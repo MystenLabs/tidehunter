@@ -1,8 +1,4 @@
-use crate::key_shape::KeySpaceDesc;
-use crate::lookup::RandomRead;
-use crate::math::rescale_u32;
 use crate::wal::WalPosition;
-use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
@@ -14,10 +10,6 @@ pub(crate) struct IndexTable {
     // to load parts of it from disk
     pub(crate) data: BTreeMap<Bytes, WalPosition>,
 }
-
-const HEADER_ELEMENTS: usize = 1024;
-const HEADER_ELEMENT_SIZE: usize = 8;
-const HEADER_SIZE: usize = HEADER_ELEMENTS * HEADER_ELEMENT_SIZE;
 
 impl IndexTable {
     pub fn insert(&mut self, k: Bytes, v: WalPosition) -> Option<WalPosition> {
@@ -147,216 +139,11 @@ impl IndexTable {
     pub fn len(&self) -> usize {
         self.data.len()
     }
-
-    pub fn to_bytes(&self, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = Self::element_size(ks);
-        let capacity = element_size * self.data.len() + HEADER_SIZE;
-        let mut out = BytesMut::with_capacity(capacity);
-        out.put_bytes(0, HEADER_SIZE);
-        let mut header = IndexTableHeaderBuilder::new(ks);
-        for (key, value) in self.data.iter() {
-            if key.len() != ks.reduced_key_size() {
-                // todo make into debug assertion
-                panic!(
-                    "Index in ks {} contains key length {} (configured {})",
-                    ks.name(),
-                    key.len(),
-                    ks.reduced_key_size()
-                );
-            }
-            header.add_key(key, out.len());
-            out.put_slice(&key);
-            value.write_to_buf(&mut out);
-        }
-        assert_eq!(out.len(), capacity);
-        header.write_header(out.len(), &mut out[..HEADER_SIZE]);
-        out.to_vec().into()
-    }
-
-    pub fn from_bytes(ks: &KeySpaceDesc, b: Bytes) -> Self {
-        let b = b.slice(HEADER_SIZE..);
-        let element_size = Self::element_size(ks);
-        let elements = b.len() / element_size;
-        assert_eq!(b.len(), elements * element_size);
-
-        let mut data = BTreeMap::new();
-        for i in 0..elements {
-            let key = b.slice(i * element_size..(i * element_size + ks.reduced_key_size()));
-            let value = WalPosition::from_slice(
-                &b[(i * element_size + ks.reduced_key_size())..(i * element_size + element_size)],
-            );
-            data.insert(key, value);
-        }
-
-        assert_eq!(data.len(), elements);
-        Self { data }
-    }
-
-    pub fn element_size(ks: &KeySpaceDesc) -> usize {
-        ks.reduced_key_size() + WalPosition::LENGTH
-    }
-
-    pub fn lookup_unloaded(
-        ks: &KeySpaceDesc,
-        reader: &impl RandomRead,
-        key: &[u8],
-    ) -> Option<WalPosition> {
-        let key_size = ks.reduced_key_size();
-        assert_eq!(key.len(), key_size);
-        let micro_cell = Self::key_micro_cell(ks, key);
-        let header_element =
-            reader.read(micro_cell * HEADER_ELEMENT_SIZE..(micro_cell + 1) * HEADER_ELEMENT_SIZE);
-        let mut header_element = &header_element[..];
-        let from_offset = header_element.get_u32() as usize;
-        let to_offset = header_element.get_u32() as usize;
-        if from_offset == 0 && to_offset == 0 {
-            return None;
-        }
-        let buffer = reader.read(from_offset..to_offset);
-        let mut buffer = &buffer[..];
-        let element_size = Self::element_size(ks);
-        while !buffer.is_empty() {
-            let k = &buffer[..key_size];
-            if k == key {
-                buffer = &buffer[key_size..];
-                let position = WalPosition::read_from_buf(&mut buffer);
-                return Some(position);
-            }
-            buffer = &buffer[element_size..];
-        }
-        None
-    }
-
-    fn key_micro_cell(ks: &KeySpaceDesc, key: &[u8]) -> usize {
-        let prefix = ks.cell_prefix(key);
-        let cell = ks.cell_by_prefix(prefix);
-        let cell_prefix_range = ks.cell_prefix_range(cell);
-        let cell_offset = prefix
-            // cell_prefix_range.start is always u32 (but not cell_prefix_range.end)
-            .checked_sub(cell_prefix_range.start as u32)
-            .expect("Key prefix is out of cell prefix range");
-        let cell_size = ks.cell_size();
-        let micro_cell = rescale_u32(cell_offset, cell_size, HEADER_ELEMENTS as u32);
-        micro_cell as usize
-    }
-}
-
-pub struct IndexTableHeaderBuilder<'a> {
-    ks: &'a KeySpaceDesc,
-    header: Vec<(u32, u32)>,
-    last_micro_cell: Option<usize>,
-}
-
-impl<'a> IndexTableHeaderBuilder<'a> {
-    pub fn new(ks: &'a KeySpaceDesc) -> Self {
-        let header = (0..HEADER_ELEMENTS).map(|_| (0, 0)).collect();
-        Self {
-            ks,
-            header,
-            last_micro_cell: None,
-        }
-    }
-
-    pub fn add_key(&mut self, key: &[u8], offset: usize) {
-        let offset = Self::check_offset(offset);
-        let micro_cell = IndexTable::key_micro_cell(&self.ks, key);
-        if let Some(last_micro_cell) = self.last_micro_cell {
-            if last_micro_cell == micro_cell {
-                return;
-            }
-            self.header[last_micro_cell].1 = offset;
-        }
-        self.last_micro_cell = Some(micro_cell);
-        self.header[micro_cell].0 = offset;
-    }
-
-    pub fn write_header(self, end_offset: usize, mut buf: &mut [u8]) {
-        let mut header = self.header;
-        let end_offset = Self::check_offset(end_offset);
-        if let Some(last_micro_cell) = self.last_micro_cell {
-            header[last_micro_cell].1 = end_offset;
-        }
-        for (start, end) in header {
-            buf.put_u32(start);
-            buf.put_u32(end);
-        }
-    }
-
-    fn check_offset(offset: usize) -> u32 {
-        assert!(offset < u32::MAX as usize, "Index table is too large");
-        offset as u32
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key_shape::KeyShape;
-    use rand::rngs::ThreadRng;
-    use rand::{Rng, RngCore};
-
-    #[test]
-    pub fn test_index_lookup() {
-        let (shape, ks) = KeyShape::new_single(16, 8, 8);
-        let ks = shape.ks(ks);
-        let mut index = IndexTable::default();
-        index.insert(k(1), w(5));
-        index.insert(k(5), w(10));
-        let bytes = index.to_bytes(ks);
-        assert_eq!(None, IndexTable::lookup_unloaded(ks, &bytes, &k(0)));
-        assert_eq!(Some(w(5)), IndexTable::lookup_unloaded(ks, &bytes, &k(1)));
-        assert_eq!(Some(w(10)), IndexTable::lookup_unloaded(ks, &bytes, &k(5)));
-        assert_eq!(None, IndexTable::lookup_unloaded(ks, &bytes, &k(10)));
-        let mut index = IndexTable::default();
-        index.insert(k(u128::MAX), w(15));
-        index.insert(k(u128::MAX - 5), w(25));
-        let bytes = index.to_bytes(ks);
-        assert_eq!(
-            Some(w(15)),
-            IndexTable::lookup_unloaded(ks, &bytes, &k(u128::MAX))
-        );
-        assert_eq!(
-            Some(w(25)),
-            IndexTable::lookup_unloaded(ks, &bytes, &k(u128::MAX - 5))
-        );
-        assert_eq!(
-            None,
-            IndexTable::lookup_unloaded(ks, &bytes, &k(u128::MAX - 1))
-        );
-        assert_eq!(
-            None,
-            IndexTable::lookup_unloaded(ks, &bytes, &k(u128::MAX - 100))
-        );
-    }
-
-    #[test]
-    pub fn test_index_lookup_random() {
-        const M: usize = 8;
-        const P: usize = 8;
-        let (shape, ks) = KeyShape::new_single(16, M, P);
-        let ks = shape.ks(ks);
-        let mut index = IndexTable::default();
-        let mut rng = ThreadRng::default();
-        let target_bucket = rng.gen_range(0..((M * P) as u128));
-        let bucket_size = u128::MAX / ((M * P) as u128);
-        let target_range = target_bucket * bucket_size..(target_bucket + 1) * bucket_size;
-        const ITERATIONS: usize = 1000;
-        for _ in 0..ITERATIONS {
-            let key = rng.gen_range(target_range.clone());
-            let pos = rng.next_u64();
-            index.insert(k(key), w(pos));
-        }
-        let bytes = index.to_bytes(ks);
-        for (key, expected_value) in index.data {
-            let value = IndexTable::lookup_unloaded(ks, &bytes, &key);
-            assert_eq!(Some(expected_value), value);
-        }
-        for _ in 0..ITERATIONS {
-            let key = rng.gen_range(target_range.clone());
-            let value = IndexTable::lookup_unloaded(ks, &bytes, &k(key));
-            assert!(value.is_none());
-        }
-    }
 
     #[test]
     pub fn test_unmerge_flushed() {
@@ -438,13 +225,5 @@ mod tests {
         // not existing element - next not found
         let next = table.next_entry(Some(vec![1, 2, 3, 3].into()), true);
         assert!(next.is_none());
-    }
-
-    fn k(k: u128) -> Bytes {
-        k.to_be_bytes().to_vec().into()
-    }
-
-    fn w(w: u64) -> WalPosition {
-        WalPosition::test_value(w)
     }
 }

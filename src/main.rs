@@ -4,7 +4,7 @@ mod control;
 mod crc;
 pub mod db;
 mod flusher;
-mod index_table;
+mod index;
 pub mod iterators;
 mod key_shape;
 mod large_table;
@@ -19,6 +19,8 @@ mod stress;
 
 #[cfg(feature = "random_access_speed_test")]
 mod random_access_speed_test;
+#[cfg(feature = "read_window_test")]
+mod read_window_test;
 mod wal;
 mod wal_syncer;
 
@@ -27,6 +29,8 @@ fn main() {
     random_access_speed_test::random_access_speed_test();
     #[cfg(feature = "stress")]
     stress::main();
+    #[cfg(feature = "read_window_test")]
+    read_window_test::main();
 }
 
 #[allow(dead_code)]

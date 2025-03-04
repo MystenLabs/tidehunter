@@ -1,5 +1,5 @@
 use crate::db::Db;
-use crate::index_table::IndexTable;
+use crate::index::index_table::IndexTable;
 use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::large_table::Loader;
 use crate::metrics::Metrics;

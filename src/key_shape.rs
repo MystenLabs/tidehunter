@@ -10,6 +10,8 @@ use std::num::NonZeroUsize;
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
+pub(crate) const CELL_PREFIX_LENGTH: usize = 4; // in bytes
+
 #[derive(Clone)]
 pub struct KeyShape {
     key_spaces: Vec<KeySpaceDesc>,
@@ -215,8 +217,8 @@ impl KeySpaceDesc {
 
     pub(crate) fn cell_prefix(&self, k: &[u8]) -> u32 {
         let k = &k[self.config.key_offset..];
-        let copy = cmp::min(k.len(), 4);
-        let mut p = [0u8; 4];
+        let copy = cmp::min(k.len(), CELL_PREFIX_LENGTH);
+        let mut p = [0u8; CELL_PREFIX_LENGTH];
         p[..copy].copy_from_slice(&k[..copy]);
         u32::from_be_bytes(p)
     }
