@@ -1,9 +1,9 @@
 use minibytes::Bytes;
 use std::ops::Range;
 
-use super::persisted_index::IndexFormat;
+use super::index_format::IndexFormat;
 use super::{deserialize_index_entries, serialize_index_entries};
-use crate::index::persisted_index::PREFIX_LENGTH;
+use crate::index::index_format::PREFIX_LENGTH;
 use crate::key_shape::CELL_PREFIX_LENGTH;
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
@@ -221,8 +221,7 @@ mod test {
     use rand::Rng;
 
     use super::*;
-    use crate::file_reader::FileReader;
-    use crate::{index::persisted_index::test::*, key_shape::KeyShape};
+    use crate::{file_reader::FileReader, index::index_format::test::*, key_shape::KeyShape};
     use std::{cell::Cell, collections::HashSet};
 
     #[test]

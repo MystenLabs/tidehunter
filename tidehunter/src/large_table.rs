@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::flusher::{FlushKind, IndexFlusher};
+use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
-use crate::index::persisted_index::IndexFormat;
 use crate::index::INDEX_FORMAT;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::metrics::Metrics;
