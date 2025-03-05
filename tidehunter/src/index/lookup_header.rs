@@ -5,7 +5,7 @@ use crate::math::rescale_u32;
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
-use super::persisted_index::{IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE};
+use super::index_format::{IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE};
 use super::{deserialize_index_entries, serialize_index_entries};
 
 pub struct LookupHeaderIndex;
@@ -138,7 +138,7 @@ impl<'a> IndexTableHeaderBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::persisted_index::test::*;
+    use crate::index::index_format::test::*;
 
     #[test]
     pub fn test_index_lookup() {

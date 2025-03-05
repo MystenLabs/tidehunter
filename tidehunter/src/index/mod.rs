@@ -1,6 +1,6 @@
+pub mod index_format;
 pub mod index_table;
 pub mod lookup_header;
-pub mod persisted_index;
 pub mod uniform_lookup;
 
 use bytes::{BufMut, BytesMut};
