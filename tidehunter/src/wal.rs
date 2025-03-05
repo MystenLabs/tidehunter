@@ -681,7 +681,7 @@ impl WalPosition {
         self.0
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn test_value(v: u64) -> Self {
         Self(v)
     }
