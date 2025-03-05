@@ -8,7 +8,7 @@ pub const HEADER_ELEMENT_SIZE: usize = 8;
 pub const HEADER_SIZE: usize = HEADER_ELEMENTS * HEADER_ELEMENT_SIZE;
 pub const PREFIX_LENGTH: usize = 8; // prefix of key used to estimate position in file, in bytes
 
-pub trait IndexFormat {
+pub(crate) trait IndexFormat {
     fn to_bytes(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes;
     fn from_bytes(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable;
     fn lookup_unloaded(
