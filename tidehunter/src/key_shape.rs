@@ -17,6 +17,7 @@ pub struct KeyShape {
     key_spaces: Vec<KeySpaceDesc>,
 }
 
+#[allow(dead_code)]
 pub struct KeyShapeBuilder {
     key_spaces: Vec<KeySpaceDesc>,
 }
@@ -58,6 +59,7 @@ pub(crate) struct BloomFilterParams {
 // todo - make mod wal private
 pub type Compactor = Box<dyn Fn(&mut BTreeMap<Bytes, WalPosition>) + Sync + Send>;
 
+#[allow(dead_code)]
 impl KeyShapeBuilder {
     pub fn new() -> Self {
         Self { key_spaces: vec![] }
