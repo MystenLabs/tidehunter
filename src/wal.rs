@@ -1,4 +1,6 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
+use crate::index::persisted_index::IndexFormat;
+use crate::index::INDEX_FORMAT;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal_syncer::WalSyncer;
@@ -271,6 +273,42 @@ impl Wal {
     }
 
     pub fn random_reader_at(
+        &self,
+        pos: WalPosition,
+        inner_offset: usize,
+    ) -> Result<WalRandomRead, WalError> {
+        if INDEX_FORMAT.use_unbounded_reader() {
+            self.random_reader_at_unbounded(pos, inner_offset)
+        } else {
+            self.random_reader_at_bounded(pos, inner_offset)
+        }
+    }
+
+    pub fn random_reader_at_unbounded(
+        &self,
+        pos: WalPosition,
+        inner_offset: usize,
+    ) -> Result<WalRandomRead, WalError> {
+        assert_ne!(
+            pos,
+            WalPosition::INVALID,
+            "Trying to read invalid wal position"
+        );
+        let (map, offset) = self.layout.locate(pos.0);
+        if let Some(map) = self.get_map(map) {
+            let offset = offset as usize;
+            let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
+            let data = map.data.slice(header_end + inner_offset..);
+            Ok(WalRandomRead::Mapped(data))
+        } else {
+            let header_end = pos.0 + CrcFrame::CRC_HEADER_LENGTH as u64;
+            let frag_end = self.layout.map_range(map).end;
+            let range = (header_end + inner_offset as u64)..frag_end;
+            Ok(WalRandomRead::File(FileRange::new(&self.file, range)))
+        }
+    }
+
+    pub fn random_reader_at_bounded(
         &self,
         pos: WalPosition,
         inner_offset: usize,

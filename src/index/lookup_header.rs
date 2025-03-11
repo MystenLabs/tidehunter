@@ -83,6 +83,10 @@ impl IndexFormat for LookupHeaderIndex {
         }
         None
     }
+
+    fn use_unbounded_reader(&self) -> bool {
+        true
+    }
 }
 pub struct IndexTableHeaderBuilder<'a> {
     ks: &'a KeySpaceDesc,

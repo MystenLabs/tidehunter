@@ -21,6 +21,8 @@ pub trait IndexFormat {
     fn element_size(ks: &KeySpaceDesc) -> usize {
         ks.reduced_key_size() + WalPosition::LENGTH
     }
+
+    fn use_unbounded_reader(&self) -> bool;
 }
 
 #[cfg(test)]
