@@ -1,6 +1,6 @@
 use prometheus::{
-    exponential_buckets, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
-    Registry,
+    exponential_buckets, linear_buckets, Histogram, HistogramVec, IntCounter, IntCounterVec,
+    IntGauge, IntGaugeVec, Registry,
 };
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -23,6 +23,7 @@ pub struct Metrics {
 
     pub lookup_mcs: HistogramVec,
     pub lookup_result: IntCounterVec,
+    pub lookup_iterations: Histogram,
 
     pub large_table_contention: HistogramVec,
     pub wal_contention: Histogram,
@@ -81,6 +82,7 @@ impl Metrics {
         let lookup_buckets = exponential_buckets(5., 1.4, 25).unwrap();
         let db_op_buckets = exponential_buckets(5., 1.4, 25).unwrap();
         let lock_buckets = exponential_buckets(1., 1.5, 12).unwrap();
+        let lookup_iterations_buckets = linear_buckets(1., 1.0, 10).unwrap();
         let this = Metrics {
             replayed_wal_records: counter!("replayed_wal_records", registry),
             max_index_size: AtomicUsize::new(0),
@@ -103,6 +105,7 @@ impl Metrics {
                 registry
             ),
             lookup_result: counter_vec!("lookup_result", &["ks", "result", "source"], registry),
+            lookup_iterations: histogram!("lookup_iterations", lookup_iterations_buckets, registry),
 
             large_table_contention: histogram_vec!(
                 "large_table_contention",
@@ -164,4 +167,8 @@ impl Drop for McsTimer {
         self.histogram
             .observe(self.start.elapsed().as_micros() as f64)
     }
+}
+
+pub fn print_histogram_stats(histogram: &Histogram) {
+    println!("Histogram: {:?}", histogram);
 }

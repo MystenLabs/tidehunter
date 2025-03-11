@@ -34,7 +34,7 @@ fn main() {
     #[cfg(feature = "read_window_test")]
     benchmarks::read_window_test::main();
     #[cfg(feature = "index_benchmark_generate")]
-    // benchmarks::index_benchmark::generate_benchmark_files();
+    benchmarks::index_benchmark::generate_benchmark_files();
     #[cfg(feature = "index_benchmark_run")]
     benchmarks::index_benchmark::run_benchmarks();
 }
