@@ -142,6 +142,7 @@ impl IndexFormat for UniformLookupIndex {
         reader: &impl RandomRead,
         key: &[u8],
     ) -> Option<WalPosition> {
+        // todo simplify this function
         // compute cell and prefix
         let element_size = Self::element_size(ks);
         let key_size = ks.reduced_key_size();
@@ -171,18 +172,6 @@ impl IndexFormat for UniformLookupIndex {
             let first_element_key = &buffer[..key_size];
             let last_element_key =
                 &buffer[buffer.len() - element_size..buffer.len() - element_size + key_size];
-            if iterations >= 10 && iterations <= 20 {
-                println!("100 iterations!!!");
-                println!("from_offset: {}", from_offset);
-                println!("to_offset: {}", to_offset);
-                let prefix = Self::bytes_to_key(key);
-                let first_element_key = Self::bytes_to_key(first_element_key);
-                let last_element_key = Self::bytes_to_key(last_element_key);
-                println!("prefix: {}", prefix);
-                println!("first_element_key: {:?}", first_element_key);
-                println!("last_element_key: {:?}", last_element_key);
-                println!("*****************");
-            }
             // first check if the buffer range contains the key
             if key < first_element_key && from_offset != 0 {
                 // key is smaller than the first element in the buffer
