@@ -49,6 +49,8 @@ struct StressArgs {
         default_value = "false"
     )]
     no_snapshot: bool,
+    #[arg(long, help = "Use direct IO", default_value = "false")]
+    direct_io: bool,
     #[arg(long, short = 'p', help = "Path for storage temp dir")]
     path: Option<String>,
     #[arg(long, help = "Print report file", default_value = "false")]
@@ -68,6 +70,10 @@ pub fn main() {
     let print_report = args.report;
     let mut config = Config::default();
     config.max_dirty_keys = 1024;
+    config.direct_io = args.direct_io;
+    if args.direct_io {
+        report!(report, "Using **direct IO**");
+    }
     let config = Arc::new(config);
     let registry = Registry::new();
     let metrics = Metrics::new_in(&registry);
