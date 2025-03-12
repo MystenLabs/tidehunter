@@ -82,7 +82,7 @@ pub fn main() {
     }
     let stress = Stress { db, ks, args };
     println!("Starting write test");
-    let elapsed = stress.measure(StressThread::run_writes);
+    let elapsed = stress.measure(StressThread::run_writes, &mut report);
     let written = stress.args.writes * stress.args.threads;
     let written_bytes = written * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
@@ -105,7 +105,7 @@ pub fn main() {
     } else {
         Default::default()
     };
-    let elapsed = stress.measure(StressThread::run_reads);
+    let elapsed = stress.measure(StressThread::run_reads, &mut report);
     manual_stop.store(true, Ordering::Relaxed);
     let read = stress.args.reads * stress.args.threads;
     let read_bytes = read * stress.args.write_size;
@@ -147,7 +147,11 @@ impl Stress {
         manual_stop
     }
 
-    pub fn measure<F: FnOnce(StressThread) + Clone + Send + 'static>(&self, f: F) -> Duration {
+    pub fn measure<F: FnOnce(StressThread) + Clone + Send + 'static>(
+        &self,
+        f: F,
+        report: &mut Report,
+    ) -> Duration {
         let (threads, _, latency) = self.start_threads(f);
         let start = Instant::now();
         for t in threads {
@@ -159,7 +163,7 @@ impl Stress {
             .unwrap()
             .unwrap();
         let p = move |i: usize| percentiles.get(i).unwrap().1.range();
-        println!("Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}",
+        report!(report, "Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}",
         p(0), p(1), p(2), p(3), p(4), p(5));
         start.elapsed()
     }
