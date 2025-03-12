@@ -1,0 +1,167 @@
+use bytes::BytesMut;
+use minibytes::Bytes;
+use std::alloc::Layout;
+use std::fs::File;
+use std::io;
+use std::ops::Range;
+use std::os::unix::fs::FileExt;
+
+pub struct FileReader<'a> {
+    file: &'a File,
+    direct_io: bool,
+}
+
+impl<'a> FileReader<'a> {
+    pub fn new(file: &'a File, direct_io: bool) -> Self {
+        Self { file, direct_io }
+    }
+
+    pub fn io_buffer(&self, size: usize) -> Vec<u8> {
+        if self.direct_io {
+            unsafe {
+                const PAGE_SIZE: usize = 4 * 1024;
+                let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
+                let mem = std::alloc::alloc(layout);
+                Vec::from_raw_parts(mem, size, size)
+            }
+        } else {
+            vec![0; size]
+        }
+    }
+
+    pub fn read_exact_at(&self, pos: u64, len: usize) -> io::Result<Bytes> {
+        if self.direct_io {
+            let range = pos..(pos + len as u64);
+            let (read_range, map_range) = align_range(range);
+            let mut buffer = self.io_buffer((read_range.end - read_range.start) as usize);
+            self.file.read_exact_at(&mut buffer, read_range.start)?;
+            let buffer = Bytes::from(buffer);
+            let buffer = buffer.slice(map_range);
+            Ok(buffer)
+        } else {
+            let mut buffer = self.io_buffer(len);
+            self.file.read_exact_at(&mut buffer, pos)?;
+            Ok(Bytes::from(buffer))
+        }
+    }
+}
+
+const ALIGN: u64 = 512;
+
+/// Aligns given range with specified alignment (const 512 bytes right now).
+/// This adjusts given arbitrary range to a range that can be used with direct io.
+///
+/// Returns two ranges:
+///  - **Read range** - potentially bigger range aligned for direct IO.
+///  - **Map range** - Range that maps region that has been read into the originally requested region.
+fn align_range(range: Range<u64>) -> (Range<u64>, Range<usize>) {
+    let range_len = range.end - range.start;
+    let read_range = align_down(range.start)..align_up(range.end);
+    let map_start = (range.start - read_range.start) as usize;
+    let map_end = map_start + range_len as usize;
+    let map_range = map_start..map_end;
+    (read_range, map_range)
+}
+
+fn align_down(v: u64) -> u64 {
+    v / ALIGN * ALIGN
+}
+
+fn align_up(v: u64) -> u64 {
+    align_down(v + ALIGN - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BufMut;
+    use std::fs::OpenOptions;
+    use std::path::Path;
+
+    #[test]
+    fn test_align_range() {
+        #[track_caller]
+        fn assert_align(range: Range<u64>, expected_read: Range<u64>, expected_map: Range<usize>) {
+            let (actual_read, actual_map) = align_range(range);
+            assert_eq!(actual_read, expected_read, "Read range mismatch");
+            assert_eq!(actual_map, expected_map, "Map range mismatch");
+        }
+
+        assert_align(0..10, 0..512, 0..10);
+        assert_align(0..512, 0..512, 0..512);
+        assert_align(5..512, 0..512, 5..512);
+        assert_align(5..20, 0..512, 5..20);
+
+        assert_align(1024..1034, 1024..(1024 + 512), 0..10);
+        assert_align(1024..(1024 + 512), 1024..(1024 + 512), 0..512);
+        assert_align(1034..(1024 + 512), 1024..(1024 + 512), 10..512);
+        assert_align(1034..1044, 1024..(1024 + 512), 10..20);
+    }
+
+    #[test]
+    fn test_align_value() {
+        assert_eq!(align_down(0), 0);
+        assert_eq!(align_down(1), 0);
+        assert_eq!(align_down(10), 0);
+        assert_eq!(align_down(511), 0);
+        assert_eq!(align_down(512), 512);
+        assert_eq!(align_down(513), 512);
+        assert_eq!(align_down(1023), 512);
+        assert_eq!(align_down(1024), 1024);
+        assert_eq!(align_down(1025), 1024);
+
+        assert_eq!(align_up(0), 0);
+        assert_eq!(align_up(1), 512);
+        assert_eq!(align_up(10), 512);
+        assert_eq!(align_up(511), 512);
+        assert_eq!(align_up(512), 512);
+        assert_eq!(align_up(513), 1024);
+        assert_eq!(align_up(1023), 1024);
+        assert_eq!(align_up(1024), 1024);
+        assert_eq!(align_up(1025), 1024 + 512);
+    }
+
+    #[test]
+    fn test_file_reader() {
+        let dir = tempdir::TempDir::new("test_file_reader").unwrap();
+        let path = dir.path().join("file");
+        let mut buf = BytesMut::zeroed(12 * 1024);
+        let mut writer = &mut buf[..];
+        for i in 0..3 * 1024 {
+            writer.put_u32(i);
+        }
+        std::fs::write(&path, &buf).unwrap();
+        test_file_reader_impl(&path, false);
+        test_file_reader_impl(&path, true);
+    }
+
+    fn test_file_reader_impl(path: &Path, direct_io: bool) {
+        println!("test_file_reader_impl direct_io: {direct_io}");
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        if direct_io {
+            options.custom_flags(0x4000 /*O_DIRECT*/);
+        }
+        let file = options.open(path).unwrap();
+        let reader = FileReader::new(&file, direct_io);
+        #[track_caller]
+        fn test_read(reader: &FileReader, v: u32) {
+            let pos = (v as u64) * 4;
+            let buf = reader.read_exact_at(pos, 4).unwrap();
+            let mut sbuf = [0u8; 4];
+            sbuf.copy_from_slice(&buf);
+            assert_eq!(u32::from_be_bytes(sbuf), v);
+        }
+
+        test_read(&reader, 0);
+        test_read(&reader, 1);
+        test_read(&reader, 15);
+        test_read(&reader, 1024);
+        test_read(&reader, 1025);
+        test_read(&reader, 2048);
+        test_read(&reader, 2047);
+        test_read(&reader, 2049);
+        test_read(&reader, 3 * 1024 - 1);
+    }
+}

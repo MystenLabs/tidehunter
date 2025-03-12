@@ -1,4 +1,5 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
+use crate::file_reader::FileReader;
 use crate::index::persisted_index::IndexFormat;
 use crate::index::INDEX_FORMAT;
 use crate::lookup::{FileRange, RandomRead};
@@ -304,7 +305,10 @@ impl Wal {
             let header_end = pos.0 + CrcFrame::CRC_HEADER_LENGTH as u64;
             let frag_end = self.layout.map_range(map).end;
             let range = (header_end + inner_offset as u64)..frag_end;
-            Ok(WalRandomRead::File(FileRange::new(&self.file, range)))
+            Ok(WalRandomRead::File(FileRange::new(
+                self.file_reader(),
+                range,
+            )))
         }
     }
 
@@ -331,7 +335,10 @@ impl Wal {
             let size = CrcFrame::read_size(&buf);
             let header_end = pos.0 + CrcFrame::CRC_HEADER_LENGTH as u64;
             let range = (header_end + inner_offset as u64)..(header_end + size as u64);
-            Ok(WalRandomRead::File(FileRange::new(&self.file, range)))
+            Ok(WalRandomRead::File(FileRange::new(
+                self.file_reader(),
+                range,
+            )))
         }
     }
 
@@ -448,6 +455,10 @@ impl Wal {
             iterator.next()?;
         }
         Ok(iterator)
+    }
+
+    fn file_reader(&self) -> FileReader {
+        FileReader::new(&self.file, self.layout.direct_io)
     }
 
     #[cfg(unix)]

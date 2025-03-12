@@ -3,6 +3,7 @@ pub mod config;
 mod control;
 mod crc;
 pub mod db;
+mod file_reader;
 mod flusher;
 mod index;
 pub mod iterators;

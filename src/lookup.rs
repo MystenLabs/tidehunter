@@ -1,10 +1,9 @@
+use crate::file_reader::FileReader;
 use minibytes::Bytes;
-use std::fs::File;
 use std::ops::Range;
-use std::os::unix::prelude::FileExt;
 
 pub struct FileRange<'a> {
-    file: &'a File,
+    reader: FileReader<'a>,
     range: Range<u64>,
 }
 
@@ -26,11 +25,12 @@ impl RandomRead for Bytes {
 impl RandomRead for FileRange<'_> {
     fn read(&self, range: Range<usize>) -> Bytes {
         let read_range = self.checked_range(range);
-        let mut result = vec![0; (read_range.end - read_range.start) as usize];
-        self.file
-            .read_exact_at(&mut result, read_range.start)
-            .expect("Failed to read file");
-        result.into()
+        self.reader
+            .read_exact_at(
+                read_range.start,
+                (read_range.end - read_range.start) as usize,
+            )
+            .expect("Failed to read file")
     }
 
     fn len(&self) -> usize {
@@ -39,8 +39,8 @@ impl RandomRead for FileRange<'_> {
 }
 
 impl<'a> FileRange<'a> {
-    pub fn new(file: &'a File, range: Range<u64>) -> Self {
-        Self { file, range }
+    pub fn new(reader: FileReader<'a>, range: Range<u64>) -> Self {
+        Self { reader, range }
     }
 
     #[inline]
