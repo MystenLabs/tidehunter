@@ -1,5 +1,5 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
-use crate::file_reader::{set_direct_options, FileReader};
+use crate::file_reader::{align_size, set_direct_options, FileReader};
 use crate::index::persisted_index::IndexFormat;
 use crate::index::INDEX_FORMAT;
 use crate::lookup::{FileRange, RandomRead};
@@ -71,7 +71,7 @@ pub enum WalRandomRead<'a> {
 impl WalWriter {
     pub fn write(&self, w: &PreparedWalWrite) -> Result<WalPosition, WalError> {
         let len = w.frame.len_with_header() as u64;
-        let len_aligned = align(len);
+        let len_aligned = self.wal.layout.align(len);
         let mut current_map_and_position = self.position_and_map.lock();
         let (pos, prev_block_end) = current_map_and_position.0.allocate_position(len_aligned);
         // todo duplicated code
@@ -153,7 +153,7 @@ impl WalLayout {
         assert!(self.frag_size <= u32::MAX as u64, "Frag size too large");
         assert_eq!(
             self.frag_size,
-            align(self.frag_size),
+            self.align(self.frag_size),
             "Frag size not aligned"
         );
     }
@@ -186,11 +186,10 @@ impl WalLayout {
         let end = self.frag_size * (map + 1);
         start..end
     }
-}
 
-const fn align(l: u64) -> u64 {
-    const ALIGN: u64 = 8;
-    (l + ALIGN - 1) / ALIGN * ALIGN
+    fn align(&self, v: u64) -> u64 {
+        align_size(v, self.direct_io)
+    }
 }
 
 impl Wal {
@@ -543,7 +542,10 @@ impl WalIterator {
             frame?
         };
         let position = WalPosition(self.position);
-        self.position += align((frame.len() + CrcFrame::CRC_HEADER_LENGTH) as u64);
+        self.position += self
+            .wal
+            .layout
+            .align((frame.len() + CrcFrame::CRC_HEADER_LENGTH) as u64);
         Ok((position, frame))
     }
 
@@ -787,17 +789,6 @@ mod tests {
         // Leap over frag boundary
         assert_eq!((512, 504), position.allocate_position(16));
         assert_eq!((512 + 16, 512 + 16), position.allocate_position(32));
-    }
-
-    #[test]
-    fn test_align() {
-        assert_eq!(align(1), 8);
-        assert_eq!(align(4), 8);
-        assert_eq!(align(7), 8);
-        assert_eq!(align(0), 0);
-        assert_eq!(align(8), 8);
-        assert_eq!(align(15), 16);
-        assert_eq!(align(16), 16);
     }
 
     #[test]

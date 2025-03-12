@@ -49,8 +49,6 @@ impl<'a> FileReader<'a> {
     }
 }
 
-const ALIGN: u64 = 512;
-
 /// Aligns given range with specified alignment (const 512 bytes right now).
 /// This adjusts given arbitrary range to a range that can be used with direct io.
 ///
@@ -59,19 +57,31 @@ const ALIGN: u64 = 512;
 ///  - **Map range** - Range that maps region that has been read into the originally requested region.
 fn align_range(range: Range<u64>) -> (Range<u64>, Range<usize>) {
     let range_len = range.end - range.start;
-    let read_range = align_down(range.start)..align_up(range.end);
+    let read_range =
+        align_down(range.start, DIRECT_IO_ALIGNMENT)..align_up(range.end, DIRECT_IO_ALIGNMENT);
     let map_start = (range.start - read_range.start) as usize;
     let map_end = map_start + range_len as usize;
     let map_range = map_start..map_end;
     (read_range, map_range)
 }
 
-fn align_down(v: u64) -> u64 {
-    v / ALIGN * ALIGN
+const DEFAULT_ALIGNMENT: u64 = 8;
+const DIRECT_IO_ALIGNMENT: u64 = 512;
+
+pub(crate) const fn align_size(v: u64, direct_io: bool) -> u64 {
+    if direct_io {
+        align_up(v, DIRECT_IO_ALIGNMENT)
+    } else {
+        align_up(v, DEFAULT_ALIGNMENT)
+    }
 }
 
-fn align_up(v: u64) -> u64 {
-    align_down(v + ALIGN - 1)
+const fn align_down(v: u64, align: u64) -> u64 {
+    v / align * align
+}
+
+const fn align_up(v: u64, align: u64) -> u64 {
+    align_down(v + align - 1, align)
 }
 
 pub(crate) fn set_direct_options(options: &mut OpenOptions, direct_io: bool) {
@@ -120,25 +130,26 @@ mod tests {
 
     #[test]
     fn test_align_value() {
-        assert_eq!(align_down(0), 0);
-        assert_eq!(align_down(1), 0);
-        assert_eq!(align_down(10), 0);
-        assert_eq!(align_down(511), 0);
-        assert_eq!(align_down(512), 512);
-        assert_eq!(align_down(513), 512);
-        assert_eq!(align_down(1023), 512);
-        assert_eq!(align_down(1024), 1024);
-        assert_eq!(align_down(1025), 1024);
+        const A: u64 = 512;
+        assert_eq!(align_down(0, A), 0);
+        assert_eq!(align_down(1, A), 0);
+        assert_eq!(align_down(10, A), 0);
+        assert_eq!(align_down(511, A), 0);
+        assert_eq!(align_down(512, A), 512);
+        assert_eq!(align_down(513, A), 512);
+        assert_eq!(align_down(1023, A), 512);
+        assert_eq!(align_down(1024, A), 1024);
+        assert_eq!(align_down(1025, A), 1024);
 
-        assert_eq!(align_up(0), 0);
-        assert_eq!(align_up(1), 512);
-        assert_eq!(align_up(10), 512);
-        assert_eq!(align_up(511), 512);
-        assert_eq!(align_up(512), 512);
-        assert_eq!(align_up(513), 1024);
-        assert_eq!(align_up(1023), 1024);
-        assert_eq!(align_up(1024), 1024);
-        assert_eq!(align_up(1025), 1024 + 512);
+        assert_eq!(align_up(0, A), 0);
+        assert_eq!(align_up(1, A), 512);
+        assert_eq!(align_up(10, A), 512);
+        assert_eq!(align_up(511, A), 512);
+        assert_eq!(align_up(512, A), 512);
+        assert_eq!(align_up(513, A), 1024);
+        assert_eq!(align_up(1023, A), 1024);
+        assert_eq!(align_up(1024, A), 1024);
+        assert_eq!(align_up(1025, A), 1024 + 512);
     }
 
     #[test]
