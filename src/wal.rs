@@ -1,5 +1,5 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
-use crate::file_reader::FileReader;
+use crate::file_reader::{set_direct_options, FileReader};
 use crate::index::persisted_index::IndexFormat;
 use crate::index::INDEX_FORMAT;
 use crate::lookup::{FileRange, RandomRead};
@@ -198,9 +198,7 @@ impl Wal {
         layout.assert_layout();
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
-        if layout.direct_io {
-            Self::set_o_direct(&mut options);
-        }
+        set_direct_options(&mut options, layout.direct_io);
         let file = options.open(p)?;
         Ok(Self::from_file(file, layout, metrics))
     }
@@ -459,17 +457,6 @@ impl Wal {
 
     fn file_reader(&self) -> FileReader {
         FileReader::new(&self.file, self.layout.direct_io)
-    }
-
-    #[cfg(unix)]
-    fn set_o_direct(options: &mut OpenOptions) {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x4000 /*O_DIRECT*/);
-    }
-
-    #[cfg(not(unix))]
-    fn set_o_direct(options: &mut OpenOptions) {
-        unimplemented!("set_o_direct not implemented non-unix systems");
     }
 }
 

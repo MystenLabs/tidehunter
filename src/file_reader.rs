@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use minibytes::Bytes;
 use std::alloc::Layout;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
@@ -74,6 +74,23 @@ fn align_up(v: u64) -> u64 {
     align_down(v + ALIGN - 1)
 }
 
+pub(crate) fn set_direct_options(options: &mut OpenOptions, direct_io: bool) {
+    if direct_io {
+        set_o_direct(options)
+    }
+}
+
+#[cfg(unix)]
+fn set_o_direct(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(0x4000 /*O_DIRECT*/);
+}
+
+#[cfg(not(unix))]
+fn set_o_direct(options: &mut OpenOptions) {
+    unimplemented!("set_o_direct not implemented non-unix systems");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,12 +157,9 @@ mod tests {
 
     fn test_file_reader_impl(path: &Path, direct_io: bool) {
         println!("test_file_reader_impl direct_io: {direct_io}");
-        use std::os::unix::fs::OpenOptionsExt;
         let mut options = OpenOptions::new();
         options.read(true);
-        if direct_io {
-            options.custom_flags(0x4000 /*O_DIRECT*/);
-        }
+        set_direct_options(&mut options, direct_io);
         let file = options.open(path).unwrap();
         let reader = FileReader::new(&file, direct_io);
         #[track_caller]
