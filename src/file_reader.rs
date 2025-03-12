@@ -32,6 +32,11 @@ impl<'a> FileReader<'a> {
         }
     }
 
+    pub fn io_buffer_bytes(&self, size: usize) -> BytesMut {
+        let buffer = self.io_buffer(size);
+        BytesMut::from(bytes::Bytes::from(buffer))
+    }
+
     pub fn read_exact_at(&self, pos: u64, len: usize) -> io::Result<Bytes> {
         if self.direct_io {
             let range = pos..(pos + len as u64);

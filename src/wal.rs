@@ -5,7 +5,7 @@ use crate::index::INDEX_FORMAT;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal_syncer::WalSyncer;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -251,7 +251,7 @@ impl Wal {
                     .into(),
             ))
         } else {
-            let mut buf = BytesMut::zeroed(INITIAL_READ_SIZE);
+            let mut buf = self.file_reader().io_buffer_bytes(INITIAL_READ_SIZE);
             let read = self.file.read_at(&mut buf, pos.0)?;
             assert!(read > CrcFrame::CRC_HEADER_LENGTH); // todo this is not actually guaranteed
             let size = CrcFrame::read_size(&buf[..read]);
@@ -262,10 +262,15 @@ impl Wal {
                     let more = target_size - INITIAL_READ_SIZE;
                     buf.put_bytes(0, more);
                 }
+                // todo for direct io we need to confirm read is properly aligned
                 self.file
                     .read_exact_at(&mut buf[read..], pos.0 + read as u64)?;
             }
-            let bytes = bytes::Bytes::from(buf).into();
+            let mut bytes = Bytes::from(bytes::Bytes::from(buf));
+            if self.layout.direct_io && bytes.len() > target_size {
+                // Direct IO buffer can be larger then needed
+                bytes = bytes.slice(..target_size);
+            }
             Ok((false, CrcFrame::read_from_bytes(&bytes, 0)?))
         }
     }
