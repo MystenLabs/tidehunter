@@ -16,6 +16,7 @@ impl<'a> FileReader<'a> {
         Self { file, direct_io }
     }
 
+    /// Returns new un-initialized buffer of a given size
     pub fn io_buffer(&self, size: usize) -> Vec<u8> {
         if self.direct_io {
             unsafe {
@@ -25,7 +26,9 @@ impl<'a> FileReader<'a> {
                 Vec::from_raw_parts(mem, size, size)
             }
         } else {
-            vec![0; size]
+            let mut v = Vec::with_capacity(size);
+            unsafe { v.set_len(size) };
+            v
         }
     }
 
