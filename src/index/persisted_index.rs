@@ -73,19 +73,22 @@ pub mod test {
         let target_bucket = rng.gen_range(0..((M * P) as u32));
         let bucket_size = u32::MAX / ((M * P) as u32);
         let target_range = target_bucket * bucket_size..(target_bucket + 1) * bucket_size;
-        const ITERATIONS: usize = 1000;
+        const ITERATIONS: usize = 100_000;
         for _ in 0..ITERATIONS {
             let key = rng.gen_range(target_range.clone());
             let pos = rng.next_u64();
             index.insert(k32(key), w(pos));
         }
         let bytes = pi.to_bytes(&index, ks);
-        for (key, expected_value) in index.data {
-            let value = pi.lookup_unloaded(ks, &bytes, &key);
-            assert_eq!(Some(expected_value), value);
+        for (key, expected_value) in &index.data {
+            let value = pi.lookup_unloaded(ks, &bytes, key);
+            assert_eq!(Some(*expected_value), value);
         }
         for _ in 0..ITERATIONS {
             let key = rng.gen_range(target_range.clone());
+            if index.data.contains_key(&k32(key)) {
+                continue; // skip keys that are in the index
+            }
             let value = pi.lookup_unloaded(ks, &bytes, &k32(key));
             assert!(value.is_none());
         }
