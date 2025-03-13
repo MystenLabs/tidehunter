@@ -37,6 +37,15 @@ impl<'a> FileReader<'a> {
         BytesMut::from(bytes::Bytes::from(buffer))
     }
 
+    /// returns new un-initialized buffer with requested size and copies over given buffer to the beginning
+    pub fn reallocate(&self, buf: BytesMut, new_size: usize) -> BytesMut {
+        assert!(new_size >= buf.len());
+        // todo we can try to use mem realloc here since we might avoid memory copy in that case
+        let mut new_buf = self.io_buffer_bytes(new_size);
+        new_buf[..buf.len()].copy_from_slice(&buf);
+        new_buf
+    }
+
     pub fn read_exact_at(&self, pos: u64, len: usize) -> io::Result<Bytes> {
         if self.direct_io {
             let range = pos..(pos + len as u64);

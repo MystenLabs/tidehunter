@@ -257,12 +257,18 @@ impl Wal {
             let size = CrcFrame::read_size(&buf[..read]);
             let target_size = size + CrcFrame::CRC_HEADER_LENGTH;
             if target_size > read {
+                if self.layout.direct_io && read != INITIAL_READ_SIZE {
+                    panic!("read not aligned: {read}");
+                }
                 // todo more test coverage for those cases including when read != INITIAL_READ_SIZE
                 if target_size > INITIAL_READ_SIZE {
-                    let more = target_size - INITIAL_READ_SIZE;
-                    buf.put_bytes(0, more);
+                    let target_read_size = if self.layout.direct_io {
+                        self.layout.align(target_size as u64) as usize
+                    } else {
+                        target_size
+                    };
+                    buf = self.file_reader().reallocate(buf, target_read_size);
                 }
-                // todo for direct io we need to confirm read is properly aligned
                 self.file
                     .read_exact_at(&mut buf[read..], pos.0 + read as u64)?;
             }
