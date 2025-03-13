@@ -10,6 +10,10 @@ use crate::metrics::Metrics;
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
+const DEFAULT_WINDOW_SIZE: usize = 500;
+const NUM_WINDOW_SIZES: usize = 1;
+
+#[derive(Clone)]
 pub struct UniformLookupIndex {
     window_sizes: Vec<Vec<usize>>,
     metrics: Arc<Metrics>,
@@ -18,13 +22,9 @@ pub struct UniformLookupIndex {
 impl UniformLookupIndex {
     #[allow(dead_code)]
     pub fn new(metrics: Arc<Metrics>) -> Self {
-        // For now, let's fill with default values.
-        // Suppose we want a 128x128 matrix that always returns 500 initially:
-        let size_x = 128;
-        let size_y = 128;
-        let mut matrix = Vec::with_capacity(size_x);
-        for _ in 0..size_x {
-            let row = vec![500; size_y];
+        let mut matrix = Vec::with_capacity(NUM_WINDOW_SIZES);
+        for _ in 0..NUM_WINDOW_SIZES {
+            let row = vec![DEFAULT_WINDOW_SIZE; NUM_WINDOW_SIZES];
             matrix.push(row);
         }
 
