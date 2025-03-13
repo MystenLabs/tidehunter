@@ -8,6 +8,7 @@ use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::Ran
 use super::index_format::{IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE};
 use super::{deserialize_index_entries, serialize_index_entries};
 
+#[derive(Clone)]
 pub struct LookupHeaderIndex;
 
 impl LookupHeaderIndex {

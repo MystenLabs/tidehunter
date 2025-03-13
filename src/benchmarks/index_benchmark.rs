@@ -1,7 +1,8 @@
 use prometheus::Registry;
 use rand::Rng;
+use std::env;
 use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::io::{Seek, Write};
 use std::ops::Range;
 use std::path::Path;
 use tidehunter::metrics::print_histogram_stats;
@@ -17,73 +18,130 @@ use crate::wal::WalPosition;
 use minibytes::Bytes;
 use std::io::{BufReader, Read};
 use std::time::{Duration, Instant};
-// use time::macros::format_description;
 
 use crate::key_shape::KeySpace;
 
 const HEADER_INDEX_FILE: &str = "data/bench_header.dat";
 const UNIFORM_INDEX_FILE: &str = "data/bench_uniform.dat";
-const NUM_INDICES: usize = 1_000;
+const NUM_INDICES: usize = 250_000;
 const ENTRIES_PER_INDEX: usize = 100_000;
 const NUM_LOOKUPS: usize = 10_000_000;
 const NUM_RUNS: usize = 10;
 
 /// Generates a file with serialized indices for benchmarking
-pub(crate) fn generate_index_file<P: IndexFormat>(
+pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone>(
     output_path: &Path,
     n_indices: usize,
     entries_per_index: usize,
-    index_format: &P,
+    index_format: P,
 ) -> std::io::Result<()> {
     println!(
         "Generating index file with {} indices, {} entries each",
         n_indices, entries_per_index
     );
 
-    // Create file with BufferedWriter
-    let file = File::create(output_path)?;
-    let mut writer = BufWriter::new(file);
+    // Create the main output file and write the number of indices
+    let mut file = File::create(output_path)?;
+    file.write_all(&n_indices.to_be_bytes())?;
 
     // Create KeyShape for the benchmark
     let (key_shape, ks) = KeyShape::new_single(32, 1, 1); // Using 32-byte keys
     let ks_desc = key_shape.ks(ks);
 
-    let mut rng = rand::thread_rng();
+    let start = Instant::now();
 
-    writer.write_all(&n_indices.to_be_bytes())?;
+    // Create a temporary directory for index chunks
+    let project_root = env::current_dir()?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix("tidehunter_index_gen_")
+        .tempdir_in(project_root)?;
 
-    // Generate N indices
-    for i in 0..n_indices {
-        if i % 100 == 0 {
-            println!("  Generated {} indices...", i);
+    // Create a tokio runtime for parallel processing
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_cpus::get())
+        .build()
+        .unwrap();
+
+    // No need to clone index_format since we own it
+    // let index_format = index_format.clone();
+    let ks_desc = ks_desc.clone();
+
+    // Generate indices in parallel and write to temporary files
+    runtime.block_on(async {
+        let mut tasks = Vec::new();
+
+        for i in 0..n_indices {
+            let index_format_clone = index_format.clone();
+            let ks_desc_clone = ks_desc.clone();
+            let temp_path = temp_dir.path().join(format!("index_{}.tmp", i));
+
+            // Spawn a task for each index
+            let task = tokio::spawn(async move {
+                if i % 100 == 0 {
+                    println!("  Generating index {}...", i);
+                }
+
+                // Create an IndexTable with m entries
+                let mut index = IndexTable::default();
+                let mut rng = rand::thread_rng();
+
+                // Fill with random entries
+                for _ in 0..entries_per_index {
+                    // Create a random key (32 bytes)
+                    let mut key = vec![0u8; 32];
+                    rng.fill(&mut key[..]);
+
+                    // Create a random WalPosition
+                    let position = WalPosition::test_value(rng.gen());
+
+                    // Insert into the index
+                    index.insert(Bytes::from(key), position);
+                }
+
+                // Serialize the index
+                let bytes = index_format_clone.to_bytes(&index, &ks_desc_clone);
+
+                // Write the serialized index to a temporary file
+                let mut temp_file = File::create(&temp_path)?;
+                temp_file.write_all(&bytes)?;
+
+                Ok::<_, std::io::Error>((i, temp_path))
+            });
+
+            tasks.push(task);
         }
 
-        // Create an IndexTable with m entries
-        let mut index = IndexTable::default();
+        // Process completed tasks as they finish
+        for task in futures::future::join_all(tasks).await {
+            match task {
+                Ok(Ok((i, temp_path))) => {
+                    if i % 100 == 0 {
+                        println!("  Merging index {} into main file...", i);
+                    }
 
-        // Fill with random entries
-        for _ in 0..entries_per_index {
-            // Create a random key (32 bytes)
-            let mut key = vec![0u8; 32];
-            rng.fill(&mut key[..]);
+                    // Read the temporary file
+                    let mut temp_file = File::open(&temp_path)?;
+                    let mut buffer = Vec::new();
+                    temp_file.read_to_end(&mut buffer)?;
 
-            // Create a random WalPosition
-            let position = WalPosition::test_value(rng.gen());
+                    // Append to the main file
+                    file.write_all(&buffer)?;
 
-            // Insert into the index
-            index.insert(Bytes::from(key), position);
+                    Ok::<_, std::io::Error>(())
+                }
+                Ok(Err(e)) => Err(e),
+                Err(e) => Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )),
+            }?
         }
 
-        // Serialize the index
-        let bytes = index_format.to_bytes(&index, ks_desc);
+        Ok::<_, std::io::Error>(())
+    })?;
 
-        // Write size and bytes to file
-
-        writer.write_all(&bytes)?;
-    }
-
-    writer.flush()?;
-    println!("Index file generated successfully");
+    file.flush()?;
+    println!("Index file generated successfully in {:?}", start.elapsed());
     Ok(())
 }
 
@@ -95,13 +153,8 @@ pub fn generate_benchmark_files() {
 
     let header_path = Path::new(HEADER_INDEX_FILE);
     println!("Generating LookupHeaderIndex file: {:?}", header_path);
-    generate_index_file(
-        header_path,
-        n_indices,
-        entries_per_index,
-        &LookupHeaderIndex,
-    )
-    .expect("Failed to generate LookupHeaderIndex file");
+    generate_index_file(header_path, n_indices, entries_per_index, LookupHeaderIndex)
+        .expect("Failed to generate LookupHeaderIndex file");
 
     let uniform_path = Path::new(UNIFORM_INDEX_FILE);
     println!("Generating UniformLookupIndex file: {:?}", uniform_path);
@@ -109,7 +162,7 @@ pub fn generate_benchmark_files() {
         uniform_path,
         n_indices,
         entries_per_index,
-        &UniformLookupIndex::new_with_default_metrics(),
+        UniformLookupIndex::new_with_default_metrics(),
     )
     .expect("Failed to generate UniformLookupIndex file");
 
@@ -244,8 +297,6 @@ pub fn run_benchmarks() {
     let num_lookups = NUM_LOOKUPS;
     let batch_size = 1000;
 
-    // Benchmark UniformLookupIndex
-    println!("\nBenchmarking UniformLookupIndex...");
     let uniform_path = Path::new(UNIFORM_INDEX_FILE);
     let uniform_file = File::open(uniform_path).expect("Failed to open UniformLookupIndex file");
     let uniform_file_length = std::fs::metadata(uniform_path)
@@ -254,18 +305,6 @@ pub fn run_benchmarks() {
     let uniform_bench = IndexBenchmark::load_from_file(&uniform_file, uniform_file_length)
         .expect("Failed to load UniformLookupIndex benchmark file");
 
-    for _ in 0..NUM_RUNS {
-        let uniform_durations = uniform_bench.run_benchmark(
-            &UniformLookupIndex::new(metrics.clone()),
-            num_lookups,
-            batch_size,
-        );
-        analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
-    }
-    print_histogram_stats(&metrics.lookup_iterations);
-
-    // Benchmark HeaderLookupIndex
-    println!("\nBenchmarking HeaderLookupIndex...");
     let header_path = Path::new(HEADER_INDEX_FILE);
     let header_file = File::open(header_path).expect("Failed to open UniformLookupIndex file");
     let header_file_length = std::fs::metadata(header_path)
@@ -274,9 +313,20 @@ pub fn run_benchmarks() {
     let header_bench = IndexBenchmark::load_from_file(&header_file, header_file_length)
         .expect("Failed to load HeaderLookupIndex benchmark file");
 
+    let mut header_durations = Vec::with_capacity(NUM_RUNS * NUM_LOOKUPS / batch_size);
+    let mut uniform_durations = Vec::with_capacity(NUM_RUNS * NUM_LOOKUPS / batch_size);
     for _ in 0..NUM_RUNS {
-        let header_durations =
-            header_bench.run_benchmark(&LookupHeaderIndex, num_lookups, batch_size);
-        analyze_results("HeaderLookupIndex", &header_durations, batch_size);
+        let mut durations = header_bench.run_benchmark(&LookupHeaderIndex, num_lookups, batch_size);
+        header_durations.append(&mut durations);
+
+        durations = uniform_bench.run_benchmark(
+            &UniformLookupIndex::new(metrics.clone()),
+            num_lookups,
+            batch_size,
+        );
+        uniform_durations.append(&mut durations);
     }
+    analyze_results("HeaderLookupIndex", &header_durations, batch_size);
+    analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
+    print_histogram_stats(&metrics.lookup_iterations);
 }
