@@ -21,11 +21,11 @@ use std::time::{Duration, Instant};
 
 use crate::key_shape::KeySpace;
 
-const HEADER_INDEX_FILE: &str = "data/bench_header.dat";
-const UNIFORM_INDEX_FILE: &str = "data/bench_uniform.dat";
-const NUM_INDICES: usize = 250_000;
+const HEADER_INDEX_FILE: &str = "data/bench-header-100GB-100K.dat";
+const UNIFORM_INDEX_FILE: &str = "data/bench-uniform-100GB-100K.dat";
+const NUM_INDICES: usize = 25_000;
 const ENTRIES_PER_INDEX: usize = 100_000;
-const NUM_LOOKUPS: usize = 10_000_000;
+const NUM_LOOKUPS: usize = 1_000_000;
 const NUM_RUNS: usize = 10;
 
 /// Generates a file with serialized indices for benchmarking
@@ -318,6 +318,7 @@ pub fn run_benchmarks() {
     for _ in 0..NUM_RUNS {
         let mut durations = header_bench.run_benchmark(&LookupHeaderIndex, num_lookups, batch_size);
         header_durations.append(&mut durations);
+        analyze_results("HeaderLookupIndex", &header_durations, batch_size);
 
         durations = uniform_bench.run_benchmark(
             &UniformLookupIndex::new(metrics.clone()),
@@ -325,8 +326,7 @@ pub fn run_benchmarks() {
             batch_size,
         );
         uniform_durations.append(&mut durations);
+        analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
     }
-    analyze_results("HeaderLookupIndex", &header_durations, batch_size);
-    analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
     print_histogram_stats(&metrics.lookup_iterations);
 }
