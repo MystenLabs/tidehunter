@@ -1,0 +1,30 @@
+Benchmark Summary Report
+======================
+Generated on: Fri Mar 14 16:32:55 CET 2025
+
+File Size | Window Size | Index Type | Throughput (lookups/sec) | Avg Hops
+---------|-------------|------------|-------------------------|----------
+100GB | 100 | Header | 12037.74 | 2.00
+100GB | 100 | Uniform | 8993.46 | 1.96
+100GB | 200 | Header | 12279.95 | 2.00
+100GB | 200 | Uniform | 10418.63 | 1.43
+100GB | 400 | Header | 12024.70 | 2.00
+100GB | 400 | Uniform | 11421.70 | 1.12
+100GB | 800 | Header | 11798.07 | 2.00
+100GB | 800 | Uniform | 10322.46 | 1.00
+10GB | 100 | Header | 138429.59 | 2.00
+10GB | 100 | Uniform | 183297.53 | 1.95
+10GB | 200 | Header | 547633.44 | 2.00
+10GB | 200 | Uniform | 510103.79 | 1.42
+10GB | 400 | Header | 545546.62 | 2.00
+10GB | 400 | Uniform | 385152.54 | 1.12
+10GB | 800 | Header | 549534.61 | 2.00
+10GB | 800 | Uniform | 291481.44 | 1.00
+1TB | 100 | Header | 10240.22 | 2.00
+1TB | 100 | Uniform | 6698.41 | 1.96
+1TB | 200 | Header | 10657.86 | 2.00
+1TB | 200 | Uniform | 7664.56 | 1.43
+1TB | 400 | Header | 10476.71 | 2.00
+1TB | 400 | Uniform | 8931.45 | 1.12
+1TB | 800 | Header | 9767.35 | 2.00
+1TB | 800 | Uniform | 8199.55 | 1.00
