@@ -1,12 +1,12 @@
-use crate::config::Config;
-use crate::db::Db;
-use crate::key_shape::{KeyShape, KeySpace};
-use crate::metrics::Metrics;
+use tidehunter::config::Config;
+use tidehunter::db::Db;
+use tidehunter::key_shape::{KeyShape, KeySpace};
+use tidehunter::metrics::Metrics;
 use bytes::BufMut;
 use clap::Parser;
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
-use prometheus::Registry;
+use ::prometheus::Registry;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
+
+mod prometheus;
 
 macro_rules! report {
     ($report: expr, $($arg:tt)*) => {
@@ -77,7 +79,7 @@ pub fn main() {
     let config = Arc::new(config);
     let registry = Registry::new();
     let metrics = Metrics::new_in(&registry);
-    crate::prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
+    prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
     let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
     if !args.no_snapshot {

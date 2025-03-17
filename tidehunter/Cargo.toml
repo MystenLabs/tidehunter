@@ -1,0 +1,22 @@
+[package]
+name = "tidehunter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memmap2 = "0.7.0"
+minibytes = { path = "../third-party/minibytes", default-features = false, features = ["frommmap", "frombytes"] }
+smallvec = "1.13.2"
+parking_lot = { workspace = true }
+crc32fast = "1.3.2"
+bytes = {workspace = true}
+bincode = "1.3.3"
+serde = { version = "1.0.208", features = ["derive"] }
+rand = {workspace = true}
+prometheus = {workspace = true}
+tokio = { version = "1.36.0", features = ["full"] }
+bloom = "0.3.2"
+lru = "0.12.2"
+
+[dev-dependencies]
+tempdir = "0.3.7"

@@ -14,7 +14,7 @@ struct RandomAccessSpeedTest {
     alignment: u64,
 }
 
-pub(crate) fn random_access_speed_test() {
+pub fn main() {
     for direct_io in [true, false] {
         for alignment in [1, 512, 4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024] {
             if direct_io && alignment == 1 {

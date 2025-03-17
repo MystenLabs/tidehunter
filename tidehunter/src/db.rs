@@ -81,7 +81,7 @@ impl Db {
         Ok(this)
     }
 
-    pub(crate) fn wal_path(path: &Path) -> PathBuf {
+    pub fn wal_path(path: &Path) -> PathBuf {
         path.join("wal")
     }
 

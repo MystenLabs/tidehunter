@@ -32,7 +32,9 @@ impl<T: BytesOwner> AbstractOwner<[u8]> for T {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 // AbstractOwner<T> is Send + Sync and AbstractBytes<T> is immutable.
@@ -160,7 +162,6 @@ where
         let any = arc_owner.as_any();
         any.downcast_ref()
     }
-
 
     /// Attempt to downcast to an exclusive mut reference.
     ///

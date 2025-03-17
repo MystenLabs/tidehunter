@@ -13,13 +13,10 @@ mod lookup;
 mod math;
 pub mod metrics;
 mod primitives;
-#[cfg(feature = "stress")]
-mod prometheus;
-#[cfg(feature = "stress")]
-mod stress;
 mod wal;
 mod wal_syncer;
 
+// todo remove re-export
 pub use minibytes;
 
 pub use wal::WalPosition;
