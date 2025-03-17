@@ -3,10 +3,13 @@
 # Exit on any error
 set -e
 
+# Benchmark configuration constants
+INDEX_SIZE="1M"
+
 # Directory setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-RESULTS_DIR="$PROJECT_ROOT/results"
+RESULTS_DIR="$PROJECT_ROOT/results/index-$INDEX_SIZE"
 SRC_DIR="$PROJECT_ROOT/src"
 
 # Ensure results directory exists
@@ -16,8 +19,6 @@ mkdir -p "$RESULTS_DIR"
 UNIFORM_LOOKUP_PATH="$SRC_DIR/index/uniform_lookup.rs"
 INDEX_BENCHMARK_PATH="$SRC_DIR/benchmarks/index_benchmark.rs"
 
-# Benchmark configuration constants
-INDEX_SIZE="100K"
 # Array of file sizes to test
 FILE_SIZES=("10GB" "100GB" "1TB")
 
