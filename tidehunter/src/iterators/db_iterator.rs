@@ -82,7 +82,7 @@ impl DbIterator {
         };
         let next_key = self.next_key.take();
         if let Some(next_key) = &next_key {
-            // todo - implement with key reduction to reduce calls to db.next_entry
+            // todo - implement with key reduction to reduce calls to storage.next_entry
             // This can be be used as is with key reduction
             // because next_key is a reduced key
             if !self.with_key_reduction {

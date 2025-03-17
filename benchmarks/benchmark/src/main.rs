@@ -1,12 +1,9 @@
-use tidehunter::config::Config;
-use tidehunter::db::Db;
-use tidehunter::key_shape::{KeyShape, KeySpace};
-use tidehunter::metrics::Metrics;
+use crate::storage::tidehunter::TidehunterStorage;
+use crate::storage::Storage;
 use bytes::BufMut;
 use clap::Parser;
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
-use ::prometheus::Registry;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,8 +11,11 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
+use tidehunter::config::Config;
+use tidehunter::db::Db;
 
 mod prometheus;
+mod storage;
 
 macro_rules! report {
     ($report: expr, $($arg:tt)*) => {
@@ -76,19 +76,14 @@ pub fn main() {
     if args.direct_io {
         report!(report, "Using **direct IO**");
     }
-    let config = Arc::new(config);
-    let registry = Registry::new();
-    let metrics = Metrics::new_in(&registry);
-    prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
-    let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
-    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let storage = TidehunterStorage::open(config, dir.path());
     if !args.no_snapshot {
         report!(report, "Periodic snapshot **enabled**");
-        db.start_periodic_snapshot();
+        storage.db.start_periodic_snapshot();
     } else {
         report!(report, "Periodic snapshot **disabled**");
     }
-    let stress = Stress { db, ks, args };
+    let stress = Stress { storage, args };
     println!("Starting write test");
     let elapsed = stress.measure(StressThread::run_writes, &mut report);
     let written = stress.args.writes * stress.args.threads;
@@ -127,7 +122,11 @@ pub fn main() {
     report!(
         report,
         "Max index size {} entries",
-        metrics.max_index_size.load(Ordering::Relaxed)
+        stress
+            .storage
+            .metrics
+            .max_index_size
+            .load(Ordering::Relaxed)
     );
     if print_report {
         println!("Writing report file");
@@ -135,9 +134,8 @@ pub fn main() {
     }
 }
 
-struct Stress {
-    db: Arc<Db>,
-    ks: KeySpace,
+struct Stress<T> {
+    storage: T,
     args: Arc<StressArgs>,
 }
 
@@ -146,8 +144,8 @@ struct Report {
     lines: String,
 }
 
-impl Stress {
-    pub fn background<F: FnOnce(StressThread) + Clone + Send + 'static>(
+impl<T: Storage> Stress<T> {
+    pub fn background<F: FnOnce(StressThread<T>) + Clone + Send + 'static>(
         &self,
         f: F,
     ) -> Arc<AtomicBool> {
@@ -155,7 +153,7 @@ impl Stress {
         manual_stop
     }
 
-    pub fn measure<F: FnOnce(StressThread) + Clone + Send + 'static>(
+    pub fn measure<F: FnOnce(StressThread<T>) + Clone + Send + 'static>(
         &self,
         f: F,
         report: &mut Report,
@@ -176,7 +174,7 @@ impl Stress {
         start.elapsed()
     }
 
-    fn start_threads<F: FnOnce(StressThread) + Clone + Send + 'static>(
+    fn start_threads<F: FnOnce(StressThread<T>) + Clone + Send + 'static>(
         &self,
         f: F,
     ) -> (Vec<JoinHandle<()>>, Arc<AtomicBool>, Arc<AtomicHistogram>) {
@@ -188,8 +186,7 @@ impl Stress {
         let latency = Arc::new(latency);
         for index in 0..self.args.threads {
             let thread = StressThread {
-                ks: self.ks,
-                db: self.db.clone(),
+                db: self.storage.clone(),
                 start_lock: start_lock.clone(),
                 args: self.args.clone(),
                 index: index as u64,
@@ -230,9 +227,8 @@ fn byte_div(n: usize) -> String {
     }
 }
 
-struct StressThread {
-    db: Arc<Db>,
-    ks: KeySpace,
+struct StressThread<T> {
+    db: T,
     start_lock: Arc<RwLock<()>>,
     args: Arc<StressArgs>,
     index: u64,
@@ -241,13 +237,13 @@ struct StressThread {
     latency: Arc<AtomicHistogram>,
 }
 
-impl StressThread {
+impl<T: Storage> StressThread<T> {
     pub fn run_writes(self) {
         let _ = self.start_lock.read();
         for pos in 0..self.args.writes {
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
-            self.db.insert(self.ks, key, value).unwrap();
+            self.db.insert(key.into(), value.into());
             self.latency
                 .increment(timer.elapsed().as_micros() as u64)
                 .unwrap();
@@ -263,7 +259,7 @@ impl StressThread {
             deadline = deadline + delay;
             pos -= 1;
             let (key, value) = self.key_value(pos);
-            self.db.insert(self.ks, key, value).unwrap();
+            self.db.insert(key.into(), value.into());
             thread::sleep(
                 deadline
                     .checked_duration_since(Instant::now())
@@ -279,11 +275,7 @@ impl StressThread {
             let pos = pos_rng.gen_range(0..self.args.writes);
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
-            let found_value = self
-                .db
-                .get(self.ks, &key)
-                .unwrap()
-                .expect("Expected value not found");
+            let found_value = self.db.get(&key).expect("Expected value not found");
             self.latency
                 .increment(timer.elapsed().as_micros() as u64)
                 .unwrap();

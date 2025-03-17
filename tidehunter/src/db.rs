@@ -104,7 +104,7 @@ impl Db {
             let current_wal_position = db.wal_writer.wal_position();
             let written = current_wal_position.as_u64().checked_sub(position).unwrap();
             if written > db.config.snapshot_written_bytes() {
-                // todo taint db instance on failure?
+                // todo taint storage instance on failure?
                 let snapshot_position = db
                     .rebuild_control_region_from(current_wal_position)
                     .expect("Failed to rebuild control region");
@@ -331,9 +331,9 @@ impl Db {
         }
     }
 
-    /// Returns true if this db is empty.
+    /// Returns true if this storage is empty.
     ///
-    /// (warn) Right now it returns true if db was never inserted true,
+    /// (warn) Right now it returns true if storage was never inserted true,
     /// but may return false if entry was inserted and then deleted.
     pub fn is_empty(&self) -> bool {
         self.large_table.is_empty()
@@ -1403,9 +1403,9 @@ mod test {
                 // This way we trigger unloading on the
                 // cell containing keys prefixed by [1, 2, 3, 4, ...]
                 //
-                // println!("A {:?}", LargeTable::locate(db.key_shape.cell(ks,&[1, 2, 3, 4])));
+                // println!("A {:?}", LargeTable::locate(storage.key_shape.cell(ks,&[1, 2, 3, 4])));
                 // for i in 0..255 {
-                //     println!("{i} {:?}", LargeTable::locate(db.key_shape.cell(ks,&[i, 2, 3, 4])));
+                //     println!("{i} {:?}", LargeTable::locate(storage.key_shape.cell(ks,&[i, 2, 3, 4])));
                 // }
             }
 
