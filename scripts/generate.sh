@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Constants
-ENTRIES_PER_INDEX=100000
+ENTRIES_PER_INDEX=1000000
 ENTRY_SIZE_BYTES=40  # Each entry is approximately 40 bytes
 
 # Compute the index size in bytes (approximation)

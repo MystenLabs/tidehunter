@@ -24,7 +24,7 @@ use crate::key_shape::KeySpace;
 const HEADER_INDEX_FILE: &str = "data/bench-header-100GB-100K.dat";
 const UNIFORM_INDEX_FILE: &str = "data/bench-uniform-100GB-100K.dat";
 const NUM_INDICES: usize = 25_000;
-const ENTRIES_PER_INDEX: usize = 100_000;
+const ENTRIES_PER_INDEX: usize = 1_000_000;
 const NUM_LOOKUPS: usize = 1_000_000;
 const NUM_RUNS: usize = 10;
 

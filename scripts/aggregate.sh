@@ -23,8 +23,8 @@ echo "Benchmark Summary Report" > "$SUMMARY_FILE"
 echo "======================" >> "$SUMMARY_FILE"
 echo "Generated on: $(date)" >> "$SUMMARY_FILE"
 echo "" >> "$SUMMARY_FILE"
-echo "File Size | Window Size | Index Type | Throughput (lookups/sec) | Avg Hops" >> "$SUMMARY_FILE"
-echo "---------|-------------|------------|-------------------------|----------" >> "$SUMMARY_FILE"
+printf "%-10s | %-11s | %-10s | %-25s | %-8s\n" "File Size" "Window Size" "Index Type" "Throughput (lookups/sec)" "Avg Hops" >> "$SUMMARY_FILE"
+printf "%-10s-|-%-11s-|-%-10s-|-%-25s-|-%-8s\n" "----------" "-----------" "----------" "-------------------------" "--------" >> "$SUMMARY_FILE"
 
 # Process each log file
 for log_file in "$RESULTS_DIR"/benchmark_*.log; do
@@ -80,11 +80,11 @@ for log_file in "$RESULTS_DIR"/benchmark_*.log; do
     
     # Add to summary file
     if [ ! -z "$header_throughput" ]; then
-        echo "$file_size | $window_size | Header | $header_throughput | 2.00" >> "$SUMMARY_FILE"
+        printf "%-10s | %-11s | %-10s | %-25s | %-8s\n" "$file_size" "$window_size" "Header" "$header_throughput" "2.00" >> "$SUMMARY_FILE"
     fi
     
     if [ ! -z "$uniform_throughput" ]; then
-        echo "$file_size | $window_size | Uniform | $uniform_throughput | $uniform_avg_hops" >> "$SUMMARY_FILE"
+        printf "%-10s | %-11s | %-10s | %-25s | %-8s\n" "$file_size" "$window_size" "Uniform" "$uniform_throughput" "$uniform_avg_hops" >> "$SUMMARY_FILE"
     fi
 done
 

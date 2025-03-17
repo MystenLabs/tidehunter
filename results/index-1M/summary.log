@@ -1,0 +1,30 @@
+Benchmark Summary Report
+======================
+Generated on: Mon Mar 17 11:50:40 CET 2025
+
+File Size  | Window Size | Index Type | Throughput (lookups/sec)  | Avg Hops
+-----------|-------------|------------|---------------------------|---------
+100GB      | 100         | Header     | 8194.66                   | 2.00    
+100GB      | 100         | Uniform    | 5604.73                   | 2.54    
+100GB      | 200         | Header     | 8273.69                   | 2.00    
+100GB      | 200         | Uniform    | 6522.06                   | 1.74    
+100GB      | 400         | Header     | 8479.38                   | 2.00    
+100GB      | 400         | Uniform    | 7209.81                   | 1.30    
+100GB      | 800         | Header     | 8894.26                   | 2.00    
+100GB      | 800         | Uniform    | 7446.16                   | 1.05    
+10GB       | 100         | Header     | 110558.92                 | 2.00    
+10GB       | 100         | Uniform    | 154748.88                 | 2.54    
+10GB       | 200         | Header     | 138400.81                 | 2.00    
+10GB       | 200         | Uniform    | 267875.48                 | 1.73    
+10GB       | 400         | Header     | 137625.28                 | 2.00    
+10GB       | 400         | Uniform    | 219649.08                 | 1.30    
+10GB       | 800         | Header     | 132902.86                 | 2.00    
+10GB       | 800         | Uniform    | 153633.43                 | 1.06    
+1TB        | 100         | Header     | 7880.65                   | 2.00    
+1TB        | 100         | Uniform    | 4905.15                   | 2.55    
+1TB        | 200         | Header     | 6878.65                   | 2.00    
+1TB        | 200         | Uniform    | 5103.23                   | 1.74    
+1TB        | 400         | Header     | 7338.55                   | 2.00    
+1TB        | 400         | Uniform    | 6048.10                   | 1.30    
+1TB        | 800         | Header     | 7059.06                   | 2.00    
+1TB        | 800         | Uniform    | 6228.89                   | 1.05    
