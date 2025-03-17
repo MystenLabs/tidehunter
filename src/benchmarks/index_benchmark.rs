@@ -7,6 +7,7 @@ use std::ops::Range;
 use std::path::Path;
 use tidehunter::metrics::print_histogram_stats;
 
+use crate::file_reader::FileReader;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
 use crate::index::lookup_header::LookupHeaderIndex;
@@ -27,6 +28,7 @@ const NUM_INDICES: usize = 25_000;
 const ENTRIES_PER_INDEX: usize = 1_000_000;
 const NUM_LOOKUPS: usize = 1_000_000;
 const NUM_RUNS: usize = 10;
+const USE_DIRECT_IO: bool = false;
 
 /// Generates a file with serialized indices for benchmarking
 pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone>(
@@ -204,7 +206,7 @@ impl<'a> IndexBenchmark<'a> {
                 start: cursor + i * index_size,
                 end: cursor + (i + 1) * index_size as u64,
             };
-            readers.push(FileRange::new(&file, range));
+            readers.push(FileRange::new(FileReader::new(file, USE_DIRECT_IO), range));
         }
 
         let (key_shape, ks) = KeyShape::new_single(32, 1, 1);
