@@ -1,6 +1,6 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::file_reader::{align_size, set_direct_options, FileReader};
-use crate::index::persisted_index::IndexFormat;
+use crate::index::index_format::IndexFormat;
 use crate::index::INDEX_FORMAT;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
