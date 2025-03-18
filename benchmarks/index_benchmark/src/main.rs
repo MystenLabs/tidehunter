@@ -22,14 +22,6 @@ use tidehunter::lookup::FileRange;
 use tidehunter::metrics::Metrics;
 use tidehunter::wal::WalPosition;
 
-const HEADER_INDEX_FILE: &str = "data/bench-header-100GB-100K.dat";
-const UNIFORM_INDEX_FILE: &str = "data/bench-uniform-100GB-100K.dat";
-const NUM_INDICES: usize = 25_000;
-const ENTRIES_PER_INDEX: usize = 1_000_000;
-const NUM_LOOKUPS: usize = 1_000_000;
-const NUM_RUNS: usize = 10;
-const USE_DIRECT_IO: bool = false;
-
 /// Generates a file with serialized indices for benchmarking
 pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone>(
     output_path: &Path,
@@ -147,30 +139,6 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     Ok(())
 }
 
-pub fn generate_benchmark_files() {
-    let n_indices = NUM_INDICES; // Number of indices
-    let entries_per_index = ENTRIES_PER_INDEX; // Entries per index
-
-    println!("Generating benchmark files...");
-
-    let header_path = Path::new(HEADER_INDEX_FILE);
-    println!("Generating LookupHeaderIndex file: {:?}", header_path);
-    generate_index_file(header_path, n_indices, entries_per_index, LookupHeaderIndex)
-        .expect("Failed to generate LookupHeaderIndex file");
-
-    let uniform_path = Path::new(UNIFORM_INDEX_FILE);
-    println!("Generating UniformLookupIndex file: {:?}", uniform_path);
-    generate_index_file(
-        uniform_path,
-        n_indices,
-        entries_per_index,
-        UniformLookupIndex::new_with_default_metrics(),
-    )
-    .expect("Failed to generate UniformLookupIndex file");
-
-    println!("Benchmark files generated.");
-}
-
 struct IndexBenchmark<'a> {
     index_count: u64,
     readers: Vec<FileRange<'a>>,
@@ -179,7 +147,7 @@ struct IndexBenchmark<'a> {
 }
 
 impl<'a> IndexBenchmark<'a> {
-    fn load_from_file(file: &'a File, file_length: u64) -> std::io::Result<Self> {
+    fn load_from_file(file: &'a File, file_length: u64, direct_io: bool) -> std::io::Result<Self> {
         let mut reader = BufReader::new(file);
         // get index count (first 8 bytes of file)
         let mut size_buf = [0u8; 8];
@@ -206,7 +174,7 @@ impl<'a> IndexBenchmark<'a> {
                 start: cursor + i * index_size,
                 end: cursor + (i + 1) * index_size as u64,
             };
-            readers.push(FileRange::new(FileReader::new(file, USE_DIRECT_IO), range));
+            readers.push(FileRange::new(FileReader::new(file, direct_io), range));
         }
 
         let (key_shape, ks) = KeyShape::new_single(32, 1, 1);
@@ -292,47 +260,6 @@ fn analyze_results(name: &str, durations: &[Duration], batch_size: usize) {
     println!("    Max: {:.2} ns", max);
 }
 
-pub fn run_benchmarks() {
-    let registry = Registry::new();
-    let metrics = Metrics::new_in(&registry);
-
-    let num_lookups = NUM_LOOKUPS;
-    let batch_size = 1000;
-
-    let uniform_path = Path::new(UNIFORM_INDEX_FILE);
-    let uniform_file = File::open(uniform_path).expect("Failed to open UniformLookupIndex file");
-    let uniform_file_length = std::fs::metadata(uniform_path)
-        .expect("Failed to get file metadata")
-        .len();
-    let uniform_bench = IndexBenchmark::load_from_file(&uniform_file, uniform_file_length)
-        .expect("Failed to load UniformLookupIndex benchmark file");
-
-    let header_path = Path::new(HEADER_INDEX_FILE);
-    let header_file = File::open(header_path).expect("Failed to open UniformLookupIndex file");
-    let header_file_length = std::fs::metadata(header_path)
-        .expect("Failed to get file metadata")
-        .len();
-    let header_bench = IndexBenchmark::load_from_file(&header_file, header_file_length)
-        .expect("Failed to load HeaderLookupIndex benchmark file");
-
-    let mut header_durations = Vec::with_capacity(NUM_RUNS * NUM_LOOKUPS / batch_size);
-    let mut uniform_durations = Vec::with_capacity(NUM_RUNS * NUM_LOOKUPS / batch_size);
-    for _ in 0..NUM_RUNS {
-        let mut durations = header_bench.run_benchmark(&LookupHeaderIndex, num_lookups, batch_size);
-        header_durations.append(&mut durations);
-        analyze_results("HeaderLookupIndex", &header_durations, batch_size);
-
-        durations = uniform_bench.run_benchmark(
-            &UniformLookupIndex::new(metrics.clone()),
-            num_lookups,
-            batch_size,
-        );
-        uniform_durations.append(&mut durations);
-        analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
-    }
-    print_histogram_stats(&metrics.lookup_iterations);
-}
-
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -343,16 +270,125 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Generate benchmark files
-    Generate,
+    Generate {
+        /// Number of indices to generate
+        #[arg(long, default_value_t = 25_000)]
+        num_indices: usize,
+        /// Number of entries per index
+        #[arg(long, default_value_t = 1_000_000)]
+        entries_per_index: usize,
+        /// Output file for header index
+        #[arg(long, default_value = "data/bench-header-100GB-100K.dat")]
+        header_file: String,
+        /// Output file for uniform index
+        #[arg(long, default_value = "data/bench-uniform-100GB-100K.dat")]
+        uniform_file: String,
+    },
     /// Run benchmarks
-    Run,
+    Run {
+        /// Number of lookups to perform
+        #[arg(long, default_value_t = 1_000_000)]
+        num_lookups: usize,
+        /// Number of benchmark runs
+        #[arg(long, default_value_t = 10)]
+        num_runs: usize,
+        /// Batch size for lookups
+        #[arg(long, default_value_t = 1000)]
+        batch_size: usize,
+        /// Input file for header index
+        #[arg(long, default_value = "data/bench-header-100GB-100K.dat")]
+        header_file: String,
+        /// Input file for uniform index
+        #[arg(long, default_value = "data/bench-uniform-100GB-100K.dat")]
+        uniform_file: String,
+        /// Whether to use direct I/O
+        #[arg(long, default_value_t = false)]
+        direct_io: bool,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Generate => generate_benchmark_files(),
-        Commands::Run => run_benchmarks(),
+        Commands::Generate {
+            num_indices,
+            entries_per_index,
+            header_file,
+            uniform_file,
+        } => {
+            let header_path = Path::new(&header_file);
+            let uniform_path = Path::new(&uniform_file);
+
+            println!("Generating benchmark files...");
+            println!("Generating LookupHeaderIndex file: {:?}", header_path);
+            generate_index_file(
+                header_path,
+                num_indices,
+                entries_per_index,
+                LookupHeaderIndex,
+            )
+            .expect("Failed to generate LookupHeaderIndex file");
+
+            println!("Generating UniformLookupIndex file: {:?}", uniform_path);
+            generate_index_file(
+                uniform_path,
+                num_indices,
+                entries_per_index,
+                UniformLookupIndex::new_with_default_metrics(),
+            )
+            .expect("Failed to generate UniformLookupIndex file");
+
+            println!("Benchmark files generated.");
+        }
+        Commands::Run {
+            num_lookups,
+            num_runs,
+            batch_size,
+            header_file,
+            uniform_file,
+            direct_io,
+        } => {
+            let registry = Registry::new();
+            let metrics = Metrics::new_in(&registry);
+
+            let uniform_path = Path::new(&uniform_file);
+            let uniform_file =
+                File::open(uniform_path).expect("Failed to open UniformLookupIndex file");
+            let uniform_file_length = std::fs::metadata(uniform_path)
+                .expect("Failed to get file metadata")
+                .len();
+            let uniform_bench =
+                IndexBenchmark::load_from_file(&uniform_file, uniform_file_length, direct_io)
+                    .expect("Failed to load UniformLookupIndex benchmark file");
+
+            let header_path = Path::new(&header_file);
+            let header_file =
+                File::open(header_path).expect("Failed to open HeaderLookupIndex file");
+            let header_file_length = std::fs::metadata(header_path)
+                .expect("Failed to get file metadata")
+                .len();
+            let header_bench =
+                IndexBenchmark::load_from_file(&header_file, header_file_length, direct_io)
+                    .expect("Failed to load HeaderLookupIndex benchmark file");
+
+            let mut header_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
+            let mut uniform_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
+            for _ in 0..num_runs {
+                let mut durations =
+                    header_bench.run_benchmark(&LookupHeaderIndex, num_lookups, batch_size);
+                header_durations.append(&mut durations);
+                analyze_results("HeaderLookupIndex", &header_durations, batch_size);
+
+                durations = uniform_bench.run_benchmark(
+                    &UniformLookupIndex::new(metrics.clone()),
+                    num_lookups,
+                    batch_size,
+                );
+                uniform_durations.append(&mut durations);
+                analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
+            }
+            print_histogram_stats(&metrics.lookup_iterations);
+        }
     }
 }

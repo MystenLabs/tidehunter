@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Constants
-ENTRIES_PER_INDEX=1000000
+ENTRIES_PER_INDEX=10000 # !!! MAKE SURE THIS IS THE SAME AS THE INDEX_SIZE IN run.sh !!!
 ENTRY_SIZE_BYTES=40  # Each entry is approximately 40 bytes
 
 # Compute the index size in bytes (approximation)
@@ -31,23 +31,6 @@ format_number() {
 ENTRIES_SHORT=$(format_number $ENTRIES_PER_INDEX)
 echo "Using shorthand $ENTRIES_SHORT for $ENTRIES_PER_INDEX entries in filenames"
 
-# Function to update the benchmark file
-update_benchmark_file() {
-  local file_size_name=$1
-  local num_indices=$2
-  
-  echo "Updating index_benchmark.rs for $file_size_name with $num_indices indices and $ENTRIES_PER_INDEX entries per index"
-  
-  # Use sed to update the constants in the file
-  sed -i.bak "s|const HEADER_INDEX_FILE: \&str = \".*\";|const HEADER_INDEX_FILE: \&str = \"data/bench-header-$file_size_name-$ENTRIES_SHORT.dat\";|" src/benchmarks/index_benchmark.rs
-  sed -i.bak "s|const UNIFORM_INDEX_FILE: \&str = \".*\";|const UNIFORM_INDEX_FILE: \&str = \"data/bench-uniform-$file_size_name-$ENTRIES_SHORT.dat\";|" src/benchmarks/index_benchmark.rs
-  sed -i.bak "s|const NUM_INDICES: usize = [0-9_]*;|const NUM_INDICES: usize = $num_indices;|" src/benchmarks/index_benchmark.rs
-  sed -i.bak "s|const ENTRIES_PER_INDEX: usize = [0-9_]*;|const ENTRIES_PER_INDEX: usize = $ENTRIES_PER_INDEX;|" src/benchmarks/index_benchmark.rs
-  
-  # Remove backup files
-  rm src/benchmarks/index_benchmark.rs.bak
-}
-
 # Create data directory if it doesn't exist
 mkdir -p data
 
@@ -63,12 +46,15 @@ for size_pair in "${FILE_SIZES[@]}"; do
   echo "  - Target size: $size_bytes bytes"
   echo "  - Number of indices: $num_indices"
   
-  # Update the benchmark file
-  update_benchmark_file "$size_name" "$num_indices"
-  
-  # Run the benchmark generation
-  echo "Running benchmark generation for $size_name..."
-  cargo run --release --features index_benchmark_generate
+  # Generate header index file
+  header_file="data/bench-header-$size_name-$ENTRIES_SHORT.dat"
+  uniform_file="data/bench-uniform-$size_name-$ENTRIES_SHORT.dat"
+  echo "Generating header index file: $header_file"
+  cargo run --release -- generate \
+    --num-indices "$num_indices" \
+    --entries-per-index "$ENTRIES_PER_INDEX" \
+    --header-file "$header_file" \
+    --uniform-file "$uniform_file"
   
   echo "Completed generating $size_name benchmark file"
   echo "----------------------------------------"
