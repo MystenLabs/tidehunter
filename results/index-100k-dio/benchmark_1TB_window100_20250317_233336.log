@@ -1,0 +1,136 @@
+Benchmark started at Mon Mar 17 11:33:36 PM UTC 2025
+Building and running benchmark...
+   Compiling tidehunter v0.1.0 (/opt/sui/thdb/tidehunter)
+    Finished `release` profile [optimized] target(s) in 2.23s
+     Running `target/release/tidehunter`
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 1000000 lookups in 103.92s
+  Throughput: 9622.61 lookups/sec
+  Latency per lookup:
+    Mean: 103921.88 ns
+    Std Dev: 5954.93 ns
+    Min: 94166.93 ns
+    Max: 163904.39 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 1000000 lookups in 128.81s
+  Throughput: 7763.35 lookups/sec
+  Latency per lookup:
+    Mean: 128810.44 ns
+    Std Dev: 2036.56 ns
+    Min: 122311.92 ns
+    Max: 145736.01 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 2000000 lookups in 201.98s
+  Throughput: 9902.15 lookups/sec
+  Latency per lookup:
+    Mean: 100988.17 ns
+    Std Dev: 5509.18 ns
+    Min: 92193.24 ns
+    Max: 163904.39 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 2000000 lookups in 274.74s
+  Throughput: 7279.70 lookups/sec
+  Latency per lookup:
+    Mean: 137368.39 ns
+    Std Dev: 8893.24 ns
+    Min: 122311.92 ns
+    Max: 160363.70 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 3000000 lookups in 302.95s
+  Throughput: 9902.57 lookups/sec
+  Latency per lookup:
+    Mean: 100983.85 ns
+    Std Dev: 4629.88 ns
+    Min: 92193.24 ns
+    Max: 163904.39 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 3000000 lookups in 419.99s
+  Throughput: 7143.06 lookups/sec
+  Latency per lookup:
+    Mean: 139996.12 ns
+    Std Dev: 8382.17 ns
+    Min: 122311.92 ns
+    Max: 160363.70 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 4000000 lookups in 408.06s
+  Throughput: 9802.49 lookups/sec
+  Latency per lookup:
+    Mean: 102014.87 ns
+    Std Dev: 4679.75 ns
+    Min: 92193.24 ns
+    Max: 163904.39 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 4000000 lookups in 563.66s
+  Throughput: 7096.50 lookups/sec
+  Latency per lookup:
+    Mean: 140914.45 ns
+    Std Dev: 7539.65 ns
+    Min: 122311.92 ns
+    Max: 160363.70 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 5000000 lookups in 513.46s
+  Throughput: 9737.79 lookups/sec
+  Latency per lookup:
+    Mean: 102692.69 ns
+    Std Dev: 4763.46 ns
+    Min: 92193.24 ns
+    Max: 163904.39 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 5000000 lookups in 708.40s
+  Throughput: 7058.15 lookups/sec
+  Latency per lookup:
+    Mean: 141680.21 ns
+    Std Dev: 7003.39 ns
+    Min: 122311.92 ns
+    Max: 160363.70 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 6000000 lookups in 614.11s
+  Throughput: 9770.20 lookups/sec
+  Latency per lookup:
+    Mean: 102352.10 ns
+    Std Dev: 4507.39 ns
+    Min: 92193.24 ns
+    Max: 163904.39 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 6000000 lookups in 855.45s
+  Throughput: 7013.89 lookups/sec
+  Latency per lookup:
+    Mean: 142574.20 ns
+    Std Dev: 6828.06 ns
+    Min: 122311.92 ns
+    Max: 160527.35 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 7000000 lookups in 716.94s
+  Throughput: 9763.66 lookups/sec
+  Latency per lookup:
+    Mean: 102420.62 ns
+    Std Dev: 4419.87 ns
+    Min: 92193.24 ns
+    Max: 198511.77 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 7000000 lookups in 988.91s
+  Throughput: 7078.47 lookups/sec
+  Latency per lookup:
+    Mean: 141273.55 ns
+    Std Dev: 7613.31 ns
+    Min: 122209.98 ns
+    Max: 198013.01 ns
+Running 1000000 lookups in batches of 1000
+thread 'main' panicked at src/lookup.rs:33:14:
+Failed to read file: Error { kind: UnexpectedEof, message: "failed to fill whole buffer" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Benchmark completed at Tue Mar 18 12:03:19 AM UTC 2025

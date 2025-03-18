@@ -1,0 +1,10 @@
+Benchmark started at Mon Mar 17 01:29:01 PM UTC 2025
+Building and running benchmark...
+   Compiling tidehunter v0.1.0 (/opt/sui/thdb/tidehunter)
+    Finished `release` profile [optimized] target(s) in 1.85s
+     Running `target/release/tidehunter`
+Running 1000000 lookups in batches of 1000
+thread 'main' panicked at src/lookup.rs:33:14:
+Failed to read file: Error { kind: UnexpectedEof, message: "failed to fill whole buffer" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Benchmark completed at Mon Mar 17 01:29:04 PM UTC 2025

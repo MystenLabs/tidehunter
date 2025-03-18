@@ -1,0 +1,19 @@
+Benchmark started at Mon Mar 17 11:30:55 PM UTC 2025
+Building and running benchmark...
+   Compiling tidehunter v0.1.0 (/opt/sui/thdb/tidehunter)
+    Finished `release` profile [optimized] target(s) in 2.71s
+     Running `target/release/tidehunter`
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 1000000 lookups in 105.36s
+  Throughput: 9491.40 lookups/sec
+  Latency per lookup:
+    Mean: 105358.57 ns
+    Std Dev: 6619.16 ns
+    Min: 95521.39 ns
+    Max: 125996.36 ns
+Running 1000000 lookups in batches of 1000
+thread 'main' panicked at src/lookup.rs:33:14:
+Failed to read file: Error { kind: UnexpectedEof, message: "failed to fill whole buffer" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Benchmark completed at Mon Mar 17 11:33:36 PM UTC 2025
