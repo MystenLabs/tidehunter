@@ -31,7 +31,7 @@ pub mod test {
     use rand::{rngs::ThreadRng, Rng, RngCore};
 
     use crate::{
-        index::index_table::IndexTable, index::persisted_index::IndexFormat, key_shape::KeyShape,
+        index::index_format::IndexFormat, index::index_table::IndexTable, key_shape::KeyShape,
         wal::WalPosition,
     };
 

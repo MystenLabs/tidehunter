@@ -193,7 +193,11 @@ impl WalLayout {
 }
 
 impl Wal {
-    pub fn open(p: &Path, layout: WalLayout, metrics: Arc<Metrics>) -> io::Result<Arc<Self>> {
+    pub(crate) fn open(
+        p: &Path,
+        layout: WalLayout,
+        metrics: Arc<Metrics>,
+    ) -> io::Result<Arc<Self>> {
         layout.assert_layout();
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
@@ -682,7 +686,7 @@ impl WalPosition {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn test_value(v: u64) -> Self {
+    pub fn test_value(v: u64) -> Self {
         Self(v)
     }
 }
