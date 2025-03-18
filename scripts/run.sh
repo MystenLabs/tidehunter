@@ -5,7 +5,7 @@ set -e
 
 # Benchmark configuration constants
 INDEX_SIZE="10k" # !!! MAKE SURE THIS IS THE SAME AS THE ENTRIES_PER_INDEX IN generate.sh !!!
-DIRECT_IO_SUFFIX="dio"
+DIRECT_IO_SUFFIX=
 
 # Benchmark parameters
 NUM_LOOKUPS=1000000
@@ -15,7 +15,8 @@ BATCH_SIZE=1000
 # Directory setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-RESULTS_DIR="$PROJECT_ROOT/results/index-$INDEX_SIZE-$DIRECT_IO_SUFFIX"
+RESULTS_DIR="$PROJECT_ROOT/results/index-$INDEX_SIZE$DIRECT_IO_SUFFIX"
+SRC_DIR="$PROJECT_ROOT/tidehunter/src"
 
 # Ensure results directory exists
 mkdir -p "$RESULTS_DIR"
@@ -40,9 +41,6 @@ for file_size in "${FILE_SIZES[@]}"; do
         log_file="$RESULTS_DIR/benchmark_${file_size}_window${window_size}_${timestamp}.log"
         
         echo "Benchmark started at $(date)" | tee -a "$log_file"
-        
-        # Update DEFAULT_WINDOW_SIZE in uniform_lookup.rs
-        sed -i.bak "s/const DEFAULT_WINDOW_SIZE: usize = [0-9]\+;/const DEFAULT_WINDOW_SIZE: usize = $window_size;/" "$UNIFORM_LOOKUP_PATH"
 
         # Check if the header and uniform files exist
         if [ ! -f "data/bench-header-$file_size-$INDEX_SIZE.dat" ]; then
@@ -56,21 +54,19 @@ for file_size in "${FILE_SIZES[@]}"; do
         
         # Run the benchmark with the new command-line interface
         echo "Running benchmark..." | tee -a "$log_file"
-        cargo run --release -- run \
+        cargo run --release --bin index_benchmark -- run \
             --num-lookups "$NUM_LOOKUPS" \
             --num-runs "$NUM_RUNS" \
             --batch-size "$BATCH_SIZE" \
+            --window-size "$window_size" \
             --header-file "data/bench-header-$file_size-$INDEX_SIZE.dat" \
             --uniform-file "data/bench-uniform-$file_size-$INDEX_SIZE.dat" \
-            --direct-io 2>&1 | tee -a "$log_file"
+            $DIRECT_IO_SUFFIX 2>&1 | tee -a "$log_file"
         
         # Log benchmark completion
         echo "Benchmark completed at $(date)" | tee -a "$log_file"
         echo "Results saved to $log_file"
         echo ""
-        
-        # Restore original file (optional, but helpful to avoid git conflicts)
-        mv "$UNIFORM_LOOKUP_PATH.bak" "$UNIFORM_LOOKUP_PATH"
     done
 done
 

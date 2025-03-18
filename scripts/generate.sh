@@ -50,7 +50,7 @@ for size_pair in "${FILE_SIZES[@]}"; do
   header_file="data/bench-header-$size_name-$ENTRIES_SHORT.dat"
   uniform_file="data/bench-uniform-$size_name-$ENTRIES_SHORT.dat"
   echo "Generating header index file: $header_file"
-  cargo run --release -- generate \
+  cargo run --release --bin index_benchmark -- generate \
     --num-indices "$num_indices" \
     --entries-per-index "$ENTRIES_PER_INDEX" \
     --header-file "$header_file" \

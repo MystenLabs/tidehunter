@@ -20,7 +20,6 @@ pub struct UniformLookupIndex {
 }
 
 impl UniformLookupIndex {
-    #[allow(dead_code)]
     pub fn new(metrics: Arc<Metrics>) -> Self {
         let mut matrix = Vec::with_capacity(NUM_WINDOW_SIZES);
         for _ in 0..NUM_WINDOW_SIZES {
@@ -34,10 +33,21 @@ impl UniformLookupIndex {
         }
     }
 
-    // You might also want a method that uses default metrics for tests/other use cases
-    #[allow(dead_code)]
     pub fn new_with_default_metrics() -> Self {
         Self::new(Metrics::new())
+    }
+
+    pub fn new_with_window_size(metrics: Arc<Metrics>, window_size: usize) -> Self {
+        let mut matrix = Vec::with_capacity(NUM_WINDOW_SIZES);
+        for _ in 0..NUM_WINDOW_SIZES {
+            let row = vec![window_size; NUM_WINDOW_SIZES];
+            matrix.push(row);
+        }
+
+        Self {
+            window_sizes: matrix,
+            metrics, // Use the provided metrics
+        }
     }
 
     fn probable_key_offset_and_window_size(

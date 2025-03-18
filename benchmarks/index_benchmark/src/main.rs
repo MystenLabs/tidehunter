@@ -207,7 +207,8 @@ impl<'a> IndexBenchmark<'a> {
 
             for _ in 0..batch_size {
                 // Choose a random index
-                let index_idx = rng.gen_range(0..self.index_count) as usize;
+                // todo revert to self.index_count. this solution avoid alignment issues
+                let index_idx = rng.gen_range(0..self.index_count - 1) as usize;
                 let reader = &self.readers[index_idx];
 
                 // Create a random key to look up
@@ -295,6 +296,9 @@ enum Commands {
         /// Batch size for lookups
         #[arg(long, default_value_t = 1000)]
         batch_size: usize,
+        /// Window size for uniform index
+        #[arg(long, default_value_t = 500)]
+        window_size: usize,
         /// Input file for header index
         #[arg(long, default_value = "data/bench-header-100GB-100K.dat")]
         header_file: String,
@@ -345,6 +349,7 @@ fn main() {
             num_lookups,
             num_runs,
             batch_size,
+            window_size,
             header_file,
             uniform_file,
             direct_io,
@@ -381,7 +386,7 @@ fn main() {
                 analyze_results("HeaderLookupIndex", &header_durations, batch_size);
 
                 durations = uniform_bench.run_benchmark(
-                    &UniformLookupIndex::new(metrics.clone()),
+                    &UniformLookupIndex::new_with_window_size(metrics.clone(), window_size),
                     num_lookups,
                     batch_size,
                 );
