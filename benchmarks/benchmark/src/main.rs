@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
+#[cfg(not(feature = "rocks"))]
 use tidehunter::config::Config;
 #[cfg(not(feature = "rocks"))]
 use tidehunter::db::Db;
@@ -71,14 +72,19 @@ pub fn main() {
     };
     println!("Path to storage: {}", dir.path().display());
     let print_report = args.report;
-    let mut config = Config::default();
-    config.max_dirty_keys = 1024;
-    config.direct_io = args.direct_io;
-    if args.direct_io {
-        report!(report, "Using **direct IO**");
-    }
     #[cfg(not(feature = "rocks"))]
     let storage = {
+        let mut config = Config::default();
+        config.max_dirty_keys = 1024;
+        config.direct_io = args.direct_io;
+        config.frag_size = 1024 * 1024 * 1024;
+        config.max_maps = 8;
+        config.snapshot_unload_threshold = 128 * 1024 * 1024 * 1024;
+        config.snapshot_written_bytes = 64 * 1024 * 1024 * 1024;
+        config.unload_jitter_pct = 30;
+        if args.direct_io {
+            report!(report, "Using **direct IO**");
+        }
         use crate::storage::tidehunter::TidehunterStorage;
         let storage = TidehunterStorage::open(config, dir.path());
         if !args.no_snapshot {
