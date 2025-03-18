@@ -1,4 +1,3 @@
-use crate::storage::tidehunter::TidehunterStorage;
 use crate::storage::Storage;
 use bytes::BufMut;
 use clap::Parser;
@@ -12,8 +11,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 use tidehunter::config::Config;
+#[cfg(not(feature = "rocks"))]
 use tidehunter::db::Db;
 
+#[allow(dead_code)]
 mod prometheus;
 mod storage;
 
@@ -76,13 +77,23 @@ pub fn main() {
     if args.direct_io {
         report!(report, "Using **direct IO**");
     }
-    let storage = TidehunterStorage::open(config, dir.path());
-    if !args.no_snapshot {
-        report!(report, "Periodic snapshot **enabled**");
-        storage.db.start_periodic_snapshot();
-    } else {
-        report!(report, "Periodic snapshot **disabled**");
-    }
+    #[cfg(not(feature = "rocks"))]
+    let storage = {
+        use crate::storage::tidehunter::TidehunterStorage;
+        let storage = TidehunterStorage::open(config, dir.path());
+        if !args.no_snapshot {
+            report!(report, "Periodic snapshot **enabled**");
+            storage.db.start_periodic_snapshot();
+        } else {
+            report!(report, "Periodic snapshot **disabled**");
+        }
+        storage
+    };
+    #[cfg(feature = "rocks")]
+    let storage = {
+        use crate::storage::rocks::RocksStorage;
+        RocksStorage::open(dir.path())
+    };
     let stress = Stress { storage, args };
     println!("Starting write test");
     let elapsed = stress.measure(StressThread::run_writes, &mut report);
@@ -95,13 +106,16 @@ pub fn main() {
         dec_div(written / msecs * 1000),
         byte_div(written_bytes / msecs * 1000)
     );
-    let wal = Db::wal_path(dir.path());
-    let wal_len = fs::metadata(wal).unwrap().len();
-    report!(
-        report,
-        "Wal size {:.1} Gb",
-        wal_len as f64 / 1024. / 1024. / 1024.
-    );
+    #[cfg(not(feature = "rocks"))]
+    {
+        let wal = Db::wal_path(dir.path());
+        let wal_len = fs::metadata(wal).unwrap().len();
+        report!(
+            report,
+            "Wal size {:.1} Gb",
+            wal_len as f64 / 1024. / 1024. / 1024.
+        );
+    }
     println!("Starting read test");
     let manual_stop = if stress.args.background_writes > 0 {
         stress.background(StressThread::run_background_writes)
@@ -119,6 +133,7 @@ pub fn main() {
         dec_div(read / msecs * 1000),
         byte_div(read_bytes / msecs * 1000)
     );
+    #[cfg(not(feature = "rocks"))]
     report!(
         report,
         "Max index size {} entries",

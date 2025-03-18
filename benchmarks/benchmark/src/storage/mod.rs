@@ -1,3 +1,6 @@
+#[cfg(feature = "rocks")]
+pub mod rocks;
+#[cfg(not(feature = "rocks"))]
 pub mod tidehunter;
 
 use minibytes::Bytes;

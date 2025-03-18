@@ -15,3 +15,7 @@ axum = "0.6.18"
 tempdir = "0.3.7"
 tokio = { version = "1.44.1", features = ["full"] }
 minibytes = { path = "../../third-party/minibytes", default-features = false, features = ["frommmap", "frombytes"] }
+rocksdb = { version = "0.21.0", default-features = false, features = ["snappy", "lz4", "zstd", "zlib", "multi-threaded-cf"], optional = true }
+
+[features]
+rocks = ["rocksdb"]
