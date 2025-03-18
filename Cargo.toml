@@ -4,6 +4,7 @@ members = [
     "benchmarks/random_access_speed_test",
     "benchmarks/benchmark",
     "benchmarks/read_window_test",
+    "benchmarks/index_benchmark",
 ]
 resolver = "2"
 

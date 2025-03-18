@@ -1,3 +1,4 @@
+use clap::{Parser, Subcommand};
 use prometheus::Registry;
 use rand::Rng;
 use std::env;
@@ -7,20 +8,19 @@ use std::ops::Range;
 use std::path::Path;
 use tidehunter::metrics::print_histogram_stats;
 
-use crate::file_reader::FileReader;
-use crate::index::index_format::IndexFormat;
-use crate::index::index_table::IndexTable;
-use crate::index::lookup_header::LookupHeaderIndex;
-use crate::index::uniform_lookup::UniformLookupIndex;
-use crate::key_shape::KeyShape;
-use crate::lookup::FileRange;
-use crate::metrics::Metrics;
-use crate::wal::WalPosition;
 use minibytes::Bytes;
 use std::io::{BufReader, Read};
 use std::time::{Duration, Instant};
-
-use crate::key_shape::KeySpace;
+use tidehunter::file_reader::FileReader;
+use tidehunter::index::index_format::IndexFormat;
+use tidehunter::index::index_table::IndexTable;
+use tidehunter::index::lookup_header::LookupHeaderIndex;
+use tidehunter::index::uniform_lookup::UniformLookupIndex;
+use tidehunter::key_shape::KeyShape;
+use tidehunter::key_shape::KeySpace;
+use tidehunter::lookup::FileRange;
+use tidehunter::metrics::Metrics;
+use tidehunter::wal::WalPosition;
 
 const HEADER_INDEX_FILE: &str = "data/bench-header-100GB-100K.dat";
 const UNIFORM_INDEX_FILE: &str = "data/bench-uniform-100GB-100K.dat";
@@ -331,4 +331,28 @@ pub fn run_benchmarks() {
         analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
     }
     print_histogram_stats(&metrics.lookup_iterations);
+}
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Generate benchmark files
+    Generate,
+    /// Run benchmarks
+    Run,
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Generate => generate_benchmark_files(),
+        Commands::Run => run_benchmarks(),
+    }
 }

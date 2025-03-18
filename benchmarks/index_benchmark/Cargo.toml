@@ -1,0 +1,19 @@
+[package]
+name = "index_benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tidehunter = {version = "0.1.0", path = "../../tidehunter"}
+prometheus = {workspace = true}
+rand = {workspace = true}
+minibytes = { path = "../../third-party/minibytes", default-features = false, features = ["frommmap", "frombytes"] }
+tokio = { version = "1.44.1", features = ["full"] }
+tempfile = "3.3"
+futures = "0.3"
+num_cpus = "1.13"
+clap = { version = "4.4", features = ["derive"] }
+
+[features]
+index_benchmark_generate = []
+index_benchmark_run = []

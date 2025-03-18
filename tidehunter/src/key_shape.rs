@@ -26,11 +26,11 @@ pub struct KeyShapeBuilder {
 pub struct KeySpace(pub(crate) u8);
 
 #[derive(Clone)]
-pub(crate) struct KeySpaceDesc {
+pub struct KeySpaceDesc {
     inner: Arc<KeySpaceDescInner>,
 }
 
-pub(crate) struct KeySpaceDescInner {
+pub struct KeySpaceDescInner {
     id: KeySpace,
     name: String,
     key_size: usize,
@@ -376,7 +376,7 @@ impl KeyShape {
         self.ks(ks).range_cell(from_included, to_included)
     }
 
-    pub(crate) fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
+    pub fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
         let Some(key_space) = self.key_spaces.get(ks.0 as usize) else {
             panic!("Key space {} not found", ks.0)
         };
