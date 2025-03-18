@@ -4,12 +4,13 @@
 set -e
 
 # Benchmark configuration constants
-INDEX_SIZE="1M"
+INDEX_SIZE="100k"
+DIRECT_IO_SUFFIX="dio"
 
 # Directory setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-RESULTS_DIR="$PROJECT_ROOT/results/index-$INDEX_SIZE"
+RESULTS_DIR="$PROJECT_ROOT/results/index-$INDEX_SIZE-$DIRECT_IO_SUFFIX"
 SRC_DIR="$PROJECT_ROOT/src"
 
 # Ensure results directory exists
