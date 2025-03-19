@@ -1,7 +1,11 @@
+use std::sync::Arc;
+use std::time::Instant;
+
 use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 
 use crate::math::rescale_u32;
+use crate::metrics::Metrics;
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
@@ -9,9 +13,19 @@ use super::index_format::{IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEA
 use super::{deserialize_index_entries, serialize_index_entries};
 
 #[derive(Clone)]
-pub struct LookupHeaderIndex;
+pub struct LookupHeaderIndex {
+    metrics: Arc<Metrics>,
+}
 
 impl LookupHeaderIndex {
+    pub fn new(metrics: Arc<Metrics>) -> Self {
+        Self { metrics }
+    }
+
+    pub fn new_with_default_metrics() -> Self {
+        Self::new(Metrics::new())
+    }
+
     fn key_micro_cell(ks: &KeySpaceDesc, key: &[u8]) -> usize {
         let prefix = ks.cell_prefix(key);
         let cell = ks.cell_by_prefix(prefix);
@@ -62,26 +76,41 @@ impl IndexFormat for LookupHeaderIndex {
         let key_size = ks.reduced_key_size();
         assert_eq!(key.len(), key_size);
         let micro_cell = Self::key_micro_cell(ks, key);
+        let now = Instant::now();
         let header_element =
             reader.read(micro_cell * HEADER_ELEMENT_SIZE..(micro_cell + 1) * HEADER_ELEMENT_SIZE);
+        self.metrics
+            .lookup_io_mcs
+            .inc_by(now.elapsed().as_micros() as u64);
         let mut header_element = &header_element[..];
         let from_offset = header_element.get_u32() as usize;
         let to_offset = header_element.get_u32() as usize;
         if from_offset == 0 && to_offset == 0 {
             return None;
         }
+        let now = Instant::now();
         let buffer = reader.read(from_offset..to_offset);
+        self.metrics
+            .lookup_io_mcs
+            .inc_by(now.elapsed().as_micros() as u64);
         let mut buffer = &buffer[..];
         let element_size = Self::element_size(ks);
+        let now = Instant::now();
         while !buffer.is_empty() {
             let k = &buffer[..key_size];
             if k == key {
                 buffer = &buffer[key_size..];
                 let position = WalPosition::read_from_buf(&mut buffer);
+                self.metrics
+                    .lookup_scan_mcs
+                    .inc_by(now.elapsed().as_micros() as u64);
                 return Some(position);
             }
             buffer = &buffer[element_size..];
         }
+        self.metrics
+            .lookup_scan_mcs
+            .inc_by(now.elapsed().as_micros() as u64);
         None
     }
 
@@ -143,11 +172,13 @@ mod tests {
 
     #[test]
     pub fn test_index_lookup() {
-        test_index_lookup_inner(&LookupHeaderIndex);
+        let index = LookupHeaderIndex::new_with_default_metrics();
+        test_index_lookup_inner(&index);
     }
 
     #[test]
     pub fn test_index_lookup_random() {
-        test_index_lookup_random_inner(&LookupHeaderIndex);
+        let index = LookupHeaderIndex::new_with_default_metrics();
+        test_index_lookup_random_inner(&index);
     }
 }

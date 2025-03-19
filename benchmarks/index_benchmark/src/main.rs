@@ -330,7 +330,7 @@ fn main() {
                 header_path,
                 num_indices,
                 entries_per_index,
-                LookupHeaderIndex,
+                LookupHeaderIndex::new_with_default_metrics(),
             )
             .expect("Failed to generate LookupHeaderIndex file");
 
@@ -354,8 +354,10 @@ fn main() {
             uniform_file,
             direct_io,
         } => {
-            let registry = Registry::new();
-            let metrics = Metrics::new_in(&registry);
+            let header_registry = Registry::new();
+            let uniform_registry = Registry::new();
+            let header_metrics = Metrics::new_in(&header_registry);
+            let uniform_metrics = Metrics::new_in(&uniform_registry);
 
             let uniform_path = Path::new(&uniform_file);
             let uniform_file =
@@ -380,20 +382,43 @@ fn main() {
             let mut header_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
             let mut uniform_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
             for _ in 0..num_runs {
-                let mut durations =
-                    header_bench.run_benchmark(&LookupHeaderIndex, num_lookups, batch_size);
+                let mut durations = header_bench.run_benchmark(
+                    &LookupHeaderIndex::new(header_metrics.clone()),
+                    num_lookups,
+                    batch_size,
+                );
                 header_durations.append(&mut durations);
                 analyze_results("HeaderLookupIndex", &header_durations, batch_size);
 
                 durations = uniform_bench.run_benchmark(
-                    &UniformLookupIndex::new_with_window_size(metrics.clone(), window_size),
+                    &UniformLookupIndex::new_with_window_size(uniform_metrics.clone(), window_size),
                     num_lookups,
                     batch_size,
                 );
                 uniform_durations.append(&mut durations);
                 analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
             }
-            print_histogram_stats(&metrics.lookup_iterations);
+
+            // Print HeaderLookupIndex stats
+            println!(
+                "HeaderLookupIndex: scan mcs {:?}",
+                header_metrics.lookup_scan_mcs
+            );
+            println!(
+                "HeaderLookupIndex: io mcs {:?}",
+                header_metrics.lookup_io_mcs
+            );
+
+            // Print UniformLookupIndex stats
+            print_histogram_stats(&uniform_metrics.lookup_iterations);
+            println!(
+                "UniformLookupIndex: scan mcs {:?}",
+                uniform_metrics.lookup_scan_mcs
+            );
+            println!(
+                "UniformLookupIndex: io mcs {:?}",
+                uniform_metrics.lookup_io_mcs
+            );
         }
     }
 }

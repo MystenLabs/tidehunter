@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Constants
-ENTRIES_PER_INDEX=10000 # !!! MAKE SURE THIS IS THE SAME AS THE INDEX_SIZE IN run.sh !!!
+ENTRIES_PER_INDEX=100000 # !!! MAKE SURE THIS IS THE SAME AS THE INDEX_SIZE IN run.sh !!!
 ENTRY_SIZE_BYTES=40  # Each entry is approximately 40 bytes
 
 # Compute the index size in bytes (approximation)
@@ -11,8 +11,8 @@ echo "Index size: $ENTRIES_PER_INDEX entries x $ENTRY_SIZE_BYTES bytes = $INDEX_
 # File sizes to generate
 FILE_SIZES=(
   "10GB:10000000000"
-  "100GB:100000000000"
-  "1TB:1000000000000"
+  # "100GB:100000000000"
+  # "1TB:1000000000000"
 )
 
 # Function to format numbers with k/M suffix
