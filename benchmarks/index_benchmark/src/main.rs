@@ -3,13 +3,13 @@ use prometheus::Registry;
 use rand::Rng;
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, Write};
+use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
 use tidehunter::metrics::print_histogram_stats;
 
 use minibytes::Bytes;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::time::{Duration, Instant};
 use tidehunter::file_reader::{set_direct_options, FileReader};
 use tidehunter::index::index_format::IndexFormat;
@@ -148,13 +148,13 @@ struct IndexBenchmark<'a> {
 
 impl<'a> IndexBenchmark<'a> {
     fn load_from_file(file: &'a File, file_length: u64, direct_io: bool) -> std::io::Result<Self> {
-        let mut reader = BufReader::new(file);
+        // let mut reader = BufReader::new(file);
+        let reader = FileReader::new(file, direct_io);
         // get index count (first 8 bytes of file)
-        let mut size_buf = [0u8; 8];
         let index_count;
-        match reader.read_exact(&mut size_buf) {
-            Ok(_) => {
-                index_count = u64::from_be_bytes(size_buf);
+        match reader.read_exact_at(0, 8) {
+            Ok(buf) => {
+                index_count = u64::from_be_bytes(buf.as_ref().try_into().unwrap());
             }
             Err(_) => {
                 panic!("Failed to read index count");
@@ -168,11 +168,11 @@ impl<'a> IndexBenchmark<'a> {
         let index_size = (file_length - 8) / index_count;
 
         let mut readers = Vec::new();
-        let cursor = reader.stream_position().unwrap();
+
         for i in 0..index_count as u64 {
             let range = Range {
-                start: cursor + i * index_size,
-                end: cursor + (i + 1) * index_size as u64,
+                start: 8 + i * index_size,
+                end: 8 + (i + 1) * index_size as u64,
             };
             readers.push(FileRange::new(FileReader::new(file, direct_io), range));
         }
@@ -414,6 +414,10 @@ fn main() {
                 "HeaderLookupIndex: io mcs {:?}",
                 header_metrics.lookup_io_mcs
             );
+            println!(
+                "HeaderLookupIndex: io bytes {:?}",
+                header_metrics.lookup_io_bytes
+            );
 
             // Print UniformLookupIndex stats
             print_histogram_stats(&uniform_metrics.lookup_iterations);
@@ -424,6 +428,10 @@ fn main() {
             println!(
                 "UniformLookupIndex: io mcs {:?}",
                 uniform_metrics.lookup_io_mcs
+            );
+            println!(
+                "UniformLookupIndex: io bytes {:?}",
+                uniform_metrics.lookup_io_bytes
             );
         }
     }

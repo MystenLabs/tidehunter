@@ -4,13 +4,13 @@
 set -e
 
 # Benchmark configuration constants
-INDEX_SIZE="100k" # !!! MAKE SURE THIS IS THE SAME AS THE ENTRIES_PER_INDEX IN generate.sh !!!
+INDEX_SIZE="1M" # !!! MAKE SURE THIS IS THE SAME AS THE ENTRIES_PER_INDEX IN generate.sh !!!
 DIRECT_IO_SUFFIX="--direct-io" # uncomment to use direct I/O
 # DIRECT_IO_SUFFIX= # uncomment to not use direct I/O
 
 # Benchmark parameters
 NUM_LOOKUPS=1000000
-NUM_RUNS=1
+NUM_RUNS=3
 BATCH_SIZE=1000
 
 # Directory setup
@@ -26,12 +26,11 @@ mkdir -p "$RESULTS_DIR"
 UNIFORM_LOOKUP_PATH="$SRC_DIR/index/uniform_lookup.rs"
 
 # Array of file sizes to test
-# FILE_SIZES=("10GB" "100GB" "1TB")
-FILE_SIZES=("10GB")
+# FILE_SIZES=("1TB" "100GB" "10GB")
+FILE_SIZES=("100GB" "10GB")
 
 # Array of window sizes to test
-# WINDOW_SIZES=(100 200 400 800)
-WINDOW_SIZES=(200 400 800)
+WINDOW_SIZES=(100 200 400 800)
 
 # Run benchmarks for each combination
 for file_size in "${FILE_SIZES[@]}"; do

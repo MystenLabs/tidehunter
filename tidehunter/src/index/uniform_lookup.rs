@@ -183,6 +183,7 @@ impl IndexFormat for UniformLookupIndex {
             self.metrics
                 .lookup_io_mcs
                 .inc_by(io_start.elapsed().as_micros() as u64);
+            self.metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
 
             let first_element_key = &buffer[..key_size];
             let last_element_key =
