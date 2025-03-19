@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use prometheus::Registry;
 use rand::Rng;
 use std::env;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Seek, Write};
 use std::ops::Range;
 use std::path::Path;
@@ -11,7 +11,7 @@ use tidehunter::metrics::print_histogram_stats;
 use minibytes::Bytes;
 use std::io::{BufReader, Read};
 use std::time::{Duration, Instant};
-use tidehunter::file_reader::FileReader;
+use tidehunter::file_reader::{set_direct_options, FileReader};
 use tidehunter::index::index_format::IndexFormat;
 use tidehunter::index::index_table::IndexTable;
 use tidehunter::index::lookup_header::LookupHeaderIndex;
@@ -360,8 +360,13 @@ fn main() {
             let uniform_metrics = Metrics::new_in(&uniform_registry);
 
             let uniform_path = Path::new(&uniform_file);
-            let uniform_file =
-                File::open(uniform_path).expect("Failed to open UniformLookupIndex file");
+            let mut options = OpenOptions::new();
+            options.read(true);
+            set_direct_options(&mut options, direct_io);
+
+            let uniform_file = options
+                .open(uniform_path)
+                .expect("Failed to open UniformLookupIndex file");
             let uniform_file_length = std::fs::metadata(uniform_path)
                 .expect("Failed to get file metadata")
                 .len();
@@ -370,8 +375,9 @@ fn main() {
                     .expect("Failed to load UniformLookupIndex benchmark file");
 
             let header_path = Path::new(&header_file);
-            let header_file =
-                File::open(header_path).expect("Failed to open HeaderLookupIndex file");
+            let header_file = options
+                .open(header_path)
+                .expect("Failed to open HeaderLookupIndex file");
             let header_file_length = std::fs::metadata(header_path)
                 .expect("Failed to get file metadata")
                 .len();
