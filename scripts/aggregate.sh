@@ -23,8 +23,8 @@ echo "Benchmark Summary Report" > "$SUMMARY_FILE"
 echo "======================" >> "$SUMMARY_FILE"
 echo "Generated on: $(date)" >> "$SUMMARY_FILE"
 echo "" >> "$SUMMARY_FILE"
-printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s\n" "File Size" "Window Size" "Index Type" "Tput (ops/s)" "Avg Hops" "Scan us" "IO us" >> "$SUMMARY_FILE"
-printf "%-9s-|-%-11s-|-%-10s-|-%-12s-|-%-8s-|-%-12s-|-%-10s\n" "---------" "-----------" "----------" "------------" "--------" "------------" "----------" >> "$SUMMARY_FILE"
+printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "File Size" "Window Size" "Index Type" "Tput (ops/s)" "Avg Hops" "Scan us" "IO us" "IO bytes" >> "$SUMMARY_FILE"
+printf "%-9s-|-%-11s-|-%-10s-|-%-12s-|-%-8s-|-%-12s-|-%-10s-|-%-10s\n" "---------" "-----------" "----------" "------------" "--------" "------------" "----------" "----------" >> "$SUMMARY_FILE"
 
 # Process each log file
 for log_file in "$RESULTS_DIR"/benchmark_*.log; do
@@ -52,6 +52,8 @@ for log_file in "$RESULTS_DIR"/benchmark_*.log; do
     header_io_mcs=$(grep "HeaderLookupIndex: io mcs" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
     uniform_scan_mcs=$(grep "UniformLookupIndex: scan mcs" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
     uniform_io_mcs=$(grep "UniformLookupIndex: io mcs" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
+    header_io_bytes=$(grep "HeaderLookupIndex: io bytes" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
+    uniform_io_bytes=$(grep "UniformLookupIndex: io bytes" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
     
     # Extract bucket values between square brackets after the FIRST occurrence of "buckets:"
     if [ ! -z "$histogram_line" ]; then
@@ -85,11 +87,11 @@ for log_file in "$RESULTS_DIR"/benchmark_*.log; do
     
     # Add to summary file
     if [ ! -z "$header_throughput" ]; then
-        printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s\n" "$file_size" "$window_size" "Header" "$header_throughput" "2.00" "$header_scan_mcs" "$header_io_mcs" >> "$SUMMARY_FILE"
+        printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "$file_size" "$window_size" "Header" "$header_throughput" "2.00" "$header_scan_mcs" "$header_io_mcs" "$header_io_bytes" >> "$SUMMARY_FILE"
     fi
     
     if [ ! -z "$uniform_throughput" ]; then
-        printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s\n" "$file_size" "$window_size" "Uniform" "$uniform_throughput" "$uniform_avg_hops" "$uniform_scan_mcs" "$uniform_io_mcs" >> "$SUMMARY_FILE"
+        printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "$file_size" "$window_size" "Uniform" "$uniform_throughput" "$uniform_avg_hops" "$uniform_scan_mcs" "$uniform_io_mcs" "$uniform_io_bytes" >> "$SUMMARY_FILE"
     fi
 done
 

@@ -98,7 +98,7 @@ const fn align_up(v: u64, align: u64) -> u64 {
     align_down(v + align - 1, align)
 }
 
-pub(crate) fn set_direct_options(options: &mut OpenOptions, direct_io: bool) {
+pub fn set_direct_options(options: &mut OpenOptions, direct_io: bool) {
     if direct_io {
         set_o_direct(options)
     }

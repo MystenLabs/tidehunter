@@ -82,6 +82,9 @@ impl IndexFormat for LookupHeaderIndex {
         self.metrics
             .lookup_io_mcs
             .inc_by(now.elapsed().as_micros() as u64);
+        self.metrics
+            .lookup_io_bytes
+            .inc_by(header_element.len() as u64);
         let mut header_element = &header_element[..];
         let from_offset = header_element.get_u32() as usize;
         let to_offset = header_element.get_u32() as usize;
@@ -93,6 +96,7 @@ impl IndexFormat for LookupHeaderIndex {
         self.metrics
             .lookup_io_mcs
             .inc_by(now.elapsed().as_micros() as u64);
+        self.metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
         let mut buffer = &buffer[..];
         let element_size = Self::element_size(ks);
         let now = Instant::now();
