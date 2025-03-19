@@ -1,0 +1,188 @@
+Benchmark started at Tue Mar 18 07:30:47 PM UTC 2025
+Running benchmark...
+   Compiling tidehunter v0.1.0 (/opt/sui/thdb/tidehunter/tidehunter)
+   Compiling index_benchmark v0.1.0 (/opt/sui/thdb/tidehunter/benchmarks/index_benchmark)
+    Finished `release` profile [optimized] target(s) in 2.93s
+     Running `target/release/index_benchmark run --num-lookups 1000000 --num-runs 10 --batch-size 1000 --header-file data/bench-header-1TB-10k.dat --uniform-file data/bench-uniform-1TB-10k.dat`
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 1000000 lookups in 127.49s
+  Throughput: 7843.71 lookups/sec
+  Latency per lookup:
+    Mean: 127490.73 ns
+    Std Dev: 3238.63 ns
+    Min: 120432.99 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 1000000 lookups in 98.45s
+  Throughput: 10157.88 lookups/sec
+  Latency per lookup:
+    Mean: 98445.77 ns
+    Std Dev: 706.41 ns
+    Min: 97049.14 ns
+    Max: 106574.40 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 2000000 lookups in 246.91s
+  Throughput: 8100.01 lookups/sec
+  Latency per lookup:
+    Mean: 123456.70 ns
+    Std Dev: 4931.42 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 2000000 lookups in 197.39s
+  Throughput: 10132.04 lookups/sec
+  Latency per lookup:
+    Mean: 98696.77 ns
+    Std Dev: 1045.96 ns
+    Min: 96730.49 ns
+    Max: 107358.01 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 3000000 lookups in 373.99s
+  Throughput: 8021.55 lookups/sec
+  Latency per lookup:
+    Mean: 124664.23 ns
+    Std Dev: 4611.45 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 3000000 lookups in 295.65s
+  Throughput: 10147.19 lookups/sec
+  Latency per lookup:
+    Mean: 98549.44 ns
+    Std Dev: 1151.19 ns
+    Min: 95987.77 ns
+    Max: 108773.72 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 4000000 lookups in 510.01s
+  Throughput: 7843.05 lookups/sec
+  Latency per lookup:
+    Mean: 127501.42 ns
+    Std Dev: 6500.89 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 4000000 lookups in 393.57s
+  Throughput: 10163.45 lookups/sec
+  Latency per lookup:
+    Mean: 98391.80 ns
+    Std Dev: 1090.89 ns
+    Min: 95987.77 ns
+    Max: 108773.72 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 5000000 lookups in 636.77s
+  Throughput: 7852.09 lookups/sec
+  Latency per lookup:
+    Mean: 127354.55 ns
+    Std Dev: 5930.67 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 5000000 lookups in 493.01s
+  Throughput: 10141.85 lookups/sec
+  Latency per lookup:
+    Mean: 98601.31 ns
+    Std Dev: 1387.17 ns
+    Min: 95987.77 ns
+    Max: 113450.39 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 6000000 lookups in 765.84s
+  Throughput: 7834.50 lookups/sec
+  Latency per lookup:
+    Mean: 127640.50 ns
+    Std Dev: 5552.80 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 6000000 lookups in 591.02s
+  Throughput: 10151.86 lookups/sec
+  Latency per lookup:
+    Mean: 98504.10 ns
+    Std Dev: 1392.29 ns
+    Min: 95987.14 ns
+    Max: 113450.39 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 7000000 lookups in 902.57s
+  Throughput: 7755.66 lookups/sec
+  Latency per lookup:
+    Mean: 128938.14 ns
+    Std Dev: 6149.22 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 7000000 lookups in 688.69s
+  Throughput: 10164.25 lookups/sec
+  Latency per lookup:
+    Mean: 98384.01 ns
+    Std Dev: 1344.23 ns
+    Min: 95987.14 ns
+    Max: 113450.39 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 8000000 lookups in 1030.31s
+  Throughput: 7764.62 lookups/sec
+  Latency per lookup:
+    Mean: 128789.33 ns
+    Std Dev: 5874.90 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 8000000 lookups in 787.34s
+  Throughput: 10160.82 lookups/sec
+  Latency per lookup:
+    Mean: 98417.21 ns
+    Std Dev: 2126.11 ns
+    Min: 95984.74 ns
+    Max: 205140.80 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 9000000 lookups in 1159.66s
+  Throughput: 7760.89 lookups/sec
+  Latency per lookup:
+    Mean: 128851.21 ns
+    Std Dev: 5608.85 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 9000000 lookups in 885.37s
+  Throughput: 10165.26 lookups/sec
+  Latency per lookup:
+    Mean: 98374.29 ns
+    Std Dev: 2054.24 ns
+    Min: 95984.74 ns
+    Max: 205140.80 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 10000000 lookups in 1296.46s
+  Throughput: 7713.29 lookups/sec
+  Latency per lookup:
+    Mean: 129646.39 ns
+    Std Dev: 5909.05 ns
+    Min: 112367.62 ns
+    Max: 177493.62 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 10000000 lookups in 983.19s
+  Throughput: 10171.01 lookups/sec
+  Latency per lookup:
+    Mean: 98318.65 ns
+    Std Dev: 1970.55 ns
+    Min: 95984.74 ns
+    Max: 205140.80 ns
+Histogram: Histogram { core: HistogramCore { desc: Desc { fq_name: "lookup_iterations", help: "lookup_iterations", const_label_pairs: [], variable_labels: [], id: 2280981954329258229, dim_hash: 2280981954329258229 }, label_pairs: [], collect_lock: Mutex { data: (), poisoned: false, .. }, shard_and_count: ShardAndCount { inner: 10000000 }, shards: [Shard { sum: AtomicF64 { inner: 4711630422264512512 }, count: AtomicU64 { inner: 10000000 }, buckets: [AtomicU64 { inner: 9999809 }, AtomicU64 { inner: 191 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }, Shard { sum: AtomicF64 { inner: 0 }, count: AtomicU64 { inner: 0 }, buckets: [AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }], upper_bounds: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0] } }
+Benchmark completed at Tue Mar 18 08:08:49 PM UTC 2025

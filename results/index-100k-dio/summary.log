@@ -1,0 +1,12 @@
+Benchmark Summary Report
+======================
+Generated on: Tue Mar 18 15:26:03 CET 2025
+
+File Size  | Window Size | Index Type | Throughput (lookups/sec)  | Avg Hops
+-----------|-------------|------------|---------------------------|---------
+100GB      | 100         | Header     | 10287.51                  | 2.00    
+100GB      | 100         | Uniform    | 7696.20                   | 1.43    
+100GB      | 200         | Header     | 10421.60                  | 2.00    
+100GB      | 200         | Uniform    | 8970.13                   | 1.12    
+100GB      | 400         | Header     | 9456.68                   | 2.00    
+100GB      | 400         | Uniform    | 8262.90                   | 1.00    
