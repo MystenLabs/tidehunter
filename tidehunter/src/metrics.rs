@@ -24,6 +24,8 @@ pub struct Metrics {
     pub lookup_mcs: HistogramVec,
     pub lookup_result: IntCounterVec,
     pub lookup_iterations: Histogram,
+    pub lookup_scan_mcs: IntCounter,
+    pub lookup_io_mcs: IntCounter,
 
     pub large_table_contention: HistogramVec,
     pub wal_contention: Histogram,
@@ -106,6 +108,8 @@ impl Metrics {
             ),
             lookup_result: counter_vec!("lookup_result", &["ks", "result", "source"], registry),
             lookup_iterations: histogram!("lookup_iterations", lookup_iterations_buckets, registry),
+            lookup_scan_mcs: counter!("lookup_scan_mcs", registry),
+            lookup_io_mcs: counter!("lookup_io_mcs", registry),
 
             large_table_contention: histogram_vec!(
                 "large_table_contention",

@@ -4,18 +4,19 @@
 set -e
 
 # Benchmark configuration constants
-INDEX_SIZE="10k" # !!! MAKE SURE THIS IS THE SAME AS THE ENTRIES_PER_INDEX IN generate.sh !!!
-DIRECT_IO_SUFFIX=
+INDEX_SIZE="100k" # !!! MAKE SURE THIS IS THE SAME AS THE ENTRIES_PER_INDEX IN generate.sh !!!
+DIRECT_IO_SUFFIX="--direct-io" # uncomment to use direct I/O
+# DIRECT_IO_SUFFIX= # uncomment to not use direct I/O
 
 # Benchmark parameters
 NUM_LOOKUPS=1000000
-NUM_RUNS=10
+NUM_RUNS=1
 BATCH_SIZE=1000
 
 # Directory setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-RESULTS_DIR="$PROJECT_ROOT/results/index-$INDEX_SIZE$DIRECT_IO_SUFFIX"
+RESULTS_DIR="$PROJECT_ROOT/results-local/index-$INDEX_SIZE$DIRECT_IO_SUFFIX"
 SRC_DIR="$PROJECT_ROOT/tidehunter/src"
 
 # Ensure results directory exists
@@ -25,15 +26,16 @@ mkdir -p "$RESULTS_DIR"
 UNIFORM_LOOKUP_PATH="$SRC_DIR/index/uniform_lookup.rs"
 
 # Array of file sizes to test
-FILE_SIZES=("10GB" "100GB" "1TB")
+# FILE_SIZES=("10GB" "100GB" "1TB")
+FILE_SIZES=("10GB")
 
 # Array of window sizes to test
-WINDOW_SIZES=(50 100 200 400)
+# WINDOW_SIZES=(100 200 400 800)
+WINDOW_SIZES=(200 400 800)
 
 # Run benchmarks for each combination
 for file_size in "${FILE_SIZES[@]}"; do
     for window_size in "${WINDOW_SIZES[@]}"; do
-        window_size=$((window_size * 2))
         echo "===== Running benchmark with file size $file_size, window size $window_size, index size $INDEX_SIZE ====="
         
         # Create timestamp for log file

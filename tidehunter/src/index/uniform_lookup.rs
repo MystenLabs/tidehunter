@@ -1,6 +1,7 @@
 use minibytes::Bytes;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::index_format::IndexFormat;
 use super::{deserialize_index_entries, serialize_index_entries};
@@ -177,7 +178,11 @@ impl IndexFormat for UniformLookupIndex {
                 self.metrics.lookup_iterations.observe(iterations as f64);
                 return None;
             }
+            let io_start = Instant::now();
             let buffer = reader.read(from_offset..to_offset);
+            self.metrics
+                .lookup_io_mcs
+                .inc_by(io_start.elapsed().as_micros() as u64);
 
             let first_element_key = &buffer[..key_size];
             let last_element_key =
@@ -210,6 +215,7 @@ impl IndexFormat for UniformLookupIndex {
 
             // Binary search on the sorted entries
             // todo compare different approaches for in-memory search
+            let scan_start = Instant::now();
             let mut left = 0;
             let mut right = count; // one past the last valid index
             while left < right {
@@ -230,6 +236,9 @@ impl IndexFormat for UniformLookupIndex {
                             &buffer[(entry_offset + key_size)..(entry_offset + element_size)];
                         let position = WalPosition::read_from_buf(&mut pos_slice);
                         self.metrics.lookup_iterations.observe(iterations as f64);
+                        self.metrics
+                            .lookup_scan_mcs
+                            .inc_by(scan_start.elapsed().as_micros() as u64);
                         return Some(position);
                     }
                 }
@@ -237,6 +246,9 @@ impl IndexFormat for UniformLookupIndex {
 
             // Not found
             self.metrics.lookup_iterations.observe(iterations as f64);
+            self.metrics
+                .lookup_scan_mcs
+                .inc_by(scan_start.elapsed().as_micros() as u64);
             return None;
         }
     }
