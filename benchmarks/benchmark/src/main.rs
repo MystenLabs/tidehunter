@@ -203,7 +203,7 @@ impl<T: Storage> Stress<T> {
         let start_lock = Arc::new(RwLock::new(()));
         let start_w = start_lock.write();
         let manual_stop = Arc::new(AtomicBool::new(false));
-        let latency = AtomicHistogram::new(12, 20).unwrap();
+        let latency = AtomicHistogram::new(12, 22).unwrap();
         let latency = Arc::new(latency);
         for index in 0..self.args.threads {
             let thread = StressThread {
@@ -228,9 +228,9 @@ fn dec_div(n: usize) -> String {
     const M: usize = 1_000_000;
     const K: usize = 1_000;
     if n > M {
-        format!("{}M", n / M)
+        format!("{:.2}M", n as f64 / M as f64)
     } else if n > K {
-        format!("{}K", n / K)
+        format!("{:.2}K", n as f64 / K as f64)
     } else {
         format!("{n}")
     }
