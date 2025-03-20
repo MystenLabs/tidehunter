@@ -10,7 +10,7 @@ use crate::metrics::Metrics;
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
-const DEFAULT_WINDOW_SIZE: usize = 500;
+const DEFAULT_WINDOW_SIZE: usize = 800;
 const NUM_WINDOW_SIZES: usize = 1;
 
 #[derive(Clone)]
@@ -68,7 +68,7 @@ impl UniformLookupIndex {
         let probable_offset =
             (((prefix_pos as u128) * (file_length as u128) / (cell_width as u128)) as usize)
                 .clamp(0, file_length - 1);
-        let half_window_size = self.window_sizes[0][0]; // todo lookup by N and p
+        let half_window_size = self.window_sizes[0][0] / 2; // todo lookup by N and p
 
         (probable_offset, half_window_size)
     }
