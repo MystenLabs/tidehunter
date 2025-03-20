@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use minibytes::Bytes;
 
 use super::lookup_header::LookupHeaderIndex;
@@ -70,6 +72,70 @@ impl IndexFormat for IndexFormatType {
             IndexFormatType::Uniform(index) => index.use_unbounded_reader(),
         }
     }
+}
+
+/// Performs a binary search on a buffer of key-value entries to find a match for the given key.
+/// Each entry consists of a key followed by a WalPosition.
+///
+/// # Arguments
+/// * `buffer` - The buffer containing the entries
+/// * `key` - The key to search for
+/// * `element_size` - The size of each full entry (key + position)
+/// * `key_size` - The size of just the key portion
+/// * `metrics` - Metrics to track performance
+///
+/// # Returns
+/// * `Some(WalPosition)` if key is found
+/// * `None` if key is not found
+pub fn binary_search_entries(
+    buffer: &[u8],
+    key: &[u8],
+    element_size: usize,
+    key_size: usize,
+    metrics: &Metrics,
+) -> Option<WalPosition> {
+    if buffer.is_empty() {
+        return None;
+    }
+
+    let scan_start = Instant::now();
+    let count = buffer.len() / element_size;
+    if count == 0 {
+        return None;
+    }
+
+    let mut left = 0;
+    let mut right = count; // one past the last valid index
+    while left < right {
+        let mid = (left + right) / 2;
+        let entry_offset = mid * element_size;
+        let k = &buffer[entry_offset..entry_offset + key_size];
+
+        match k.cmp(key) {
+            std::cmp::Ordering::Less => {
+                left = mid + 1;
+            }
+            std::cmp::Ordering::Greater => {
+                right = mid;
+            }
+            std::cmp::Ordering::Equal => {
+                // parse wal position
+                let mut pos_slice =
+                    &buffer[(entry_offset + key_size)..(entry_offset + element_size)];
+                let position = WalPosition::read_from_buf(&mut pos_slice);
+                metrics
+                    .lookup_scan_mcs
+                    .inc_by(scan_start.elapsed().as_micros() as u64);
+                return Some(position);
+            }
+        }
+    }
+
+    // Not found
+    metrics
+        .lookup_scan_mcs
+        .inc_by(scan_start.elapsed().as_micros() as u64);
+    None
 }
 
 #[cfg(test)]
