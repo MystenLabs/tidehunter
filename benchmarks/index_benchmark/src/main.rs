@@ -315,7 +315,7 @@ enum Commands {
         #[arg(long, default_value_t = 1000)]
         batch_size: usize,
         /// Window size for uniform index
-        #[arg(long, default_value_t = 500)]
+        #[arg(long, default_value_t = 800)]
         window_size: usize,
         /// Input file for header index
         #[arg(long, default_value = "data/bench-header-100GB-100K.dat")]
