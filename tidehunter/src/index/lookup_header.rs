@@ -10,6 +10,7 @@ use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::Ran
 
 use super::index_format::{IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE};
 use super::{deserialize_index_entries, serialize_index_entries};
+use crate::index::index_format::binary_search_entries;
 
 #[derive(Clone)]
 pub struct LookupHeaderIndex;
@@ -85,25 +86,11 @@ impl IndexFormat for LookupHeaderIndex {
             .lookup_io_mcs
             .inc_by(now.elapsed().as_micros() as u64);
         metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
-        let mut buffer = &buffer[..];
+        let buffer = &buffer[..];
         let element_size = Self::element_size(ks);
-        let now = Instant::now();
-        while !buffer.is_empty() {
-            let k = &buffer[..key_size];
-            if k == key {
-                buffer = &buffer[key_size..];
-                let position = WalPosition::read_from_buf(&mut buffer);
-                metrics
-                    .lookup_scan_mcs
-                    .inc_by(now.elapsed().as_micros() as u64);
-                return Some(position);
-            }
-            buffer = &buffer[element_size..];
-        }
-        metrics
-            .lookup_scan_mcs
-            .inc_by(now.elapsed().as_micros() as u64);
-        None
+
+        // Use binary search instead of linear search
+        binary_search_entries(&buffer, key, element_size, key_size, metrics)
     }
 
     fn use_unbounded_reader(&self) -> bool {

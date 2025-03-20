@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use super::index_format::IndexFormat;
 use super::{deserialize_index_entries, serialize_index_entries};
-use crate::index::index_format::PREFIX_LENGTH;
+use crate::index::index_format::{binary_search_entries, PREFIX_LENGTH};
 use crate::key_shape::CELL_PREFIX_LENGTH;
 use crate::metrics::Metrics;
 use crate::wal::WalPosition;
@@ -206,43 +206,10 @@ impl IndexFormat for UniformLookupIndex {
                 return None; // no entries in this buffer window
             }
 
-            // Binary search on the sorted entries
-            // todo compare different approaches for in-memory search
-            let scan_start = Instant::now();
-            let mut left = 0;
-            let mut right = count; // one past the last valid index
-            while left < right {
-                let mid = (left + right) / 2;
-                let entry_offset = mid * element_size;
-                let k = &buffer[entry_offset..entry_offset + key_size];
-
-                match k.cmp(key) {
-                    std::cmp::Ordering::Less => {
-                        left = mid + 1;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        right = mid;
-                    }
-                    std::cmp::Ordering::Equal => {
-                        // parse wal position
-                        let mut pos_slice =
-                            &buffer[(entry_offset + key_size)..(entry_offset + element_size)];
-                        let position = WalPosition::read_from_buf(&mut pos_slice);
-                        metrics.lookup_iterations.observe(iterations as f64);
-                        metrics
-                            .lookup_scan_mcs
-                            .inc_by(scan_start.elapsed().as_micros() as u64);
-                        return Some(position);
-                    }
-                }
-            }
-
-            // Not found
+            // Use the extracted binary search function
+            let result = binary_search_entries(&buffer, key, element_size, key_size, metrics);
             metrics.lookup_iterations.observe(iterations as f64);
-            metrics
-                .lookup_scan_mcs
-                .inc_by(scan_start.elapsed().as_micros() as u64);
-            return None;
+            return result;
         }
     }
 
