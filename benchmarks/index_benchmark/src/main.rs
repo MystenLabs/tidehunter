@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use prometheus::Registry;
-use rand::Rng;
-use std::env;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Range;
@@ -9,7 +9,6 @@ use std::path::Path;
 use tidehunter::metrics::print_histogram_stats;
 
 use minibytes::Bytes;
-use std::io::Read;
 use std::time::{Duration, Instant};
 use tidehunter::file_reader::{set_direct_options, FileReader};
 use tidehunter::index::index_format::IndexFormat;
@@ -44,31 +43,49 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 
     let start = Instant::now();
 
-    // Create a temporary directory for index chunks
-    let project_root = env::current_dir()?;
-    let temp_dir = tempfile::Builder::new()
-        .prefix("tidehunter_index_gen_")
-        .tempdir_in(project_root)?;
-
     // Create a tokio runtime for parallel processing
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(num_cpus::get())
         .build()
         .unwrap();
 
-    // No need to clone index_format since we own it
-    // let index_format = index_format.clone();
     let ks_desc = ks_desc.clone();
 
-    // Generate indices in parallel and write to temporary files
-    // todo replace temporary files with a channel
+    // Generate indices in parallel and send through a channel
     runtime.block_on(async {
-        let mut tasks = Vec::new();
+        // Create a channel for sending indices
+        let (tx, rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(32); // Buffer size of 32
 
+        // Spawn a task to consume indices and write to the file
+        let consumer = tokio::spawn(async move {
+            let mut rx = rx;
+            let mut indices_written = 0;
+
+            while let Some((i, buffer)) = rx.recv().await {
+                if i % 100 == 0 {
+                    println!("  Merging index {} into main file...", i);
+                }
+
+                // Write the serialized index to the main file
+                file.write_all(&buffer)?;
+                indices_written += 1;
+            }
+
+            assert_eq!(
+                indices_written, n_indices,
+                "Not all indices were written to the file"
+            );
+            file.flush()?;
+
+            Ok::<_, std::io::Error>(())
+        });
+
+        // Spawn tasks to generate indices
+        let mut producer_tasks = Vec::new();
         for i in 0..n_indices {
+            let tx_clone = tx.clone();
             let index_format_clone = index_format.clone();
             let ks_desc_clone = ks_desc.clone();
-            let temp_path = temp_dir.path().join(format!("index_{}.tmp", i));
 
             // Spawn a task for each index
             let task = tokio::spawn(async move {
@@ -78,7 +95,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 
                 // Create an IndexTable with m entries
                 let mut index = IndexTable::default();
-                let mut rng = rand::thread_rng();
+                let mut rng = StdRng::from_entropy();
 
                 // Fill with random entries
                 for _ in 0..entries_per_index {
@@ -96,34 +113,28 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                 // Serialize the index
                 let bytes = index_format_clone.to_bytes(&index, &ks_desc_clone);
 
-                // Write the serialized index to a temporary file
-                let mut temp_file = File::create(&temp_path)?;
-                temp_file.write_all(&bytes)?;
-
-                Ok::<_, std::io::Error>((i, temp_path))
+                // Send the serialized index through the channel
+                tx_clone
+                    .send((i, bytes.as_ref().to_vec()))
+                    .await
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Failed to send index through channel: {}", e),
+                        )
+                    })
             });
 
-            tasks.push(task);
+            producer_tasks.push(task);
         }
 
-        // Process completed tasks as they finish
-        for task in futures::future::join_all(tasks).await {
+        // Drop the original sender so the channel will close when all producer tasks are done
+        drop(tx);
+
+        // Wait for all producer tasks to complete
+        for task in futures::future::join_all(producer_tasks).await {
             match task {
-                Ok(Ok((i, temp_path))) => {
-                    if i % 100 == 0 {
-                        println!("  Merging index {} into main file...", i);
-                    }
-
-                    // Read the temporary file
-                    let mut temp_file = File::open(&temp_path)?;
-                    let mut buffer = Vec::new();
-                    temp_file.read_to_end(&mut buffer)?;
-
-                    // Append to the main file
-                    file.write_all(&buffer)?;
-
-                    Ok::<_, std::io::Error>(())
-                }
+                Ok(Ok(())) => Ok(()),
                 Ok(Err(e)) => Err(e),
                 Err(e) => Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -132,10 +143,16 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
             }?
         }
 
-        Ok::<_, std::io::Error>(())
+        // Wait for the consumer task to complete
+        match consumer.await {
+            Ok(result) => result,
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )),
+        }
     })?;
 
-    file.flush()?;
     println!("Index file generated successfully in {:?}", start.elapsed());
     Ok(())
 }
