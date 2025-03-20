@@ -219,6 +219,7 @@ impl Wal {
     }
 
     // todo remove
+    #[doc(hidden)]
     #[cfg(test)]
     pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalError> {
         assert_ne!(

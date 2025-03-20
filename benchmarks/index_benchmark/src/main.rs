@@ -61,6 +61,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     let ks_desc = ks_desc.clone();
 
     // Generate indices in parallel and write to temporary files
+    // todo replace temporary files with a channel
     runtime.block_on(async {
         let mut tasks = Vec::new();
 
@@ -148,7 +149,6 @@ struct IndexBenchmark<'a> {
 
 impl<'a> IndexBenchmark<'a> {
     fn load_from_file(file: &'a File, file_length: u64, direct_io: bool) -> std::io::Result<Self> {
-        // let mut reader = BufReader::new(file);
         let reader = FileReader::new(file, direct_io);
         // get index count (first 8 bytes of file)
         let index_count;
@@ -216,7 +216,7 @@ impl<'a> IndexBenchmark<'a> {
                 rng.fill(&mut key[..]);
 
                 // Look up the key
-                let _ = index_format.lookup_unloaded(ks_desc, reader, &key);
+                index_format.lookup_unloaded(ks_desc, reader, &key);
             }
 
             durations.push(start.elapsed());
