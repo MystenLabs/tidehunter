@@ -1,3 +1,4 @@
+use crate::cell::CellId;
 use crate::db::Db;
 use crate::index::index_table::IndexTable;
 use crate::key_shape::{KeySpace, KeySpaceDesc};
@@ -23,7 +24,7 @@ struct IndexFlusherThread {
 
 pub struct FlusherCommand {
     ks: KeySpace,
-    cell: usize,
+    cell: CellId,
     flush_kind: FlushKind,
 }
 
@@ -54,7 +55,7 @@ impl IndexFlusher {
         jh
     }
 
-    pub fn request_flush(&self, ks: KeySpace, cell: usize, flush_kind: FlushKind) {
+    pub fn request_flush(&self, ks: KeySpace, cell: CellId, flush_kind: FlushKind) {
         let command = FlusherCommand {
             ks,
             cell,

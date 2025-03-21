@@ -1,3 +1,4 @@
+use crate::cell::CellId;
 use crate::db::{Db, DbResult};
 use crate::key_shape::KeySpace;
 use minibytes::Bytes;
@@ -6,22 +7,24 @@ use std::sync::Arc;
 pub struct DbIterator {
     db: Arc<Db>,
     ks: KeySpace,
-    next_cell: Option<usize>,
+    next_cell: Option<CellId>,
     next_key: Option<Bytes>,
     full_lower_bound: Option<Bytes>,
     full_upper_bound: Option<Bytes>,
     with_key_reduction: bool,
-    end_cell_exclusive: Option<usize>,
+    end_cell_exclusive: Option<CellId>,
     reverse: bool,
 }
 
 impl DbIterator {
     pub(crate) fn new(db: Arc<Db>, ks: KeySpace) -> Self {
-        let with_key_reduction = db.ks(ks).key_reduction().is_some();
+        let ksd = db.ks(ks);
+        let with_key_reduction = ksd.key_reduction().is_some();
+        let next_cell = ksd.first_cell();
         Self {
             db,
             ks,
-            next_cell: Some(0),
+            next_cell: Some(next_cell),
             next_key: None,
             full_lower_bound: None,
             full_upper_bound: None,
@@ -38,9 +41,9 @@ impl DbIterator {
         let ks = self.db.ks(self.ks);
         let reduced_lower_bound = ks.reduced_key_bytes(full_lower_bound.clone());
         if self.reverse {
-            self.end_cell_exclusive = ks.next_cell(ks.cell_for_key(&reduced_lower_bound), true);
+            self.end_cell_exclusive = ks.next_cell(ks.cell_id(&reduced_lower_bound), true);
         } else {
-            self.next_cell = Some(ks.cell_for_key(&reduced_lower_bound));
+            self.next_cell = Some(ks.cell_id(&reduced_lower_bound));
             self.next_key = Some(reduced_lower_bound);
         }
         self.full_lower_bound = Some(full_lower_bound);
@@ -58,10 +61,10 @@ impl DbIterator {
             } else {
                 saturated_decrement_vec(&reduced_upper_bound)
             };
-            self.next_cell = Some(ks.cell_for_key(&next_key));
+            self.next_cell = Some(ks.cell_id(&next_key));
             self.next_key = Some(next_key);
         } else {
-            self.end_cell_exclusive = ks.next_cell(ks.cell_for_key(&reduced_upper_bound), false);
+            self.end_cell_exclusive = ks.next_cell(ks.cell_id(&reduced_upper_bound), false);
         }
         self.full_upper_bound = Some(full_upper_bound);
     }
@@ -77,7 +80,7 @@ impl DbIterator {
     }
 
     fn try_next(&mut self) -> Result<Option<DbResult<(Bytes, Bytes)>>, IteratorAction> {
-        let Some(next_cell) = self.next_cell else {
+        let Some(next_cell) = self.next_cell.take() else {
             return Ok(None);
         };
         let next_key = self.next_key.take();
@@ -93,7 +96,7 @@ impl DbIterator {
             self.ks,
             next_cell,
             next_key,
-            self.end_cell_exclusive,
+            &self.end_cell_exclusive,
             self.reverse,
         ) {
             Ok(Some((next_cell, next_key, key, value))) => {

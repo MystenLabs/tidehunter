@@ -1,4 +1,4 @@
-use crate::cell::CellId;
+use crate::cell::{CellId, CellIdBytesContainer};
 use crate::config::Config;
 use crate::flusher::{FlushKind, IndexFlusher};
 use crate::index::index_format::IndexFormat;
@@ -32,7 +32,7 @@ pub struct Version(pub u64);
 
 pub struct LargeTableEntry {
     ks: KeySpaceDesc,
-    cell: usize,
+    cell: CellId,
     data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
@@ -61,8 +61,9 @@ struct Row {
 }
 
 enum Entries {
-    Array(Box<[LargeTableEntry]>),
-    Tree(BTreeMap<Bytes, LargeTableEntry>),
+    Array(usize /*num_mutexes*/, Box<[LargeTableEntry]>),
+    #[allow(dead_code)]
+    Tree(BTreeMap<CellIdBytesContainer, LargeTableEntry>),
 }
 
 /// ks -> row -> cell
@@ -107,7 +108,9 @@ impl LargeTable {
                             .iter()
                             .enumerate()
                             .map(|(row_offset, position)| {
+                                // todo support for prefix key
                                 let cell = ks.cell_by_location(row_index, row_offset);
+                                let cell = CellId::Integer(cell);
                                 let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
                                 LargeTableEntry::from_snapshot_position(
                                     ks.clone(),
@@ -118,7 +121,7 @@ impl LargeTable {
                                 )
                             })
                             .collect();
-                        let entries = Entries::Array(entries);
+                        let entries = Entries::Array(ks.num_mutexes(), entries);
                         let value_lru = ks.value_cache_size().map(LruCache::new);
                         Row { entries, value_lru }
                     });
@@ -145,13 +148,13 @@ impl LargeTable {
         value: &Bytes,
         loader: &L,
     ) -> Result<(), L::Error> {
-        let (mut row, offset) = self.row(ks, &k);
+        let (mut row, cell) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
             let previous = value_lru.push(k.clone(), value.clone());
             self.update_lru_metric(ks, previous, delta);
         }
-        let entry = row.entry_mut(offset);
+        let entry = row.entry_mut(&cell);
         entry.insert(k, v);
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
@@ -183,12 +186,12 @@ impl LargeTable {
         v: WalPosition,
         _loader: &L,
     ) -> Result<(), L::Error> {
-        let (mut row, offset) = self.row(ks, &k);
+        let (mut row, cell) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
             let previous = value_lru.pop(&k);
             self.update_lru_metric(ks, previous.map(|v| (k.clone(), v)), 0);
         }
-        let entry = row.entry_mut(offset);
+        let entry = row.entry_mut(&cell);
         entry.remove(k, v);
         Ok(())
     }
@@ -197,7 +200,7 @@ impl LargeTable {
         if ks.value_cache_size().is_none() {
             return;
         }
-        let (mut row, _offset) = self.row(ks, &key);
+        let (mut row, _cell) = self.row(ks, &key);
         let Some(value_lru) = &mut row.value_lru else {
             unreachable!()
         };
@@ -227,7 +230,7 @@ impl LargeTable {
         k: &[u8],
         loader: &L,
     ) -> Result<GetResult, L::Error> {
-        let (mut row, offset) = self.row(ks, k);
+        let (mut row, cell) = self.row(ks, k);
         if let Some(value_lru) = &mut row.value_lru {
             if let Some(value) = value_lru.get(k) {
                 self.metrics
@@ -237,7 +240,7 @@ impl LargeTable {
                 return Ok(GetResult::Value(value.clone()));
             }
         }
-        let entry = row.entry_mut(offset);
+        let entry = row.entry_mut(&cell);
         if entry.bloom_filter_not_found(k) {
             return Ok(self.report_lookup_result(ks, None, "bloom"));
         }
@@ -305,7 +308,7 @@ impl LargeTable {
 
     fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, CellId) {
         let ks_table = self.ks_table(ks);
-        let (mutex, offset) = ks.location_for_key(k);
+        let (mutex, cell) = ks.location_for_key(k);
         let row = ks_table.lock(
             mutex,
             &self
@@ -313,7 +316,7 @@ impl LargeTable {
                 .large_table_contention
                 .with_label_values(&[ks.name()]),
         );
-        (row, offset)
+        (row, cell)
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
@@ -451,23 +454,23 @@ impl LargeTable {
     pub fn next_entry<L: Loader>(
         &self,
         ks: &KeySpaceDesc,
-        mut cell: usize,
+        mut cell: CellId,
         mut next_key: Option<Bytes>,
         loader: &L,
-        end_cell_exclusive: Option<usize>,
+        end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> Result<
         Option<(
-            Option<usize>, /*next cell*/
-            Option<Bytes>, /*next key*/
-            Bytes,         /*fetched key*/
-            WalPosition,   /*fetched value*/
+            Option<CellId>, /*next cell*/
+            Option<Bytes>,  /*next key*/
+            Bytes,          /*fetched key*/
+            WalPosition,    /*fetched value*/
         )>,
         L::Error,
     > {
         let ks_table = self.ks_table(ks);
         loop {
-            let (row, offset) = ks.location_for_cell(cell);
+            let row = ks.mutex_for_cell(&cell);
             let mut row = ks_table.lock(
                 row,
                 &self
@@ -475,7 +478,7 @@ impl LargeTable {
                     .large_table_contention
                     .with_label_values(&[ks.name()]),
             );
-            let entry = row.entry_mut(offset);
+            let entry = row.entry_mut(&cell);
             // todo read from disk instead of loading
             entry.maybe_load(loader)?;
             if let Some((key, value, next_key)) = entry.next_entry(next_key, reverse) {
@@ -492,11 +495,11 @@ impl LargeTable {
                 };
                 if let Some(end_cell_exclusive) = end_cell_exclusive {
                     if reverse {
-                        if next_cell <= end_cell_exclusive {
+                        if &next_cell <= end_cell_exclusive {
                             return Ok(None);
                         }
                     } else {
-                        if next_cell >= end_cell_exclusive {
+                        if &next_cell >= end_cell_exclusive {
                             return Ok(None);
                         }
                     }
@@ -510,13 +513,13 @@ impl LargeTable {
     pub fn last_in_range<L: Loader>(
         &self,
         ks: &KeySpaceDesc,
-        cell: usize,
+        cell: &CellId,
         from_included: &Bytes,
         to_included: &Bytes,
         loader: &L,
     ) -> Result<Option<(Bytes, WalPosition)>, L::Error> {
         // todo duplicate code with next_entry(...)
-        let (row, offset) = ks.location_for_cell(cell);
+        let row = ks.mutex_for_cell(&cell);
         let ks_table = self.ks_table(ks);
         let mut row = ks_table.lock(
             row,
@@ -525,7 +528,7 @@ impl LargeTable {
                 .large_table_contention
                 .with_label_values(&[ks.name()]),
         );
-        let entry = row.entry_mut(offset);
+        let entry = row.entry_mut(cell);
         // todo read from disk instead of loading
         entry.maybe_load(loader)?;
         // todo make sure can't have dirty markers in index in this state
@@ -555,11 +558,11 @@ impl LargeTable {
     pub fn update_flushed_index(
         &self,
         ks: &KeySpaceDesc,
-        cell: usize,
+        cell: &CellId,
         original_index: Arc<IndexTable>,
         position: WalPosition,
     ) {
-        let (row, offset) = ks.location_for_cell(cell);
+        let row = ks.mutex_for_cell(&cell);
         let ks_table = self.ks_table(ks);
         let mut row = ks_table.lock(
             row,
@@ -568,7 +571,7 @@ impl LargeTable {
                 .large_table_contention
                 .with_label_values(&[ks.name()]),
         );
-        let entry = row.entry_mut(offset);
+        let entry = row.entry_mut(cell);
         entry.update_flushed_index(original_index, position);
     }
 
@@ -589,7 +592,7 @@ impl LargeTable {
 }
 
 impl Row {
-    pub fn entry_mut(&mut self, id: CellId) -> &mut LargeTableEntry {
+    pub fn entry_mut(&mut self, id: &CellId) -> &mut LargeTableEntry {
         self.entries.entry_mut(id)
     }
 }
@@ -609,7 +612,7 @@ pub trait Loader {
 impl LargeTableEntry {
     pub fn new_unloaded(
         ks: KeySpaceDesc,
-        cell: usize,
+        cell: CellId,
         position: WalPosition,
         metrics: Arc<Metrics>,
         unload_jitter: usize,
@@ -625,7 +628,7 @@ impl LargeTableEntry {
 
     pub fn new_empty(
         ks: KeySpaceDesc,
-        cell: usize,
+        cell: CellId,
         metrics: Arc<Metrics>,
         unload_jitter: usize,
     ) -> Self {
@@ -640,7 +643,7 @@ impl LargeTableEntry {
 
     fn new_with_state(
         ks: KeySpaceDesc,
-        cell: usize,
+        cell: CellId,
         state: LargeTableEntryState,
         metrics: Arc<Metrics>,
         unload_jitter: usize,
@@ -663,7 +666,7 @@ impl LargeTableEntry {
 
     pub fn from_snapshot_position(
         ks: KeySpaceDesc,
-        cell: usize,
+        cell: CellId,
         position: &WalPosition,
         metrics: Arc<Metrics>,
         unload_jitter: usize,
@@ -816,7 +819,7 @@ impl LargeTableEntry {
             let flush_kind = self
                 .flush_kind()
                 .expect("unload_if_ks_enabled is called in clean state");
-            flusher.request_flush(self.ks.id(), self.cell, flush_kind);
+            flusher.request_flush(self.ks.id(), self.cell.clone(), flush_kind);
         }
     }
 
@@ -1109,19 +1112,20 @@ impl Default for LargeTableEntryState {
 }
 
 impl Entries {
-    pub fn entry_mut(&mut self, cell: CellId) -> &mut LargeTableEntry {
+    pub fn entry_mut(&mut self, cell: &CellId) -> &mut LargeTableEntry {
         match self {
-            Entries::Array(arr) => {
+            Entries::Array(num_mutexes, arr) => {
                 let CellId::Integer(cell) = cell else {
                     panic!("Invalid cell id for array entry list: {cell:?}");
                 };
-                arr.get_mut(cell).unwrap()
+                let offset = *cell / *num_mutexes;
+                arr.get_mut(offset).unwrap()
             }
             Entries::Tree(tree) => {
                 let CellId::Bytes(cell) = cell else {
                     panic!("Invalid cell id for tree entry list: {cell:?}");
                 };
-                tree.get_mut(&cell).unwrap()
+                tree.get_mut(cell).unwrap()
             }
         }
     }
@@ -1132,14 +1136,14 @@ impl Entries {
 
     pub fn len(&self) -> usize {
         match self {
-            Entries::Array(arr) => arr.len(),
+            Entries::Array(_, arr) => arr.len(),
             Entries::Tree(tree) => tree.len(),
         }
     }
 
     // todo replace with generalized implementation
     pub fn iter_mut_array(&mut self) -> &mut [LargeTableEntry] {
-        let Entries::Array(arr) = self else {
+        let Entries::Array(_, arr) = self else {
             unimplemented!()
         };
         arr
@@ -1147,7 +1151,7 @@ impl Entries {
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = &LargeTableEntry> + '_> {
         match self {
-            Entries::Array(arr) => Box::new(arr.iter()),
+            Entries::Array(_, arr) => Box::new(arr.iter()),
             Entries::Tree(tree) => Box::new(tree.values()),
         }
     }
@@ -1173,10 +1177,10 @@ mod tests {
             IndexFlusher::new_unstarted_for_test(),
             Metrics::new(),
         );
-        let (mut row, offset) = l.row(ks.ks(a), &[]);
-        assert_eq!(row.entry_mut(offset).ks.name(), "a");
-        let (mut row, offset) = l.row(ks.ks(b), &[5, 2, 3, 4]);
-        assert_eq!(row.entry_mut(offset).ks.name(), "b");
+        let (mut row, cell) = l.row(ks.ks(a), &[]);
+        assert_eq!(row.entry_mut(&cell).ks.name(), "a");
+        let (mut row, cell) = l.row(ks.ks(b), &[5, 2, 3, 4]);
+        assert_eq!(row.entry_mut(&cell).ks.name(), "b");
     }
 
     #[test]

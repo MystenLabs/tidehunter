@@ -2,10 +2,10 @@ use crate::cell::CellId;
 use crate::control::ControlRegion;
 use crate::crc::CrcFrame;
 use crate::db::MAX_KEY_LEN;
-use crate::math::downscale_u32;
+use crate::math::{downscale_u32, ending_u32};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
-use std::cmp;
+use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, Range};
@@ -50,6 +50,24 @@ pub struct KeySpaceConfig {
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
     key_reduction: Option<Range<usize>>,
+    key_type: KeyType,
+}
+
+#[derive(Clone, Copy)]
+pub enum KeyType {
+    Uniform,
+    PrefixedUniform(PrefixedUniformKeyConfig),
+}
+
+#[derive(Clone, Copy)]
+pub struct PrefixedUniformKeyConfig {
+    /// First prefix_len_bytes of a key considered a 'prefix'
+    prefix_len_bytes: usize,
+    /// The last cluster_bits of the prefix are set to zero to "cluster"
+    /// multiple prefixes into the same cell
+    #[allow(dead_code)]
+    cluster_bits: usize,
+    reset_mask: u8,
 }
 
 #[derive(Default, Clone)]
@@ -134,6 +152,9 @@ impl KeyShapeBuilder {
             if ks.config.bloom_filter.is_some() && ks.config.compactor.is_some() {
                 panic!("Tidehunter currently does not support key space with both compactor and bloom filter enabled");
             }
+            ks.config
+                .key_type
+                .verify_key_size(ks.reduced_key_size() - ks.config.key_offset);
         }
     }
 }
@@ -156,22 +177,14 @@ impl KeySpaceDesc {
      * **Key** is a full key(u8 slice).
      * **Prefix** is u32 representing a 4-byte prefix of the key used to map key to its cell.
      */
-
     pub(crate) fn location_for_key(&self, k: &[u8]) -> (usize, CellId) {
-        let prefix = self.cell_prefix(k);
-        let cell = self.cell_by_prefix(prefix);
-        self.location_for_cell(cell)
+        let cell = self.cell_id(k);
+        let mutex = self.mutex_for_cell(&cell);
+        (mutex, cell)
     }
 
-    pub(crate) fn cell_for_key(&self, k: &[u8]) -> usize {
-        let prefix = self.cell_prefix(k);
-        self.cell_by_prefix(prefix)
-    }
-
-    pub(crate) fn location_for_cell(&self, cell: usize) -> (usize, CellId) {
-        let mutex = cell % self.num_mutexes();
-        let offset = cell / self.num_mutexes();
-        (mutex, CellId::Integer(offset))
+    pub(crate) fn mutex_for_cell(&self, cell: &CellId) -> usize {
+        cell.mutex_seed() % self.num_mutexes()
     }
 
     // Reverse of locate_cell
@@ -187,8 +200,11 @@ impl KeySpaceDesc {
         self.per_mutex
     }
 
-    pub fn next_cell(&self, cell: usize, reverse: bool) -> Option<usize> {
-        if reverse {
+    pub fn next_cell(&self, cell: CellId, reverse: bool) -> Option<CellId> {
+        let CellId::Integer(cell) = cell else {
+            unimplemented!("next_cell for bytes")
+        };
+        let next = if reverse {
             cell.checked_sub(1)
         } else {
             if cell >= self.num_cells() - 1 {
@@ -196,7 +212,12 @@ impl KeySpaceDesc {
             } else {
                 Some(cell + 1)
             }
-        }
+        };
+        next.map(CellId::Integer)
+    }
+
+    pub(crate) fn first_cell(&self) -> CellId {
+        self.config.key_type.first_cell()
     }
 
     pub(crate) fn key_reduction(&self) -> &Option<Range<usize>> {
@@ -215,17 +236,31 @@ impl KeySpaceDesc {
         self.mutexes * self.per_mutex
     }
 
+    // todo - rewrite to support prefix key in lookup
     pub(crate) fn cell_by_prefix(&self, prefix: u32) -> usize {
         let bucket = downscale_u32(prefix, self.num_cells() as u32) as usize;
         bucket
     }
 
+    // todo - rewrite to support prefix key in lookup
     pub(crate) fn cell_prefix(&self, k: &[u8]) -> u32 {
+        ending_u32(&k[self.config.key_offset..])
+    }
+
+    pub(crate) fn cell_id(&self, k: &[u8]) -> CellId {
         let k = &k[self.config.key_offset..];
-        let copy = cmp::min(k.len(), CELL_PREFIX_LENGTH);
-        let mut p = [0u8; CELL_PREFIX_LENGTH];
-        p[..copy].copy_from_slice(&k[..copy]);
-        u32::from_be_bytes(p)
+        match self.config.key_type {
+            KeyType::Uniform => {
+                let ending_u32 = ending_u32(k);
+                let cell = downscale_u32(ending_u32, self.num_cells() as u32) as usize;
+                CellId::Integer(cell)
+            }
+            KeyType::PrefixedUniform(config) => {
+                let mut prefix = SmallVec::from(&k[..config.prefix_len_bytes]);
+                prefix[config.prefix_len_bytes - 1] &= config.reset_mask;
+                CellId::Bytes(prefix)
+            }
+        }
     }
 
     pub(crate) fn cell_prefix_range(&self, cell: usize) -> Range<u64> {
@@ -242,11 +277,11 @@ impl KeySpaceDesc {
 
     /// Returns the cell containing the range.
     /// Right now, this only works if the entire range "fits" single cell.
-    pub(crate) fn range_cell(&self, from_included: &[u8], to_included: &[u8]) -> usize {
-        let start_prefix = self.cell_prefix(&from_included);
-        let end_prefix = self.cell_prefix(&to_included);
+    pub(crate) fn range_cell(&self, from_included: &[u8], to_included: &[u8]) -> CellId {
+        let start_prefix = self.cell_id(&from_included);
+        let end_prefix = self.cell_id(&to_included);
         if start_prefix == end_prefix {
-            self.cell_by_prefix(start_prefix)
+            end_prefix
         } else {
             panic!("Can't have ordered iterator over key range that does not fit same large table cell");
         }
@@ -375,7 +410,7 @@ impl KeyShape {
         ks: KeySpace,
         from_included: &[u8],
         to_included: &[u8],
-    ) -> usize {
+    ) -> CellId {
         self.ks(ks).range_cell(from_included, to_included)
     }
 
@@ -402,30 +437,94 @@ impl Deref for KeySpaceDesc {
     }
 }
 
+impl Default for KeyType {
+    fn default() -> Self {
+        KeyType::Uniform
+    }
+}
+
+impl KeyType {
+    fn verify_key_size(&self, key_size: usize) {
+        match self {
+            KeyType::Uniform => {}
+            KeyType::PrefixedUniform(config) => {
+                assert!(
+                    key_size > config.prefix_len_bytes,
+                    "key_size({}) must be greater then prefix len({})",
+                    key_size,
+                    config.prefix_len_bytes
+                );
+            }
+        }
+    }
+
+    pub(crate) fn first_cell(&self) -> CellId {
+        match self {
+            KeyType::Uniform => CellId::Integer(0),
+            KeyType::PrefixedUniform(config) => {
+                let bytes = SmallVec::from_elem(0, config.prefix_len_bytes);
+                CellId::Bytes(bytes)
+            }
+        }
+    }
+}
+
+impl PrefixedUniformKeyConfig {
+    pub fn new(prefix_len_bytes: usize, cluster_bits: usize) -> Self {
+        assert!(
+            prefix_len_bytes > 0,
+            "prefix_len_bytes must be greater then zero, otherwise Uniform key type must be used"
+        );
+        let reset_mask = Self::make_reset_mask(cluster_bits);
+        Self {
+            prefix_len_bytes,
+            cluster_bits,
+            reset_mask,
+        }
+    }
+
+    fn make_reset_mask(cluster_bits: usize) -> u8 {
+        assert!(
+            cluster_bits < 8,
+            "cluster_bits must be less then 8, reduce prefix_len_bytes otherwise"
+        );
+        u8::MAX - ((1 << cluster_bits) - 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    //
+    // #[test]
+    // fn test_cell_by_location() {
+    //     let ks = KeySpaceDescInner {
+    //         id: KeySpace(0),
+    //         name: "".to_string(),
+    //         key_size: 0,
+    //         mutexes: 128,
+    //         per_mutex: 512,
+    //         config: Default::default(),
+    //     };
+    //     let ks = KeySpaceDesc {
+    //         inner: Arc::new(ks),
+    //     };
+    //     for cell in 0..1024usize {
+    //         let (row, offset) = ks.location_for_cell(cell);
+    //         let CellId::Integer(offset) = offset else {
+    //             panic!("Unexpected cell id")
+    //         };
+    //         let evaluated_cell = ks.cell_by_location(row, offset);
+    //         assert_eq!(evaluated_cell, cell);
+    //     }
+    // }
 
     #[test]
-    fn test_cell_by_location() {
-        let ks = KeySpaceDescInner {
-            id: KeySpace(0),
-            name: "".to_string(),
-            key_size: 0,
-            mutexes: 128,
-            per_mutex: 512,
-            config: Default::default(),
-        };
-        let ks = KeySpaceDesc {
-            inner: Arc::new(ks),
-        };
-        for cell in 0..1024usize {
-            let (row, offset) = ks.location_for_cell(cell);
-            let CellId::Integer(offset) = offset else {
-                panic!("Unexpected cell id")
-            };
-            let evaluated_cell = ks.cell_by_location(row, offset);
-            assert_eq!(evaluated_cell, cell);
-        }
+    fn test_make_reset_mask() {
+        let f = PrefixedUniformKeyConfig::make_reset_mask;
+        assert_eq!(f(0), 0b1111_1111);
+        assert_eq!(f(1), 0b1111_1110);
+        assert_eq!(f(2), 0b1111_1100);
+        assert_eq!(f(7), 0b1000_0000);
     }
 }

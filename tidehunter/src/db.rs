@@ -1,4 +1,5 @@
 use crate::batch::WriteBatch;
+use crate::cell::CellId;
 use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
@@ -319,7 +320,7 @@ impl Db {
             .range_cell(ks.id(), &from_included, &to_included);
         let Some((_key, position)) =
             self.large_table
-                .last_in_range(ks, cell, &from_included, &to_included, self)?
+                .last_in_range(ks, &cell, &from_included, &to_included, self)?
         else {
             return Ok(None);
         };
@@ -370,16 +371,16 @@ impl Db {
     pub(crate) fn next_entry(
         &self,
         ks: KeySpace,
-        cell: usize,
+        cell: CellId,
         next_key: Option<Bytes>,
-        end_cell_exclusive: Option<usize>,
+        end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> DbResult<
         Option<(
-            Option<usize>, /*next cell*/
-            Option<Bytes>, /*next key*/
-            Bytes,         /*fetched key*/
-            Bytes,         /*fetched value*/
+            Option<CellId>, /*next cell*/
+            Option<Bytes>,  /*next key*/
+            Bytes,          /*fetched key*/
+            Bytes,          /*fetched value*/
         )>,
     > {
         let ks = self.key_shape.ks(ks);
@@ -401,13 +402,13 @@ impl Db {
     pub(crate) fn update_flushed_index(
         &self,
         ks: KeySpace,
-        cell: usize,
+        cell: CellId,
         original_index: Arc<IndexTable>,
         position: WalPosition,
     ) {
         let ks = self.key_shape.ks(ks);
         self.large_table
-            .update_flushed_index(ks, cell, original_index, position)
+            .update_flushed_index(ks, &cell, original_index, position)
     }
 
     pub(crate) fn load_index(&self, ks: KeySpace, position: WalPosition) -> DbResult<IndexTable> {
@@ -1390,23 +1391,7 @@ mod test {
             )
             .unwrap();
             {
-                // todo this code predates KS api so we calculate cells manually
-                // todo rewrite with using ks API instead
-                let ksd = db.key_shape.ks(ks);
-                let (mutex1, cell1) = ksd.location_for_key(&other_key);
-                let (mutex2, cell2) = ksd.location_for_key(&[1, 2, 3, 4, 5]);
-                assert_eq!(mutex1, mutex2);
-                assert_ne!(cell1, cell2);
-                // code below is needed to search for other_key
-                // if layout of large table in test changes
-                // other_key should be from the same mutex but different cell
-                // This way we trigger unloading on the
-                // cell containing keys prefixed by [1, 2, 3, 4, ...]
-                //
-                // println!("A {:?}", LargeTable::locate(storage.key_shape.cell(ks,&[1, 2, 3, 4])));
-                // for i in 0..255 {
-                //     println!("{i} {:?}", LargeTable::locate(storage.key_shape.cell(ks,&[i, 2, 3, 4])));
-                // }
+                // todo rewrite
             }
 
             db.insert(ks, other_key.clone(), vec![5]).unwrap(); // fill one
