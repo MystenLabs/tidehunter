@@ -44,8 +44,9 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     let start = Instant::now();
 
     // Create a tokio runtime for parallel processing
+    let num_threads = num_cpus::get();
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_cpus::get())
+        .worker_threads(num_threads)
         .build()
         .unwrap();
 
@@ -54,7 +55,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     // Generate indices in parallel and send through a channel
     runtime.block_on(async {
         // Create a channel for sending indices
-        let (tx, rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(32); // Buffer size of 32
+        let (tx, rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(num_threads);
 
         // Spawn a task to consume indices and write to the file
         let consumer = tokio::spawn(async move {
@@ -82,47 +83,63 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 
         // Spawn tasks to generate indices
         let mut producer_tasks = Vec::new();
-        for i in 0..n_indices {
+        for i in 0..num_threads {
             let tx_clone = tx.clone();
             let index_format_clone = index_format.clone();
             let ks_desc_clone = ks_desc.clone();
 
-            // Spawn a task for each index
+            // Spawn a task for each thread
             let task = tokio::spawn(async move {
-                if i % 100 == 0 {
-                    println!("  Generating index {}...", i);
+                println!("  Starting task {}...", i);
+                let batch_size = if i < num_threads - 1 {
+                    n_indices / num_threads
+                } else {
+                    n_indices / num_threads + n_indices % num_threads
+                };
+
+                for j in 0..batch_size {
+                    let index_idx = i * batch_size + j;
+                    if index_idx % 1000 == 0 {
+                        println!("  Generating index {}...", index_idx);
+                    }
+
+                    // Create an IndexTable with m entries
+                    let mut index = IndexTable::default();
+                    let mut rng = StdRng::from_entropy();
+
+                    // Fill with random entries
+                    for _ in 0..entries_per_index {
+                        // Create a random key (32 bytes)
+                        let mut key = vec![0u8; 32];
+                        rng.fill(&mut key[..]);
+
+                        // Create a random WalPosition
+                        let position = WalPosition::test_value(rng.gen());
+
+                        // Insert into the index
+                        index.insert(Bytes::from(key), position);
+                    }
+
+                    // Serialize the index
+                    let bytes = index_format_clone.to_bytes(&index, &ks_desc_clone);
+
+                    // Send the serialized index through the channel
+                    let result = tx_clone
+                        .send((index_idx, bytes.as_ref().to_vec()))
+                        .await
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("Failed to send index through channel: {}", e),
+                            )
+                        });
+
+                    if let Err(e) = result {
+                        println!("Failed to send index through channel: {}", e);
+                        return Err(e);
+                    }
                 }
-
-                // Create an IndexTable with m entries
-                let mut index = IndexTable::default();
-                let mut rng = StdRng::from_entropy();
-
-                // Fill with random entries
-                for _ in 0..entries_per_index {
-                    // Create a random key (32 bytes)
-                    let mut key = vec![0u8; 32];
-                    rng.fill(&mut key[..]);
-
-                    // Create a random WalPosition
-                    let position = WalPosition::test_value(rng.gen());
-
-                    // Insert into the index
-                    index.insert(Bytes::from(key), position);
-                }
-
-                // Serialize the index
-                let bytes = index_format_clone.to_bytes(&index, &ks_desc_clone);
-
-                // Send the serialized index through the channel
-                tx_clone
-                    .send((i, bytes.as_ref().to_vec()))
-                    .await
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Failed to send index through channel: {}", e),
-                        )
-                    })
+                Ok(())
             });
 
             producer_tasks.push(task);
