@@ -1,4 +1,5 @@
 pub mod batch;
+mod cell;
 pub mod config;
 mod control;
 mod crc;

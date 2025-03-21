@@ -1,3 +1,4 @@
+use crate::cell::CellId;
 use crate::config::Config;
 use crate::flusher::{FlushKind, IndexFlusher};
 use crate::index::index_format::IndexFormat;
@@ -13,7 +14,7 @@ use lru::LruCache;
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use rand::rngs::ThreadRng;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
@@ -56,7 +57,12 @@ struct KsTable {
 
 struct Row {
     value_lru: Option<LruCache<Bytes, Bytes>>,
-    data: Box<[LargeTableEntry]>,
+    entries: Entries,
+}
+
+enum Entries {
+    Array(Box<[LargeTableEntry]>),
+    Tree(BTreeMap<Bytes, LargeTableEntry>),
 }
 
 /// ks -> row -> cell
@@ -97,7 +103,7 @@ impl LargeTable {
                     .iter()
                     .enumerate()
                     .map(|(row_index, row_snapshot)| {
-                        let data = row_snapshot
+                        let entries = row_snapshot
                             .iter()
                             .enumerate()
                             .map(|(row_offset, position)| {
@@ -112,8 +118,9 @@ impl LargeTable {
                                 )
                             })
                             .collect();
+                        let entries = Entries::Array(entries);
                         let value_lru = ks.value_cache_size().map(LruCache::new);
-                        Row { data, value_lru }
+                        Row { entries, value_lru }
                     });
                 let rows = ShardedMutex::from_iterator(rows);
                 KsTable {
@@ -282,12 +289,9 @@ impl LargeTable {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.table.iter().all(|m| {
-            m.rows
-                .mutexes()
-                .iter()
-                .all(|m| m.lock().data.iter().all(LargeTableEntry::is_empty))
-        })
+        self.table
+            .iter()
+            .all(|m| m.rows.mutexes().iter().all(|m| m.lock().entries.is_empty()))
     }
 
     fn too_many_dirty(&self, entry: &mut LargeTableEntry) -> bool {
@@ -299,7 +303,7 @@ impl LargeTable {
         }
     }
 
-    fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, usize) {
+    fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, CellId) {
         let ks_table = self.ks_table(ks);
         let (mutex, offset) = ks.location_for_key(k);
         let row = ks_table.lock(
@@ -406,8 +410,9 @@ impl LargeTable {
         let mut ks_data = Vec::with_capacity(ks_table.rows.mutexes().len());
         for mutex in ks_table.rows.mutexes() {
             let mut row = mutex.lock();
-            let mut row_data = Vec::with_capacity(row.data.len());
-            for entry in &mut row.data {
+            // todo support for tree snapshot
+            let mut row_data = Vec::with_capacity(row.entries.len());
+            for entry in row.entries.iter_mut_array() {
                 entry.maybe_unload_for_snapshot(loader, &self.config, tail_position)?;
                 let position = entry.state.wal_position();
                 row_data.push(position);
@@ -532,7 +537,7 @@ impl LargeTable {
         for ks_table in &self.table {
             for mutex in ks_table.rows.mutexes() {
                 let lock = mutex.lock();
-                for entry in lock.data.iter() {
+                for entry in lock.entries.iter() {
                     *states
                         .entry((entry.ks.name().to_string(), entry.state.name()))
                         .or_default() += 1;
@@ -572,7 +577,7 @@ impl LargeTable {
         for ks_table in &self.table {
             for mutex in ks_table.rows.mutexes() {
                 let mut lock = mutex.lock();
-                for entry in lock.data.iter_mut() {
+                for entry in lock.entries.iter_mut_array() {
                     if entry.state.as_dirty_state().is_some() {
                         return false;
                     }
@@ -584,8 +589,8 @@ impl LargeTable {
 }
 
 impl Row {
-    pub fn entry_mut(&mut self, offset: usize) -> &mut LargeTableEntry {
-        &mut self.data[offset]
+    pub fn entry_mut(&mut self, id: CellId) -> &mut LargeTableEntry {
+        self.entries.entry_mut(id)
     }
 }
 
@@ -1100,6 +1105,51 @@ impl Version {
 impl Default for LargeTableEntryState {
     fn default() -> Self {
         Self::Empty
+    }
+}
+
+impl Entries {
+    pub fn entry_mut(&mut self, cell: CellId) -> &mut LargeTableEntry {
+        match self {
+            Entries::Array(arr) => {
+                let CellId::Integer(cell) = cell else {
+                    panic!("Invalid cell id for array entry list: {cell:?}");
+                };
+                arr.get_mut(cell).unwrap()
+            }
+            Entries::Tree(tree) => {
+                let CellId::Bytes(cell) = cell else {
+                    panic!("Invalid cell id for tree entry list: {cell:?}");
+                };
+                tree.get_mut(&cell).unwrap()
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.iter().all(LargeTableEntry::is_empty)
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Entries::Array(arr) => arr.len(),
+            Entries::Tree(tree) => tree.len(),
+        }
+    }
+
+    // todo replace with generalized implementation
+    pub fn iter_mut_array(&mut self) -> &mut [LargeTableEntry] {
+        let Entries::Array(arr) = self else {
+            unimplemented!()
+        };
+        arr
+    }
+
+    pub fn iter(&self) -> Box<dyn Iterator<Item = &LargeTableEntry> + '_> {
+        match self {
+            Entries::Array(arr) => Box::new(arr.iter()),
+            Entries::Tree(tree) => Box::new(tree.values()),
+        }
     }
 }
 

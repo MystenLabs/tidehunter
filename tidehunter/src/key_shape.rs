@@ -1,3 +1,4 @@
+use crate::cell::CellId;
 use crate::control::ControlRegion;
 use crate::crc::CrcFrame;
 use crate::db::MAX_KEY_LEN;
@@ -156,7 +157,7 @@ impl KeySpaceDesc {
      * **Prefix** is u32 representing a 4-byte prefix of the key used to map key to its cell.
      */
 
-    pub(crate) fn location_for_key(&self, k: &[u8]) -> (usize, usize) {
+    pub(crate) fn location_for_key(&self, k: &[u8]) -> (usize, CellId) {
         let prefix = self.cell_prefix(k);
         let cell = self.cell_by_prefix(prefix);
         self.location_for_cell(cell)
@@ -167,10 +168,10 @@ impl KeySpaceDesc {
         self.cell_by_prefix(prefix)
     }
 
-    pub(crate) fn location_for_cell(&self, cell: usize) -> (usize, usize) {
+    pub(crate) fn location_for_cell(&self, cell: usize) -> (usize, CellId) {
         let mutex = cell % self.num_mutexes();
         let offset = cell / self.num_mutexes();
-        (mutex, offset)
+        (mutex, CellId::Integer(offset))
     }
 
     // Reverse of locate_cell
@@ -420,6 +421,9 @@ mod tests {
         };
         for cell in 0..1024usize {
             let (row, offset) = ks.location_for_cell(cell);
+            let CellId::Integer(offset) = offset else {
+                panic!("Unexpected cell id")
+            };
             let evaluated_cell = ks.cell_by_location(row, offset);
             assert_eq!(evaluated_cell, cell);
         }
