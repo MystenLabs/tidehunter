@@ -2,7 +2,7 @@ use crate::cell::CellId;
 use crate::control::ControlRegion;
 use crate::crc::CrcFrame;
 use crate::db::MAX_KEY_LEN;
-use crate::math::{downscale_u32, ending_u32};
+use crate::math::{downscale_u32, starting_u32};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use smallvec::SmallVec;
@@ -244,14 +244,14 @@ impl KeySpaceDesc {
 
     // todo - rewrite to support prefix key in lookup
     pub(crate) fn cell_prefix(&self, k: &[u8]) -> u32 {
-        ending_u32(&k[self.config.key_offset..])
+        starting_u32(&k[self.config.key_offset..])
     }
 
     pub(crate) fn cell_id(&self, k: &[u8]) -> CellId {
         let k = &k[self.config.key_offset..];
         match self.config.key_type {
             KeyType::Uniform => {
-                let ending_u32 = ending_u32(k);
+                let ending_u32 = starting_u32(k);
                 let cell = downscale_u32(ending_u32, self.num_cells() as u32) as usize;
                 CellId::Integer(cell)
             }

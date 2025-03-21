@@ -18,10 +18,10 @@ pub fn rescale_u32(v: u32, from_upper_bound_exclusive: u64, to_upper_bound_exclu
     bucket.try_into().unwrap()
 }
 
-/// Extract ending u32 value from last bytes of a slice.
-/// If slice is less than four bytes long, assumes slice is prefixed with zeroes.
-/// See test_ending_u32 for examples.
-pub fn ending_u32(slice: &[u8]) -> u32 {
+/// Extract starting u32 value from first bytes of a slice.
+/// If slice is less than four bytes long, assumes slice is padded with zeroes.
+/// See test_starting_u32 for examples.
+pub fn starting_u32(slice: &[u8]) -> u32 {
     let copy = cmp::min(slice.len(), 4);
     let mut p = [0u8; 4];
     p[..copy].copy_from_slice(&slice[..copy]);
@@ -52,13 +52,10 @@ fn test_downscale_u32() {
 }
 
 #[test]
-fn test_ending_u32() {
-    assert_eq!(0, ending_u32(&[]));
-    // assert_eq!(0, ending_u32(&[0]));
-    // assert_eq!(u32::MAX, ending_u32(&[u8::MAX]));
-    // todo - need to re-assess if this is the desired behaviour for small keys
-    assert_eq!(0x15000000, ending_u32(&[0x15]));
-    assert_eq!(0x1500, ending_u32(&[0, 0, 0x15]));
-    assert_eq!(0x15, ending_u32(&[0, 0, 0, 0x15]));
-    assert_eq!(0x01030507, ending_u32(&[0x01, 0x03, 0x05, 0x07]));
+fn test_starting_u32() {
+    assert_eq!(0, starting_u32(&[]));
+    assert_eq!(0x15000000, starting_u32(&[0x15]));
+    assert_eq!(0x1500, starting_u32(&[0, 0, 0x15]));
+    assert_eq!(0x15, starting_u32(&[0, 0, 0, 0x15]));
+    assert_eq!(0x01030507, starting_u32(&[0x01, 0x03, 0x05, 0x07]));
 }
