@@ -3,10 +3,34 @@
 # Exit on any error
 set -e
 
-# Benchmark configuration constants
-INDEX_SIZE="1M" # !!! MAKE SURE THIS IS THE SAME AS THE ENTRIES_PER_INDEX IN generate.sh !!!
-DIRECT_IO_SUFFIX="--direct-io" # uncomment to use direct I/O
-# DIRECT_IO_SUFFIX= # uncomment to not use direct I/O
+# Default index size
+DEFAULT_INDEX_SIZE="1M"
+
+# Parse command line arguments
+function usage {
+    echo "Usage: $0 [--index-size SIZE]"
+    echo "  --index-size SIZE: Index size to use (default: $DEFAULT_INDEX_SIZE)"
+    echo "                    IMPORTANT: Must match ENTRIES_PER_INDEX in generate.sh"
+    exit 1
+}
+
+# Parse arguments
+INDEX_SIZE=$DEFAULT_INDEX_SIZE
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --index-size)
+            INDEX_SIZE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
 
 # Benchmark parameters
 NUM_LOOKUPS=1000000
@@ -16,8 +40,11 @@ BATCH_SIZE=1000
 # Directory setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-RESULTS_DIR="$PROJECT_ROOT/results-local/index-$INDEX_SIZE$DIRECT_IO_SUFFIX"
+RESULTS_DIR="$PROJECT_ROOT/results-local/index-$INDEX_SIZE"
 SRC_DIR="$PROJECT_ROOT/tidehunter/src"
+
+# Display configuration
+echo "Running benchmarks with index size: $INDEX_SIZE"
 
 # Ensure results directory exists
 mkdir -p "$RESULTS_DIR"
@@ -26,48 +53,61 @@ mkdir -p "$RESULTS_DIR"
 UNIFORM_LOOKUP_PATH="$SRC_DIR/index/uniform_lookup.rs"
 
 # Array of file sizes to test
-# FILE_SIZES=("1TB" "100GB" "10GB")
-FILE_SIZES=("100GB" "10GB")
+FILE_SIZES=("1TB")
 
 # Array of window sizes to test
-WINDOW_SIZES=(100 200 400 800)
+WINDOW_SIZES=(100 200 400 800 1600 3200)
+
+# Direct I/O options
+DIRECT_IO_OPTIONS=("on" "off")
 
 # Run benchmarks for each combination
-for file_size in "${FILE_SIZES[@]}"; do
-    for window_size in "${WINDOW_SIZES[@]}"; do
-        echo "===== Running benchmark with file size $file_size, window size $window_size, index size $INDEX_SIZE ====="
-        
-        # Create timestamp for log file
-        timestamp=$(date +"%Y%m%d_%H%M%S")
-        log_file="$RESULTS_DIR/benchmark_${file_size}_window${window_size}_${timestamp}.log"
-        
-        echo "Benchmark started at $(date)" | tee -a "$log_file"
+for direct_io in "${DIRECT_IO_OPTIONS[@]}"; do
+    # Set direct I/O suffix based on the current option
+    if [ "$direct_io" == "on" ]; then
+        DIRECT_IO_SUFFIX="--direct-io"
+        DIRECT_IO_NAME="dio"
+    else
+        DIRECT_IO_SUFFIX=
+        DIRECT_IO_NAME="no-dio"
+    fi
+    
+    for file_size in "${FILE_SIZES[@]}"; do
+        for window_size in "${WINDOW_SIZES[@]}"; do
+            echo "===== Running benchmark with file size $file_size, window size $window_size, index size $INDEX_SIZE, direct I/O: $direct_io ====="
+            
+            # Create timestamp for log file
+            timestamp=$(date +"%Y%m%d_%H%M%S")
+            log_file="$RESULTS_DIR/benchmark_${file_size}_window${window_size}_${DIRECT_IO_NAME}_${timestamp}.log"
+            
+            echo "Benchmark started at $(date)" | tee -a "$log_file"
 
-        # Check if the header and uniform files exist
-        if [ ! -f "data/bench-header-$file_size-$INDEX_SIZE.dat" ]; then
-            echo "Error: Header file data/bench-header-$file_size-$INDEX_SIZE.dat does not exist"
-            exit 1
-        fi
-        if [ ! -f "data/bench-uniform-$file_size-$INDEX_SIZE.dat" ]; then
-            echo "Error: Uniform file data/bench-uniform-$file_size-$INDEX_SIZE.dat does not exist"
-            exit 1
-        fi
-        
-        # Run the benchmark with the new command-line interface
-        echo "Running benchmark..." | tee -a "$log_file"
-        cargo run --release --bin index_benchmark -- run \
-            --num-lookups "$NUM_LOOKUPS" \
-            --num-runs "$NUM_RUNS" \
-            --batch-size "$BATCH_SIZE" \
-            --window-size "$window_size" \
-            --header-file "data/bench-header-$file_size-$INDEX_SIZE.dat" \
-            --uniform-file "data/bench-uniform-$file_size-$INDEX_SIZE.dat" \
-            $DIRECT_IO_SUFFIX 2>&1 | tee -a "$log_file"
-        
-        # Log benchmark completion
-        echo "Benchmark completed at $(date)" | tee -a "$log_file"
-        echo "Results saved to $log_file"
-        echo ""
+            # Check if the header and uniform files exist
+            if [ ! -f "data/bench-header-$file_size-$INDEX_SIZE.dat" ]; then
+                echo "Error: Header file data/bench-header-$file_size-$INDEX_SIZE.dat does not exist"
+                exit 1
+            fi
+            if [ ! -f "data/bench-uniform-$file_size-$INDEX_SIZE.dat" ]; then
+                echo "Error: Uniform file data/bench-uniform-$file_size-$INDEX_SIZE.dat does not exist"
+                exit 1
+            fi
+            
+            # Run the benchmark with the new command-line interface
+            echo "Running benchmark with direct I/O: $direct_io..." | tee -a "$log_file"
+            cargo run --release --bin index_benchmark -- run \
+                --num-lookups "$NUM_LOOKUPS" \
+                --num-runs "$NUM_RUNS" \
+                --batch-size "$BATCH_SIZE" \
+                --window-size "$window_size" \
+                --header-file "data/bench-header-$file_size-$INDEX_SIZE.dat" \
+                --uniform-file "data/bench-uniform-$file_size-$INDEX_SIZE.dat" \
+                $DIRECT_IO_SUFFIX 2>&1 | tee -a "$log_file"
+            
+            # Log benchmark completion
+            echo "Benchmark completed at $(date)" | tee -a "$log_file"
+            echo "Results saved to $log_file"
+            echo ""
+        done
     done
 done
 
