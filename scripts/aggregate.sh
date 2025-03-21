@@ -23,8 +23,8 @@ echo "Benchmark Summary Report" > "$SUMMARY_FILE"
 echo "======================" >> "$SUMMARY_FILE"
 echo "Generated on: $(date)" >> "$SUMMARY_FILE"
 echo "" >> "$SUMMARY_FILE"
-printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "File Size" "Window Size" "Index Type" "Tput (ops/s)" "Avg Hops" "Scan us" "IO us" "IO bytes" >> "$SUMMARY_FILE"
-printf "%-9s-|-%-11s-|-%-10s-|-%-12s-|-%-8s-|-%-12s-|-%-10s-|-%-10s\n" "---------" "-----------" "----------" "------------" "--------" "------------" "----------" "----------" >> "$SUMMARY_FILE"
+printf "%-9s | %-6s | %-10s | %-7s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "File Size" "Window" "Index Type" "DIO" "Tput (ops/s)" "Avg Hops" "Scan us" "IO s" "IO GB" >> "$SUMMARY_FILE"
+printf "%-9s-|-%-6s-|-%-10s-|-%-7s-|-%-12s-|-%-8s-|-%-12s-|-%-10s-|-%-10s\n" "---------" "------" "----------" "-------" "------------" "--------" "------------" "----------" "----------" >> "$SUMMARY_FILE"
 
 # Process each log file
 for log_file in "$RESULTS_DIR"/benchmark_*.log; do
@@ -34,6 +34,14 @@ for log_file in "$RESULTS_DIR"/benchmark_*.log; do
     filename=$(basename "$log_file")
     file_size=$(echo "$filename" | grep -o -E '[0-9]+[GMT]B' | head -1)
     window_size=$(echo "$filename" | grep -o -E 'window[0-9]+' | sed 's/window//')
+    
+    # Extract direct I/O setting
+    dio_status="N/A"
+    if [[ "$filename" == *"_dio_"* ]]; then
+        dio_status="Yes"
+    elif [[ "$filename" == *"_no-dio_"* ]]; then
+        dio_status="No"
+    fi
     
     # Initialize variables for data collection
     header_throughput=""
@@ -50,11 +58,14 @@ for log_file in "$RESULTS_DIR"/benchmark_*.log; do
 
     header_scan_mcs=$(grep "HeaderLookupIndex: scan mcs" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
     header_io_mcs=$(grep "HeaderLookupIndex: io mcs" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
+    header_io_s=$(echo "scale=2; $header_io_mcs / 1000000" | bc)
     uniform_scan_mcs=$(grep "UniformLookupIndex: scan mcs" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
     uniform_io_mcs=$(grep "UniformLookupIndex: io mcs" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
+    uniform_io_s=$(echo "scale=2; $uniform_io_mcs / 1000000" | bc)
     header_io_bytes=$(grep "HeaderLookupIndex: io bytes" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
+    header_io_gb=$(echo "scale=2; $header_io_bytes / 1000000000" | bc)
     uniform_io_bytes=$(grep "UniformLookupIndex: io bytes" "$log_file" | grep -o -E 'inner: [0-9]+' | head -1 | awk '{print $2}')
-    
+    uniform_io_gb=$(echo "scale=2; $uniform_io_bytes / 1000000000" | bc)
     # Extract bucket values between square brackets after the FIRST occurrence of "buckets:"
     if [ ! -z "$histogram_line" ]; then
         # Extract the portion after the first "buckets:" and between its square brackets
@@ -87,11 +98,11 @@ for log_file in "$RESULTS_DIR"/benchmark_*.log; do
     
     # Add to summary file
     if [ ! -z "$header_throughput" ]; then
-        printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "$file_size" "$window_size" "Header" "$header_throughput" "2.00" "$header_scan_mcs" "$header_io_mcs" "$header_io_bytes" >> "$SUMMARY_FILE"
+        printf "%-9s | %-6s | %-10s | %-7s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "$file_size" "$window_size" "Header" "$dio_status" "$header_throughput" "2.00" "$header_scan_mcs" "$header_io_s" "$header_io_gb" >> "$SUMMARY_FILE"
     fi
     
     if [ ! -z "$uniform_throughput" ]; then
-        printf "%-9s | %-11s | %-10s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "$file_size" "$window_size" "Uniform" "$uniform_throughput" "$uniform_avg_hops" "$uniform_scan_mcs" "$uniform_io_mcs" "$uniform_io_bytes" >> "$SUMMARY_FILE"
+        printf "%-9s | %-6s | %-10s | %-7s | %-12s | %-8s | %-12s | %-10s | %-10s\n" "$file_size" "$window_size" "Uniform" "$dio_status" "$uniform_throughput" "$uniform_avg_hops" "$uniform_scan_mcs" "$uniform_io_s" "$uniform_io_gb" >> "$SUMMARY_FILE"
     fi
 done
 
