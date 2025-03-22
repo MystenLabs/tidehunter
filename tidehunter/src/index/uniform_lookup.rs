@@ -158,7 +158,7 @@ impl IndexFormat for UniformLookupIndex {
         let element_size = Self::element_size(ks);
         let key_size = ks.reduced_key_size();
         assert_eq!(key.len(), key_size);
-        let prefix = ks.cell_prefix(key);
+        let prefix = ks.index_prefix_u32(key);
         let cell = ks.cell_by_prefix(prefix);
         let cell_prefix_range = ks.cell_prefix_range(cell);
 

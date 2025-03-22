@@ -242,9 +242,15 @@ impl KeySpaceDesc {
         bucket
     }
 
-    // todo - rewrite to support prefix key in lookup
-    pub(crate) fn cell_prefix(&self, k: &[u8]) -> u32 {
-        starting_u32(&k[self.config.key_offset..])
+    /// Returns u32 prefix
+    pub(crate) fn index_prefix_u32(&self, k: &[u8]) -> u32 {
+        starting_u32(self.index_prefix(k))
+    }
+
+    fn index_prefix<'a>(&self, k: &'a [u8]) -> &'a [u8] {
+        self.config
+            .key_type
+            .index_prefix(&k[self.config.key_offset..])
     }
 
     pub(crate) fn cell_id(&self, k: &[u8]) -> CellId {
@@ -458,13 +464,20 @@ impl KeyType {
         }
     }
 
-    pub(crate) fn first_cell(&self) -> CellId {
+    fn first_cell(&self) -> CellId {
         match self {
             KeyType::Uniform => CellId::Integer(0),
             KeyType::PrefixedUniform(config) => {
                 let bytes = SmallVec::from_elem(0, config.prefix_len_bytes);
                 CellId::Bytes(bytes)
             }
+        }
+    }
+
+    fn index_prefix<'a>(&self, k: &'a [u8]) -> &'a [u8] {
+        match self {
+            KeyType::Uniform => k,
+            KeyType::PrefixedUniform(config) => &k[config.discard_prefix_bytes()..],
         }
     }
 }
@@ -489,6 +502,20 @@ impl PrefixedUniformKeyConfig {
             "cluster_bits must be less then 8, reduce prefix_len_bytes otherwise"
         );
         u8::MAX - ((1 << cluster_bits) - 1)
+    }
+
+    /// Returns number of first bytes that are the same across all keys in the cell.
+    /// If configuration has no cluster bits, this is equal to the length of the prefix.
+    /// If configuration has cluster bits, this is equal to the length of the prefix minus one.
+    /// In the latter case, one is subtracted because
+    /// the last byte of prefix can be different for the same cell.
+    fn discard_prefix_bytes(&self) -> usize {
+        // reset_mask == u8::MAX equivalent to cluster_bits == 0
+        if self.reset_mask == u8::MAX {
+            self.prefix_len_bytes
+        } else {
+            self.prefix_len_bytes - 1
+        }
     }
 }
 

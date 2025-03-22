@@ -27,7 +27,7 @@ impl LookupHeaderIndex {
     }
 
     fn key_micro_cell(ks: &KeySpaceDesc, key: &[u8]) -> usize {
-        let prefix = ks.cell_prefix(key);
+        let prefix = ks.index_prefix_u32(key);
         let cell = ks.cell_by_prefix(prefix);
         let cell_prefix_range = ks.cell_prefix_range(cell);
         let cell_offset = prefix
