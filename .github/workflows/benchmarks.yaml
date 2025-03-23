@@ -1,0 +1,129 @@
+name: Performance Benchmarks
+
+on:
+  # Run benchmarks on demand
+  workflow_dispatch:
+    inputs:
+      benchmark_type:
+        description: "Benchmark to run (all, random_access, read_window, index, benchmark)"
+        type: choice
+        options:
+          - all
+          - random_access
+          - read_window
+          - index
+          - benchmark
+        default: "all"
+      index_benchmark_mode:
+        description: "Mode for index benchmark (basic, advanced)"
+        type: choice
+        options:
+          - basic
+          - advanced
+        default: "basic"
+
+  # Run benchmarks weekly
+  schedule:
+    - cron: "0 0 * * 0" # Run at midnight on Sundays
+
+  # Optionally run on PRs with a specific label
+  pull_request:
+    types: [labeled]
+
+# Ensure only one benchmark job runs at a time
+concurrency:
+  group: benchmarks
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    # Only run on PRs with the 'run-benchmarks' label
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-benchmarks'
+
+    name: Run Benchmarks
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # Fetch all history for proper benchmarking
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Prepare results directory
+        run: |
+          mkdir -p ./results
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "# Benchmark Results - $(date)" > ./results/summary.md
+          echo "## Environment" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+          echo "Runner: ${{ runner.os }} (${{ runner.arch }})" >> ./results/summary.md
+          cat /proc/cpuinfo | grep "model name" | head -1 >> ./results/summary.md
+          free -h | head -2 >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+
+      - name: Build all benchmarks
+        run: cargo build --release --all
+
+      # Random Access Speed Test
+      - name: Run random_access_speed_test
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'random_access' || github.event_name != 'workflow_dispatch'
+        run: |
+          echo "## Random Access Speed Test" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+          cargo run --release --manifest-path benchmarks/random_access_speed_test/Cargo.toml | tee ./results/random_access_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          echo '```' >> ./results/summary.md
+
+      # Read Window Test
+      - name: Run read_window_test
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'read_window' || github.event_name != 'workflow_dispatch'
+        run: |
+          echo "## Read Window Test" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+          cargo run --release --manifest-path benchmarks/read_window_test/Cargo.toml | tee ./results/read_window_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          echo '```' >> ./results/summary.md
+
+      # Index Benchmark
+      - name: Run index_benchmark
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'index' || github.event_name != 'workflow_dispatch'
+        run: |
+          echo "## Index Benchmark (${{ github.event.inputs.index_benchmark_mode || 'basic' }})" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- --mode ${{ github.event.inputs.index_benchmark_mode || 'basic' }} | tee ./results/index_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          echo '```' >> ./results/summary.md
+
+      # General Benchmark
+      - name: Run general benchmark
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'benchmark' || github.event_name != 'workflow_dispatch'
+        run: |
+          echo "## General Benchmark" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+          cargo run --release --manifest-path benchmarks/benchmark/Cargo.toml | tee ./results/benchmark_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          echo '```' >> ./results/summary.md
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v3
+        with:
+          name: benchmark-results-${{ env.TIMESTAMP }}
+          path: results/
+          retention-days: 90
+
+      # Comment on PR if this is a PR run
+      - name: Comment PR with benchmark results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const benchmarkSummary = fs.readFileSync('./results/summary.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: benchmarkSummary
+            });

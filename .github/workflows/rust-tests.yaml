@@ -1,0 +1,42 @@
+name: Rust Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      tidehunter_repo_ref:
+        description: "Branch / commit to test"
+        type: string
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.inputs.tidehunter_repo_ref || github.ref }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # TODO: enable linting
+      #   - name: Check linting
+      #     run: cargo clippy -- -D warnings
+
+      - name: Build
+        run: cargo build
+
+      - name: Run unit tests
+        run: cargo test
