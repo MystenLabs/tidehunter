@@ -1,152 +1,93 @@
-use crate::crc::IntoBytesFixed;
 use crate::key_shape::KeyShape;
-use crate::large_table::{LargeTableContainer, Version};
+use crate::large_table::LargeTableContainer;
+use crate::metrics::Metrics;
 use crate::wal::WalPosition;
-use bytes::{Buf, BufMut, BytesMut};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
-pub struct ControlRegion {
-    version: Version,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ControlRegion {
     /// WalPosition::INVALID when wal is empty
     last_position: WalPosition,
     snapshot: LargeTableContainer<WalPosition>,
 }
 
-impl IntoBytesFixed for ControlRegion {
-    fn len(&self) -> usize {
-        // similar logic in ControlRegion::len_bytes_from_key_shape
-        let mut len = Version::LENGTH + WalPosition::LENGTH + 4;
-        for ks_table in &self.snapshot.0 {
-            let num_mutexes = ks_table.len();
-            let per_mutex = ks_table.get(0).expect("Ks table can not be empty").len();
-            len += 4;
-            len += num_mutexes * per_mutex * WalPosition::LENGTH;
-        }
-        len
-    }
-
-    fn write_into_bytes(&self, buf: &mut BytesMut) {
-        buf.put_u64(self.version.0);
-        self.last_position.write_to_buf(buf);
-        buf.put_u32(self.snapshot.0.len() as u32);
-        for ks_table in &self.snapshot.0 {
-            let num_mutexes = ks_table.len();
-            let per_mutex = ks_table.get(0).expect("Ks table can not be empty").len();
-            buf.put_u16(num_mutexes as u16);
-            buf.put_u16(per_mutex as u16);
-            for row in ks_table {
-                assert_eq!(row.len(), per_mutex);
-                for entry in row {
-                    entry.write_to_buf(buf);
-                }
-            }
-        }
-    }
+pub(crate) struct ControlRegionStore {
+    path: PathBuf,
 }
 
 impl ControlRegion {
     pub fn new_empty(key_shape: &KeyShape) -> Self {
         let snapshot = LargeTableContainer::new_from_key_shape(key_shape, WalPosition::INVALID);
         Self {
-            version: Version::ZERO,
             last_position: WalPosition::INVALID,
             snapshot,
         }
     }
 
-    pub fn new(
-        snapshot: LargeTableContainer<WalPosition>,
-        version: Version,
-        last_position: WalPosition,
-    ) -> Self {
+    pub fn new(snapshot: LargeTableContainer<WalPosition>, last_position: WalPosition) -> Self {
         Self {
             snapshot,
-            version,
             last_position,
         }
     }
 
-    pub fn version_from_bytes(mut bytes: &[u8]) -> Version {
-        Version(bytes.get_u64())
+    pub fn read_or_create(path: &Path, key_shape: &KeyShape) -> Self {
+        let bytes = fs::read(path);
+        let control_region: ControlRegion = match bytes {
+            Err(err) => {
+                if err.kind() == ErrorKind::NotFound {
+                    return ControlRegion::new_empty(key_shape);
+                } else {
+                    Err(err).expect("Failed to read control region file")
+                }
+            }
+            Ok(bytes) => {
+                bincode::deserialize(&bytes).expect("Failed to deserialize control region")
+            }
+        };
+        control_region.verify_shape(key_shape);
+        control_region
     }
 
-    pub fn from_slice(mut bytes: &[u8], key_shape: &KeyShape) -> Self {
-        assert_eq!(bytes.len(), Self::len_bytes_from_key_shape(key_shape));
-        let version = bytes.get_u64();
-        let replay_from = WalPosition::read_from_buf(&mut bytes);
-        let num_ks = bytes.get_u32() as usize;
-        assert_eq!(num_ks, key_shape.num_ks());
-        let mut snapshot = Vec::with_capacity(num_ks);
-        for ks in key_shape.iter_ks() {
-            let num_mutexes = bytes.get_u16() as usize;
-            let per_mutex = bytes.get_u16() as usize;
-            if num_mutexes != ks.num_mutexes() {
-                panic!(
-                    "Key space {} must have {} mutexes, snapshot has {}",
-                    ks.id().as_usize(),
-                    ks.num_mutexes(),
-                    num_mutexes
-                );
-            }
-            if per_mutex != ks.cells_per_mutex() {
-                panic!(
-                    "Key space {} must have {} entries per mutex, snapshot has {}",
-                    ks.id().as_usize(),
-                    ks.cells_per_mutex(),
-                    per_mutex
-                );
-            }
-            let mut ks_table = Vec::with_capacity(num_mutexes);
-            for _ in 0..num_mutexes {
-                let mut row = Vec::with_capacity(per_mutex);
-                for _ in 0..per_mutex {
-                    row.push(WalPosition::read_from_buf(&mut bytes));
-                }
-                ks_table.push(row);
-            }
-            snapshot.push(ks_table);
+    fn verify_shape(&self, key_shape: &KeyShape) {
+        let snapshot_len = self.snapshot.0.len();
+        let num_ks = key_shape.num_ks();
+        if snapshot_len != num_ks {
+            panic!("Control region has {snapshot_len} key spaces, while configuration has {num_ks}. Re-configuration is not currently supported");
         }
-        let snapshot = LargeTableContainer(snapshot);
-        Self {
-            version: Version(version),
-            last_position: replay_from,
-            snapshot,
-        }
+        // todo more verifications for the key shape
     }
 
     pub fn snapshot(&self) -> &LargeTableContainer<WalPosition> {
         &self.snapshot
     }
 
-    pub fn version(&self) -> Version {
-        self.version
-    }
-
     pub fn last_position(&self) -> WalPosition {
         self.last_position
     }
-
-    pub fn len_bytes_from_key_shape(key_shape: &KeyShape) -> usize {
-        // similar logic in ControlRegion::len
-        let mut len = Version::LENGTH + WalPosition::LENGTH + 4;
-        for ks in key_shape.iter_ks() {
-            let num_mutexes = ks.num_mutexes();
-            let per_mutex = ks.cells_per_mutex();
-            len += 4;
-            len += num_mutexes * per_mutex * WalPosition::LENGTH;
-        }
-        len
-    }
 }
 
-#[test]
-fn test_control_region_serialization() {
-    use crate::crc::CrcFrame;
-
-    let (key_shape, _) = KeyShape::new_single(4, 12, 12);
-    let cr = ControlRegion::new_empty(&key_shape);
-    let mut bytes = BytesMut::new();
-    cr.write_into_bytes(&mut bytes);
-    assert_eq!(cr.len(), bytes.len());
-    let crc_frame = CrcFrame::new(&cr);
-    assert_eq!(crc_frame.len_with_header(), key_shape.cr_len());
+impl ControlRegionStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+    pub fn store(
+        &mut self,
+        snapshot: LargeTableContainer<WalPosition>,
+        last_position: WalPosition,
+        metrics: &Metrics,
+    ) {
+        let control_region = ControlRegion::new(snapshot, last_position);
+        let serialized =
+            bincode::serialize(&control_region).expect("Failed to serialize control region");
+        let temp_file = self.path.with_extension(".bak");
+        fs::write(&temp_file, &serialized).expect("Failed to write control region file");
+        metrics
+            .snapshot_written_bytes
+            .inc_by(serialized.len() as u64);
+        fs::rename(&temp_file, &self.path).expect("Failed to rename control region file");
+    }
 }

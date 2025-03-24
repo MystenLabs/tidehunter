@@ -5,7 +5,7 @@ use crate::flusher::{FlushKind, IndexFlusher};
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
 use crate::index::INDEX_FORMAT;
-use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
+use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::sharded_mutex::ShardedMutex;
@@ -15,6 +15,7 @@ use lru::LruCache;
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use rand::rngs::ThreadRng;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -27,9 +28,6 @@ pub struct LargeTable {
     flusher: IndexFlusher,
     metrics: Arc<Metrics>,
 }
-
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-pub struct Version(pub u64);
 
 pub struct LargeTableEntry {
     cell: CellId,
@@ -67,8 +65,11 @@ enum Entries {
     Tree(BTreeMap<CellIdBytesContainer, LargeTableEntry>),
 }
 
+pub(crate) type RowContainer<T> = BTreeMap<CellId, T>;
+
 /// ks -> row -> cell
-pub(crate) struct LargeTableContainer<T>(pub Vec<Vec<Vec<T>>>);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LargeTableContainer<T>(pub Vec<Vec<RowContainer<T>>>);
 
 pub(crate) struct LargeTableSnapshot {
     pub data: LargeTableContainer<WalPosition>,
@@ -101,39 +102,32 @@ impl LargeTable {
                         ks.num_mutexes()
                     );
                 }
-                let rows = ks_snapshot
-                    .iter()
-                    .enumerate()
-                    .map(|(row_index, row_snapshot)| {
-                        let context = KsContext {
-                            ks_config: ks.clone(),
-                            config: config.clone(),
-                            metrics: metrics.clone(),
-                        };
-                        let entries = row_snapshot
-                            .iter()
-                            .enumerate()
-                            .map(|(row_offset, position)| {
-                                // todo support for prefix key
-                                let cell = ks.cell_by_location(row_index, row_offset);
-                                let cell = CellId::Integer(cell);
-                                let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
-                                LargeTableEntry::from_snapshot_position(
-                                    context.clone(),
-                                    cell,
-                                    position,
-                                    unload_jitter,
-                                )
-                            })
-                            .collect();
-                        let entries = Entries::Array(ks.num_mutexes(), entries);
-                        let value_lru = ks.value_cache_size().map(LruCache::new);
-                        Row {
-                            entries,
-                            context,
-                            value_lru,
-                        }
-                    });
+                let rows = ks_snapshot.iter().map(|row_snapshot| {
+                    let context = KsContext {
+                        ks_config: ks.clone(),
+                        config: config.clone(),
+                        metrics: metrics.clone(),
+                    };
+                    let entries = row_snapshot
+                        .iter()
+                        .map(|(cell, position)| {
+                            let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
+                            LargeTableEntry::from_snapshot_position(
+                                context.clone(),
+                                cell.clone(),
+                                position,
+                                unload_jitter,
+                            )
+                        })
+                        .collect();
+                    let entries = Entries::Array(ks.num_mutexes(), entries);
+                    let value_lru = ks.value_cache_size().map(LruCache::new);
+                    Row {
+                        entries,
+                        context,
+                        value_lru,
+                    }
+                });
                 let rows = ShardedMutex::from_iterator(rows);
                 KsTable {
                     ks: ks.clone(),
@@ -411,7 +405,7 @@ impl LargeTable {
         loader: &L,
     ) -> Result<
         (
-            Vec<Vec<WalPosition>>,
+            Vec<RowContainer<WalPosition>>,
             Option<WalPosition>,
             Option<WalPosition>,
         ),
@@ -422,12 +416,11 @@ impl LargeTable {
         let mut ks_data = Vec::with_capacity(ks_table.rows.mutexes().len());
         for mutex in ks_table.rows.mutexes() {
             let mut row = mutex.lock();
-            // todo support for tree snapshot
-            let mut row_data = Vec::with_capacity(row.entries.len());
-            for entry in row.entries.iter_mut_array() {
+            let mut row_data = RowContainer::new();
+            for (key, entry) in row.entries.iter_mut() {
                 entry.maybe_unload_for_snapshot(loader, &self.config, tail_position)?;
                 let position = entry.state.wal_position();
-                row_data.push(position);
+                row_data.insert(key, position);
                 if let Some(valid_position) = position.valid() {
                     max_wal_position = if let Some(max_wal_position) = max_wal_position {
                         Some(cmp::max(max_wal_position, valid_position))
@@ -589,7 +582,7 @@ impl LargeTable {
         for ks_table in &self.table {
             for mutex in ks_table.rows.mutexes() {
                 let mut lock = mutex.lock();
-                for entry in lock.entries.iter_mut_array() {
+                for (_, entry) in lock.entries.iter_mut() {
                     if entry.state.as_dirty_state().is_some() {
                         return false;
                     }
@@ -815,11 +808,13 @@ impl LargeTableEntry {
             let flush_kind = self
                 .flush_kind()
                 .expect("unload_if_ks_enabled is called in clean state");
+            println!("Flushing {:?}", self.cell);
             flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
         }
     }
 
     pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
+        println!("update_flushed_index {:?}", self.cell);
         assert!(
             self.flush_pending,
             "update_merged_index called while flush_pending is not set"
@@ -1097,23 +1092,23 @@ impl<T: Copy> LargeTableContainer<T> {
                 .iter_ks()
                 .map(|ks| {
                     (0..ks.num_mutexes())
-                        .map(|_| (0..ks.cells_per_mutex()).map(|_| value).collect())
+                        .map(|row| Self::new_row(ks, row, value))
                         .collect()
                 })
                 .collect(),
         )
     }
-}
 
-impl Version {
-    pub const ZERO: Version = Version(0);
-    pub const LENGTH: usize = 8;
-
-    pub fn checked_increment(&mut self) {
-        self.0 = self
-            .0
-            .checked_add(1)
-            .expect("Can not increment id: too large");
+    fn new_row(ks: &KeySpaceDesc, row: usize, value: T) -> RowContainer<T> {
+        match ks.key_type() {
+            KeyType::Uniform => {
+                // todo - create empty row and fill integer cells on-demand?
+                (0..ks.cells_per_mutex())
+                    .map(|offset| (CellId::Integer(ks.cell_by_location(row, offset)), value))
+                    .collect()
+            }
+            KeyType::PrefixedUniform(_) => RowContainer::new(),
+        }
     }
 }
 
@@ -1165,19 +1160,20 @@ impl Entries {
         self.iter().all(LargeTableEntry::is_empty)
     }
 
-    pub fn len(&self) -> usize {
+    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = (CellId, &mut LargeTableEntry)> + '_> {
         match self {
-            Entries::Array(_, arr) => arr.len(),
-            Entries::Tree(tree) => tree.len(),
+            Entries::Array(_, arr) => {
+                let iter = arr
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, e)| (CellId::Integer(i), e));
+                Box::new(iter)
+            }
+            Entries::Tree(tree) => {
+                let iter = tree.iter_mut().map(|(k, v)| (CellId::Bytes(k.clone()), v));
+                Box::new(iter)
+            }
         }
-    }
-
-    // todo replace with generalized implementation
-    pub fn iter_mut_array(&mut self) -> &mut [LargeTableEntry] {
-        let Entries::Array(_, arr) = self else {
-            unimplemented!()
-        };
-        arr
     }
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = &LargeTableEntry> + '_> {

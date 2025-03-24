@@ -1,6 +1,4 @@
 use crate::cell::CellId;
-use crate::control::ControlRegion;
-use crate::crc::CrcFrame;
 use crate::db::MAX_KEY_LEN;
 use crate::math::{downscale_u32, starting_u32};
 use crate::wal::WalPosition;
@@ -224,6 +222,10 @@ impl KeySpaceDesc {
         &self.config.key_reduction
     }
 
+    pub(crate) fn key_type(&self) -> &KeyType {
+        &self.config.key_type
+    }
+
     pub(crate) fn reduced_key_size(&self) -> usize {
         if let Some(key_reduction) = &self.config.key_reduction {
             key_reduction.len()
@@ -412,10 +414,6 @@ impl KeyShape {
         self.key_spaces.len()
     }
 
-    pub fn cr_len(&self) -> usize {
-        ControlRegion::len_bytes_from_key_shape(self) + CrcFrame::CRC_HEADER_LENGTH
-    }
-
     pub(crate) fn range_cell(
         &self,
         ks: KeySpace,
@@ -527,29 +525,6 @@ impl PrefixedUniformKeyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    //
-    // #[test]
-    // fn test_cell_by_location() {
-    //     let ks = KeySpaceDescInner {
-    //         id: KeySpace(0),
-    //         name: "".to_string(),
-    //         key_size: 0,
-    //         mutexes: 128,
-    //         per_mutex: 512,
-    //         config: Default::default(),
-    //     };
-    //     let ks = KeySpaceDesc {
-    //         inner: Arc::new(ks),
-    //     };
-    //     for cell in 0..1024usize {
-    //         let (row, offset) = ks.location_for_cell(cell);
-    //         let CellId::Integer(offset) = offset else {
-    //             panic!("Unexpected cell id")
-    //         };
-    //         let evaluated_cell = ks.cell_by_location(row, offset);
-    //         assert_eq!(evaluated_cell, cell);
-    //     }
-    // }
 
     #[test]
     fn test_make_reset_mask() {

@@ -1,25 +1,23 @@
 use crate::batch::WriteBatch;
 use crate::cell::CellId;
 use crate::config::Config;
-use crate::control::ControlRegion;
-use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
+use crate::control::{ControlRegion, ControlRegionStore};
+use crate::crc::IntoBytesFixed;
 use crate::flusher::IndexFlusher;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
 use crate::index::INDEX_FORMAT;
 use crate::iterators::db_iterator::DbIterator;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
-use crate::large_table::{GetResult, LargeTable, LargeTableContainer, Loader, Version};
+use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
 };
 use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
-use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
 use parking_lot::Mutex;
-use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Weak};
 use std::time::Duration;
@@ -46,13 +44,8 @@ impl Db {
         config: Arc<Config>,
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
-        let cr = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path.join("cr"))?;
         let (control_region_store, control_region) =
-            Self::read_or_create_control_region(&cr, &key_shape)?;
+            Self::read_or_create_control_region(path.join("cr"), &key_shape)?;
         let (flusher_sender, flusher_receiver) = mpsc::channel();
         let flusher = IndexFlusher::new(flusher_sender);
         let large_table = LargeTable::from_unloaded(
@@ -119,57 +112,12 @@ impl Db {
     }
 
     fn read_or_create_control_region(
-        cr: &File,
+        path: PathBuf,
         key_shape: &KeyShape,
     ) -> Result<(ControlRegionStore, ControlRegion), DbError> {
-        let file_len = cr.metadata()?.len() as usize;
-        let cr_len = key_shape.cr_len();
-        let mut cr_map = unsafe { MmapOptions::new().len(cr_len * 2).map_mut(cr)? };
-        let (last_written_left, control_region) = if file_len != cr_len * 2 {
-            cr.set_len((cr_len * 2) as u64)?;
-            let skip_marker = CrcFrame::skip_marker();
-            cr_map[0..skip_marker.len_with_header()].copy_from_slice(skip_marker.as_ref());
-            cr_map.flush()?;
-            (false, ControlRegion::new_empty(key_shape))
-        } else {
-            Self::read_control_region(&cr_map, key_shape)?
-        };
-        let control_region_store = ControlRegionStore {
-            cr_map,
-            last_written_left,
-            last_version: control_region.version(),
-        };
+        let control_region = ControlRegion::read_or_create(&path, key_shape);
+        let control_region_store = ControlRegionStore::new(path);
         Ok((control_region_store, control_region))
-    }
-
-    fn read_control_region(
-        cr_map: &MmapMut,
-        key_shape: &KeyShape,
-    ) -> Result<(bool, ControlRegion), DbError> {
-        let cr_len = key_shape.cr_len();
-        assert_eq!(cr_map.len(), cr_len * 2);
-        let cr1 = CrcFrame::read_from_slice(&cr_map, 0);
-        let cr2 = CrcFrame::read_from_slice(&cr_map, cr_len);
-        let (last_written_left, cr) = match (cr1, cr2) {
-            (Ok(cr1), Err(_)) => (true, cr1),
-            (Err(_), Ok(cr2)) => (false, cr2),
-            (Ok(cr1), Ok(cr2)) => {
-                let version1 = ControlRegion::version_from_bytes(cr1);
-                let version2 = ControlRegion::version_from_bytes(cr2);
-                if version1 > version2 {
-                    (true, cr1)
-                } else {
-                    (false, cr2)
-                }
-            }
-            // Cr region is valid but empty
-            (Err(CrcReadError::SkipMarker), Err(_)) => {
-                return Ok((false, ControlRegion::new_empty(key_shape)))
-            }
-            (Err(_), Err(_)) => return Err(DbError::CrCorrupted),
-        };
-        let control_region = ControlRegion::from_slice(&cr, key_shape);
-        Ok((last_written_left, control_region))
     }
 
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
@@ -505,7 +453,7 @@ impl Db {
             .large_table
             .snapshot(current_wal_position.as_u64(), self)?;
         // todo fsync wal first
-        crs.store(snapshot.data, snapshot.last_added_position, &self.metrics)?;
+        crs.store(snapshot.data, snapshot.last_added_position, &self.metrics);
         Ok(snapshot.last_added_position)
     }
 
@@ -575,42 +523,6 @@ impl Db {
             .memory_estimate
             .with_label_values(&["_", "maps"])
             .set(maps_estimate as i64);
-    }
-}
-
-struct ControlRegionStore {
-    cr_map: MmapMut,
-    last_version: Version,
-    last_written_left: bool,
-}
-
-impl ControlRegionStore {
-    pub fn store(
-        &mut self,
-        snapshot: LargeTableContainer<WalPosition>,
-        last_position: WalPosition,
-        metrics: &Metrics,
-    ) -> DbResult<()> {
-        let control_region = ControlRegion::new(snapshot, self.increment_version(), last_position);
-        let frame = CrcFrame::new(&control_region);
-        assert_eq!(frame.len_with_header() * 2, self.cr_map.len());
-        let write_to = if self.last_written_left {
-            // write right
-            &mut self.cr_map[frame.len_with_header()..]
-        } else {
-            // write left
-            &mut self.cr_map[..frame.len_with_header()]
-        };
-        write_to.copy_from_slice(frame.as_ref());
-        metrics.snapshot_written_bytes.inc_by(write_to.len() as u64);
-        self.cr_map.flush()?;
-        self.last_written_left = !self.last_written_left;
-        Ok(())
-    }
-
-    fn increment_version(&mut self) -> Version {
-        self.last_version.checked_increment();
-        self.last_version
     }
 }
 
@@ -764,6 +676,9 @@ mod test {
     fn db_test() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let config = Arc::new(Config::small());
+        // use crate::key_shape::{KeyType, PrefixedUniformKeyConfig};
+        // let ksc = KeySpaceConfig::new().with_key_type(KeyType::PrefixedUniform(PrefixedUniformKeyConfig::new(2, 0)));
+        // let (key_shape, ks) = KeyShape::new_single_config(4, 12, 12, ksc);
         let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
         {
             let db = Db::open(
