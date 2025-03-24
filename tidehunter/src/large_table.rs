@@ -1138,6 +1138,7 @@ impl Entries {
                     panic!("Invalid cell id for tree entry list: {cell_id:?}");
                 };
                 // todo this clones key on every get query - need a fix
+                // todo do not insert entry on read request
                 tree.entry(cell.clone()).or_insert_with(|| {
                     let unload_jitter = context
                         .config
