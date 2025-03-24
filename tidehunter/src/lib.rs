@@ -1,6 +1,7 @@
 pub mod batch;
 mod cell;
 pub mod config;
+mod context;
 mod control;
 mod crc;
 pub mod db;

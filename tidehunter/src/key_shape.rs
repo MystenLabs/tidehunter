@@ -370,6 +370,11 @@ impl KeySpaceConfig {
         self.key_reduction = Some(key_reduction);
         self
     }
+
+    pub fn with_key_type(mut self, key_type: KeyType) -> Self {
+        self.key_type = key_type;
+        self
+    }
 }
 
 impl KeyShape {
