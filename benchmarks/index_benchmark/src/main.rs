@@ -6,7 +6,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Arc;
 use std::thread;
 use tidehunter::metrics::print_histogram_stats;
 
@@ -223,45 +222,6 @@ impl<'a> IndexBenchmark<'a> {
         })
     }
 
-    fn run_benchmark<P: IndexFormat>(
-        &self,
-        index_format: &P,
-        num_lookups: usize,
-        batch_size: usize,
-        metrics: &Metrics,
-    ) -> Vec<Duration> {
-        let ks_desc = self.key_shape.ks(self.ks);
-        let mut rng = rand::thread_rng();
-        let mut durations = Vec::with_capacity(num_lookups / batch_size);
-
-        println!(
-            "Running {} lookups in batches of {}",
-            num_lookups, batch_size
-        );
-
-        for _ in 0..(num_lookups / batch_size) {
-            let start = Instant::now();
-
-            for _ in 0..batch_size {
-                // Choose a random index
-                // todo revert to self.index_count. this solution avoid alignment issues
-                let index_idx = rng.gen_range(0..self.index_count - 1) as usize;
-                let reader = &self.readers[index_idx];
-
-                // Create a random key to look up
-                let mut key = vec![0u8; 32];
-                rng.fill(&mut key[..]);
-
-                // Look up the key
-                index_format.lookup_unloaded(ks_desc, reader, &key, &metrics);
-            }
-
-            durations.push(start.elapsed());
-        }
-
-        durations
-    }
-
     fn run_benchmark_multithreaded<P: IndexFormat + Clone + Send + 'static>(
         &self,
         index_format: P,
@@ -298,7 +258,6 @@ impl<'a> IndexBenchmark<'a> {
 
                     // Get a slice of readers for this thread
                     let thread_readers = &self.readers[start_idx..end_idx];
-                    let metrics = metrics.clone();
                     s.spawn(move || {
                         let mut rng = rand::thread_rng();
                         let mut durations = Vec::with_capacity(num_lookups / batch_size);
@@ -337,41 +296,6 @@ impl<'a> IndexBenchmark<'a> {
         let total_time = start.elapsed();
         (total_time, thread_durations)
     }
-}
-
-fn analyze_results(name: &str, durations: &[Duration], batch_size: usize) {
-    let total_lookups = durations.len() * batch_size;
-    let total_time: Duration = durations.iter().sum();
-    let throughput = total_lookups as f64 / total_time.as_secs_f64();
-
-    // Calculate simple statistics without statrs dependency
-    let ns_per_lookup: Vec<f64> = durations
-        .iter()
-        .map(|d| d.as_nanos() as f64 / batch_size as f64)
-        .collect();
-
-    let mean = ns_per_lookup.iter().sum::<f64>() / ns_per_lookup.len() as f64;
-
-    let variance = ns_per_lookup
-        .iter()
-        .map(|x| (x - mean).powi(2))
-        .sum::<f64>()
-        / ns_per_lookup.len() as f64;
-    let std_dev = variance.sqrt();
-
-    let min = ns_per_lookup.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let max = ns_per_lookup
-        .iter()
-        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-    println!("{} Results:", name);
-    println!("  Total: {} lookups in {:.2?}", total_lookups, total_time);
-    println!("  Throughput: {:.2} lookups/sec", throughput);
-    println!("  Latency per lookup:");
-    println!("    Mean: {:.2} ns", mean);
-    println!("    Std Dev: {:.2} ns", std_dev);
-    println!("    Min: {:.2} ns", min);
-    println!("    Max: {:.2} ns", max);
 }
 
 fn analyze_multithreaded_results(
@@ -589,75 +513,50 @@ fn main() {
                 IndexBenchmark::load_from_file(&header_file, header_file_length, direct_io)
                     .expect("Failed to load HeaderLookupIndex benchmark file");
 
-            if num_threads == 1 {
-                // Single-threaded benchmark (original implementation)
-                let mut header_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
-                let mut uniform_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
-                for _ in 0..num_runs {
-                    let mut durations = header_bench.run_benchmark(
-                        &LookupHeaderIndex,
+            println!(
+                "Running multithreaded benchmark with {} threads",
+                num_threads
+            );
+            for run in 0..num_runs {
+                println!("Run {}/{}", run + 1, num_runs);
+
+                // Run HeaderLookupIndex benchmark
+                let (header_total_time, header_thread_durations) = header_bench
+                    .run_benchmark_multithreaded(
+                        LookupHeaderIndex,
                         num_lookups,
                         batch_size,
+                        num_threads,
                         &header_metrics,
                     );
-                    header_durations.append(&mut durations);
-                    analyze_results("HeaderLookupIndex", &header_durations, batch_size);
 
-                    durations = uniform_bench.run_benchmark(
-                        &UniformLookupIndex::new_with_window_size(window_size),
+                analyze_multithreaded_results(
+                    "HeaderLookupIndex",
+                    header_total_time,
+                    &header_thread_durations,
+                    batch_size,
+                    num_threads,
+                );
+
+                // Run UniformLookupIndex benchmark
+                let (uniform_total_time, uniform_thread_durations) = uniform_bench
+                    .run_benchmark_multithreaded(
+                        UniformLookupIndex::new_with_window_size(window_size),
                         num_lookups,
                         batch_size,
+                        num_threads,
                         &uniform_metrics,
                     );
-                    uniform_durations.append(&mut durations);
-                    analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
-                }
-            } else {
-                // Multi-threaded benchmark
-                println!(
-                    "Running multithreaded benchmark with {} threads",
-                    num_threads
+
+                analyze_multithreaded_results(
+                    "UniformLookupIndex",
+                    uniform_total_time,
+                    &uniform_thread_durations,
+                    batch_size,
+                    num_threads,
                 );
-                for run in 0..num_runs {
-                    println!("Run {}/{}", run + 1, num_runs);
-
-                    // Run HeaderLookupIndex benchmark
-                    let (header_total_time, header_thread_durations) = header_bench
-                        .run_benchmark_multithreaded(
-                            LookupHeaderIndex,
-                            num_lookups,
-                            batch_size,
-                            num_threads,
-                            &header_metrics,
-                        );
-
-                    analyze_multithreaded_results(
-                        "HeaderLookupIndex",
-                        header_total_time,
-                        &header_thread_durations,
-                        batch_size,
-                        num_threads,
-                    );
-
-                    // Run UniformLookupIndex benchmark
-                    let (uniform_total_time, uniform_thread_durations) = uniform_bench
-                        .run_benchmark_multithreaded(
-                            UniformLookupIndex::new_with_window_size(window_size),
-                            num_lookups,
-                            batch_size,
-                            num_threads,
-                            &uniform_metrics,
-                        );
-
-                    analyze_multithreaded_results(
-                        "UniformLookupIndex",
-                        uniform_total_time,
-                        &uniform_thread_durations,
-                        batch_size,
-                        num_threads,
-                    );
-                }
             }
+            // }
 
             // Print HeaderLookupIndex stats
             println!(
