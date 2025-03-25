@@ -879,7 +879,6 @@ mod test {
     }
 
     #[test]
-    // #[ignore] // todo fix
     fn test_iterator_prefixed() {
         test_iterator(prefix_key_shape());
     }
