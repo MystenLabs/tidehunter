@@ -5,6 +5,7 @@ use crate::flusher::{FlushKind, IndexFlusher};
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
 use crate::index::INDEX_FORMAT;
+use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
@@ -468,15 +469,7 @@ impl LargeTable {
         loader: &L,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
-    ) -> Result<
-        Option<(
-            Option<CellId>, /*next cell*/
-            Option<Bytes>,  /*next key*/
-            Bytes,          /*fetched key*/
-            WalPosition,    /*fetched value*/
-        )>,
-        L::Error,
-    > {
+    ) -> Result<Option<IteratorResult<WalPosition>>, L::Error> {
         let ks_table = self.ks_table(ks);
         loop {
             let row = ks.mutex_for_cell(&cell);
@@ -495,7 +488,12 @@ impl LargeTable {
                 } else {
                     Some(cell)
                 };
-                return Ok(Some((next_cell, next_key, key, value)));
+                return Ok(Some(IteratorResult {
+                    next_cell,
+                    next_key,
+                    key,
+                    value,
+                }));
             } else {
                 next_key = None;
                 let Some(next_cell) = ks.next_cell(cell, reverse) else {

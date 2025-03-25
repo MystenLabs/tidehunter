@@ -99,11 +99,11 @@ impl DbIterator {
             &self.end_cell_exclusive,
             self.reverse,
         ) {
-            Ok(Some((next_cell, next_key, key, value))) => {
-                self.next_cell = next_cell;
-                self.next_key = next_key;
-                self.check_bounds(&key)?;
-                Ok(Some(Ok((key, value))))
+            Ok(Some(result)) => {
+                self.next_cell = result.next_cell;
+                self.next_key = result.next_key;
+                self.check_bounds(&result.key)?;
+                Ok(Some(Ok((result.key, result.value))))
             }
             Ok(None) => Ok(None),
             Err(err) => Ok(Some(Err(err))),

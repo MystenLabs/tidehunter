@@ -8,6 +8,7 @@ use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
 use crate::index::INDEX_FORMAT;
 use crate::iterators::db_iterator::DbIterator;
+use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
@@ -323,28 +324,21 @@ impl Db {
         next_key: Option<Bytes>,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
-    ) -> DbResult<
-        Option<(
-            Option<CellId>, /*next cell*/
-            Option<Bytes>,  /*next key*/
-            Bytes,          /*fetched key*/
-            Bytes,          /*fetched value*/
-        )>,
-    > {
+    ) -> DbResult<Option<IteratorResult<Bytes>>> {
         let ks = self.key_shape.ks(ks);
         let _timer = self
             .metrics
             .db_op_mcs
             .with_label_values(&["next_entry", ks.name()])
             .mcs_timer();
-        let Some((next_cell, next_key, _key, wal_position)) =
+        let Some(result) =
             self.large_table
                 .next_entry(ks, cell, next_key, self, end_cell_exclusive, reverse)?
         else {
             return Ok(None);
         };
-        let (key, value) = self.read_record(wal_position)?;
-        Ok(Some((next_cell, next_key, key, value)))
+        let (key, value) = self.read_record(result.value)?;
+        Ok(Some(result.with_key_value(key, value)))
     }
 
     pub(crate) fn update_flushed_index(
