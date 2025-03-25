@@ -487,11 +487,9 @@ impl LargeTable {
                     .large_table_contention
                     .with_label_values(&[ks.name()]),
             );
-            // todo - use try_entry_mut
-            let entry = row.entry_mut(&cell);
-            // todo read from disk instead of loading
-            entry.maybe_load(loader)?;
-            if let Some((key, value, next_key)) = entry.next_entry(next_key, reverse) {
+            if let Some((key, value, next_key)) =
+                self.next_in_cell(loader, &mut row, &cell, next_key, reverse)?
+            {
                 let next_cell = if next_key.is_none() {
                     ks.next_cell(cell, reverse)
                 } else {
@@ -517,6 +515,22 @@ impl LargeTable {
                 cell = next_cell;
             }
         }
+    }
+
+    fn next_in_cell<L: Loader>(
+        &self,
+        loader: &L,
+        row: &mut Row,
+        cell: &CellId,
+        next_key: Option<Bytes>,
+        reverse: bool,
+    ) -> Result<Option<(Bytes, WalPosition, Option<Bytes>)>, L::Error> {
+        let Some(entry) = row.try_entry_mut(cell) else {
+            return Ok(None);
+        };
+        // todo read from disk instead of loading
+        entry.maybe_load(loader)?;
+        Ok(entry.next_entry(next_key, reverse))
     }
 
     /// See Db::last_in_range for documentation.
