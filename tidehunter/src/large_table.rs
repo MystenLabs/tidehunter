@@ -551,6 +551,7 @@ impl LargeTable {
                     if let Some(next) = row.entries.next_tree_cell(bytes, reverse) {
                         return Some(CellId::Bytes(next.clone()));
                     };
+                    // todo we can optimize this by keeping hints to a next non-empty mutex in the row
                     let Some(next_mutex) = ks.next_mutex(mutex, reverse) else {
                         return None;
                     };
