@@ -341,6 +341,16 @@ impl Db {
         Ok(Some(result.with_key_value(key, value)))
     }
 
+    /// Returns the next cell in the large table
+    pub(crate) fn next_cell(
+        &self,
+        ks: &KeySpaceDesc,
+        cell: &CellId,
+        reverse: bool,
+    ) -> Option<CellId> {
+        self.large_table.next_cell(ks, cell, reverse)
+    }
+
     pub(crate) fn update_flushed_index(
         &self,
         ks: KeySpace,
@@ -869,7 +879,7 @@ mod test {
     }
 
     #[test]
-    #[ignore] // todo fix
+    // #[ignore] // todo fix
     fn test_iterator_prefixed() {
         test_iterator(prefix_key_shape());
     }

@@ -41,7 +41,9 @@ impl DbIterator {
         let ks = self.db.ks(self.ks);
         let reduced_lower_bound = ks.reduced_key_bytes(full_lower_bound.clone());
         if self.reverse {
-            self.end_cell_exclusive = ks.next_cell(ks.cell_id(&reduced_lower_bound), true);
+            self.end_cell_exclusive =
+                self.db
+                    .next_cell(ks, &ks.cell_id(&reduced_lower_bound), true);
         } else {
             self.next_cell = Some(ks.cell_id(&reduced_lower_bound));
             self.next_key = Some(reduced_lower_bound);
@@ -64,7 +66,9 @@ impl DbIterator {
             self.next_cell = Some(ks.cell_id(&next_key));
             self.next_key = Some(next_key);
         } else {
-            self.end_cell_exclusive = ks.next_cell(ks.cell_id(&reduced_upper_bound), false);
+            self.end_cell_exclusive =
+                self.db
+                    .next_cell(ks, &ks.cell_id(&reduced_upper_bound), false);
         }
         self.full_upper_bound = Some(full_upper_bound);
     }

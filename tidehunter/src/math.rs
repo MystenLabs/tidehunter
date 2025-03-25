@@ -28,6 +28,19 @@ pub fn starting_u32(slice: &[u8]) -> u32 {
     u32::from_be_bytes(p)
 }
 
+/// Return next number in range 0..max_excluded, or None if at the end of the range
+pub fn next_bounded(n: usize, max_excluded: usize, reverse: bool) -> Option<usize> {
+    if reverse {
+        n.checked_sub(1)
+    } else {
+        if n >= max_excluded - 1 {
+            None
+        } else {
+            Some(n + 1)
+        }
+    }
+}
+
 #[test]
 fn test_downscale_u32() {
     assert_eq!(0, downscale_u32(0, 1));

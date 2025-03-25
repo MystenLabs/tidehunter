@@ -9,6 +9,7 @@ use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
+use crate::primitives::range_from_excluding;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::{WalPosition, WalRandomRead};
 use bloom::{BloomFilter, ASMS};
@@ -318,16 +319,21 @@ impl LargeTable {
     }
 
     fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, CellId) {
+        let cell = ks.cell_id(k);
+        let mutex = ks.mutex_for_cell(&cell);
+        let row = self.row_by_mutex(ks, mutex);
+        (row, cell)
+    }
+
+    fn row_by_mutex(&self, ks: &KeySpaceDesc, mutex: usize) -> MutexGuard<'_, Row> {
         let ks_table = self.ks_table(ks);
-        let (mutex, cell) = ks.location_for_key(k);
-        let row = ks_table.lock(
+        ks_table.lock(
             mutex,
             &self
                 .metrics
                 .large_table_contention
                 .with_label_values(&[ks.name()]),
-        );
-        (row, cell)
+        )
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
@@ -472,19 +478,21 @@ impl LargeTable {
     ) -> Result<Option<IteratorResult<WalPosition>>, L::Error> {
         let ks_table = self.ks_table(ks);
         loop {
-            let row = ks.mutex_for_cell(&cell);
-            let mut row = ks_table.lock(
-                row,
-                &self
-                    .metrics
-                    .large_table_contention
-                    .with_label_values(&[ks.name()]),
-            );
-            if let Some((key, value, next_key)) =
+            let next_in_cell = {
+                let row = ks.mutex_for_cell(&cell);
+                let mut row = ks_table.lock(
+                    row,
+                    &self
+                        .metrics
+                        .large_table_contention
+                        .with_label_values(&[ks.name()]),
+                );
                 self.next_in_cell(loader, &mut row, &cell, next_key, reverse)?
-            {
+                // drop row mutex as required by Self::next_cell called below
+            };
+            if let Some((key, value, next_key)) = next_in_cell {
                 let next_cell = if next_key.is_none() {
-                    ks.next_cell(cell, reverse)
+                    self.next_cell(ks, &cell, reverse)
                 } else {
                     Some(cell)
                 };
@@ -496,7 +504,7 @@ impl LargeTable {
                 }));
             } else {
                 next_key = None;
-                let Some(next_cell) = ks.next_cell(cell, reverse) else {
+                let Some(next_cell) = self.next_cell(ks, &cell, reverse) else {
                     return Ok(None);
                 };
                 if let Some(end_cell_exclusive) = end_cell_exclusive {
@@ -529,6 +537,27 @@ impl LargeTable {
         // todo read from disk instead of loading
         entry.maybe_load(loader)?;
         Ok(entry.next_entry(next_key, reverse))
+    }
+
+    /// See Db::next_cell for documentation
+    /// This function acquires row mutexes, should not be called by code that might hold row mutex
+    pub fn next_cell(&self, ks: &KeySpaceDesc, cell: &CellId, reverse: bool) -> Option<CellId> {
+        match cell {
+            CellId::Integer(cell) => ks.next_integer_cell(*cell, reverse),
+            CellId::Bytes(bytes) => {
+                let mut mutex = ks.mutex_for_cell(&cell);
+                loop {
+                    let row = self.row_by_mutex(ks, mutex);
+                    if let Some(next) = row.entries.next_tree_cell(bytes, reverse) {
+                        return Some(CellId::Bytes(next.clone()));
+                    };
+                    let Some(next_mutex) = ks.next_mutex(mutex, reverse) else {
+                        return None;
+                    };
+                    mutex = next_mutex;
+                }
+            }
+        }
     }
 
     /// See Db::last_in_range for documentation.
@@ -1194,6 +1223,17 @@ impl Entries {
                 tree.get_mut(cell)
             }
         }
+    }
+
+    fn next_tree_cell(
+        &self,
+        cell: &CellIdBytesContainer,
+        reverse: bool,
+    ) -> Option<&CellIdBytesContainer> {
+        let Entries::Tree(tree) = self else {
+            panic!("next_cell_id can only be called on tree entries");
+        };
+        range_from_excluding::next_key_in_tree(&tree, cell, reverse)
     }
 
     pub fn is_empty(&self) -> bool {

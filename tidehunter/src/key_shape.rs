@@ -1,5 +1,6 @@
 use crate::cell::CellId;
 use crate::db::MAX_KEY_LEN;
+use crate::math;
 use crate::math::{downscale_u32, starting_u32};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
@@ -175,14 +176,13 @@ impl KeySpaceDesc {
      * **Key** is a full key(u8 slice).
      * **Prefix** is u32 representing a 4-byte prefix of the key used to map key to its cell.
      */
-    pub(crate) fn location_for_key(&self, k: &[u8]) -> (usize, CellId) {
-        let cell = self.cell_id(k);
-        let mutex = self.mutex_for_cell(&cell);
-        (mutex, cell)
-    }
 
     pub(crate) fn mutex_for_cell(&self, cell: &CellId) -> usize {
         cell.mutex_seed() % self.num_mutexes()
+    }
+
+    pub(crate) fn next_mutex(&self, mutex: usize, reverse: bool) -> Option<usize> {
+        math::next_bounded(mutex, self.num_mutexes(), reverse)
     }
 
     // Reverse of locate_cell
@@ -198,19 +198,8 @@ impl KeySpaceDesc {
         self.per_mutex
     }
 
-    pub fn next_cell(&self, cell: CellId, reverse: bool) -> Option<CellId> {
-        let CellId::Integer(cell) = cell else {
-            unimplemented!("next_cell for bytes")
-        };
-        let next = if reverse {
-            cell.checked_sub(1)
-        } else {
-            if cell >= self.num_cells() - 1 {
-                None
-            } else {
-                Some(cell + 1)
-            }
-        };
+    pub fn next_integer_cell(&self, cell: usize, reverse: bool) -> Option<CellId> {
+        let next = math::next_bounded(cell, self.num_cells(), reverse);
         next.map(CellId::Integer)
     }
 
