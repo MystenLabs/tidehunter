@@ -247,7 +247,10 @@ impl LargeTable {
                 return Ok(GetResult::Value(value.clone()));
             }
         }
-        let entry = row.entry_mut(&cell);
+        let entry = row.try_entry_mut(&cell);
+        let Some(entry) = entry else {
+            return Ok(self.report_lookup_result(ks, None, "prefix"));
+        };
         if entry.bloom_filter_not_found(k) {
             return Ok(self.report_lookup_result(ks, None, "bloom"));
         }
@@ -484,6 +487,7 @@ impl LargeTable {
                     .large_table_contention
                     .with_label_values(&[ks.name()]),
             );
+            // todo - use try_entry_mut
             let entry = row.entry_mut(&cell);
             // todo read from disk instead of loading
             entry.maybe_load(loader)?;
@@ -534,6 +538,7 @@ impl LargeTable {
                 .large_table_contention
                 .with_label_values(&[ks.name()]),
         );
+        // todo use try_entry_mut
         let entry = row.entry_mut(cell);
         // todo read from disk instead of loading
         entry.maybe_load(loader)?;
@@ -600,6 +605,10 @@ impl LargeTable {
 impl Row {
     pub fn entry_mut(&mut self, id: &CellId) -> &mut LargeTableEntry {
         self.entries.entry_mut(id, &self.context)
+    }
+
+    pub fn try_entry_mut(&mut self, id: &CellId) -> Option<&mut LargeTableEntry> {
+        self.entries.try_entry_mut(id, &self.context)
     }
 }
 
@@ -1137,7 +1146,6 @@ impl Entries {
                     panic!("Invalid cell id for tree entry list: {cell_id:?}");
                 };
                 // todo this clones key on every get query - need a fix
-                // todo do not insert entry on read request
                 tree.entry(cell.clone()).or_insert_with(|| {
                     let unload_jitter = context
                         .config
@@ -1156,6 +1164,22 @@ impl Entries {
                 //     let new_entry = LargeTableEntry::new_empty(context.clone(), cell_id.clone(), unload_jitter);
                 //     va.insert(new_entry)
                 // }
+            }
+        }
+    }
+
+    pub fn try_entry_mut(
+        &mut self,
+        cell_id: &CellId,
+        context: &KsContext,
+    ) -> Option<&mut LargeTableEntry> {
+        match self {
+            Entries::Array(_, _) => Some(self.entry_mut(cell_id, context)),
+            Entries::Tree(tree) => {
+                let CellId::Bytes(cell) = cell_id else {
+                    panic!("Invalid cell id for tree entry list: {cell_id:?}");
+                };
+                tree.get_mut(cell)
             }
         }
     }
