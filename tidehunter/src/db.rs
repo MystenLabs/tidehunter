@@ -669,17 +669,28 @@ impl From<bincode::Error> for DbError {
 mod test {
     use super::*;
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
+    use crate::key_shape::{KeyType, PrefixedUniformKeyConfig};
     use rand::rngs::ThreadRng;
     use rand::Rng;
 
     #[test]
-    fn db_test() {
+    fn db_test_uniform() {
+        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
+        db_test(key_shape, ks);
+    }
+
+    #[test]
+    fn db_test_prefixed() {
+        let ksc = KeySpaceConfig::new().with_key_type(KeyType::PrefixedUniform(
+            PrefixedUniformKeyConfig::new(2, 0),
+        ));
+        let (key_shape, ks) = KeyShape::new_single_config(4, 12, 12, ksc);
+        db_test(key_shape, ks);
+    }
+
+    fn db_test(key_shape: KeyShape, ks: KeySpace) {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let config = Arc::new(Config::small());
-        // use crate::key_shape::{KeyType, PrefixedUniformKeyConfig};
-        // let ksc = KeySpaceConfig::new().with_key_type(KeyType::PrefixedUniform(PrefixedUniformKeyConfig::new(2, 0)));
-        // let (key_shape, ks) = KeyShape::new_single_config(4, 12, 12, ksc);
-        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
         {
             let db = Db::open(
                 dir.path(),
