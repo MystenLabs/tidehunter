@@ -675,20 +675,15 @@ mod test {
 
     #[test]
     fn db_test_uniform() {
-        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
-        db_test(key_shape, ks);
+        db_test(KeyShape::new_single(4, 12, 12));
     }
 
     #[test]
     fn db_test_prefixed() {
-        let ksc = KeySpaceConfig::new().with_key_type(KeyType::PrefixedUniform(
-            PrefixedUniformKeyConfig::new(2, 0),
-        ));
-        let (key_shape, ks) = KeyShape::new_single_config(4, 12, 12, ksc);
-        db_test(key_shape, ks);
+        db_test(prefix_key_shape());
     }
 
-    fn db_test(key_shape: KeyShape, ks: KeySpace) {
+    fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let config = Arc::new(Config::small());
         {
@@ -815,10 +810,18 @@ mod test {
     }
 
     #[test]
-    fn test_remove() {
+    fn test_remove_uniform() {
+        test_remove(KeyShape::new_single(4, 12, 12));
+    }
+
+    #[test]
+    fn test_remove_prefixed() {
+        test_remove(prefix_key_shape());
+    }
+
+    fn test_remove((key_shape, ks): (KeyShape, KeySpace)) {
         let dir = tempdir::TempDir::new("test-remove").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
         {
             let db = Db::open(
                 dir.path(),
@@ -867,11 +870,20 @@ mod test {
     }
 
     #[test]
-    fn test_iterator() {
+    fn test_iterator_uniform() {
+        test_iterator(KeyShape::new_single(4, 12, 12));
+    }
+
+    #[test]
+    #[ignore] // todo fix
+    fn test_iterator_prefixed() {
+        test_iterator(prefix_key_shape());
+    }
+
+    fn test_iterator((key_shape, ks): (KeyShape, KeySpace)) {
         let dir = tempdir::TempDir::new("test-iterator").unwrap();
         let config = Arc::new(Config::small());
         let mut data = Vec::with_capacity(1024);
-        let (key_shape, ks) = KeyShape::new_single(4, 4, 4);
         {
             let db = Db::open(
                 dir.path(),
@@ -1617,6 +1629,13 @@ mod test {
         // the next lookup comes from the lru cache
         assert_eq!(db.get(ks, &[1, 2, 3, 4]).unwrap().unwrap().as_ref(), &[1]);
         assert_eq!(4, lru_lookups("root", &metrics));
+    }
+
+    fn prefix_key_shape() -> (KeyShape, KeySpace) {
+        let ksc = KeySpaceConfig::new().with_key_type(KeyType::PrefixedUniform(
+            PrefixedUniformKeyConfig::new(2, 0),
+        ));
+        KeyShape::new_single_config(4, 12, 12, ksc)
     }
 
     fn lru_lookups(ks: &str, metrics: &Metrics) -> u64 {
