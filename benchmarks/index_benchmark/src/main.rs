@@ -6,6 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use tidehunter::metrics::print_histogram_stats;
 
@@ -297,7 +298,7 @@ impl<'a> IndexBenchmark<'a> {
 
                     // Get a slice of readers for this thread
                     let thread_readers = &self.readers[start_idx..end_idx];
-
+                    let metrics = metrics.clone();
                     s.spawn(move || {
                         let mut rng = rand::thread_rng();
                         let mut durations = Vec::with_capacity(num_lookups / batch_size);
