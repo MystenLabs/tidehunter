@@ -1,0 +1,66 @@
+Benchmark started at Tue Mar 25 02:26:33 AM UTC 2025
+Running benchmark with direct I/O: off...
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/index_benchmark run --num-lookups 1000000 --num-runs 3 --batch-size 1000 --window-size 400 --header-file data/bench-header-1TB-1M.dat --uniform-file data/bench-uniform-1TB-1M.dat`
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 1000000 lookups in 99.41s
+  Throughput: 10059.66 lookups/sec
+  Latency per lookup:
+    Mean: 99406.93 ns
+    Std Dev: 1674.28 ns
+    Min: 93736.64 ns
+    Max: 104802.47 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 1000000 lookups in 141.14s
+  Throughput: 7085.00 lookups/sec
+  Latency per lookup:
+    Mean: 141143.19 ns
+    Std Dev: 2469.05 ns
+    Min: 131878.51 ns
+    Max: 149371.77 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 2000000 lookups in 198.25s
+  Throughput: 10088.44 lookups/sec
+  Latency per lookup:
+    Mean: 99123.39 ns
+    Std Dev: 1584.20 ns
+    Min: 93736.64 ns
+    Max: 104802.47 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 2000000 lookups in 282.11s
+  Throughput: 7089.34 lookups/sec
+  Latency per lookup:
+    Mean: 141056.94 ns
+    Std Dev: 2443.09 ns
+    Min: 131878.51 ns
+    Max: 149371.77 ns
+Running 1000000 lookups in batches of 1000
+HeaderLookupIndex Results:
+  Total: 3000000 lookups in 298.31s
+  Throughput: 10056.79 lookups/sec
+  Latency per lookup:
+    Mean: 99435.30 ns
+    Std Dev: 1650.51 ns
+    Min: 93736.64 ns
+    Max: 105111.05 ns
+Running 1000000 lookups in batches of 1000
+UniformLookupIndex Results:
+  Total: 3000000 lookups in 423.37s
+  Throughput: 7085.93 lookups/sec
+  Latency per lookup:
+    Mean: 141124.76 ns
+    Std Dev: 2425.49 ns
+    Min: 131878.51 ns
+    Max: 150451.02 ns
+HeaderLookupIndex: scan mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_scan_mcs", help: "lookup_scan_mcs", const_label_pairs: [], variable_labels: [], id: 914794617080129952, dim_hash: 914794617080129952 }, val: AtomicU64 { inner: 1700 }, val_type: Counter, label_pairs: [] } }
+HeaderLookupIndex: io mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_mcs", help: "lookup_io_mcs", const_label_pairs: [], variable_labels: [], id: 1936770213637198483, dim_hash: 1936770213637198483 }, val: AtomicU64 { inner: 294405078 }, val_type: Counter, label_pairs: [] } }
+HeaderLookupIndex: io bytes GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_bytes", help: "lookup_io_bytes", const_label_pairs: [], variable_labels: [], id: 16528068844073587369, dim_hash: 16528068844073587369 }, val: AtomicU64 { inner: 117209055800 }, val_type: Counter, label_pairs: [] } }
+Histogram: Histogram { core: HistogramCore { desc: Desc { fq_name: "lookup_iterations", help: "lookup_iterations", const_label_pairs: [], variable_labels: [], id: 2280981954329258229, dim_hash: 2280981954329258229 }, label_pairs: [], collect_lock: Mutex { data: (), poisoned: false, .. }, shard_and_count: ShardAndCount { inner: 3000000 }, shards: [Shard { sum: AtomicF64 { inner: 4707382806446080000 }, count: AtomicU64 { inner: 3000000 }, buckets: [AtomicU64 { inner: 1262693 }, AtomicU64 { inner: 1309090 }, AtomicU64 { inner: 361739 }, AtomicU64 { inner: 60317 }, AtomicU64 { inner: 5834 }, AtomicU64 { inner: 318 }, AtomicU64 { inner: 9 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }, Shard { sum: AtomicF64 { inner: 0 }, count: AtomicU64 { inner: 0 }, buckets: [AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }], upper_bounds: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0] } }
+UniformLookupIndex: scan mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_scan_mcs", help: "lookup_scan_mcs", const_label_pairs: [], variable_labels: [], id: 914794617080129952, dim_hash: 914794617080129952 }, val: AtomicU64 { inner: 1840 }, val_type: Counter, label_pairs: [] } }
+UniformLookupIndex: io mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_mcs", help: "lookup_io_mcs", const_label_pairs: [], variable_labels: [], id: 1936770213637198483, dim_hash: 1936770213637198483 }, val: AtomicU64 { inner: 418761733 }, val_type: Counter, label_pairs: [] } }
+UniformLookupIndex: io bytes GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_bytes", help: "lookup_io_bytes", const_label_pairs: [], variable_labels: [], id: 16528068844073587369, dim_hash: 16528068844073587369 }, val: AtomicU64 { inner: 83811161400 }, val_type: Counter, label_pairs: [] } }
+Benchmark completed at Tue Mar 25 02:38:34 AM UTC 2025
