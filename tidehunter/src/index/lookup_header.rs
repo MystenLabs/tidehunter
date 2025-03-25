@@ -86,7 +86,6 @@ impl IndexFormat for LookupHeaderIndex {
             .lookup_io_mcs
             .inc_by(now.elapsed().as_micros() as u64);
         metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
-        let buffer = &buffer[..];
         let element_size = Self::element_size(ks);
 
         // Use binary search instead of linear search

@@ -144,9 +144,10 @@ pub mod test {
     use rand::{rngs::ThreadRng, Rng, RngCore};
 
     use crate::key_shape::KeyType;
-    use crate::metrics::Metrics;
     use crate::{
-        index::index_format::IndexFormat, index::index_table::IndexTable, key_shape::KeyShape,
+        index::{index_format::IndexFormat, index_table::IndexTable},
+        key_shape::KeyShape,
+        metrics::Metrics,
         wal::WalPosition,
     };
 
