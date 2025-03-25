@@ -3,7 +3,7 @@ use minibytes::Bytes;
 
 pub mod db_iterator;
 
-pub struct IteratorResult<T> {
+pub(crate) struct IteratorResult<T> {
     pub next_cell: Option<CellId>,
     pub next_key: Option<Bytes>,
     pub key: Bytes,
