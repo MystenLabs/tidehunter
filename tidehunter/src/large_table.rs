@@ -108,19 +108,23 @@ impl LargeTable {
                         config: config.clone(),
                         metrics: metrics.clone(),
                     };
-                    let entries = row_snapshot
-                        .iter()
-                        .map(|(cell, position)| {
-                            let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
-                            LargeTableEntry::from_snapshot_position(
-                                context.clone(),
-                                cell.clone(),
-                                position,
-                                unload_jitter,
-                            )
-                        })
-                        .collect();
-                    let entries = Entries::Array(ks.num_mutexes(), entries);
+                    let entries = row_snapshot.iter().map(|(cell, position)| {
+                        let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
+                        LargeTableEntry::from_snapshot_position(
+                            context.clone(),
+                            cell.clone(),
+                            position,
+                            unload_jitter,
+                        )
+                    });
+                    let entries = match ks.key_type() {
+                        KeyType::Uniform => Entries::Array(ks.num_mutexes(), entries.collect()),
+                        KeyType::PrefixedUniform(_) => Entries::Tree(
+                            entries
+                                .map(|e| (e.cell.assume_bytes_id().clone(), e))
+                                .collect(),
+                        ),
+                    };
                     let value_lru = ks.value_cache_size().map(LruCache::new);
                     Row {
                         entries,

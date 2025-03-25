@@ -18,6 +18,13 @@ impl CellId {
             CellId::Bytes(bytes) => starting_u32(&bytes) as usize,
         }
     }
+
+    pub fn assume_bytes_id(&self) -> &CellIdBytesContainer {
+        match self {
+            CellId::Integer(_) => panic!("assume_bytes_id called on integer cell id"),
+            CellId::Bytes(bytes) => bytes,
+        }
+    }
 }
 
 impl PartialOrd for CellId {
