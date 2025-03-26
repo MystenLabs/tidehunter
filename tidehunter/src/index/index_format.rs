@@ -30,13 +30,14 @@ pub mod test {
     use minibytes::Bytes;
     use rand::{rngs::ThreadRng, Rng, RngCore};
 
+    use crate::key_shape::KeyType;
     use crate::{
         index::index_format::IndexFormat, index::index_table::IndexTable, key_shape::KeyShape,
         wal::WalPosition,
     };
 
     pub fn test_index_lookup_inner(pi: &impl IndexFormat) {
-        let (shape, ks) = KeyShape::new_single(16, 8, 8);
+        let (shape, ks) = KeyShape::new_single(16, 8, KeyType::uniform(8));
         let ks = shape.ks(ks);
         let mut index = IndexTable::default();
         index.insert(k128(1), w(5));
@@ -66,7 +67,7 @@ pub mod test {
     pub fn test_index_lookup_random_inner(pi: &impl IndexFormat) {
         const M: usize = 8;
         const P: usize = 8;
-        let (shape, ks) = KeyShape::new_single(4, M, P);
+        let (shape, ks) = KeyShape::new_single(4, M, KeyType::uniform(P));
         let ks = shape.ks(ks);
         let mut index = IndexTable::default();
         let mut rng = ThreadRng::default();

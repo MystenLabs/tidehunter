@@ -9,7 +9,7 @@ use crate::index::index_table::IndexTable;
 use crate::index::INDEX_FORMAT;
 use crate::iterators::db_iterator::DbIterator;
 use crate::iterators::IteratorResult;
-use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
+use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal::{
@@ -506,20 +506,28 @@ impl Db {
 
     fn report_memory_estimates(&self) {
         for ks in self.key_shape.iter_ks() {
-            let cache_estimate = (ks.reduced_key_size() + WalPosition::SIZE)
-                * ks.num_cells()
-                * self.config.max_dirty_keys;
-            self.metrics
-                .memory_estimate
-                .with_label_values(&[ks.name(), "index_cache"])
-                .set(cache_estimate as i64);
-            if let Some(bloom_filter) = ks.bloom_filter() {
-                let bloom_size = needed_bits(bloom_filter.rate, bloom_filter.count) / 8;
-                let bloom_estimate = bloom_size * ks.num_cells();
-                self.metrics
-                    .memory_estimate
-                    .with_label_values(&[ks.name(), "bloom"])
-                    .set(bloom_estimate as i64);
+            match ks.key_type() {
+                KeyType::Uniform(config) => {
+                    let num_cells = config.num_cells(ks);
+                    let cache_estimate = (ks.reduced_key_size() + WalPosition::SIZE)
+                        * num_cells
+                        * self.config.max_dirty_keys;
+                    self.metrics
+                        .memory_estimate
+                        .with_label_values(&[ks.name(), "index_cache"])
+                        .set(cache_estimate as i64);
+                    if let Some(bloom_filter) = ks.bloom_filter() {
+                        let bloom_size = needed_bits(bloom_filter.rate, bloom_filter.count) / 8;
+                        let bloom_estimate = bloom_size * num_cells;
+                        self.metrics
+                            .memory_estimate
+                            .with_label_values(&[ks.name(), "bloom"])
+                            .set(bloom_estimate as i64);
+                    }
+                }
+                KeyType::PrefixedUniform(_) => {
+                    // todo report actual values for memory usage since we can't have estimates here
+                }
             }
         }
         let maps_estimate = (self.config.max_maps as u64) * self.config.frag_size;
@@ -672,14 +680,14 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::key_shape::KeyType;
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
-    use crate::key_shape::{KeyType, PrefixedUniformKeyConfig};
     use rand::rngs::ThreadRng;
     use rand::Rng;
 
     #[test]
     fn db_test_uniform() {
-        db_test(KeyShape::new_single(4, 12, 12));
+        db_test(KeyShape::new_single(4, 12, KeyType::uniform(12)));
     }
 
     #[test]
@@ -767,7 +775,7 @@ mod test {
         let dir = tempdir::TempDir::new("test-batch").unwrap();
         let config = Config::small();
         let config = Arc::new(config);
-        let (key_shape, ks) = KeyShape::new_single(8, 12, 12);
+        let (key_shape, ks) = KeyShape::new_single(8, 12, KeyType::uniform(12));
         let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
         let threads = 8u64;
         let mut jhs = Vec::with_capacity(threads as usize);
@@ -803,7 +811,7 @@ mod test {
     fn test_batch() {
         let dir = tempdir::TempDir::new("test-batch").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
+        let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
         let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
         let mut batch = WriteBatch::new();
         batch.write(ks, vec![5, 6, 7, 8], vec![15]);
@@ -815,7 +823,7 @@ mod test {
 
     #[test]
     fn test_remove_uniform() {
-        test_remove(KeyShape::new_single(4, 12, 12));
+        test_remove(KeyShape::new_single(4, 12, KeyType::uniform(12)));
     }
 
     #[test]
@@ -875,7 +883,7 @@ mod test {
 
     #[test]
     fn test_iterator_uniform() {
-        test_iterator(KeyShape::new_single(4, 12, 12));
+        test_iterator(KeyShape::new_single(4, 12, KeyType::uniform(12)));
     }
 
     #[test]
@@ -979,7 +987,7 @@ mod test {
     fn test_iterator_run(data: Vec<u128>, ks_config: KeySpaceConfig) {
         let dir = tempdir::TempDir::new("test-iterator").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single_config(16, 4, 4, ks_config);
+        let (key_shape, ks) = KeyShape::new_single_config(16, 4, KeyType::uniform(4), ks_config);
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
@@ -1025,7 +1033,7 @@ mod test {
     fn test_ordered_iterator() {
         let dir = tempdir::TempDir::new("test-ordered-iterator").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
+        let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
         {
             let db = Db::open(
                 dir.path(),
@@ -1084,7 +1092,7 @@ mod test {
     fn test_empty() {
         let dir = tempdir::TempDir::new("test-empty").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
+        let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
         {
             let db = Db::open(
                 dir.path(),
@@ -1114,10 +1122,10 @@ mod test {
         let dir = tempdir::TempDir::new("test-small-keys").unwrap();
         let config = Arc::new(Config::small());
         let mut ksb = KeyShapeBuilder::new();
-        let ks0 = ksb.add_key_space("a", 0, 12, 12);
-        let ks1 = ksb.add_key_space("b", 1, 12, 12);
-        let ks2 = ksb.add_key_space("c", 2, 12, 12);
-        let _ks3 = ksb.add_key_space("d", 3, 12, 12);
+        let ks0 = ksb.add_key_space("a", 0, 12, KeyType::uniform(12));
+        let ks1 = ksb.add_key_space("b", 1, 12, KeyType::uniform(12));
+        let ks2 = ksb.add_key_space("c", 2, 12, KeyType::uniform(12));
+        let _ks3 = ksb.add_key_space("d", 3, 12, KeyType::uniform(12));
         let key_shape = ksb.build();
         {
             let db = Db::open(
@@ -1152,7 +1160,7 @@ mod test {
     fn test_last_in_range() {
         let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
+        let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
@@ -1191,7 +1199,7 @@ mod test {
         let config = Arc::new(Config::small());
         let mut ksb = KeyShapeBuilder::new();
         let ksc = KeySpaceConfig::new().with_value_cache_size(512);
-        let ks = ksb.add_key_space_config("k", 8, 1, 1, ksc);
+        let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
         let key_shape = ksb.build();
         let metrics = Metrics::new();
         let db = Db::open(
@@ -1223,7 +1231,7 @@ mod test {
         let config = Arc::new(Config::small());
         let mut ksb = KeyShapeBuilder::new();
         let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
-        let ks = ksb.add_key_space_config("k", 8, 1, 1, ksc);
+        let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
         let key_shape = ksb.build();
         let metrics = Metrics::new();
         let db = Db::open(
@@ -1270,7 +1278,7 @@ mod test {
         let mut config = Config::small();
         config.max_dirty_keys = 2;
         let config = Arc::new(config);
-        let (key_shape, ks) = KeyShape::new_single(5, 2, 1024);
+        let (key_shape, ks) = KeyShape::new_single(5, 2, KeyType::uniform(1024));
         #[track_caller]
         fn check_all(db: &Db, ks: KeySpace, last: u8) {
             for i in 5u8..=last {
@@ -1402,7 +1410,7 @@ mod test {
         let config = Arc::new(Config::small());
         let mut ksb = KeyShapeBuilder::new();
         let ksc = KeySpaceConfig::new().with_value_cache_size(10);
-        let ks = ksb.add_key_space_config("k", 1, 1, 1, ksc);
+        let ks = ksb.add_key_space_config("k", 1, 1, KeyType::uniform(1), ksc);
         let key_shape = ksb.build();
         let metrics = Metrics::new();
         let db = Db::open(
@@ -1460,7 +1468,7 @@ mod test {
         let dir =
             tempdir::TempDir::new(&format!("test-concurrent-single-value-update-{i}")).unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single(4, 1, 1);
+        let (key_shape, ks) = KeyShape::new_single(4, 1, KeyType::uniform(1));
         let cached_value;
         let key = Bytes::from(15u32.to_be_bytes().to_vec());
         {
@@ -1509,7 +1517,7 @@ mod test {
         let dir = tempdir::TempDir::new("test_key_reduction").unwrap();
         let config = Arc::new(Config::small());
         let ks_config = KeySpaceConfig::new().with_key_reduction(0..2);
-        let (key_shape, ks) = KeyShape::new_single_config(4, 1, 1, ks_config);
+        let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
@@ -1603,7 +1611,7 @@ mod test {
         let ks_config = KeySpaceConfig::new()
             .with_key_reduction(0..2)
             .with_value_cache_size(2);
-        let (key_shape, ks) = KeyShape::new_single_config(4, 1, 1, ks_config);
+        let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
         let metrics = Metrics::new();
         let db = Db::open(
             dir.path(),
@@ -1635,10 +1643,7 @@ mod test {
     }
 
     fn prefix_key_shape() -> (KeyShape, KeySpace) {
-        let ksc = KeySpaceConfig::new().with_key_type(KeyType::PrefixedUniform(
-            PrefixedUniformKeyConfig::new(2, 0),
-        ));
-        KeyShape::new_single_config(4, 12, 12, ksc)
+        KeyShape::new_single(4, 12, KeyType::prefix_uniform(2, 0))
     }
 
     fn lru_lookups(ks: &str, metrics: &Metrics) -> u64 {

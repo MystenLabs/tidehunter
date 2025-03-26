@@ -263,6 +263,7 @@ mod test {
     use rand::Rng;
 
     use super::*;
+    use crate::key_shape::KeyType;
     use crate::{file_reader::FileReader, index::index_format::test::*, key_shape::KeyShape};
     use std::{cell::Cell, collections::HashSet};
 
@@ -318,7 +319,7 @@ mod test {
     #[test]
     fn test_key_at_window_edge() {
         // 1) Build a KeyShape + single KeySpace for demonstration:
-        let (shape, ks_id) = KeyShape::new_single(8, 1, 1);
+        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
         let ks = shape.ks(ks_id);
 
         // 2) Insert several entries in ascending order
@@ -393,7 +394,7 @@ mod test {
     fn test_probable_window_accuracy_with_random_keys() {
         let num_entries = 1_000_000;
         let test_lookups = num_entries / 10; // 10% lookups
-        let (shape, ks_id) = KeyShape::new_single(8, 1, 1);
+        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
         let ks = shape.ks(ks_id);
 
         // 1) Generate random, distinct 64-bit keys
@@ -520,7 +521,7 @@ mod test {
     #[test]
     fn test_singlehopindex_with_short_keys() {
         // 1) Build a KeyShape that expects e.g. 4‐byte keys
-        let (shape, ks_id) = KeyShape::new_single(4, 12, 12);
+        let (shape, ks_id) = KeyShape::new_single(4, 12, KeyType::uniform(12));
         let ks = shape.ks(ks_id);
 
         // 2) Insert a few short keys into IndexTable
@@ -563,7 +564,7 @@ mod test {
         let index_impl = UniformLookupIndex::new(Metrics::new());
 
         // 2) Build a KeyShape, e.g. 8-byte keys
-        let (shape, ks_id) = KeyShape::new_single(4, 12, 12);
+        let (shape, ks_id) = KeyShape::new_single(4, 12, KeyType::uniform(12));
         let ks = shape.ks(ks_id);
 
         // 3) Populate an IndexTable
@@ -617,7 +618,7 @@ mod test {
 
     #[test]
     fn single_entry_search() {
-        let (shape, ks_id) = KeyShape::new_single(8, 4, 4);
+        let (shape, ks_id) = KeyShape::new_single(8, 4, KeyType::uniform(4));
         let ks = shape.ks(ks_id);
 
         // 1) Make an IndexTable with exactly 1 key-value
@@ -650,7 +651,7 @@ mod test {
         let single_hop = UniformLookupIndex::new(Metrics::new());
 
         // 2) Build a key shape (assuming 8-byte keys, but adapt as needed)
-        let (shape, ks_id) = KeyShape::new_single(8, 4, 4);
+        let (shape, ks_id) = KeyShape::new_single(8, 4, KeyType::uniform(4));
         let ks = shape.ks(ks_id);
 
         // 3) Populate an IndexTable with some entries

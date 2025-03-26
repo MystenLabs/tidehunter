@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tidehunter::config::Config;
 use tidehunter::db::Db;
-use tidehunter::key_shape::{KeyShape, KeySpace};
+use tidehunter::key_shape::{KeyShape, KeySpace, KeyType};
 use tidehunter::metrics::Metrics;
 
 pub struct TidehunterStorage {
@@ -30,7 +30,7 @@ impl TidehunterStorage {
         let registry = Registry::new();
         let metrics = Metrics::new_in(&registry);
         crate::prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
-        let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
+        let (key_shape, ks) = KeyShape::new_single(32, 1024, KeyType::uniform(32));
         let db = Db::open(path, key_shape, config, metrics.clone()).unwrap();
         let this = Self { db, ks, metrics };
         Arc::new(this)

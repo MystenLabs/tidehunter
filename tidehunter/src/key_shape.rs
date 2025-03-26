@@ -37,8 +37,7 @@ pub struct KeySpaceDescInner {
     name: String,
     key_size: usize,
     mutexes: usize,
-    // todo this needs to move to KeyType::Uniform, as it only applies for this type of keys
-    per_mutex: usize,
+    key_type: KeyType,
     config: KeySpaceConfig,
 }
 
@@ -50,13 +49,17 @@ pub struct KeySpaceConfig {
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
     key_reduction: Option<Range<usize>>,
-    key_type: KeyType,
 }
 
 #[derive(Clone, Copy)]
 pub enum KeyType {
-    Uniform,
+    Uniform(UniformKeyConfig),
     PrefixedUniform(PrefixedUniformKeyConfig),
+}
+
+#[derive(Clone, Copy)]
+pub struct UniformKeyConfig {
+    cells_per_mutex: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -93,15 +96,9 @@ impl KeyShapeBuilder {
         name: impl Into<String>,
         key_size: usize,
         mutexes: usize,
-        per_mutex: usize,
+        key_type: KeyType,
     ) -> KeySpace {
-        self.add_key_space_config(
-            name,
-            key_size,
-            mutexes,
-            per_mutex,
-            KeySpaceConfig::default(),
-        )
+        self.add_key_space_config(name, key_size, mutexes, key_type, KeySpaceConfig::default())
     }
 
     pub fn add_key_space_config(
@@ -109,12 +106,11 @@ impl KeyShapeBuilder {
         name: impl Into<String>,
         key_size: usize,
         mutexes: usize,
-        per_mutex: usize,
+        key_type: KeyType,
         config: KeySpaceConfig,
     ) -> KeySpace {
         let name = name.into();
         assert!(mutexes > 0, "mutexes should be greater then 0");
-        assert!(per_mutex > 0, "per_mutex should be greater then 0");
 
         assert!(
             self.key_spaces.len() < (u8::MAX - 1) as usize,
@@ -132,7 +128,7 @@ impl KeyShapeBuilder {
             name,
             key_size,
             mutexes,
-            per_mutex,
+            key_type,
             config,
         };
         let key_space = KeySpaceDesc {
@@ -154,8 +150,7 @@ impl KeyShapeBuilder {
             if ks.config.bloom_filter.is_some() && ks.config.compactor.is_some() {
                 panic!("Tidehunter currently does not support key space with both compactor and bloom filter enabled");
             }
-            ks.config
-                .key_type
+            ks.key_type
                 .verify_key_size(ks.reduced_key_size() - ks.config.key_offset);
         }
     }
@@ -197,17 +192,8 @@ impl KeySpaceDesc {
         self.mutexes
     }
 
-    pub fn cells_per_mutex(&self) -> usize {
-        self.per_mutex
-    }
-
-    pub fn next_integer_cell(&self, cell: usize, reverse: bool) -> Option<CellId> {
-        let next = math::next_bounded(cell, self.num_cells(), reverse);
-        next.map(CellId::Integer)
-    }
-
     pub(crate) fn first_cell(&self) -> CellId {
-        self.config.key_type.first_cell()
+        self.key_type.first_cell()
     }
 
     pub(crate) fn key_reduction(&self) -> &Option<Range<usize>> {
@@ -215,7 +201,7 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn key_type(&self) -> &KeyType {
-        &self.config.key_type
+        &self.key_type
     }
 
     pub(crate) fn reduced_key_size(&self) -> usize {
@@ -226,27 +212,22 @@ impl KeySpaceDesc {
         }
     }
 
-    pub(crate) fn num_cells(&self) -> usize {
-        self.mutexes * self.per_mutex
-    }
-
     /// Returns u32 prefix
     pub(crate) fn index_prefix_u32(&self, k: &[u8]) -> u32 {
         starting_u32(self.index_prefix(k))
     }
 
     fn index_prefix<'a>(&self, k: &'a [u8]) -> &'a [u8] {
-        self.config
-            .key_type
-            .index_prefix(&k[self.config.key_offset..])
+        self.key_type.index_prefix(&k[self.config.key_offset..])
     }
 
     pub(crate) fn cell_id(&self, k: &[u8]) -> CellId {
         let k = &k[self.config.key_offset..];
-        match self.config.key_type {
-            KeyType::Uniform => {
+        match self.key_type {
+            KeyType::Uniform(config) => {
                 let starting_u32 = starting_u32(k);
-                let cell = downscale_u32(starting_u32, self.num_cells() as u32) as usize;
+                let num_cells = config.num_cells(self) as u32;
+                let cell = downscale_u32(starting_u32, num_cells) as usize;
                 CellId::Integer(cell)
             }
             KeyType::PrefixedUniform(config) => {
@@ -260,9 +241,9 @@ impl KeySpaceDesc {
 
     pub(crate) fn index_prefix_range(&self, cell: &CellId) -> Range<u64> {
         match (self.key_type(), cell) {
-            (KeyType::Uniform, CellId::Integer(cell)) => {
+            (KeyType::Uniform(config), CellId::Integer(cell)) => {
                 let cell = *cell as u64;
-                let num_cells = self.num_cells() as u64;
+                let num_cells = config.num_cells(self) as u64;
                 // If you have only 1 cell, it has u32::MAX+1 elements,
                 let cell_size = MAX_U32_PLUS_ONE / num_cells;
                 cell * cell_size..((cell + 1) * cell_size)
@@ -271,7 +252,7 @@ impl KeySpaceDesc {
                 // CellId can not be empty
                 prefix_config.prefix_range(cell[0])
             }
-            (KeyType::Uniform, CellId::Bytes(_)) => {
+            (KeyType::Uniform(_), CellId::Bytes(_)) => {
                 panic!("index_prefix_range called for uniform key type and bytes cell id")
             }
             (KeyType::PrefixedUniform(_), CellId::Integer(_)) => {
@@ -369,22 +350,17 @@ impl KeySpaceConfig {
         self.key_reduction = Some(key_reduction);
         self
     }
-
-    pub fn with_key_type(mut self, key_type: KeyType) -> Self {
-        self.key_type = key_type;
-        self
-    }
 }
 
 impl KeyShape {
-    pub fn new_single(key_size: usize, mutexes: usize, per_mutex: usize) -> (Self, KeySpace) {
-        Self::new_single_config(key_size, mutexes, per_mutex, Default::default())
+    pub fn new_single(key_size: usize, mutexes: usize, key_type: KeyType) -> (Self, KeySpace) {
+        Self::new_single_config(key_size, mutexes, key_type, Default::default())
     }
 
     pub fn new_single_config(
         key_size: usize,
         mutexes: usize,
-        per_mutex: usize,
+        key_type: KeyType,
         config: KeySpaceConfig,
     ) -> (Self, KeySpace) {
         let key_space = KeySpaceDescInner {
@@ -392,7 +368,7 @@ impl KeyShape {
             name: "root".into(),
             key_size,
             mutexes,
-            per_mutex,
+            key_type,
             config,
         };
         let key_space = KeySpaceDesc {
@@ -443,16 +419,21 @@ impl Deref for KeySpaceDesc {
     }
 }
 
-impl Default for KeyType {
-    fn default() -> Self {
-        KeyType::Uniform
-    }
-}
-
 impl KeyType {
+    pub fn uniform(cells_per_mutex: usize) -> Self {
+        Self::Uniform(UniformKeyConfig::new(cells_per_mutex))
+    }
+
+    pub fn prefix_uniform(prefix_len_bytes: usize, cluster_bits: usize) -> Self {
+        Self::PrefixedUniform(PrefixedUniformKeyConfig::new(
+            prefix_len_bytes,
+            cluster_bits,
+        ))
+    }
+
     fn verify_key_size(&self, key_size: usize) {
         match self {
-            KeyType::Uniform => {}
+            KeyType::Uniform(_) => {}
             KeyType::PrefixedUniform(config) => {
                 assert!(
                     key_size > config.prefix_len_bytes,
@@ -466,7 +447,7 @@ impl KeyType {
 
     fn first_cell(&self) -> CellId {
         match self {
-            KeyType::Uniform => CellId::Integer(0),
+            KeyType::Uniform(_) => CellId::Integer(0),
             KeyType::PrefixedUniform(config) => {
                 let bytes = SmallVec::from_elem(0, config.prefix_len_bytes);
                 CellId::Bytes(bytes)
@@ -476,9 +457,37 @@ impl KeyType {
 
     fn index_prefix<'a>(&self, k: &'a [u8]) -> &'a [u8] {
         match self {
-            KeyType::Uniform => k,
+            KeyType::Uniform(_) => k,
             KeyType::PrefixedUniform(config) => &k[config.discard_prefix_bytes()..],
         }
+    }
+}
+
+impl UniformKeyConfig {
+    pub fn new(cells_per_mutex: usize) -> Self {
+        assert!(
+            cells_per_mutex > 0,
+            "cells_per_mutex should be greater then 0"
+        );
+        Self { cells_per_mutex }
+    }
+
+    pub(crate) fn cells_per_mutex(&self) -> usize {
+        self.cells_per_mutex
+    }
+
+    pub(crate) fn num_cells(&self, ksd: &KeySpaceDesc) -> usize {
+        self.cells_per_mutex * ksd.num_mutexes()
+    }
+
+    pub(crate) fn next_cell(
+        &self,
+        ksd: &KeySpaceDesc,
+        cell: usize,
+        reverse: bool,
+    ) -> Option<CellId> {
+        let next = math::next_bounded(cell, self.num_cells(ksd), reverse);
+        next.map(CellId::Integer)
     }
 }
 
@@ -586,10 +595,7 @@ mod tests {
 
     #[test]
     fn index_prefix_test() {
-        let config = KeySpaceConfig::new().with_key_type(KeyType::PrefixedUniform(
-            PrefixedUniformKeyConfig::new(2, 0),
-        ));
-        let (key_shape, ks) = KeyShape::new_single_config(4, 2, 2, config);
+        let (key_shape, ks) = KeyShape::new_single(4, 2, KeyType::prefix_uniform(2, 0));
         let ks = key_shape.ks(ks);
 
         assert_eq!(c(&hex!("1234")), ks.cell_id(&hex!("12345678")));

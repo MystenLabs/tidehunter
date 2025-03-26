@@ -16,8 +16,8 @@ use tidehunter::index::index_format::IndexFormat;
 use tidehunter::index::index_table::IndexTable;
 use tidehunter::index::lookup_header::LookupHeaderIndex;
 use tidehunter::index::uniform_lookup::UniformLookupIndex;
-use tidehunter::key_shape::KeyShape;
 use tidehunter::key_shape::KeySpace;
+use tidehunter::key_shape::{KeyShape, KeyType};
 use tidehunter::lookup::FileRange;
 use tidehunter::metrics::Metrics;
 use tidehunter::wal::WalPosition;
@@ -39,7 +39,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     file.write_all(&n_indices.to_be_bytes())?;
 
     // Create KeyShape for the benchmark
-    let (key_shape, ks) = KeyShape::new_single(32, 1, 1); // Using 32-byte keys
+    let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::uniform(1)); // Using 32-byte keys
     let ks_desc = key_shape.ks(ks);
 
     let start = Instant::now();
@@ -177,7 +177,7 @@ impl<'a> IndexBenchmark<'a> {
             readers.push(FileRange::new(FileReader::new(file, direct_io), range));
         }
 
-        let (key_shape, ks) = KeyShape::new_single(32, 1, 1);
+        let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::uniform(1));
 
         Ok(Self {
             index_count,

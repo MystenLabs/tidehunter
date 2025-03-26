@@ -120,7 +120,7 @@ impl LargeTable {
                         )
                     });
                     let entries = match ks.key_type() {
-                        KeyType::Uniform => Entries::Array(ks.num_mutexes(), entries.collect()),
+                        KeyType::Uniform(_) => Entries::Array(ks.num_mutexes(), entries.collect()),
                         KeyType::PrefixedUniform(_) => Entries::Tree(
                             entries
                                 .map(|e| (e.cell.assume_bytes_id().clone(), e))
@@ -542,9 +542,11 @@ impl LargeTable {
     /// See Db::next_cell for documentation
     /// This function acquires row mutexes, should not be called by code that might hold row mutex
     pub fn next_cell(&self, ks: &KeySpaceDesc, cell: &CellId, reverse: bool) -> Option<CellId> {
-        match cell {
-            CellId::Integer(cell) => ks.next_integer_cell(*cell, reverse),
-            CellId::Bytes(bytes) => {
+        match (ks.key_type(), cell) {
+            (KeyType::Uniform(config), CellId::Integer(cell)) => {
+                config.next_cell(ks, *cell, reverse)
+            }
+            (KeyType::PrefixedUniform(_), CellId::Bytes(bytes)) => {
                 let mut mutex = ks.mutex_for_cell(&cell);
                 loop {
                     let row = self.row_by_mutex(ks, mutex);
@@ -557,6 +559,12 @@ impl LargeTable {
                     };
                     mutex = next_mutex;
                 }
+            }
+            (KeyType::Uniform(_), CellId::Bytes(_)) => {
+                panic!("next_cell with uniform key type but bytes cell id")
+            }
+            (KeyType::PrefixedUniform(_), CellId::Integer(_)) => {
+                panic!("next_cell with prefix key type but integer cell id")
             }
         }
     }
@@ -1156,9 +1164,9 @@ impl<T: Copy> LargeTableContainer<T> {
 
     fn new_row(ks: &KeySpaceDesc, row: usize, value: T) -> RowContainer<T> {
         match ks.key_type() {
-            KeyType::Uniform => {
+            KeyType::Uniform(config) => {
                 // todo - create empty row and fill integer cells on-demand?
-                (0..ks.cells_per_mutex())
+                (0..config.cells_per_mutex())
                     .map(|offset| (CellId::Integer(ks.cell_by_location(row, offset)), value))
                     .collect()
             }
@@ -1274,9 +1282,9 @@ mod tests {
     fn test_ks_allocation() {
         let config = Config::small();
         let mut ks = KeyShapeBuilder::new();
-        let a = ks.add_key_space("a", 0, 1, 1);
-        let b = ks.add_key_space("b", 0, 1, 1);
-        ks.add_key_space("c", 0, 1, 1);
+        let a = ks.add_key_space("a", 0, 1, KeyType::uniform(1));
+        let b = ks.add_key_space("b", 0, 1, KeyType::uniform(1));
+        ks.add_key_space("c", 0, 1, KeyType::uniform(1));
         let ks = ks.build();
         let l = LargeTable::from_unloaded(
             &ks,
