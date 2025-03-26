@@ -8,7 +8,10 @@ pub fn downscale_u32(v: u32, upper_bound_exclusive: u32) -> u32 {
 /// Scale down u32 value from the range 0..=from_upper_bound_exclusive to the given range 0..upper_bound_exclusive
 /// from_upper_bound_exclusive is specified as u64 to allow for value u32::MAX+1 as exclusive upper range
 pub fn rescale_u32(v: u32, from_upper_bound_exclusive: u64, to_upper_bound_exclusive: u32) -> u32 {
-    assert!((v as u64) < from_upper_bound_exclusive);
+    assert!(
+        (v as u64) < from_upper_bound_exclusive,
+        "v: {v}, from_upper_bound_exclusive: {from_upper_bound_exclusive}"
+    );
     assert!(to_upper_bound_exclusive > 0);
     let v = v as u64;
     // this does not overflow: v <= u32::MAX, upper_bound_exclusive <= u32::MAX

@@ -28,13 +28,13 @@ impl LookupHeaderIndex {
 
     fn key_micro_cell(ks: &KeySpaceDesc, key: &[u8]) -> usize {
         let prefix = ks.index_prefix_u32(key);
-        let cell = ks.cell_by_prefix(prefix);
-        let cell_prefix_range = ks.cell_prefix_range(cell);
+        let cell = ks.cell_id(key);
+        let cell_prefix_range = ks.index_prefix_range(&cell);
         let cell_offset = prefix
             // cell_prefix_range.start is always u32 (but not cell_prefix_range.end)
             .checked_sub(cell_prefix_range.start as u32)
             .expect("Key prefix is out of cell prefix range");
-        let cell_size = ks.cell_size();
+        let cell_size = cell_prefix_range.end - cell_prefix_range.start;
         let micro_cell = rescale_u32(cell_offset, cell_size, HEADER_ELEMENTS as u32);
         micro_cell as usize
     }

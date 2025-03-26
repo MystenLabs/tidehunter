@@ -7,17 +7,17 @@ use minibytes::Bytes;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::ops::{Deref, Range};
+use std::ops::{Deref, Range, RangeInclusive};
 use std::sync::Arc;
 
 pub(crate) const CELL_PREFIX_LENGTH: usize = 4; // in bytes
+const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
 
 #[derive(Clone)]
 pub struct KeyShape {
     key_spaces: Vec<KeySpaceDesc>,
 }
 
-#[allow(dead_code)]
 pub struct KeyShapeBuilder {
     key_spaces: Vec<KeySpaceDesc>,
 }
@@ -37,6 +37,7 @@ pub struct KeySpaceDescInner {
     name: String,
     key_size: usize,
     mutexes: usize,
+    // todo this needs to move to KeyType::Uniform, as it only applies for this type of keys
     per_mutex: usize,
     config: KeySpaceConfig,
 }
@@ -66,6 +67,8 @@ pub struct PrefixedUniformKeyConfig {
     /// multiple prefixes into the same cell
     #[allow(dead_code)]
     cluster_bits: usize,
+    /// Mask that has all ones followed by cluster_bits zeroes at the end.
+    /// E.g. for cluster_bits=2 the mask is 1111_1100
     reset_mask: u8,
 }
 
@@ -227,12 +230,6 @@ impl KeySpaceDesc {
         self.mutexes * self.per_mutex
     }
 
-    // todo - rewrite to support prefix key in lookup
-    pub(crate) fn cell_by_prefix(&self, prefix: u32) -> usize {
-        let bucket = downscale_u32(prefix, self.num_cells() as u32) as usize;
-        bucket
-    }
-
     /// Returns u32 prefix
     pub(crate) fn index_prefix_u32(&self, k: &[u8]) -> u32 {
         starting_u32(self.index_prefix(k))
@@ -248,28 +245,39 @@ impl KeySpaceDesc {
         let k = &k[self.config.key_offset..];
         match self.config.key_type {
             KeyType::Uniform => {
-                let ending_u32 = starting_u32(k);
-                let cell = downscale_u32(ending_u32, self.num_cells() as u32) as usize;
+                let starting_u32 = starting_u32(k);
+                let cell = downscale_u32(starting_u32, self.num_cells() as u32) as usize;
                 CellId::Integer(cell)
             }
             KeyType::PrefixedUniform(config) => {
                 let mut prefix = SmallVec::from(&k[..config.prefix_len_bytes]);
-                prefix[config.prefix_len_bytes - 1] &= config.reset_mask;
+                let cluster_byte_ref = &mut prefix[config.prefix_len_bytes - 1];
+                *cluster_byte_ref = config.cluster_bits(*cluster_byte_ref);
                 CellId::Bytes(prefix)
             }
         }
     }
 
-    pub(crate) fn cell_prefix_range(&self, cell: usize) -> Range<u64> {
-        let cell = cell as u64;
-        let cell_size = self.cell_size();
-        cell * cell_size..((cell + 1) * cell_size)
-    }
-
-    pub(crate) fn cell_size(&self) -> u64 {
-        let cells = self.num_cells() as u64;
-        // If you have only 1 cell, it has u32::MAX+1 elements,
-        (u32::MAX as u64 + 1) / cells
+    pub(crate) fn index_prefix_range(&self, cell: &CellId) -> Range<u64> {
+        match (self.key_type(), cell) {
+            (KeyType::Uniform, CellId::Integer(cell)) => {
+                let cell = *cell as u64;
+                let num_cells = self.num_cells() as u64;
+                // If you have only 1 cell, it has u32::MAX+1 elements,
+                let cell_size = MAX_U32_PLUS_ONE / num_cells;
+                cell * cell_size..((cell + 1) * cell_size)
+            }
+            (KeyType::PrefixedUniform(prefix_config), CellId::Bytes(cell)) => {
+                // CellId can not be empty
+                prefix_config.prefix_range(cell[0])
+            }
+            (KeyType::Uniform, CellId::Bytes(_)) => {
+                panic!("index_prefix_range called for uniform key type and bytes cell id")
+            }
+            (KeyType::PrefixedUniform(_), CellId::Integer(_)) => {
+                panic!("index_prefix_range called for prefix key type and integer cell id")
+            }
+        }
     }
 
     /// Returns the cell containing the range.
@@ -502,18 +510,70 @@ impl PrefixedUniformKeyConfig {
     /// In the latter case, one is subtracted because
     /// the last byte of prefix can be different for the same cell.
     fn discard_prefix_bytes(&self) -> usize {
-        // reset_mask == u8::MAX equivalent to cluster_bits == 0
-        if self.reset_mask == u8::MAX {
-            self.prefix_len_bytes
-        } else {
+        if self.has_cluster_bits() {
             self.prefix_len_bytes - 1
+        } else {
+            self.prefix_len_bytes
         }
+    }
+
+    /// See explanation on prefix_range_u8 for details.
+    #[inline(always)]
+    fn cluster_bits(&self, v: u8) -> u8 {
+        v & self.reset_mask
+    }
+
+    /// Returns whether config has cluster bits.
+    #[inline(always)]
+    fn has_cluster_bits(&self) -> bool {
+        // reset_mask == u8::MAX equivalent to cluster_bits == 0
+        self.reset_mask != u8::MAX
+    }
+
+    fn prefix_range(&self, first_byte: u8) -> Range<u64> {
+        if self.has_cluster_bits() {
+            let range_u8 = self.prefix_range_u8(first_byte);
+            let start_inclusive = (*range_u8.start() as u64) << 24;
+            let end_inclusive = (*range_u8.end() as u64) << 24;
+            let end_exclusive = end_inclusive + 1;
+            start_inclusive..end_exclusive
+        } else {
+            0..MAX_U32_PLUS_ONE
+        }
+    }
+
+    /// Returns range of u8 values for which all keys sharing the same cluster byte will fall into.
+    ///
+    /// This function has invariant (I) that for any value x
+    /// prefix_range_u8(x).contains(x)
+    ///
+    /// Combined this function and cluster_bits have the following invariant (II):
+    /// For any two values x and y,
+    /// cluster_bits(x) == cluster_bits(y) if and only if
+    /// prefix_range_u8(x) == prefix_range_u8(y)
+    ///
+    /// In other words, all bytes falling within the same prefix_range_u8 share the same cluster bits.
+    ///
+    /// See prefix_range_u8 for examples.
+    #[inline(always)]
+    fn prefix_range_u8(&self, first_byte: u8) -> RangeInclusive<u8> {
+        let min_byte = first_byte & self.reset_mask;
+        // Mask that has all zeroes followed by cluster_bits ones at the end.
+        // E.g., for cluster_bits=2 the compliment_mask is 0000_0011
+        // This naturally turns out to be !self.reset_mask
+        let compliment_mask = !self.reset_mask;
+        let max_byte = min_byte + compliment_mask;
+        min_byte..=max_byte
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell::CellIdBytesContainer;
+    use hex_literal::hex;
+    use std::collections::hash_map::Entry;
+    use std::collections::HashMap;
 
     #[test]
     fn test_make_reset_mask() {
@@ -522,5 +582,87 @@ mod tests {
         assert_eq!(f(1), 0b1111_1110);
         assert_eq!(f(2), 0b1111_1100);
         assert_eq!(f(7), 0b1000_0000);
+    }
+
+    #[test]
+    fn index_prefix_test() {
+        let config = KeySpaceConfig::new().with_key_type(KeyType::PrefixedUniform(
+            PrefixedUniformKeyConfig::new(2, 0),
+        ));
+        let (key_shape, ks) = KeyShape::new_single_config(4, 2, 2, config);
+        let ks = key_shape.ks(ks);
+
+        assert_eq!(c(&hex!("1234")), ks.cell_id(&hex!("12345678")));
+        assert_eq!(&hex!("5678"), ks.index_prefix(&hex!("12345678")));
+        let prefix = 0x56780000;
+        assert_eq!(prefix, ks.index_prefix_u32(&hex!("12345678")));
+
+        let cell_prefix_range = ks.index_prefix_range(&ks.cell_id(&hex!("12345678")));
+        assert_eq!(cell_prefix_range.start, 0);
+        assert_eq!(cell_prefix_range.end, 0x1_0000_0000);
+    }
+
+    #[test]
+    fn test_prefix_range_for_prefix_key() {
+        let config = PrefixedUniformKeyConfig::new(1, 0);
+        assert_prefix_range_eq(0x0000_0000..0x1_0000_0000, config.prefix_range(111));
+        let config = PrefixedUniformKeyConfig::new(1, 7);
+        assert_prefix_range_eq(0x0000_0000..0x7f00_0001, config.prefix_range(0));
+        assert_prefix_range_eq(0x0000_0000..0x7f00_0001, config.prefix_range(15));
+        assert_prefix_range_eq(0x0000_0000..0x7f00_0001, config.prefix_range(0x7f));
+        assert_prefix_range_eq(0x8000_0000..0xff00_0001, config.prefix_range(0x80));
+        assert_prefix_range_eq(0x8000_0000..0xff00_0001, config.prefix_range(0xff));
+    }
+
+    #[track_caller]
+    fn assert_prefix_range_eq(r1: Range<u64>, r2: Range<u64>) {
+        if r1 != r2 {
+            panic!(
+                "{:08x}..{:08x} != {:08x}..{:08x}",
+                r1.start, r1.end, r2.start, r2.end
+            )
+        }
+    }
+
+    #[test]
+    fn test_prefix_range_u8() {
+        for bits in 0..8 {
+            let c = PrefixedUniformKeyConfig::new(1, bits);
+            test_prefix_range_config(bits, &c);
+        }
+    }
+
+    fn test_prefix_range_config(bits: usize, c: &PrefixedUniformKeyConfig) {
+        // Assert invariants (I) and (II) for prefix_range_u8 (see docs)
+        let mut ranges = HashMap::<u8, (usize, RangeInclusive<u8>)>::default();
+        for v in 0..=u8::MAX {
+            let range = c.prefix_range_u8(v);
+            assert!(
+                range.contains(&v),
+                "prefix_range_u8 {range:?} for value {v} does not contain that value"
+            );
+            let cluster_id = c.cluster_bits(v);
+            match ranges.entry(cluster_id) {
+                Entry::Vacant(va) => {
+                    va.insert((1, range));
+                }
+                Entry::Occupied(oc) => {
+                    let (count, oc_range) = oc.into_mut();
+                    assert_eq!(oc_range, &range);
+                    *count += 1;
+                }
+            }
+        }
+        // Assert that configuration with n cluster bits splits space into 2^(8-n) chunks
+        assert_eq!(2usize.pow((8 - bits) as u32), ranges.len(), "bits={bits}");
+        // Assert that space split into equal 'chunks' of 2^n size
+        let expected_count = 2usize.pow(bits as u32);
+        for (_, (count, _)) in ranges {
+            assert_eq!(expected_count, count, "bits={bits}");
+        }
+    }
+
+    fn c(s: &[u8]) -> CellId {
+        CellId::Bytes(CellIdBytesContainer::from(s))
     }
 }
