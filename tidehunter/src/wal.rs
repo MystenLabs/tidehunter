@@ -1,7 +1,7 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::file_reader::{align_size, set_direct_options, FileReader};
 use crate::index::index_format::IndexFormat;
-use crate::index::INDEX_FORMAT;
+use crate::key_shape::KeySpaceDesc;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal_syncer::WalSyncer;
@@ -288,10 +288,11 @@ impl Wal {
 
     pub fn random_reader_at(
         &self,
+        ks: &KeySpaceDesc,
         pos: WalPosition,
         inner_offset: usize,
     ) -> Result<WalRandomRead, WalError> {
-        if INDEX_FORMAT.use_unbounded_reader() {
+        if ks.index_format().use_unbounded_reader() {
             self.random_reader_at_unbounded(pos, inner_offset)
         } else {
             self.random_reader_at_bounded(pos, inner_offset)

@@ -17,11 +17,10 @@ const NUM_WINDOW_SIZES: usize = 1;
 #[derive(Clone)]
 pub struct UniformLookupIndex {
     window_sizes: Vec<Vec<usize>>,
-    metrics: Arc<Metrics>,
 }
 
 impl UniformLookupIndex {
-    pub fn new(metrics: Arc<Metrics>) -> Self {
+    pub fn new() -> Self {
         let mut matrix = Vec::with_capacity(NUM_WINDOW_SIZES);
         for _ in 0..NUM_WINDOW_SIZES {
             let row = vec![DEFAULT_WINDOW_SIZE; NUM_WINDOW_SIZES];
@@ -30,15 +29,10 @@ impl UniformLookupIndex {
 
         Self {
             window_sizes: matrix,
-            metrics, // Use the provided metrics
         }
     }
 
-    pub fn new_with_default_metrics() -> Self {
-        Self::new(Metrics::new())
-    }
-
-    pub fn new_with_window_size(metrics: Arc<Metrics>, window_size: usize) -> Self {
+    pub fn new_with_window_size(window_size: usize) -> Self {
         let mut matrix = Vec::with_capacity(NUM_WINDOW_SIZES);
         for _ in 0..NUM_WINDOW_SIZES {
             let row = vec![window_size; NUM_WINDOW_SIZES];
@@ -47,7 +41,6 @@ impl UniformLookupIndex {
 
         Self {
             window_sizes: matrix,
-            metrics, // Use the provided metrics
         }
     }
 
@@ -152,6 +145,7 @@ impl IndexFormat for UniformLookupIndex {
         ks: &KeySpaceDesc,
         reader: &impl RandomRead,
         key: &[u8],
+        metrics: Arc<Metrics>,
     ) -> Option<WalPosition> {
         // todo simplify this function
         // compute cell and prefix
@@ -174,15 +168,15 @@ impl IndexFormat for UniformLookupIndex {
         loop {
             iterations += 1;
             if (to_offset - from_offset < element_size) || (from_offset >= file_length) {
-                self.metrics.lookup_iterations.observe(iterations as f64);
+                metrics.lookup_iterations.observe(iterations as f64);
                 return None;
             }
             let io_start = Instant::now();
             let buffer = reader.read(from_offset..to_offset);
-            self.metrics
+            metrics
                 .lookup_io_mcs
                 .inc_by(io_start.elapsed().as_micros() as u64);
-            self.metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
+            metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
 
             let first_element_key = &buffer[..key_size];
             let last_element_key =
@@ -209,7 +203,7 @@ impl IndexFormat for UniformLookupIndex {
             debug_assert_eq!(buffer.len() % element_size, 0);
             let count = buffer.len() / element_size;
             if count == 0 {
-                self.metrics.lookup_iterations.observe(iterations as f64);
+                metrics.lookup_iterations.observe(iterations as f64);
                 return None; // no entries in this buffer window
             }
 
@@ -235,8 +229,8 @@ impl IndexFormat for UniformLookupIndex {
                         let mut pos_slice =
                             &buffer[(entry_offset + key_size)..(entry_offset + element_size)];
                         let position = WalPosition::read_from_buf(&mut pos_slice);
-                        self.metrics.lookup_iterations.observe(iterations as f64);
-                        self.metrics
+                        metrics.lookup_iterations.observe(iterations as f64);
+                        metrics
                             .lookup_scan_mcs
                             .inc_by(scan_start.elapsed().as_micros() as u64);
                         return Some(position);
@@ -245,8 +239,8 @@ impl IndexFormat for UniformLookupIndex {
             }
 
             // Not found
-            self.metrics.lookup_iterations.observe(iterations as f64);
-            self.metrics
+            metrics.lookup_iterations.observe(iterations as f64);
+            metrics
                 .lookup_scan_mcs
                 .inc_by(scan_start.elapsed().as_micros() as u64);
             return None;
@@ -269,13 +263,13 @@ mod test {
 
     #[test]
     pub fn test_index_lookup() {
-        let pi = UniformLookupIndex::new(Metrics::new());
+        let pi = UniformLookupIndex::new();
         test_index_lookup_inner(&pi);
     }
 
     #[test]
     pub fn test_index_lookup_random() {
-        let pi = UniformLookupIndex::new(Metrics::new());
+        let pi = UniformLookupIndex::new();
         test_index_lookup_random_inner(&pi);
     }
 
@@ -319,6 +313,7 @@ mod test {
     #[test]
     fn test_key_at_window_edge() {
         // 1) Build a KeyShape + single KeySpace for demonstration:
+        let metrics = Metrics::new();
         let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
         let ks = shape.ks(ks_id);
 
@@ -335,7 +330,7 @@ mod test {
         }
 
         // 3) Convert the table to bytes using SingleHopIndex
-        let index_format = UniformLookupIndex::new(Metrics::new());
+        let index_format = UniformLookupIndex::new();
         let serialized = index_format.to_bytes(&table, ks);
 
         // 4) We'll build our mock "window" that intentionally ends
@@ -368,7 +363,7 @@ mod test {
         //
         // For demonstration, we'll do it directly:
         let key_40 = 40_u64.to_be_bytes();
-        let found = index_format.lookup_unloaded(ks, &mock_reader, &key_40);
+        let found = index_format.lookup_unloaded(ks, &mock_reader, &key_40, metrics.clone());
         assert_eq!(
             found,
             Some(WalPosition::test_value(40)),
@@ -377,7 +372,7 @@ mod test {
 
         // 7) Similarly, check key=50 (which is the last in the chunk)
         let key_50 = 50_u64.to_be_bytes();
-        let found_50 = index_format.lookup_unloaded(ks, &mock_reader, &key_50);
+        let found_50 = index_format.lookup_unloaded(ks, &mock_reader, &key_50, metrics.clone());
         assert_eq!(
             found_50,
             Some(WalPosition::test_value(50)),
@@ -386,12 +381,13 @@ mod test {
 
         // 8) Also confirm a missing key (key=45) isn't found in that partial chunk
         let key_45 = 45_u64.to_be_bytes();
-        let missing = index_format.lookup_unloaded(ks, &mock_reader, &key_45);
+        let missing = index_format.lookup_unloaded(ks, &mock_reader, &key_45, metrics.clone());
         assert_eq!(missing, None, "Key=45 should not be found");
     }
 
     #[test]
     fn test_probable_window_accuracy_with_random_keys() {
+        let metrics = Metrics::new();
         let num_entries = 1_000_000;
         let test_lookups = num_entries / 10; // 10% lookups
         let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
@@ -415,7 +411,7 @@ mod test {
         }
 
         // 3) Convert to bytes using SingleHopIndex
-        let index_format = UniformLookupIndex::new(Metrics::new());
+        let index_format = UniformLookupIndex::new();
         let data = index_format.to_bytes(&index, ks);
 
         // 4) Wrap it in our MockRandomRead
@@ -435,7 +431,7 @@ mod test {
 
             // do the lookup
             let key_bytes = key.to_be_bytes();
-            let found = index_format.lookup_unloaded(ks, &reader, &key_bytes);
+            let found = index_format.lookup_unloaded(ks, &reader, &key_bytes, metrics.clone());
 
             // confirm correctness, though you can skip if you only care about stats
             assert_eq!(
@@ -463,7 +459,7 @@ mod test {
     fn test_offset_calculation() {
         let cell_prefix_range = 0..100;
         let file_length = 1000; // test with file larger than range
-        let pi = UniformLookupIndex::new(Metrics::new());
+        let pi = UniformLookupIndex::new();
 
         let key = [0, 0, 0, 0, 0, 0, 0, 0];
         let (offset, _) =
@@ -520,6 +516,7 @@ mod test {
 
     #[test]
     fn test_singlehopindex_with_short_keys() {
+        let metrics = Metrics::new();
         // 1) Build a KeyShape that expects e.g. 4‐byte keys
         let (shape, ks_id) = KeyShape::new_single(4, 12, KeyType::uniform(12));
         let ks = shape.ks(ks_id);
@@ -534,7 +531,7 @@ mod test {
         index.insert(key2.clone().into(), WalPosition::test_value(1002));
 
         // 3) Convert to bytes with SingleHopIndex
-        let single_hop = UniformLookupIndex::new(Metrics::new());
+        let single_hop = UniformLookupIndex::new();
         let data = single_hop.to_bytes(&index, ks);
 
         // 4) Mock a simple in‐memory reader
@@ -543,15 +540,15 @@ mod test {
 
         // 5) Make sure we can look up short_key1, short_key2, short_key3
         //    without panicking or indexing out of range
-        let found1 = single_hop.lookup_unloaded(ks, &reader, &key1);
+        let found1 = single_hop.lookup_unloaded(ks, &reader, &key1, metrics.clone());
         assert_eq!(found1, Some(WalPosition::test_value(1001)));
 
-        let found2 = single_hop.lookup_unloaded(ks, &reader, &key2);
+        let found2 = single_hop.lookup_unloaded(ks, &reader, &key2, metrics.clone());
         assert_eq!(found2, Some(WalPosition::test_value(1002)));
 
         // 6) Also ensure that a random short key that doesn't exist returns None
         let not_inserted = Bytes::from(vec![7, 8, 9, 10]);
-        let found4 = single_hop.lookup_unloaded(ks, &reader, &not_inserted);
+        let found4 = single_hop.lookup_unloaded(ks, &reader, &not_inserted, metrics.clone());
         assert_eq!(found4, None, "Key {not_inserted:?} unexpectedly found");
     }
 
@@ -561,7 +558,8 @@ mod test {
         use std::io::Write;
 
         // 1) Choose which PersistedIndex to test:
-        let index_impl = UniformLookupIndex::new(Metrics::new());
+        let metrics = Metrics::new();
+        let index_impl = UniformLookupIndex::new();
 
         // 2) Build a KeyShape, e.g. 8-byte keys
         let (shape, ks_id) = KeyShape::new_single(4, 12, KeyType::uniform(12));
@@ -607,12 +605,12 @@ mod test {
         // let found1 = index_impl.lookup_unloaded(ks, &file_range, &key1);
         // assert_eq!(found1, Some(WalPosition::test_value(100)));
 
-        let found2 = index_impl.lookup_unloaded(ks, &file_range, &key2);
+        let found2 = index_impl.lookup_unloaded(ks, &file_range, &key2, metrics.clone());
         assert_eq!(found2, Some(WalPosition::test_value(200)));
 
         // 8) Confirm non-existent key returns None
         let key3 = Bytes::from(vec![99, 99, 99, 99]);
-        let found3 = index_impl.lookup_unloaded(ks, &file_range, &key3);
+        let found3 = index_impl.lookup_unloaded(ks, &file_range, &key3, metrics.clone());
         assert_eq!(found3, None);
     }
 
@@ -620,6 +618,7 @@ mod test {
     fn single_entry_search() {
         let (shape, ks_id) = KeyShape::new_single(8, 4, KeyType::uniform(4));
         let ks = shape.ks(ks_id);
+        let metrics = Metrics::new();
 
         // 1) Make an IndexTable with exactly 1 key-value
         let mut index = IndexTable::default();
@@ -628,27 +627,36 @@ mod test {
         index.insert(key.clone(), walpos);
 
         // 2) Write it to bytes
-        let pi = UniformLookupIndex::new(Metrics::new());
+        let pi = UniformLookupIndex::new();
         let bytes = pi.to_bytes(&index, ks);
         assert!(!bytes.is_empty());
 
         // 3) Make sure we can find that exact key
-        assert_eq!(Some(walpos), pi.lookup_unloaded(ks, &bytes, &key));
+        assert_eq!(
+            Some(walpos),
+            pi.lookup_unloaded(ks, &bytes, &key, metrics.clone())
+        );
 
         // 4) Try smaller key
         let smaller_key = Bytes::from(vec![0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(None, pi.lookup_unloaded(ks, &bytes, &smaller_key));
+        assert_eq!(
+            None,
+            pi.lookup_unloaded(ks, &bytes, &smaller_key, metrics.clone())
+        );
 
         // 5) Try bigger key
         let bigger_key = Bytes::from(vec![255, 255, 255, 255, 255, 255, 255, 255]);
-        assert_eq!(None, pi.lookup_unloaded(ks, &bytes, &bigger_key));
+        assert_eq!(
+            None,
+            pi.lookup_unloaded(ks, &bytes, &bigger_key, metrics.clone())
+        );
     }
 
     #[test]
     fn test_persisted_index_roundtrip() {
         // 1) Choose an implementation: SingleHopIndex or MicroCellIndex
         //    Depending on which you want to test.
-        let single_hop = UniformLookupIndex::new(Metrics::new());
+        let single_hop = UniformLookupIndex::new();
 
         // 2) Build a key shape (assuming 8-byte keys, but adapt as needed)
         let (shape, ks_id) = KeyShape::new_single(8, 4, KeyType::uniform(4));
