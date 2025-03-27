@@ -273,6 +273,8 @@ impl LargeTable {
             }
             LargeTableEntryState::Unloaded(position) => position,
         };
+        // drop row to avoid holding mutex during IO
+        drop(row);
         // todo move tokio dep under a feature
         let now = Instant::now();
         let index_reader = loader.index_reader(index_position)?;
@@ -281,7 +283,7 @@ impl LargeTable {
             tokio::task::block_in_place(|| INDEX_FORMAT.lookup_unloaded(ks, &index_reader, k));
         self.metrics
             .lookup_mcs
-            .with_label_values(&[index_reader.kind_str(), entry.context.name()])
+            .with_label_values(&[index_reader.kind_str(), ks.name()])
             .observe(now.elapsed().as_micros() as f64);
         Ok(self.report_lookup_result(ks, result, "lookup"))
     }
