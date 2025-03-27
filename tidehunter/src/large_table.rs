@@ -4,7 +4,6 @@ use crate::context::KsContext;
 use crate::flusher::{FlushKind, IndexFlusher};
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
-use crate::index::INDEX_FORMAT;
 use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
@@ -277,10 +276,12 @@ impl LargeTable {
         drop(row);
         // todo move tokio dep under a feature
         let now = Instant::now();
-        let index_reader = loader.index_reader(index_position)?;
+        let index_reader = loader.index_reader(ks, index_position)?;
         // todo - consider only doing block_in_place for the syscall random reader
-        let result =
-            tokio::task::block_in_place(|| INDEX_FORMAT.lookup_unloaded(ks, &index_reader, k));
+        let result = tokio::task::block_in_place(|| {
+            ks.index_format()
+                .lookup_unloaded(ks, &index_reader, k, self.metrics.clone())
+        });
         self.metrics
             .lookup_mcs
             .with_label_values(&[index_reader.kind_str(), ks.name()])
@@ -669,7 +670,11 @@ pub trait Loader {
 
     fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> Result<IndexTable, Self::Error>;
 
-    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error>;
+    fn index_reader(
+        &self,
+        ks: &KeySpaceDesc,
+        position: WalPosition,
+    ) -> Result<WalRandomRead, Self::Error>;
 
     fn flush_supported(&self) -> bool;
 

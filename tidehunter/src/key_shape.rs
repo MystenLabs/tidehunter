@@ -1,5 +1,6 @@
 use crate::cell::CellId;
 use crate::db::MAX_KEY_LEN;
+use crate::index::index_format::IndexFormatType;
 use crate::math;
 use crate::math::{downscale_u32, starting_u32};
 use crate::wal::WalPosition;
@@ -49,6 +50,7 @@ pub struct KeySpaceConfig {
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
     key_reduction: Option<Range<usize>>,
+    index_format: IndexFormatType,
 }
 
 #[derive(Clone, Copy)]
@@ -312,6 +314,10 @@ impl KeySpaceDesc {
     pub fn id(&self) -> KeySpace {
         self.id
     }
+
+    pub(crate) fn index_format(&self) -> &IndexFormatType {
+        &self.config.index_format
+    }
 }
 
 impl KeySpaceConfig {
@@ -348,6 +354,11 @@ impl KeySpaceConfig {
 
     pub fn with_key_reduction(mut self, key_reduction: Range<usize>) -> Self {
         self.key_reduction = Some(key_reduction);
+        self
+    }
+
+    pub fn with_index_format(mut self, index_format: IndexFormatType) -> Self {
+        self.index_format = index_format;
         self
     }
 }
