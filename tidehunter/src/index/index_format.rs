@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use minibytes::Bytes;
 
 use super::lookup_header::LookupHeaderIndex;
@@ -21,7 +19,7 @@ pub trait IndexFormat {
         ks: &KeySpaceDesc,
         reader: &impl RandomRead,
         key: &[u8],
-        metrics: Arc<Metrics>,
+        metrics: &Metrics,
     ) -> Option<WalPosition>;
 
     fn element_size(ks: &KeySpaceDesc) -> usize {
@@ -58,7 +56,7 @@ impl IndexFormat for IndexFormatType {
         ks: &KeySpaceDesc,
         reader: &impl RandomRead,
         key: &[u8],
-        metrics: Arc<Metrics>,
+        metrics: &Metrics,
     ) -> Option<WalPosition> {
         match self {
             IndexFormatType::Header => LookupHeaderIndex.lookup_unloaded(ks, reader, key, metrics),
@@ -95,41 +93,35 @@ pub mod test {
         index.insert(k128(5), w(10));
 
         let bytes = pi.to_bytes(&index, ks);
-        assert_eq!(
-            None,
-            pi.lookup_unloaded(ks, &bytes, &k128(0), metrics.clone())
-        );
+        assert_eq!(None, pi.lookup_unloaded(ks, &bytes, &k128(0), &metrics));
         assert_eq!(
             Some(w(5)),
-            pi.lookup_unloaded(ks, &bytes, &k128(1), metrics.clone())
+            pi.lookup_unloaded(ks, &bytes, &k128(1), &metrics)
         );
         assert_eq!(
             Some(w(10)),
-            pi.lookup_unloaded(ks, &bytes, &k128(5), metrics.clone())
+            pi.lookup_unloaded(ks, &bytes, &k128(5), &metrics)
         );
-        assert_eq!(
-            None,
-            pi.lookup_unloaded(ks, &bytes, &k128(10), metrics.clone())
-        );
+        assert_eq!(None, pi.lookup_unloaded(ks, &bytes, &k128(10), &metrics));
         let mut index = IndexTable::default();
         index.insert(k128(u128::MAX), w(15));
         index.insert(k128(u128::MAX - 5), w(25));
         let bytes = pi.to_bytes(&index, ks);
         assert_eq!(
             Some(w(15)),
-            pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX), metrics.clone())
+            pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX), &metrics)
         );
         assert_eq!(
             Some(w(25)),
-            pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX - 5), metrics.clone())
+            pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX - 5), &metrics)
         );
         assert_eq!(
             None,
-            pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX - 1), metrics.clone())
+            pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX - 1), &metrics)
         );
         assert_eq!(
             None,
-            pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX - 100), metrics.clone())
+            pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX - 100), &metrics)
         );
     }
 
@@ -152,7 +144,7 @@ pub mod test {
         }
         let bytes = pi.to_bytes(&index, ks);
         for (key, expected_value) in &index.data {
-            let value = pi.lookup_unloaded(ks, &bytes, key, metrics.clone());
+            let value = pi.lookup_unloaded(ks, &bytes, key, &metrics);
             assert_eq!(Some(*expected_value), value);
         }
         for _ in 0..ITERATIONS {
@@ -160,7 +152,7 @@ pub mod test {
             if index.data.contains_key(&k32(key)) {
                 continue; // skip keys that are in the index
             }
-            let value = pi.lookup_unloaded(ks, &bytes, &k32(key), metrics.clone());
+            let value = pi.lookup_unloaded(ks, &bytes, &k32(key), &metrics);
             assert!(value.is_none());
         }
     }

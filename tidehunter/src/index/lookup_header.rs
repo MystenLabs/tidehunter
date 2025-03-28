@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::{Buf, BufMut};
@@ -62,7 +61,7 @@ impl IndexFormat for LookupHeaderIndex {
         ks: &KeySpaceDesc,
         reader: &impl RandomRead,
         key: &[u8],
-        metrics: Arc<Metrics>,
+        metrics: &Metrics,
     ) -> Option<WalPosition> {
         let key_size = ks.reduced_key_size();
         assert_eq!(key.len(), key_size);

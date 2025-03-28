@@ -6,7 +6,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Arc;
 use tidehunter::metrics::print_histogram_stats;
 
 use minibytes::Bytes;
@@ -193,7 +192,7 @@ impl<'a> IndexBenchmark<'a> {
         index_format: &P,
         num_lookups: usize,
         batch_size: usize,
-        metrics: Arc<Metrics>,
+        metrics: &Metrics,
     ) -> Vec<Duration> {
         let ks_desc = self.key_shape.ks(self.ks);
         let mut rng = rand::thread_rng();
@@ -218,7 +217,7 @@ impl<'a> IndexBenchmark<'a> {
                 rng.fill(&mut key[..]);
 
                 // Look up the key
-                index_format.lookup_unloaded(ks_desc, reader, &key, metrics.clone());
+                index_format.lookup_unloaded(ks_desc, reader, &key, &metrics);
             }
 
             durations.push(start.elapsed());
@@ -394,7 +393,7 @@ fn main() {
                     &LookupHeaderIndex,
                     num_lookups,
                     batch_size,
-                    header_metrics.clone(),
+                    &header_metrics,
                 );
                 header_durations.append(&mut durations);
                 analyze_results("HeaderLookupIndex", &header_durations, batch_size);
@@ -403,7 +402,7 @@ fn main() {
                     &UniformLookupIndex::new_with_window_size(window_size),
                     num_lookups,
                     batch_size,
-                    uniform_metrics.clone(),
+                    &uniform_metrics,
                 );
                 uniform_durations.append(&mut durations);
                 analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
