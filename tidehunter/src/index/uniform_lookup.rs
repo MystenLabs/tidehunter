@@ -279,8 +279,6 @@ mod test {
     #[test]
     fn test_key_at_window_edge() {
         let metrics = Metrics::new();
-        // 1) Build a KeyShape + single KeySpace for demonstration:
-        let metrics = Metrics::new();
         let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
         let ks = shape.ks(ks_id);
 
@@ -526,7 +524,6 @@ mod test {
         let metrics = Metrics::new();
 
         // 1) Choose which PersistedIndex to test:
-        let metrics = Metrics::new();
         let index_impl = UniformLookupIndex::new();
 
         // 2) Build a KeyShape, e.g. 8-byte keys
