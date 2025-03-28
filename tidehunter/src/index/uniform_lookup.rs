@@ -1,6 +1,5 @@
 use minibytes::Bytes;
 use std::ops::Range;
-use std::sync::Arc;
 use std::time::Instant;
 
 use super::index_format::IndexFormat;
@@ -145,7 +144,7 @@ impl IndexFormat for UniformLookupIndex {
         ks: &KeySpaceDesc,
         reader: &impl RandomRead,
         key: &[u8],
-        metrics: Arc<Metrics>,
+        metrics: &Metrics,
     ) -> Option<WalPosition> {
         // todo simplify this function
         // compute cell and prefix
@@ -363,7 +362,7 @@ mod test {
         //
         // For demonstration, we'll do it directly:
         let key_40 = 40_u64.to_be_bytes();
-        let found = index_format.lookup_unloaded(ks, &mock_reader, &key_40, metrics.clone());
+        let found = index_format.lookup_unloaded(ks, &mock_reader, &key_40, &metrics);
         assert_eq!(
             found,
             Some(WalPosition::test_value(40)),
@@ -372,7 +371,7 @@ mod test {
 
         // 7) Similarly, check key=50 (which is the last in the chunk)
         let key_50 = 50_u64.to_be_bytes();
-        let found_50 = index_format.lookup_unloaded(ks, &mock_reader, &key_50, metrics.clone());
+        let found_50 = index_format.lookup_unloaded(ks, &mock_reader, &key_50, &metrics);
         assert_eq!(
             found_50,
             Some(WalPosition::test_value(50)),
@@ -381,7 +380,7 @@ mod test {
 
         // 8) Also confirm a missing key (key=45) isn't found in that partial chunk
         let key_45 = 45_u64.to_be_bytes();
-        let missing = index_format.lookup_unloaded(ks, &mock_reader, &key_45, metrics.clone());
+        let missing = index_format.lookup_unloaded(ks, &mock_reader, &key_45, &metrics);
         assert_eq!(missing, None, "Key=45 should not be found");
     }
 
@@ -431,7 +430,7 @@ mod test {
 
             // do the lookup
             let key_bytes = key.to_be_bytes();
-            let found = index_format.lookup_unloaded(ks, &reader, &key_bytes, metrics.clone());
+            let found = index_format.lookup_unloaded(ks, &reader, &key_bytes, &metrics);
 
             // confirm correctness, though you can skip if you only care about stats
             assert_eq!(
@@ -540,15 +539,15 @@ mod test {
 
         // 5) Make sure we can look up short_key1, short_key2, short_key3
         //    without panicking or indexing out of range
-        let found1 = single_hop.lookup_unloaded(ks, &reader, &key1, metrics.clone());
+        let found1 = single_hop.lookup_unloaded(ks, &reader, &key1, &metrics);
         assert_eq!(found1, Some(WalPosition::test_value(1001)));
 
-        let found2 = single_hop.lookup_unloaded(ks, &reader, &key2, metrics.clone());
+        let found2 = single_hop.lookup_unloaded(ks, &reader, &key2, &metrics);
         assert_eq!(found2, Some(WalPosition::test_value(1002)));
 
         // 6) Also ensure that a random short key that doesn't exist returns None
         let not_inserted = Bytes::from(vec![7, 8, 9, 10]);
-        let found4 = single_hop.lookup_unloaded(ks, &reader, &not_inserted, metrics.clone());
+        let found4 = single_hop.lookup_unloaded(ks, &reader, &not_inserted, &metrics);
         assert_eq!(found4, None, "Key {not_inserted:?} unexpectedly found");
     }
 
@@ -605,12 +604,12 @@ mod test {
         // let found1 = index_impl.lookup_unloaded(ks, &file_range, &key1);
         // assert_eq!(found1, Some(WalPosition::test_value(100)));
 
-        let found2 = index_impl.lookup_unloaded(ks, &file_range, &key2, metrics.clone());
+        let found2 = index_impl.lookup_unloaded(ks, &file_range, &key2, &metrics);
         assert_eq!(found2, Some(WalPosition::test_value(200)));
 
         // 8) Confirm non-existent key returns None
         let key3 = Bytes::from(vec![99, 99, 99, 99]);
-        let found3 = index_impl.lookup_unloaded(ks, &file_range, &key3, metrics.clone());
+        let found3 = index_impl.lookup_unloaded(ks, &file_range, &key3, &metrics);
         assert_eq!(found3, None);
     }
 
@@ -632,24 +631,15 @@ mod test {
         assert!(!bytes.is_empty());
 
         // 3) Make sure we can find that exact key
-        assert_eq!(
-            Some(walpos),
-            pi.lookup_unloaded(ks, &bytes, &key, metrics.clone())
-        );
+        assert_eq!(Some(walpos), pi.lookup_unloaded(ks, &bytes, &key, &metrics));
 
         // 4) Try smaller key
         let smaller_key = Bytes::from(vec![0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            None,
-            pi.lookup_unloaded(ks, &bytes, &smaller_key, metrics.clone())
-        );
+        assert_eq!(None, pi.lookup_unloaded(ks, &bytes, &smaller_key, &metrics));
 
         // 5) Try bigger key
         let bigger_key = Bytes::from(vec![255, 255, 255, 255, 255, 255, 255, 255]);
-        assert_eq!(
-            None,
-            pi.lookup_unloaded(ks, &bytes, &bigger_key, metrics.clone())
-        );
+        assert_eq!(None, pi.lookup_unloaded(ks, &bytes, &bigger_key, &metrics));
     }
 
     #[test]

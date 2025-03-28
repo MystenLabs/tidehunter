@@ -280,7 +280,7 @@ impl LargeTable {
         // todo - consider only doing block_in_place for the syscall random reader
         let result = tokio::task::block_in_place(|| {
             ks.index_format()
-                .lookup_unloaded(ks, &index_reader, k, self.metrics.clone())
+                .lookup_unloaded(ks, &index_reader, k, &self.metrics)
         });
         self.metrics
             .lookup_mcs
