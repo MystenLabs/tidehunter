@@ -1,6 +1,8 @@
 use super::super::*;
 use crate::batch::WriteBatch;
 use crate::config::Config;
+use crate::index::index_format::IndexFormatType;
+use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{KeyShape, KeySpace, KeyType};
 use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
 use crate::metrics::Metrics;
@@ -969,4 +971,187 @@ fn ku128(k: u128) -> Bytes {
 
 fn vu128(v: u128) -> Bytes {
     v.to_le_bytes().to_vec().into()
+}
+
+pub(super) fn uniform_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
+    // Create a key shape with two key spaces using different index formats
+    let mut builder = KeyShapeBuilder::new();
+
+    // First key space with default LookupHeader index format
+    let ks1 = builder.add_key_space("lookup_header", 4, 12, KeyType::uniform(12));
+
+    // Second key space with UniformLookup index format
+    let uniform_index = UniformLookupIndex::new();
+    let ks2_config =
+        KeySpaceConfig::default().with_index_format(IndexFormatType::Uniform(uniform_index));
+    let ks2 =
+        builder.add_key_space_config("uniform_lookup", 4, 12, KeyType::uniform(12), ks2_config);
+
+    (builder.build(), ks1, ks2)
+}
+
+pub(super) fn prefix_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
+    let mut builder = KeyShapeBuilder::new();
+    let ks1 = builder.add_key_space("lookup_header", 4, 12, KeyType::prefix_uniform(2, 0));
+    // Second key space with UniformLookup index format
+    let uniform_index = UniformLookupIndex::new();
+    let ks2_config =
+        KeySpaceConfig::default().with_index_format(IndexFormatType::Uniform(uniform_index));
+    let ks2 = builder.add_key_space_config(
+        "prefix_lookup",
+        4,
+        12,
+        KeyType::prefix_uniform(2, 0),
+        ks2_config,
+    );
+    (builder.build(), ks1, ks2)
+}
+
+pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeySpace, KeySpace)) {
+    let dir = tempdir::TempDir::new("test-index-formats").unwrap();
+    let config = Arc::new(Config::small());
+    let metrics = Metrics::new();
+
+    // First session: insert data into both key spaces
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+
+        // Insert into first key space (LookupHeader)
+        db.insert(ks1, vec![1, 2, 3, 4], vec![10, 11]).unwrap();
+        db.insert(ks1, vec![5, 6, 7, 8], vec![12, 13]).unwrap();
+
+        // Insert into second key space (UniformLookup)
+        db.insert(ks2, vec![1, 2, 3, 4], vec![20, 21]).unwrap();
+        db.insert(ks2, vec![5, 6, 7, 8], vec![22, 23]).unwrap();
+
+        // Verify we can read the data back
+        assert_eq!(
+            Some(vec![10, 11].into()),
+            db.get(ks1, &[1, 2, 3, 4]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![12, 13].into()),
+            db.get(ks1, &[5, 6, 7, 8]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![20, 21].into()),
+            db.get(ks2, &[1, 2, 3, 4]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![22, 23].into()),
+            db.get(ks2, &[5, 6, 7, 8]).unwrap()
+        );
+    }
+
+    // Second session: reopen the DB and verify the data persisted
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+
+        // Verify data from both key spaces
+        assert_eq!(
+            Some(vec![10, 11].into()),
+            db.get(ks1, &[1, 2, 3, 4]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![12, 13].into()),
+            db.get(ks1, &[5, 6, 7, 8]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![20, 21].into()),
+            db.get(ks2, &[1, 2, 3, 4]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![22, 23].into()),
+            db.get(ks2, &[5, 6, 7, 8]).unwrap()
+        );
+
+        // Update some values
+        db.insert(ks1, vec![1, 2, 3, 4], vec![14, 15]).unwrap();
+        db.insert(ks2, vec![1, 2, 3, 4], vec![24, 25]).unwrap();
+
+        // Verify updates
+        assert_eq!(
+            Some(vec![14, 15].into()),
+            db.get(ks1, &[1, 2, 3, 4]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![24, 25].into()),
+            db.get(ks2, &[1, 2, 3, 4]).unwrap()
+        );
+
+        // Force a snapshot to ensure data is flushed
+        db.rebuild_control_region().unwrap();
+    }
+
+    // Third session: verify updates after control region rebuild
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+
+        // Verify all data including updates
+        assert_eq!(
+            Some(vec![14, 15].into()),
+            db.get(ks1, &[1, 2, 3, 4]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![12, 13].into()),
+            db.get(ks1, &[5, 6, 7, 8]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![24, 25].into()),
+            db.get(ks2, &[1, 2, 3, 4]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![22, 23].into()),
+            db.get(ks2, &[5, 6, 7, 8]).unwrap()
+        );
+
+        // Remove from one key space, update in another
+        db.remove(ks1, vec![1, 2, 3, 4]).unwrap();
+        db.insert(ks2, vec![5, 6, 7, 8], vec![26, 27]).unwrap();
+
+        // Verify changes
+        assert_eq!(None, db.get(ks1, &[1, 2, 3, 4]).unwrap());
+        assert_eq!(
+            Some(vec![26, 27].into()),
+            db.get(ks2, &[5, 6, 7, 8]).unwrap()
+        );
+    }
+
+    // Fourth session: final verification
+    {
+        let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+
+        // Verify final state
+        assert_eq!(None, db.get(ks1, &[1, 2, 3, 4]).unwrap());
+        assert_eq!(
+            Some(vec![12, 13].into()),
+            db.get(ks1, &[5, 6, 7, 8]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![24, 25].into()),
+            db.get(ks2, &[1, 2, 3, 4]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![26, 27].into()),
+            db.get(ks2, &[5, 6, 7, 8]).unwrap()
+        );
+    }
 }
