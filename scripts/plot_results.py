@@ -57,105 +57,134 @@ def parse_summary_file(file_path):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # Convert window column to numeric
+    # Convert window and threads columns to numeric
     df["Window"] = pd.to_numeric(df["Window"], errors='coerce')
+    df["Threads"] = pd.to_numeric(df["Threads"], errors='coerce')
     
     return df
 
 def plot_throughput(df, output_dir):
-    """Generate throughput plot."""
-    plt.figure(figsize=(10, 6))
-    
-    # Filter for each combination of Index Type and DIO
-    for index_type in ["Header", "Uniform"]:
-        for dio_value in ["Yes", "No"]:
+    """Generate throughput plot with thread count on x-axis."""
+    # Create separate plots for each DIO value
+    for dio_value in ["Yes", "No"]:
+        plt.figure(figsize=(12, 8))
+        dio_name = "DIO" if dio_value == "Yes" else "No-DIO"
+        
+        # Filter for each combination of Index Type and Window
+        for index_type in ["Header", "Uniform"]:
+            # Get unique window sizes for this combination
             filtered_df = df[(df["Index Type"] == index_type) & (df["DIO"] == dio_value)]
+            window_sizes = filtered_df["Window"].unique()
             
-            if not filtered_df.empty:
-                # Group by window size and calculate mean throughput
-                grouped = filtered_df.groupby("Window")["Tput (ops/s)"].mean().reset_index()
+            for window in sorted(window_sizes):
+                window_df = filtered_df[filtered_df["Window"] == window]
                 
-                # Sort by window size
-                grouped = grouped.sort_values("Window")
-                
-                # Plot
-                label = f"{index_type} {'with' if dio_value == 'Yes' else 'without'} direct I/O"
-                plt.plot(grouped["Window"], grouped["Tput (ops/s)"], marker='o', label=label)
-    
-    plt.title("Throughput vs Window Size")
-    plt.xlabel("Window Size")
-    plt.ylabel("Throughput (ops/s)")
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    
-    # Save the plot
-    plt.savefig(os.path.join(output_dir, "throughput_plot.png"))
-    plt.close()
+                if not window_df.empty:
+                    # Group by thread count and calculate mean throughput
+                    grouped = window_df.groupby("Threads")["Tput (ops/s)"].mean().reset_index()
+                    
+                    # Sort by thread count
+                    grouped = grouped.sort_values("Threads")
+                    
+                    # Plot
+                    label = f"{index_type} Win-{window}"
+                    plt.plot(grouped["Threads"], grouped["Tput (ops/s)"], marker='o', label=label)
+        
+        plt.title(f"Throughput vs Thread Count ({dio_name})")
+        plt.xlabel("Thread Count")
+        plt.ylabel("Throughput (ops/s)")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        
+        # Save the plot with DIO status in the filename
+        plt.savefig(os.path.join(output_dir, f"throughput_plot_{dio_name}.png"))
+        plt.close()
 
 def plot_scan_io_time(df, output_dir):
-    """Generate scan and I/O time plot."""
-    plt.figure(figsize=(10, 6))
-    
+    """Generate scan and I/O time plot with thread count on x-axis."""
     # Convert scan time from microseconds to seconds
     df["Scan s"] = df["Scan us"] / 1000000
     
-    # Filter for each index type
-    for index_type in ["Header", "Uniform"]:
-        filtered_df = df[df["Index Type"] == index_type]
+    # Create separate plots for each DIO value
+    for dio_value in ["Yes", "No"]:
+        plt.figure(figsize=(12, 8))
+        dio_name = "DIO" if dio_value == "Yes" else "No-DIO"
         
-        if not filtered_df.empty:
-            # Group by window size and calculate mean scan and IO time
-            grouped_scan = filtered_df.groupby("Window")["Scan s"].mean().reset_index()
-            grouped_io = filtered_df.groupby("Window")["IO s"].mean().reset_index()
+        # Filter for each index type and window size
+        for index_type in ["Header", "Uniform"]:
+            window_sizes = df[(df["Index Type"] == index_type) & 
+                              (df["DIO"] == dio_value)]["Window"].unique()
             
-            # Sort by window size
-            grouped_scan = grouped_scan.sort_values("Window")
-            grouped_io = grouped_io.sort_values("Window")
-            
-            # Plot
-            plt.plot(grouped_scan["Window"], grouped_scan["Scan s"], marker='o', label=f"{index_type} Scan Time")
-            plt.plot(grouped_io["Window"], grouped_io["IO s"], marker='s', label=f"{index_type} I/O Time")
-    
-    plt.title("Scan and I/O Time vs Window Size")
-    plt.xlabel("Window Size")
-    plt.ylabel("Time (seconds)")
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    
-    # Save the plot
-    plt.savefig(os.path.join(output_dir, "scan_io_time_plot.png"))
-    plt.close()
+            for window in sorted(window_sizes):
+                filtered_df = df[(df["Index Type"] == index_type) & 
+                                 (df["Window"] == window) & 
+                                 (df["DIO"] == dio_value)]
+                
+                if not filtered_df.empty:
+                    # Group by thread count and calculate mean scan and IO time
+                    grouped_scan = filtered_df.groupby("Threads")["Scan s"].mean().reset_index()
+                    grouped_io = filtered_df.groupby("Threads")["IO s"].mean().reset_index()
+                    
+                    # Sort by thread count
+                    grouped_scan = grouped_scan.sort_values("Threads")
+                    grouped_io = grouped_io.sort_values("Threads")
+                    
+                    # Plot
+                    plt.plot(grouped_scan["Threads"], grouped_scan["Scan s"], marker='o', 
+                             label=f"{index_type} Win-{window} Scan")
+                    plt.plot(grouped_io["Threads"], grouped_io["IO s"], marker='s', 
+                             label=f"{index_type} Win-{window} I/O")
+        
+        plt.title(f"Scan and I/O Time vs Thread Count ({dio_name})")
+        plt.xlabel("Thread Count")
+        plt.ylabel("Time (seconds)")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        
+        # Save the plot with DIO status in the filename
+        plt.savefig(os.path.join(output_dir, f"scan_io_time_plot_{dio_name}.png"))
+        plt.close()
 
 def plot_io_amount(df, output_dir):
-    """Generate I/O amount plot."""
-    plt.figure(figsize=(10, 6))
-    
-    # Filter for each index type
-    for index_type in ["Header", "Uniform"]:
-        filtered_df = df[df["Index Type"] == index_type]
+    """Generate I/O amount plot with thread count on x-axis."""
+    # Create separate plots for each DIO value
+    for dio_value in ["Yes", "No"]:
+        plt.figure(figsize=(12, 8))
+        dio_name = "DIO" if dio_value == "Yes" else "No-DIO"
         
-        if not filtered_df.empty:
-            # Group by window size and calculate mean IO amount
-            grouped = filtered_df.groupby("Window")["IO GB"].mean().reset_index()
+        # Filter for each index type and window size
+        for index_type in ["Header", "Uniform"]:
+            window_sizes = df[(df["Index Type"] == index_type) & 
+                              (df["DIO"] == dio_value)]["Window"].unique()
             
-            # Sort by window size
-            grouped = grouped.sort_values("Window")
-            
-            # Plot
-            plt.plot(grouped["Window"], grouped["IO GB"], marker='o', label=f"{index_type}")
-    
-    plt.title("I/O Amount vs Window Size")
-    plt.xlabel("Window Size")
-    plt.ylabel("I/O Amount (GB)")
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    
-    # Save the plot
-    plt.savefig(os.path.join(output_dir, "io_amount_plot.png"))
-    plt.close()
+            for window in sorted(window_sizes):
+                filtered_df = df[(df["Index Type"] == index_type) & 
+                                 (df["Window"] == window) & 
+                                 (df["DIO"] == dio_value)]
+                
+                if not filtered_df.empty:
+                    # Group by thread count and calculate mean IO amount
+                    grouped = filtered_df.groupby("Threads")["IO GB"].mean().reset_index()
+                    
+                    # Sort by thread count
+                    grouped = grouped.sort_values("Threads")
+                    
+                    # Plot
+                    plt.plot(grouped["Threads"], grouped["IO GB"], marker='o', 
+                             label=f"{index_type} Win-{window}")
+        
+        plt.title(f"I/O Amount vs Thread Count ({dio_name})")
+        plt.xlabel("Thread Count")
+        plt.ylabel("I/O Amount (GB)")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        
+        # Save the plot with DIO status in the filename
+        plt.savefig(os.path.join(output_dir, f"io_amount_plot_{dio_name}.png"))
+        plt.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Generate plots from benchmark summary file")

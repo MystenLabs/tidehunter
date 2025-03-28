@@ -1,0 +1,178 @@
+Benchmark started at Tue Mar 25 09:49:30 PM UTC 2025
+Running benchmark with direct I/O: on, threads: 2...
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running `target/release/index_benchmark run --num-lookups 1000000 --num-runs 3 --batch-size 1000 --window-size 3200 --num-threads 2 --header-file data/bench-header-1TB-10k.dat --uniform-file data/bench-uniform-1TB-10k.dat --direct-io`
+Running multithreaded benchmark with 2 threads
+Run 1/3
+Running multithreaded benchmark with 2 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 2
+  End-to-end time: 159.05s
+  Total lookups: 2000000
+  End-to-end throughput: 12575.00 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 6311.64 lookups/sec
+    Latency per lookup:
+      Mean: 158437.33 ns
+      Std Dev: 429.77 ns
+      Min: 157153.51 ns
+      Max: 159782.31 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 6287.51 lookups/sec
+    Latency per lookup:
+      Mean: 159045.39 ns
+      Std Dev: 469.99 ns
+      Min: 155017.77 ns
+      Max: 160469.13 ns
+  Overall Latency Statistics:
+    Mean: 158741.36 ns
+    Std Dev: 543.35 ns
+    Min: 155017.77 ns
+    Max: 160469.13 ns
+Running multithreaded benchmark with 2 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 2
+  End-to-end time: 142.50s
+  Total lookups: 2000000
+  End-to-end throughput: 14034.90 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 7017.46 lookups/sec
+    Latency per lookup:
+      Mean: 142501.69 ns
+      Std Dev: 790.85 ns
+      Min: 140230.11 ns
+      Max: 144641.83 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 7018.86 lookups/sec
+    Latency per lookup:
+      Mean: 142473.28 ns
+      Std Dev: 796.43 ns
+      Min: 140345.23 ns
+      Max: 144953.18 ns
+  Overall Latency Statistics:
+    Mean: 142487.48 ns
+    Std Dev: 793.77 ns
+    Min: 140230.11 ns
+    Max: 144953.18 ns
+Run 2/3
+Running multithreaded benchmark with 2 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 2
+  End-to-end time: 158.80s
+  Total lookups: 2000000
+  End-to-end throughput: 12594.72 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 6297.37 lookups/sec
+    Latency per lookup:
+      Mean: 158796.47 ns
+      Std Dev: 470.67 ns
+      Min: 155652.56 ns
+      Max: 161492.08 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 6316.13 lookups/sec
+    Latency per lookup:
+      Mean: 158324.68 ns
+      Std Dev: 444.69 ns
+      Min: 156904.37 ns
+      Max: 160975.98 ns
+  Overall Latency Statistics:
+    Mean: 158560.57 ns
+    Std Dev: 515.06 ns
+    Min: 155652.56 ns
+    Max: 161492.08 ns
+Running multithreaded benchmark with 2 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 2
+  End-to-end time: 143.06s
+  Total lookups: 2000000
+  End-to-end throughput: 13980.48 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 6991.77 lookups/sec
+    Latency per lookup:
+      Mean: 143025.26 ns
+      Std Dev: 790.11 ns
+      Min: 140549.61 ns
+      Max: 145554.00 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 6990.26 lookups/sec
+    Latency per lookup:
+      Mean: 143056.29 ns
+      Std Dev: 789.42 ns
+      Min: 140702.64 ns
+      Max: 145486.79 ns
+  Overall Latency Statistics:
+    Mean: 143040.77 ns
+    Std Dev: 789.92 ns
+    Min: 140549.61 ns
+    Max: 145554.00 ns
+Run 3/3
+Running multithreaded benchmark with 2 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 2
+  End-to-end time: 158.44s
+  Total lookups: 2000000
+  End-to-end throughput: 12622.68 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 6314.69 lookups/sec
+    Latency per lookup:
+      Mean: 158360.89 ns
+      Std Dev: 431.32 ns
+      Min: 156434.42 ns
+      Max: 159669.04 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 6311.35 lookups/sec
+    Latency per lookup:
+      Mean: 158444.72 ns
+      Std Dev: 450.58 ns
+      Min: 156830.11 ns
+      Max: 160287.80 ns
+  Overall Latency Statistics:
+    Mean: 158402.80 ns
+    Std Dev: 443.04 ns
+    Min: 156434.42 ns
+    Max: 160287.80 ns
+Running multithreaded benchmark with 2 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 2
+  End-to-end time: 142.93s
+  Total lookups: 2000000
+  End-to-end throughput: 13992.48 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 6996.27 lookups/sec
+    Latency per lookup:
+      Mean: 142933.40 ns
+      Std Dev: 784.63 ns
+      Min: 140715.95 ns
+      Max: 145599.88 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 6996.25 lookups/sec
+    Latency per lookup:
+      Mean: 142933.65 ns
+      Std Dev: 845.41 ns
+      Min: 140313.77 ns
+      Max: 145511.24 ns
+  Overall Latency Statistics:
+    Mean: 142933.53 ns
+    Std Dev: 815.59 ns
+    Min: 140313.77 ns
+    Max: 145599.88 ns
+HeaderLookupIndex: scan mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_scan_mcs", help: "lookup_scan_mcs", const_label_pairs: [], variable_labels: [], id: 914794617080129952, dim_hash: 914794617080129952 }, val: AtomicU64 { inner: 1285 }, val_type: Counter, label_pairs: [] } }
+HeaderLookupIndex: io mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_mcs", help: "lookup_io_mcs", const_label_pairs: [], variable_labels: [], id: 1936770213637198483, dim_hash: 1936770213637198483 }, val: AtomicU64 { inner: 939353308 }, val_type: Counter, label_pairs: [] } }
+HeaderLookupIndex: io bytes GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_bytes", help: "lookup_io_bytes", const_label_pairs: [], variable_labels: [], id: 16528068844073587369, dim_hash: 16528068844073587369 }, val: AtomicU64 { inner: 2391850400 }, val_type: Counter, label_pairs: [] } }
+Histogram: Histogram { core: HistogramCore { desc: Desc { fq_name: "lookup_iterations", help: "lookup_iterations", const_label_pairs: [], variable_labels: [], id: 2280981954329258229, dim_hash: 2280981954329258229 }, label_pairs: [], collect_lock: Mutex { data: (), poisoned: false, .. }, shard_and_count: ShardAndCount { inner: 6000000 }, shards: [Shard { sum: AtomicF64 { inner: 4708200461918797824 }, count: AtomicU64 { inner: 6000000 }, buckets: [AtomicU64 { inner: 6000000 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }, Shard { sum: AtomicF64 { inner: 0 }, count: AtomicU64 { inner: 0 }, buckets: [AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }], upper_bounds: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0] } }
+UniformLookupIndex: scan mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_scan_mcs", help: "lookup_scan_mcs", const_label_pairs: [], variable_labels: [], id: 914794617080129952, dim_hash: 914794617080129952 }, val: AtomicU64 { inner: 256262 }, val_type: Counter, label_pairs: [] } }
+UniformLookupIndex: io mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_mcs", help: "lookup_io_mcs", const_label_pairs: [], variable_labels: [], id: 1936770213637198483, dim_hash: 1936770213637198483 }, val: AtomicU64 { inner: 805907518 }, val_type: Counter, label_pairs: [] } }
+UniformLookupIndex: io bytes GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_bytes", help: "lookup_io_bytes", const_label_pairs: [], variable_labels: [], id: 16528068844073587369, dim_hash: 16528068844073587369 }, val: AtomicU64 { inner: 706633778280 }, val_type: Counter, label_pairs: [] } }
+Benchmark completed at Tue Mar 25 10:04:35 PM UTC 2025

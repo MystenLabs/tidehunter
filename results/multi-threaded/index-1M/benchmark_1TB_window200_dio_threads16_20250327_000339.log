@@ -1,0 +1,850 @@
+Benchmark started at Thu Mar 27 12:03:39 AM UTC 2025
+Running benchmark with direct I/O: on, threads: 16...
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/index_benchmark run --num-lookups 1000000 --num-runs 3 --batch-size 1000 --window-size 200 --num-threads 16 --header-file data/bench-header-1TB-1M.dat --uniform-file data/bench-uniform-1TB-1M.dat --direct-io`
+Running multithreaded benchmark with 16 threads
+Run 1/3
+Running multithreaded benchmark with 16 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 16
+  End-to-end time: 208.80s
+  Total lookups: 16000000
+  End-to-end throughput: 76627.89 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 4797.46 lookups/sec
+    Latency per lookup:
+      Mean: 208443.64 ns
+      Std Dev: 1264.49 ns
+      Min: 196827.40 ns
+      Max: 212125.06 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 4798.58 lookups/sec
+    Latency per lookup:
+      Mean: 208395.13 ns
+      Std Dev: 1279.07 ns
+      Min: 204330.20 ns
+      Max: 212656.09 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 4794.89 lookups/sec
+    Latency per lookup:
+      Mean: 208555.27 ns
+      Std Dev: 1400.80 ns
+      Min: 192051.51 ns
+      Max: 213427.40 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 4790.99 lookups/sec
+    Latency per lookup:
+      Mean: 208724.93 ns
+      Std Dev: 1783.34 ns
+      Min: 177788.17 ns
+      Max: 212513.18 ns
+  Thread 4 Results:
+    Lookups: 1000000
+    Throughput: 4797.72 lookups/sec
+    Latency per lookup:
+      Mean: 208432.38 ns
+      Std Dev: 1232.86 ns
+      Min: 197690.52 ns
+      Max: 213059.95 ns
+  Thread 5 Results:
+    Lookups: 1000000
+    Throughput: 4792.91 lookups/sec
+    Latency per lookup:
+      Mean: 208641.41 ns
+      Std Dev: 1423.62 ns
+      Min: 184123.19 ns
+      Max: 213886.55 ns
+  Thread 6 Results:
+    Lookups: 1000000
+    Throughput: 4806.97 lookups/sec
+    Latency per lookup:
+      Mean: 208031.09 ns
+      Std Dev: 1192.97 ns
+      Min: 204137.54 ns
+      Max: 212040.78 ns
+  Thread 7 Results:
+    Lookups: 1000000
+    Throughput: 4800.78 lookups/sec
+    Latency per lookup:
+      Mean: 208299.28 ns
+      Std Dev: 1268.17 ns
+      Min: 203621.81 ns
+      Max: 213970.42 ns
+  Thread 8 Results:
+    Lookups: 1000000
+    Throughput: 4799.07 lookups/sec
+    Latency per lookup:
+      Mean: 208373.82 ns
+      Std Dev: 1247.42 ns
+      Min: 201305.55 ns
+      Max: 212274.20 ns
+  Thread 9 Results:
+    Lookups: 1000000
+    Throughput: 4804.27 lookups/sec
+    Latency per lookup:
+      Mean: 208148.34 ns
+      Std Dev: 1254.24 ns
+      Min: 204842.67 ns
+      Max: 213279.25 ns
+  Thread 10 Results:
+    Lookups: 1000000
+    Throughput: 4794.87 lookups/sec
+    Latency per lookup:
+      Mean: 208556.12 ns
+      Std Dev: 1344.36 ns
+      Min: 188719.08 ns
+      Max: 213421.68 ns
+  Thread 11 Results:
+    Lookups: 1000000
+    Throughput: 4801.29 lookups/sec
+    Latency per lookup:
+      Mean: 208277.43 ns
+      Std Dev: 1334.19 ns
+      Min: 202830.89 ns
+      Max: 212841.02 ns
+  Thread 12 Results:
+    Lookups: 1000000
+    Throughput: 4795.46 lookups/sec
+    Latency per lookup:
+      Mean: 208530.36 ns
+      Std Dev: 1353.36 ns
+      Min: 191227.19 ns
+      Max: 214336.89 ns
+  Thread 13 Results:
+    Lookups: 1000000
+    Throughput: 4792.59 lookups/sec
+    Latency per lookup:
+      Mean: 208655.59 ns
+      Std Dev: 1516.78 ns
+      Min: 182308.28 ns
+      Max: 215150.57 ns
+  Thread 14 Results:
+    Lookups: 1000000
+    Throughput: 4794.24 lookups/sec
+    Latency per lookup:
+      Mean: 208583.73 ns
+      Std Dev: 1425.93 ns
+      Min: 189068.89 ns
+      Max: 212629.61 ns
+  Thread 15 Results:
+    Lookups: 1000000
+    Throughput: 4789.27 lookups/sec
+    Latency per lookup:
+      Mean: 208800.16 ns
+      Std Dev: 1952.16 ns
+      Min: 172686.86 ns
+      Max: 215947.27 ns
+  Overall Latency Statistics:
+    Mean: 208465.54 ns
+    Std Dev: 1420.75 ns
+    Min: 172686.86 ns
+    Max: 215947.27 ns
+Running multithreaded benchmark with 16 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 16
+  End-to-end time: 236.28s
+  Total lookups: 16000000
+  End-to-end throughput: 67717.07 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 4301.72 lookups/sec
+    Latency per lookup:
+      Mean: 232465.26 ns
+      Std Dev: 4188.64 ns
+      Min: 219992.53 ns
+      Max: 247768.30 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 4255.05 lookups/sec
+    Latency per lookup:
+      Mean: 235014.61 ns
+      Std Dev: 4383.87 ns
+      Min: 212411.90 ns
+      Max: 252196.08 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 4280.52 lookups/sec
+    Latency per lookup:
+      Mean: 233616.71 ns
+      Std Dev: 4324.11 ns
+      Min: 222089.94 ns
+      Max: 250397.63 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 4255.70 lookups/sec
+    Latency per lookup:
+      Mean: 234978.72 ns
+      Std Dev: 4455.64 ns
+      Min: 218023.31 ns
+      Max: 255352.74 ns
+  Thread 4 Results:
+    Lookups: 1000000
+    Throughput: 4331.74 lookups/sec
+    Latency per lookup:
+      Mean: 230854.00 ns
+      Std Dev: 3992.64 ns
+      Min: 214147.66 ns
+      Max: 242984.92 ns
+  Thread 5 Results:
+    Lookups: 1000000
+    Throughput: 4268.73 lookups/sec
+    Latency per lookup:
+      Mean: 234261.89 ns
+      Std Dev: 4368.66 ns
+      Min: 218858.39 ns
+      Max: 246756.10 ns
+  Thread 6 Results:
+    Lookups: 1000000
+    Throughput: 4240.89 lookups/sec
+    Latency per lookup:
+      Mean: 235799.55 ns
+      Std Dev: 4452.10 ns
+      Min: 213954.47 ns
+      Max: 253855.11 ns
+  Thread 7 Results:
+    Lookups: 1000000
+    Throughput: 4249.64 lookups/sec
+    Latency per lookup:
+      Mean: 235314.15 ns
+      Std Dev: 4347.88 ns
+      Min: 221213.44 ns
+      Max: 246845.46 ns
+  Thread 8 Results:
+    Lookups: 1000000
+    Throughput: 4310.16 lookups/sec
+    Latency per lookup:
+      Mean: 232010.04 ns
+      Std Dev: 4149.32 ns
+      Min: 219175.43 ns
+      Max: 247223.71 ns
+  Thread 9 Results:
+    Lookups: 1000000
+    Throughput: 4232.32 lookups/sec
+    Latency per lookup:
+      Mean: 236276.89 ns
+      Std Dev: 4544.98 ns
+      Min: 210554.30 ns
+      Max: 254003.05 ns
+  Thread 10 Results:
+    Lookups: 1000000
+    Throughput: 4285.98 lookups/sec
+    Latency per lookup:
+      Mean: 233318.73 ns
+      Std Dev: 4175.07 ns
+      Min: 218649.55 ns
+      Max: 246837.04 ns
+  Thread 11 Results:
+    Lookups: 1000000
+    Throughput: 4250.63 lookups/sec
+    Latency per lookup:
+      Mean: 235259.11 ns
+      Std Dev: 4278.15 ns
+      Min: 214480.62 ns
+      Max: 247575.83 ns
+  Thread 12 Results:
+    Lookups: 1000000
+    Throughput: 4257.05 lookups/sec
+    Latency per lookup:
+      Mean: 234904.23 ns
+      Std Dev: 4306.38 ns
+      Min: 220368.79 ns
+      Max: 249488.64 ns
+  Thread 13 Results:
+    Lookups: 1000000
+    Throughput: 4266.69 lookups/sec
+    Latency per lookup:
+      Mean: 234373.55 ns
+      Std Dev: 4036.67 ns
+      Min: 221067.57 ns
+      Max: 245745.60 ns
+  Thread 14 Results:
+    Lookups: 1000000
+    Throughput: 4268.54 lookups/sec
+    Latency per lookup:
+      Mean: 234272.30 ns
+      Std Dev: 4207.14 ns
+      Min: 220332.57 ns
+      Max: 246191.27 ns
+  Thread 15 Results:
+    Lookups: 1000000
+    Throughput: 4234.64 lookups/sec
+    Latency per lookup:
+      Mean: 236147.48 ns
+      Std Dev: 4650.56 ns
+      Min: 208481.33 ns
+      Max: 251516.80 ns
+  Overall Latency Statistics:
+    Mean: 234304.20 ns
+    Std Dev: 4552.59 ns
+    Min: 208481.33 ns
+    Max: 255352.74 ns
+Run 2/3
+Running multithreaded benchmark with 16 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 16
+  End-to-end time: 208.59s
+  Total lookups: 16000000
+  End-to-end throughput: 76704.16 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 4808.14 lookups/sec
+    Latency per lookup:
+      Mean: 207980.82 ns
+      Std Dev: 1117.93 ns
+      Min: 204251.84 ns
+      Max: 211474.75 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 4794.01 lookups/sec
+    Latency per lookup:
+      Mean: 208593.46 ns
+      Std Dev: 1630.70 ns
+      Min: 178662.45 ns
+      Max: 212637.92 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 4800.13 lookups/sec
+    Latency per lookup:
+      Mean: 208327.69 ns
+      Std Dev: 1246.70 ns
+      Min: 197920.55 ns
+      Max: 212723.16 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 4794.56 lookups/sec
+    Latency per lookup:
+      Mean: 208569.68 ns
+      Std Dev: 1567.91 ns
+      Min: 179627.52 ns
+      Max: 212437.98 ns
+  Thread 4 Results:
+    Lookups: 1000000
+    Throughput: 4807.35 lookups/sec
+    Latency per lookup:
+      Mean: 208014.81 ns
+      Std Dev: 1132.50 ns
+      Min: 204457.68 ns
+      Max: 212297.12 ns
+  Thread 5 Results:
+    Lookups: 1000000
+    Throughput: 4794.08 lookups/sec
+    Latency per lookup:
+      Mean: 208590.76 ns
+      Std Dev: 1597.59 ns
+      Min: 178636.42 ns
+      Max: 212541.67 ns
+  Thread 6 Results:
+    Lookups: 1000000
+    Throughput: 4799.01 lookups/sec
+    Latency per lookup:
+      Mean: 208376.27 ns
+      Std Dev: 1347.05 ns
+      Min: 196051.83 ns
+      Max: 212454.42 ns
+  Thread 7 Results:
+    Lookups: 1000000
+    Throughput: 4804.92 lookups/sec
+    Latency per lookup:
+      Mean: 208119.92 ns
+      Std Dev: 1250.27 ns
+      Min: 204058.90 ns
+      Max: 212350.71 ns
+  Thread 8 Results:
+    Lookups: 1000000
+    Throughput: 4800.27 lookups/sec
+    Latency per lookup:
+      Mean: 208321.44 ns
+      Std Dev: 1408.47 ns
+      Min: 195166.85 ns
+      Max: 212460.86 ns
+  Thread 9 Results:
+    Lookups: 1000000
+    Throughput: 4800.18 lookups/sec
+    Latency per lookup:
+      Mean: 208325.45 ns
+      Std Dev: 1219.06 ns
+      Min: 198183.08 ns
+      Max: 212000.27 ns
+  Thread 10 Results:
+    Lookups: 1000000
+    Throughput: 4796.04 lookups/sec
+    Latency per lookup:
+      Mean: 208505.36 ns
+      Std Dev: 1418.98 ns
+      Min: 184685.07 ns
+      Max: 212307.96 ns
+  Thread 11 Results:
+    Lookups: 1000000
+    Throughput: 4799.02 lookups/sec
+    Latency per lookup:
+      Mean: 208375.98 ns
+      Std Dev: 1385.96 ns
+      Min: 194374.12 ns
+      Max: 213508.76 ns
+  Thread 12 Results:
+    Lookups: 1000000
+    Throughput: 4796.83 lookups/sec
+    Latency per lookup:
+      Mean: 208471.15 ns
+      Std Dev: 1390.31 ns
+      Min: 189125.86 ns
+      Max: 212759.03 ns
+  Thread 13 Results:
+    Lookups: 1000000
+    Throughput: 4806.14 lookups/sec
+    Latency per lookup:
+      Mean: 208066.98 ns
+      Std Dev: 1211.77 ns
+      Min: 204382.24 ns
+      Max: 212171.03 ns
+  Thread 14 Results:
+    Lookups: 1000000
+    Throughput: 4797.27 lookups/sec
+    Latency per lookup:
+      Mean: 208452.00 ns
+      Std Dev: 1413.80 ns
+      Min: 189602.98 ns
+      Max: 213312.10 ns
+  Thread 15 Results:
+    Lookups: 1000000
+    Throughput: 4796.85 lookups/sec
+    Latency per lookup:
+      Mean: 208469.98 ns
+      Std Dev: 1294.09 ns
+      Min: 189495.78 ns
+      Max: 211801.99 ns
+  Overall Latency Statistics:
+    Mean: 208347.61 ns
+    Std Dev: 1374.48 ns
+    Min: 178636.42 ns
+    Max: 213508.76 ns
+Running multithreaded benchmark with 16 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 16
+  End-to-end time: 236.02s
+  Total lookups: 16000000
+  End-to-end throughput: 67790.36 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 4301.38 lookups/sec
+    Latency per lookup:
+      Mean: 232483.74 ns
+      Std Dev: 4057.50 ns
+      Min: 221021.38 ns
+      Max: 245207.70 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 4252.12 lookups/sec
+    Latency per lookup:
+      Mean: 235176.55 ns
+      Std Dev: 4228.63 ns
+      Min: 211546.43 ns
+      Max: 249256.05 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 4279.37 lookups/sec
+    Latency per lookup:
+      Mean: 233679.14 ns
+      Std Dev: 4222.95 ns
+      Min: 220212.18 ns
+      Max: 248188.32 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 4252.42 lookups/sec
+    Latency per lookup:
+      Mean: 235160.14 ns
+      Std Dev: 4394.61 ns
+      Min: 218228.28 ns
+      Max: 251508.48 ns
+  Thread 4 Results:
+    Lookups: 1000000
+    Throughput: 4319.37 lookups/sec
+    Latency per lookup:
+      Mean: 231515.48 ns
+      Std Dev: 4185.32 ns
+      Min: 219193.30 ns
+      Max: 243494.14 ns
+  Thread 5 Results:
+    Lookups: 1000000
+    Throughput: 4271.28 lookups/sec
+    Latency per lookup:
+      Mean: 234121.62 ns
+      Std Dev: 4154.79 ns
+      Min: 220562.48 ns
+      Max: 246001.05 ns
+  Thread 6 Results:
+    Lookups: 1000000
+    Throughput: 4237.30 lookups/sec
+    Latency per lookup:
+      Mean: 235999.15 ns
+      Std Dev: 4626.55 ns
+      Min: 208590.14 ns
+      Max: 249224.32 ns
+  Thread 7 Results:
+    Lookups: 1000000
+    Throughput: 4249.38 lookups/sec
+    Latency per lookup:
+      Mean: 235328.62 ns
+      Std Dev: 4373.20 ns
+      Min: 220113.55 ns
+      Max: 247166.64 ns
+  Thread 8 Results:
+    Lookups: 1000000
+    Throughput: 4307.21 lookups/sec
+    Latency per lookup:
+      Mean: 232168.62 ns
+      Std Dev: 4226.97 ns
+      Min: 220396.97 ns
+      Max: 244399.86 ns
+  Thread 9 Results:
+    Lookups: 1000000
+    Throughput: 4236.90 lookups/sec
+    Latency per lookup:
+      Mean: 236021.46 ns
+      Std Dev: 4556.85 ns
+      Min: 210544.67 ns
+      Max: 248892.91 ns
+  Thread 10 Results:
+    Lookups: 1000000
+    Throughput: 4290.46 lookups/sec
+    Latency per lookup:
+      Mean: 233075.10 ns
+      Std Dev: 3993.81 ns
+      Min: 220454.72 ns
+      Max: 246233.49 ns
+  Thread 11 Results:
+    Lookups: 1000000
+    Throughput: 4251.37 lookups/sec
+    Latency per lookup:
+      Mean: 235218.38 ns
+      Std Dev: 4361.70 ns
+      Min: 215760.75 ns
+      Max: 248258.90 ns
+  Thread 12 Results:
+    Lookups: 1000000
+    Throughput: 4264.36 lookups/sec
+    Latency per lookup:
+      Mean: 234502.02 ns
+      Std Dev: 4217.40 ns
+      Min: 220666.94 ns
+      Max: 246444.84 ns
+  Thread 13 Results:
+    Lookups: 1000000
+    Throughput: 4274.52 lookups/sec
+    Latency per lookup:
+      Mean: 233944.28 ns
+      Std Dev: 4253.39 ns
+      Min: 216021.44 ns
+      Max: 249910.97 ns
+  Thread 14 Results:
+    Lookups: 1000000
+    Throughput: 4265.10 lookups/sec
+    Latency per lookup:
+      Mean: 234461.01 ns
+      Std Dev: 4179.41 ns
+      Min: 220769.61 ns
+      Max: 247638.09 ns
+  Thread 15 Results:
+    Lookups: 1000000
+    Throughput: 4238.60 lookups/sec
+    Latency per lookup:
+      Mean: 235926.79 ns
+      Std Dev: 4521.86 ns
+      Min: 212653.81 ns
+      Max: 251080.22 ns
+  Overall Latency Statistics:
+    Mean: 234298.88 ns
+    Std Dev: 4498.69 ns
+    Min: 208590.14 ns
+    Max: 251508.48 ns
+Run 3/3
+Running multithreaded benchmark with 16 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 16
+  End-to-end time: 209.82s
+  Total lookups: 16000000
+  End-to-end throughput: 76254.41 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 4788.47 lookups/sec
+    Latency per lookup:
+      Mean: 208835.10 ns
+      Std Dev: 1883.81 ns
+      Min: 178675.08 ns
+      Max: 212562.82 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 4804.87 lookups/sec
+    Latency per lookup:
+      Mean: 208122.03 ns
+      Std Dev: 1115.77 ns
+      Min: 204608.98 ns
+      Max: 211417.73 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 4807.23 lookups/sec
+    Latency per lookup:
+      Mean: 208020.19 ns
+      Std Dev: 1135.29 ns
+      Min: 203388.85 ns
+      Max: 211408.14 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 4795.02 lookups/sec
+    Latency per lookup:
+      Mean: 208549.85 ns
+      Std Dev: 1529.86 ns
+      Min: 186910.18 ns
+      Max: 212817.89 ns
+  Thread 4 Results:
+    Lookups: 1000000
+    Throughput: 4775.93 lookups/sec
+    Latency per lookup:
+      Mean: 209383.27 ns
+      Std Dev: 2676.44 ns
+      Min: 172735.07 ns
+      Max: 213776.27 ns
+  Thread 5 Results:
+    Lookups: 1000000
+    Throughput: 4804.83 lookups/sec
+    Latency per lookup:
+      Mean: 208123.99 ns
+      Std Dev: 1189.12 ns
+      Min: 204643.06 ns
+      Max: 212641.35 ns
+  Thread 6 Results:
+    Lookups: 1000000
+    Throughput: 4804.98 lookups/sec
+    Latency per lookup:
+      Mean: 208117.20 ns
+      Std Dev: 1142.87 ns
+      Min: 204592.18 ns
+      Max: 212900.52 ns
+  Thread 7 Results:
+    Lookups: 1000000
+    Throughput: 4794.40 lookups/sec
+    Latency per lookup:
+      Mean: 208576.63 ns
+      Std Dev: 1501.93 ns
+      Min: 187488.63 ns
+      Max: 212792.81 ns
+  Thread 8 Results:
+    Lookups: 1000000
+    Throughput: 4795.29 lookups/sec
+    Latency per lookup:
+      Mean: 208537.99 ns
+      Std Dev: 1428.54 ns
+      Min: 187443.82 ns
+      Max: 213133.61 ns
+  Thread 9 Results:
+    Lookups: 1000000
+    Throughput: 4793.98 lookups/sec
+    Latency per lookup:
+      Mean: 208594.79 ns
+      Std Dev: 1509.54 ns
+      Min: 188382.93 ns
+      Max: 212935.03 ns
+  Thread 10 Results:
+    Lookups: 1000000
+    Throughput: 4801.20 lookups/sec
+    Latency per lookup:
+      Mean: 208281.19 ns
+      Std Dev: 1283.44 ns
+      Min: 196340.04 ns
+      Max: 212010.06 ns
+  Thread 11 Results:
+    Lookups: 1000000
+    Throughput: 4799.95 lookups/sec
+    Latency per lookup:
+      Mean: 208335.35 ns
+      Std Dev: 1239.99 ns
+      Min: 193315.80 ns
+      Max: 212032.70 ns
+  Thread 12 Results:
+    Lookups: 1000000
+    Throughput: 4765.91 lookups/sec
+    Latency per lookup:
+      Mean: 209823.50 ns
+      Std Dev: 3407.16 ns
+      Min: 169283.66 ns
+      Max: 213918.62 ns
+  Thread 13 Results:
+    Lookups: 1000000
+    Throughput: 4782.77 lookups/sec
+    Latency per lookup:
+      Mean: 209083.76 ns
+      Std Dev: 2283.94 ns
+      Min: 176603.87 ns
+      Max: 213216.01 ns
+  Thread 14 Results:
+    Lookups: 1000000
+    Throughput: 4802.55 lookups/sec
+    Latency per lookup:
+      Mean: 208222.83 ns
+      Std Dev: 1187.11 ns
+      Min: 197721.62 ns
+      Max: 212109.20 ns
+  Thread 15 Results:
+    Lookups: 1000000
+    Throughput: 4804.38 lookups/sec
+    Latency per lookup:
+      Mean: 208143.29 ns
+      Std Dev: 1240.44 ns
+      Min: 204398.11 ns
+      Max: 211956.85 ns
+  Overall Latency Statistics:
+    Mean: 208546.93 ns
+    Std Dev: 1798.40 ns
+    Min: 169283.66 ns
+    Max: 213918.62 ns
+Running multithreaded benchmark with 16 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 16
+  End-to-end time: 236.66s
+  Total lookups: 16000000
+  End-to-end throughput: 67608.49 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 4295.50 lookups/sec
+    Latency per lookup:
+      Mean: 232801.63 ns
+      Std Dev: 4204.83 ns
+      Min: 218997.66 ns
+      Max: 247009.78 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 4247.77 lookups/sec
+    Latency per lookup:
+      Mean: 235417.52 ns
+      Std Dev: 4432.51 ns
+      Min: 215020.60 ns
+      Max: 248661.51 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 4287.92 lookups/sec
+    Latency per lookup:
+      Mean: 233213.22 ns
+      Std Dev: 4328.19 ns
+      Min: 218019.48 ns
+      Max: 246935.01 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 4259.27 lookups/sec
+    Latency per lookup:
+      Mean: 234782.15 ns
+      Std Dev: 4300.27 ns
+      Min: 219958.35 ns
+      Max: 250408.79 ns
+  Thread 4 Results:
+    Lookups: 1000000
+    Throughput: 4310.78 lookups/sec
+    Latency per lookup:
+      Mean: 231976.52 ns
+      Std Dev: 4084.43 ns
+      Min: 218475.09 ns
+      Max: 245949.71 ns
+  Thread 5 Results:
+    Lookups: 1000000
+    Throughput: 4268.42 lookups/sec
+    Latency per lookup:
+      Mean: 234278.93 ns
+      Std Dev: 4144.07 ns
+      Min: 219976.65 ns
+      Max: 246836.01 ns
+  Thread 6 Results:
+    Lookups: 1000000
+    Throughput: 4243.23 lookups/sec
+    Latency per lookup:
+      Mean: 235669.43 ns
+      Std Dev: 4534.17 ns
+      Min: 209158.84 ns
+      Max: 248557.14 ns
+  Thread 7 Results:
+    Lookups: 1000000
+    Throughput: 4250.21 lookups/sec
+    Latency per lookup:
+      Mean: 235282.30 ns
+      Std Dev: 4343.56 ns
+      Min: 216990.58 ns
+      Max: 252415.00 ns
+  Thread 8 Results:
+    Lookups: 1000000
+    Throughput: 4313.07 lookups/sec
+    Latency per lookup:
+      Mean: 231853.68 ns
+      Std Dev: 4021.58 ns
+      Min: 218543.69 ns
+      Max: 248942.00 ns
+  Thread 9 Results:
+    Lookups: 1000000
+    Throughput: 4225.54 lookups/sec
+    Latency per lookup:
+      Mean: 236656.33 ns
+      Std Dev: 4741.25 ns
+      Min: 203094.70 ns
+      Max: 249563.50 ns
+  Thread 10 Results:
+    Lookups: 1000000
+    Throughput: 4299.87 lookups/sec
+    Latency per lookup:
+      Mean: 232565.15 ns
+      Std Dev: 4130.13 ns
+      Min: 219734.73 ns
+      Max: 245630.98 ns
+  Thread 11 Results:
+    Lookups: 1000000
+    Throughput: 4245.68 lookups/sec
+    Latency per lookup:
+      Mean: 235533.78 ns
+      Std Dev: 4435.42 ns
+      Min: 213731.79 ns
+      Max: 252224.23 ns
+  Thread 12 Results:
+    Lookups: 1000000
+    Throughput: 4271.34 lookups/sec
+    Latency per lookup:
+      Mean: 234118.45 ns
+      Std Dev: 4351.01 ns
+      Min: 219665.21 ns
+      Max: 246279.86 ns
+  Thread 13 Results:
+    Lookups: 1000000
+    Throughput: 4270.74 lookups/sec
+    Latency per lookup:
+      Mean: 234151.38 ns
+      Std Dev: 4204.82 ns
+      Min: 219158.89 ns
+      Max: 246751.64 ns
+  Thread 14 Results:
+    Lookups: 1000000
+    Throughput: 4273.87 lookups/sec
+    Latency per lookup:
+      Mean: 233980.03 ns
+      Std Dev: 4200.04 ns
+      Min: 221078.35 ns
+      Max: 247431.60 ns
+  Thread 15 Results:
+    Lookups: 1000000
+    Throughput: 4235.94 lookups/sec
+    Latency per lookup:
+      Mean: 236074.96 ns
+      Std Dev: 4587.79 ns
+      Min: 211006.41 ns
+      Max: 252609.01 ns
+  Overall Latency Statistics:
+    Mean: 234272.22 ns
+    Std Dev: 4548.55 ns
+    Min: 203094.70 ns
+    Max: 252609.01 ns
+HeaderLookupIndex: scan mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_scan_mcs", help: "lookup_scan_mcs", const_label_pairs: [], variable_labels: [], id: 914794617080129952, dim_hash: 914794617080129952 }, val: AtomicU64 { inner: 2519170 }, val_type: Counter, label_pairs: [] } }
+HeaderLookupIndex: io mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_mcs", help: "lookup_io_mcs", const_label_pairs: [], variable_labels: [], id: 1936770213637198483, dim_hash: 1936770213637198483 }, val: AtomicU64 { inner: 9889493395 }, val_type: Counter, label_pairs: [] } }
+HeaderLookupIndex: io bytes GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_bytes", help: "lookup_io_bytes", const_label_pairs: [], variable_labels: [], id: 16528068844073587369, dim_hash: 16528068844073587369 }, val: AtomicU64 { inner: 1875369922320 }, val_type: Counter, label_pairs: [] } }
+Histogram: Histogram { core: HistogramCore { desc: Desc { fq_name: "lookup_iterations", help: "lookup_iterations", const_label_pairs: [], variable_labels: [], id: 2280981954329258229, dim_hash: 2280981954329258229 }, label_pairs: [], collect_lock: Mutex { data: (), poisoned: false, .. }, shard_and_count: ShardAndCount { inner: 48000000 }, shards: [Shard { sum: AtomicF64 { inner: 4728003689208348672 }, count: AtomicU64 { inner: 48000000 }, buckets: [AtomicU64 { inner: 11017448 }, AtomicU64 { inner: 16567354 }, AtomicU64 { inner: 10288266 }, AtomicU64 { inner: 5639302 }, AtomicU64 { inner: 2714949 }, AtomicU64 { inner: 1161485 }, AtomicU64 { inner: 420513 }, AtomicU64 { inner: 136863 }, AtomicU64 { inner: 41197 }, AtomicU64 { inner: 10459 }] }, Shard { sum: AtomicF64 { inner: 0 }, count: AtomicU64 { inner: 0 }, buckets: [AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }], upper_bounds: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0] } }
+UniformLookupIndex: scan mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_scan_mcs", help: "lookup_scan_mcs", const_label_pairs: [], variable_labels: [], id: 914794617080129952, dim_hash: 914794617080129952 }, val: AtomicU64 { inner: 347922 }, val_type: Counter, label_pairs: [] } }
+UniformLookupIndex: io mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_mcs", help: "lookup_io_mcs", const_label_pairs: [], variable_labels: [], id: 1936770213637198483, dim_hash: 1936770213637198483 }, val: AtomicU64 { inner: 11090306933 }, val_type: Counter, label_pairs: [] } }
+UniformLookupIndex: io bytes GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_bytes", help: "lookup_io_bytes", const_label_pairs: [], variable_labels: [], id: 16528068844073587369, dim_hash: 16528068844073587369 }, val: AtomicU64 { inner: 981225842960 }, val_type: Counter, label_pairs: [] } }
+Benchmark completed at Thu Mar 27 12:25:55 AM UTC 2025

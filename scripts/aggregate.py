@@ -20,17 +20,20 @@ def extract_metrics_from_log(log_file):
     # Extract direct I/O setting
     dio_status = "Yes" if "_dio_" in filename else "No" if "_no-dio_" in filename else "N/A"
     
+    # Extract thread count
+    thread_count = re.search(r'threads([0-9]+)', filename).group(1) if re.search(r'threads([0-9]+)', filename) else "1"
+    
     # Extract throughput values
     header_throughput = None
     uniform_throughput = None
     
     # Get all matches and calculate median using numpy
-    header_matches = list(re.finditer(r'HeaderLookupIndex Results:.*?Throughput: (\d+\.?\d*)', content, re.DOTALL))
+    header_matches = list(re.finditer(r'HeaderLookupIndex Multithreaded Results:.*?End-to-end throughput: (\d+\.?\d*)', content, re.DOTALL))
     if header_matches:
         values = np.array([float(match.group(1)) for match in header_matches])
         header_throughput = str(np.median(values))
     
-    uniform_matches = list(re.finditer(r'UniformLookupIndex Results:.*?Throughput: (\d+\.?\d*)', content, re.DOTALL))
+    uniform_matches = list(re.finditer(r'UniformLookupIndex Multithreaded Results:.*?End-to-end throughput: (\d+\.?\d*)', content, re.DOTALL))
     if uniform_matches:
         values = np.array([float(match.group(1)) for match in uniform_matches])
         uniform_throughput = str(np.median(values))
@@ -74,6 +77,7 @@ def extract_metrics_from_log(log_file):
         'file_size': file_size,
         'window_size': window_size,
         'dio_status': dio_status,
+        'thread_count': thread_count,
         'header_throughput': header_throughput,
         'uniform_throughput': uniform_throughput,
         'header_scan_mcs': header_scan_mcs,
@@ -104,11 +108,11 @@ def main():
         f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         
         # Write header
-        header = "%-9s | %-6s | %-10s | %-7s | %-12s | %-8s | %-12s | %-10s | %-10s"
-        separator = "%-9s-|-%-6s-|-%-10s-|-%-7s-|-%-12s-|-%-8s-|-%-12s-|-%-10s-|-%-10s"
+        header = "%-9s | %-6s | %-10s | %-7s | %-8s | %-12s | %-8s | %-12s | %-10s | %-10s"
+        separator = "%-9s-|-%-6s-|-%-10s-|-%-7s-|-%-8s-|-%-12s-|-%-8s-|-%-12s-|-%-10s-|-%-10s"
         
-        f.write(header % ("File Size", "Window", "Index Type", "DIO", "Tput (ops/s)", "Avg Hops", "Scan us", "IO s", "IO GB") + "\n")
-        f.write(separator % ("---------", "------", "----------", "-------", "------------", "--------", "------------", "----------", "----------") + "\n")
+        f.write(header % ("File Size", "Window", "Index Type", "DIO", "Threads", "Tput (ops/s)", "Avg Hops", "Scan us", "IO s", "IO GB") + "\n")
+        f.write(separator % ("---------", "------", "----------", "-------", "--------", "------------", "--------", "------------", "----------", "----------") + "\n")
         
         # Process each log file
         for log_file in sorted(Path(results_dir).glob("benchmark_*.log")):
@@ -122,6 +126,7 @@ def main():
                     metrics['window_size'],
                     "Header",
                     metrics['dio_status'],
+                    metrics['thread_count'],
                     metrics['header_throughput'],
                     "2.00",
                     metrics['header_scan_mcs'],
@@ -136,6 +141,7 @@ def main():
                     metrics['window_size'],
                     "Uniform",
                     metrics['dio_status'],
+                    metrics['thread_count'],
                     metrics['uniform_throughput'],
                     metrics['uniform_avg_hops'],
                     metrics['uniform_scan_mcs'],
