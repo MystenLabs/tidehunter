@@ -1,28 +1,30 @@
-use crate::batch::WriteBatch;
-use crate::cell::CellId;
-use crate::config::Config;
-use crate::control::{ControlRegion, ControlRegionStore};
-use crate::crc::IntoBytesFixed;
-use crate::flusher::IndexFlusher;
-use crate::index::index_format::IndexFormat;
-use crate::index::index_table::IndexTable;
-use crate::index::INDEX_FORMAT;
-use crate::iterators::db_iterator::DbIterator;
-use crate::iterators::IteratorResult;
-use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
-use crate::large_table::{GetResult, LargeTable, Loader};
-use crate::metrics::{Metrics, TimerExt};
-use crate::wal::{
-    PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc, Weak},
+    thread,
+    time::Duration,
 };
+
 use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
-use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Weak};
-use std::time::Duration;
-use std::{io, thread};
+
+use crate::{
+    batch::WriteBatch,
+    cell::CellId,
+    config::Config,
+    control::{ControlRegion, ControlRegionStore},
+    crc::IntoBytesFixed,
+    flusher::IndexFlusher,
+    index::{index_format::IndexFormat, index_table::IndexTable, INDEX_FORMAT},
+    iterators::{db_iterator::DbIterator, IteratorResult},
+    key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType},
+    large_table::{GetResult, LargeTable, Loader},
+    metrics::{Metrics, TimerExt},
+    wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter},
+};
 
 pub struct Db {
     large_table: LargeTable,
@@ -456,7 +458,7 @@ impl Db {
         let snapshot = self
             .large_table
             .snapshot(current_wal_position.as_u64(), self)?;
-        // todo fsync wal first
+        self.wal.fsync()?;
         crs.store(snapshot.data, snapshot.last_added_position, &self.metrics);
         Ok(snapshot.last_added_position)
     }

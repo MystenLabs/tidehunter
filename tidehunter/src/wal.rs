@@ -1,24 +1,31 @@
-use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
-use crate::file_reader::{align_size, set_direct_options, FileReader};
-use crate::index::index_format::IndexFormat;
-use crate::index::INDEX_FORMAT;
-use crate::lookup::{FileRange, RandomRead};
-use crate::metrics::{Metrics, TimerExt};
-use crate::wal_syncer::WalSyncer;
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    fs::{File, OpenOptions},
+    io,
+    mem,
+    ops::Range,
+    os::unix::fs::FileExt,
+    path::Path,
+    ptr,
+    sync::{mpsc, Arc},
+    thread,
+    thread::JoinHandle,
+    time::Instant,
+};
+
 use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::ops::Range;
-use std::os::unix::fs::FileExt;
-use std::path::Path;
-use std::sync::{mpsc, Arc};
-use std::thread::JoinHandle;
-use std::time::Instant;
-use std::{io, mem, ptr, thread};
+
+use crate::{
+    crc::{CrcFrame, CrcReadError, IntoBytesFixed},
+    file_reader::{align_size, set_direct_options, FileReader},
+    index::{index_format::IndexFormat, INDEX_FORMAT},
+    lookup::{FileRange, RandomRead},
+    metrics::{Metrics, TimerExt},
+    wal_syncer::WalSyncer,
+};
 
 pub struct WalWriter {
     wal: Arc<Wal>,
@@ -473,6 +480,11 @@ impl Wal {
     fn file_reader(&self) -> FileReader {
         FileReader::new(&self.file, self.layout.direct_io)
     }
+
+    /// Ensure the file is written to disk (blocking call).
+    pub fn fsync(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
 }
 
 impl WalMapper {
@@ -713,9 +725,11 @@ impl From<io::Error> for WalError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use bytes::BytesMut;
     use std::collections::HashSet;
+
+    use bytes::BytesMut;
+
+    use super::*;
 
     #[test]
     fn test_wal() {
