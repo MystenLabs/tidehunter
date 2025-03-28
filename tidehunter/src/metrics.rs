@@ -1,10 +1,18 @@
+use std::sync::{atomic::AtomicUsize, Arc};
+
 use prometheus::{
-    exponential_buckets, linear_buckets, Histogram, HistogramVec, IntCounter, IntCounterVec,
-    IntGauge, IntGaugeVec, Registry,
+    exponential_buckets,
+    linear_buckets,
+    Histogram,
+    HistogramVec,
+    IntCounter,
+    IntCounterVec,
+    IntGauge,
+    IntGaugeVec,
+    Registry,
 };
-use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
-use tokio::time::Instant;
+
+use crate::runtime::Instant;
 
 pub struct Metrics {
     pub replayed_wal_records: IntCounter,

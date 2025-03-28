@@ -15,10 +15,10 @@ pub mod lookup;
 mod math;
 pub mod metrics;
 mod primitives;
+mod runtime;
 pub mod wal;
 mod wal_syncer;
 
 // todo remove re-export
 pub use minibytes;
-
 pub use wal::WalPosition;
