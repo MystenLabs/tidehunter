@@ -1,15 +1,16 @@
-use minibytes::Bytes;
-use std::ops::Range;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{ops::Range, sync::Arc};
 
-use super::index_format::IndexFormat;
-use super::{deserialize_index_entries, serialize_index_entries};
-use crate::index::index_format::PREFIX_LENGTH;
-use crate::key_shape::CELL_PREFIX_LENGTH;
-use crate::metrics::Metrics;
-use crate::wal::WalPosition;
-use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
+use minibytes::Bytes;
+
+use super::{deserialize_index_entries, index_format::IndexFormat, serialize_index_entries};
+use crate::{
+    index::{index_format::PREFIX_LENGTH, index_table::IndexTable},
+    key_shape::{KeySpaceDesc, CELL_PREFIX_LENGTH},
+    lookup::RandomRead,
+    metrics::Metrics,
+    runtime::Instant,
+    wal::WalPosition,
+};
 
 const DEFAULT_WINDOW_SIZE: usize = 500;
 const NUM_WINDOW_SIZES: usize = 1;
@@ -260,12 +261,16 @@ impl IndexFormat for UniformLookupIndex {
 
 #[cfg(test)]
 mod test {
+    use std::{cell::Cell, collections::HashSet};
+
     use rand::Rng;
 
     use super::*;
-    use crate::key_shape::KeyType;
-    use crate::{file_reader::FileReader, index::index_format::test::*, key_shape::KeyShape};
-    use std::{cell::Cell, collections::HashSet};
+    use crate::{
+        file_reader::FileReader,
+        index::index_format::test::*,
+        key_shape::{KeyShape, KeyType},
+    };
 
     #[test]
     pub fn test_index_lookup() {
@@ -557,8 +562,7 @@ mod test {
 
     #[test]
     fn test_persisted_index_with_filerange() {
-        use std::fs::OpenOptions;
-        use std::io::Write;
+        use std::{fs::OpenOptions, io::Write};
 
         // 1) Choose which PersistedIndex to test:
         let index_impl = UniformLookupIndex::new(Metrics::new());

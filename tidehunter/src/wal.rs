@@ -10,7 +10,6 @@ use std::{
     sync::{mpsc, Arc},
     thread,
     thread::JoinHandle,
-    time::Instant,
 };
 
 use bytes::{Buf, BufMut};
@@ -24,6 +23,7 @@ use crate::{
     index::{index_format::IndexFormat, INDEX_FORMAT},
     lookup::{FileRange, RandomRead},
     metrics::{Metrics, TimerExt},
+    runtime::Instant,
     wal_syncer::WalSyncer,
 };
 

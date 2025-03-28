@@ -3,7 +3,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     mem,
     sync::{atomic::Ordering, Arc},
-    time::Instant,
 };
 
 use bloom::{BloomFilter, ASMS};
@@ -24,6 +23,7 @@ use crate::{
     metrics::Metrics,
     primitives::{arc_cow::ArcCow, range_from_excluding, sharded_mutex::ShardedMutex},
     runtime,
+    runtime::Instant,
     wal::{WalPosition, WalRandomRead},
 };
 
