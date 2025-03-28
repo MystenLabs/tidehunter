@@ -1,0 +1,274 @@
+Benchmark started at Tue Mar 25 04:35:59 PM UTC 2025
+Running benchmark with direct I/O: on, threads: 4...
+    Finished `release` profile [optimized] target(s) in 0.09s
+     Running `target/release/index_benchmark run --num-lookups 1000000 --num-runs 3 --batch-size 1000 --window-size 100 --num-threads 4 --header-file data/bench-header-1TB-10k.dat --uniform-file data/bench-uniform-1TB-10k.dat --direct-io`
+Running multithreaded benchmark with 4 threads
+Run 1/3
+Running multithreaded benchmark with 4 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 4
+  End-to-end time: 159.54s
+  Total lookups: 4000000
+  End-to-end throughput: 25072.01 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 6275.53 lookups/sec
+    Latency per lookup:
+      Mean: 159349.12 ns
+      Std Dev: 452.06 ns
+      Min: 157903.91 ns
+      Max: 161193.63 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 6268.01 lookups/sec
+    Latency per lookup:
+      Mean: 159540.16 ns
+      Std Dev: 498.08 ns
+      Min: 157999.39 ns
+      Max: 162756.67 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 6270.50 lookups/sec
+    Latency per lookup:
+      Mean: 159476.95 ns
+      Std Dev: 463.09 ns
+      Min: 157869.58 ns
+      Max: 163114.34 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 6269.56 lookups/sec
+    Latency per lookup:
+      Mean: 159500.92 ns
+      Std Dev: 504.37 ns
+      Min: 157841.02 ns
+      Max: 162453.33 ns
+  Overall Latency Statistics:
+    Mean: 159466.79 ns
+    Std Dev: 485.23 ns
+    Min: 157841.02 ns
+    Max: 163114.34 ns
+Running multithreaded benchmark with 4 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 4
+  End-to-end time: 100.21s
+  Total lookups: 4000000
+  End-to-end throughput: 39916.72 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 10060.48 lookups/sec
+    Latency per lookup:
+      Mean: 99398.88 ns
+      Std Dev: 1119.50 ns
+      Min: 95582.65 ns
+      Max: 102987.39 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 9985.30 lookups/sec
+    Latency per lookup:
+      Mean: 100147.18 ns
+      Std Dev: 1083.57 ns
+      Min: 96517.45 ns
+      Max: 103880.01 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 9979.20 lookups/sec
+    Latency per lookup:
+      Mean: 100208.40 ns
+      Std Dev: 1146.67 ns
+      Min: 97177.29 ns
+      Max: 104803.51 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 10049.39 lookups/sec
+    Latency per lookup:
+      Mean: 99508.50 ns
+      Std Dev: 1069.35 ns
+      Min: 96119.96 ns
+      Max: 102948.94 ns
+  Overall Latency Statistics:
+    Mean: 99815.74 ns
+    Std Dev: 1163.83 ns
+    Min: 95582.65 ns
+    Max: 104803.51 ns
+Run 2/3
+Running multithreaded benchmark with 4 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 4
+  End-to-end time: 159.84s
+  Total lookups: 4000000
+  End-to-end throughput: 25024.60 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 6273.20 lookups/sec
+    Latency per lookup:
+      Mean: 159408.23 ns
+      Std Dev: 457.06 ns
+      Min: 157759.62 ns
+      Max: 160988.02 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 6258.06 lookups/sec
+    Latency per lookup:
+      Mean: 159794.04 ns
+      Std Dev: 469.07 ns
+      Min: 157813.40 ns
+      Max: 161036.91 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 6256.16 lookups/sec
+    Latency per lookup:
+      Mean: 159842.46 ns
+      Std Dev: 455.16 ns
+      Min: 158038.38 ns
+      Max: 161322.65 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 6267.06 lookups/sec
+    Latency per lookup:
+      Mean: 159564.49 ns
+      Std Dev: 477.69 ns
+      Min: 158148.97 ns
+      Max: 161191.89 ns
+  Overall Latency Statistics:
+    Mean: 159652.31 ns
+    Std Dev: 496.95 ns
+    Min: 157759.62 ns
+    Max: 161322.65 ns
+Running multithreaded benchmark with 4 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 4
+  End-to-end time: 100.31s
+  Total lookups: 4000000
+  End-to-end throughput: 39877.25 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 9987.70 lookups/sec
+    Latency per lookup:
+      Mean: 100123.16 ns
+      Std Dev: 1128.58 ns
+      Min: 96533.13 ns
+      Max: 104171.81 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 10001.84 lookups/sec
+    Latency per lookup:
+      Mean: 99981.57 ns
+      Std Dev: 1137.58 ns
+      Min: 96210.71 ns
+      Max: 103428.52 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 9969.33 lookups/sec
+    Latency per lookup:
+      Mean: 100307.60 ns
+      Std Dev: 1093.00 ns
+      Min: 96830.14 ns
+      Max: 103757.59 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 9974.25 lookups/sec
+    Latency per lookup:
+      Mean: 100258.18 ns
+      Std Dev: 1128.07 ns
+      Min: 96564.42 ns
+      Max: 103986.34 ns
+  Overall Latency Statistics:
+    Mean: 100167.63 ns
+    Std Dev: 1129.09 ns
+    Min: 96210.71 ns
+    Max: 104171.81 ns
+Run 3/3
+Running multithreaded benchmark with 4 threads, 1000000 lookups per thread in batches of 1000
+HeaderLookupIndex Multithreaded Results:
+  Threads: 4
+  End-to-end time: 159.86s
+  Total lookups: 4000000
+  End-to-end throughput: 25021.69 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 6299.49 lookups/sec
+    Latency per lookup:
+      Mean: 158742.95 ns
+      Std Dev: 462.97 ns
+      Min: 157386.73 ns
+      Max: 160952.78 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 6255.43 lookups/sec
+    Latency per lookup:
+      Mean: 159861.10 ns
+      Std Dev: 519.20 ns
+      Min: 155593.03 ns
+      Max: 161795.68 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 6273.19 lookups/sec
+    Latency per lookup:
+      Mean: 159408.57 ns
+      Std Dev: 454.18 ns
+      Min: 158075.77 ns
+      Max: 160822.21 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 6305.26 lookups/sec
+    Latency per lookup:
+      Mean: 158597.73 ns
+      Std Dev: 455.13 ns
+      Min: 157250.36 ns
+      Max: 160036.42 ns
+  Overall Latency Statistics:
+    Mean: 159152.59 ns
+    Std Dev: 696.51 ns
+    Min: 155593.03 ns
+    Max: 161795.68 ns
+Running multithreaded benchmark with 4 threads, 1000000 lookups per thread in batches of 1000
+UniformLookupIndex Multithreaded Results:
+  Threads: 4
+  End-to-end time: 100.38s
+  Total lookups: 4000000
+  End-to-end throughput: 39848.49 lookups/sec
+  Thread 0 Results:
+    Lookups: 1000000
+    Throughput: 9962.14 lookups/sec
+    Latency per lookup:
+      Mean: 100380.01 ns
+      Std Dev: 1133.73 ns
+      Min: 95809.38 ns
+      Max: 104260.25 ns
+  Thread 1 Results:
+    Lookups: 1000000
+    Throughput: 9999.42 lookups/sec
+    Latency per lookup:
+      Mean: 100005.78 ns
+      Std Dev: 1074.41 ns
+      Min: 96689.93 ns
+      Max: 103789.34 ns
+  Thread 2 Results:
+    Lookups: 1000000
+    Throughput: 9998.24 lookups/sec
+    Latency per lookup:
+      Mean: 100017.63 ns
+      Std Dev: 1118.86 ns
+      Min: 95898.60 ns
+      Max: 103635.28 ns
+  Thread 3 Results:
+    Lookups: 1000000
+    Throughput: 9990.96 lookups/sec
+    Latency per lookup:
+      Mean: 100090.49 ns
+      Std Dev: 1102.47 ns
+      Min: 96813.74 ns
+      Max: 103822.20 ns
+  Overall Latency Statistics:
+    Mean: 100123.48 ns
+    Std Dev: 1117.92 ns
+    Min: 95809.38 ns
+    Max: 104260.25 ns
+HeaderLookupIndex: scan mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_scan_mcs", help: "lookup_scan_mcs", const_label_pairs: [], variable_labels: [], id: 914794617080129952, dim_hash: 914794617080129952 }, val: AtomicU64 { inner: 1974 }, val_type: Counter, label_pairs: [] } }
+HeaderLookupIndex: io mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_mcs", help: "lookup_io_mcs", const_label_pairs: [], variable_labels: [], id: 1936770213637198483, dim_hash: 1936770213637198483 }, val: AtomicU64 { inner: 1889257601 }, val_type: Counter, label_pairs: [] } }
+HeaderLookupIndex: io bytes GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_bytes", help: "lookup_io_bytes", const_label_pairs: [], variable_labels: [], id: 16528068844073587369, dim_hash: 16528068844073587369 }, val: AtomicU64 { inner: 4784412120 }, val_type: Counter, label_pairs: [] } }
+Histogram: Histogram { core: HistogramCore { desc: Desc { fq_name: "lookup_iterations", help: "lookup_iterations", const_label_pairs: [], variable_labels: [], id: 2280981954329258229, dim_hash: 2280981954329258229 }, label_pairs: [], collect_lock: Mutex { data: (), poisoned: false, .. }, shard_and_count: ShardAndCount { inner: 12000000 }, shards: [Shard { sum: AtomicF64 { inner: 4714082973144580096 }, count: AtomicU64 { inner: 12000000 }, buckets: [AtomicU64 { inner: 9444274 }, AtomicU64 { inner: 2543031 }, AtomicU64 { inner: 12693 }, AtomicU64 { inner: 2 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }, Shard { sum: AtomicF64 { inner: 0 }, count: AtomicU64 { inner: 0 }, buckets: [AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }, AtomicU64 { inner: 0 }] }], upper_bounds: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0] } }
+UniformLookupIndex: scan mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_scan_mcs", help: "lookup_scan_mcs", const_label_pairs: [], variable_labels: [], id: 914794617080129952, dim_hash: 914794617080129952 }, val: AtomicU64 { inner: 9481 }, val_type: Counter, label_pairs: [] } }
+UniformLookupIndex: io mcs GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_mcs", help: "lookup_io_mcs", const_label_pairs: [], variable_labels: [], id: 1936770213637198483, dim_hash: 1936770213637198483 }, val: AtomicU64 { inner: 1175879086 }, val_type: Counter, label_pairs: [] } }
+UniformLookupIndex: io bytes GenericCounter { v: Value { desc: Desc { fq_name: "lookup_io_bytes", help: "lookup_io_bytes", const_label_pairs: [], variable_labels: [], id: 16528068844073587369, dim_hash: 16528068844073587369 }, val: AtomicU64 { inner: 58154423560 }, val_type: Counter, label_pairs: [] } }
+Benchmark completed at Tue Mar 25 04:48:59 PM UTC 2025
