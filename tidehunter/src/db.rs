@@ -141,8 +141,7 @@ impl Db {
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
         let reduced_key = ks.reduced_key_bytes(k);
-        self.large_table
-            .insert(ks, reduced_key, position, &v, self)?;
+        self.large_table.insert(ks, reduced_key, position, &v, self);
         Ok(())
     }
 
@@ -217,7 +216,7 @@ impl Db {
             ks.check_key(&w.key);
             let reduced_key = ks.reduced_key_bytes(w.key);
             self.large_table
-                .insert(ks, reduced_key, position, &w.value, self)?;
+                .insert(ks, reduced_key, position, &w.value, self);
             last_position = position;
         }
 
@@ -424,7 +423,7 @@ impl Db {
                     metrics.replayed_wal_records.inc();
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
-                    large_table.insert(ks, reduced_key, position, &v, wal_iterator.wal())?;
+                    large_table.insert(ks, reduced_key, position, &v, wal_iterator.wal());
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()

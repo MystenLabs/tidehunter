@@ -1,28 +1,30 @@
-use crate::cell::{CellId, CellIdBytesContainer};
-use crate::config::Config;
-use crate::context::KsContext;
-use crate::flusher::{FlushKind, IndexFlusher};
-use crate::index::index_format::IndexFormat;
-use crate::index::index_table::IndexTable;
-use crate::index::INDEX_FORMAT;
-use crate::iterators::IteratorResult;
-use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
-use crate::metrics::Metrics;
-use crate::primitives::arc_cow::ArcCow;
-use crate::primitives::range_from_excluding;
-use crate::primitives::sharded_mutex::ShardedMutex;
-use crate::wal::{WalPosition, WalRandomRead};
+use std::{
+    cmp,
+    collections::{BTreeMap, HashMap, HashSet},
+    mem,
+    sync::{atomic::Ordering, Arc},
+    time::Instant,
+};
+
 use bloom::{BloomFilter, ASMS};
 use lru::LruCache;
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use rand::rngs::ThreadRng;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Instant;
-use std::{cmp, mem};
+
+use crate::{
+    cell::{CellId, CellIdBytesContainer},
+    config::Config,
+    context::KsContext,
+    flusher::{FlushKind, IndexFlusher},
+    index::{index_format::IndexFormat, index_table::IndexTable, INDEX_FORMAT},
+    iterators::IteratorResult,
+    key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType},
+    metrics::Metrics,
+    primitives::{arc_cow::ArcCow, range_from_excluding, sharded_mutex::ShardedMutex},
+    wal::{WalPosition, WalRandomRead},
+};
 
 pub struct LargeTable {
     table: Vec<KsTable>,
@@ -156,7 +158,7 @@ impl LargeTable {
         v: WalPosition,
         value: &Bytes,
         loader: &L,
-    ) -> Result<(), L::Error> {
+    ) {
         let (mut row, cell) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
@@ -185,7 +187,6 @@ impl LargeTable {
             .max_index_size_metric
             .set(max_index_size as i64);
         self.metrics.index_size.observe(index_size as f64);
-        Ok(())
     }
 
     pub fn remove<L: Loader>(
