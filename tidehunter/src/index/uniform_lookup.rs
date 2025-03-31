@@ -1,6 +1,6 @@
+use crate::runtime::Instant;
 use minibytes::Bytes;
 use std::ops::Range;
-use crate::runtime::Instant;
 
 use super::index_format::IndexFormat;
 use super::{deserialize_index_entries, serialize_index_entries};
