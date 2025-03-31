@@ -1,19 +1,16 @@
-use std::{
-    sync::{mpsc, Arc, Weak},
-    thread,
-    thread::JoinHandle,
-};
-
-use crate::{
-    cell::CellId,
-    db::Db,
-    index::index_table::IndexTable,
-    key_shape::{KeySpace, KeySpaceDesc},
-    large_table::Loader,
-    metrics::Metrics,
-    runtime::Instant,
-    wal::WalPosition,
-};
+use crate::cell::CellId;
+use crate::db::Db;
+use crate::index::index_table::IndexTable;
+use crate::key_shape::{KeySpace, KeySpaceDesc};
+use crate::large_table::Loader;
+use crate::metrics::Metrics;
+use crate::wal::WalPosition;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::Weak;
+use std::thread;
+use std::thread::JoinHandle;
+use crate::runtime::Instant;
 
 pub struct IndexFlusher {
     sender: mpsc::Sender<FlusherCommand>,

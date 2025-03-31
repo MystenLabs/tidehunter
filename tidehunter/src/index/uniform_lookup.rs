@@ -1,16 +1,15 @@
-use std::{ops::Range, sync::Arc};
-
 use minibytes::Bytes;
+use std::ops::Range;
+use std::sync::Arc;
+use crate::runtime::Instant;
 
-use super::{deserialize_index_entries, index_format::IndexFormat, serialize_index_entries};
-use crate::{
-    index::{index_format::PREFIX_LENGTH, index_table::IndexTable},
-    key_shape::{KeySpaceDesc, CELL_PREFIX_LENGTH},
-    lookup::RandomRead,
-    metrics::Metrics,
-    runtime::Instant,
-    wal::WalPosition,
-};
+use super::index_format::IndexFormat;
+use super::{deserialize_index_entries, serialize_index_entries};
+use crate::index::index_format::PREFIX_LENGTH;
+use crate::key_shape::CELL_PREFIX_LENGTH;
+use crate::metrics::Metrics;
+use crate::wal::WalPosition;
+use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 const DEFAULT_WINDOW_SIZE: usize = 500;
 const NUM_WINDOW_SIZES: usize = 1;
@@ -261,16 +260,12 @@ impl IndexFormat for UniformLookupIndex {
 
 #[cfg(test)]
 mod test {
-    use std::{cell::Cell, collections::HashSet};
-
     use rand::Rng;
 
     use super::*;
-    use crate::{
-        file_reader::FileReader,
-        index::index_format::test::*,
-        key_shape::{KeyShape, KeyType},
-    };
+    use crate::key_shape::KeyType;
+    use crate::{file_reader::FileReader, index::index_format::test::*, key_shape::KeyShape};
+    use std::{cell::Cell, collections::HashSet};
 
     #[test]
     pub fn test_index_lookup() {
