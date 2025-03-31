@@ -192,6 +192,7 @@ impl<'a> IndexBenchmark<'a> {
         index_format: &P,
         num_lookups: usize,
         batch_size: usize,
+        metrics: &Metrics,
     ) -> Vec<Duration> {
         let ks_desc = self.key_shape.ks(self.ks);
         let mut rng = rand::thread_rng();
@@ -216,7 +217,7 @@ impl<'a> IndexBenchmark<'a> {
                 rng.fill(&mut key[..]);
 
                 // Look up the key
-                index_format.lookup_unloaded(ks_desc, reader, &key);
+                index_format.lookup_unloaded(ks_desc, reader, &key, &metrics);
             }
 
             durations.push(start.elapsed());
@@ -330,7 +331,7 @@ fn main() {
                 header_path,
                 num_indices,
                 entries_per_index,
-                LookupHeaderIndex::new_with_default_metrics(),
+                LookupHeaderIndex,
             )
             .expect("Failed to generate LookupHeaderIndex file");
 
@@ -339,7 +340,7 @@ fn main() {
                 uniform_path,
                 num_indices,
                 entries_per_index,
-                UniformLookupIndex::new_with_default_metrics(),
+                UniformLookupIndex::new(),
             )
             .expect("Failed to generate UniformLookupIndex file");
 
@@ -389,17 +390,19 @@ fn main() {
             let mut uniform_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
             for _ in 0..num_runs {
                 let mut durations = header_bench.run_benchmark(
-                    &LookupHeaderIndex::new(header_metrics.clone()),
+                    &LookupHeaderIndex,
                     num_lookups,
                     batch_size,
+                    &header_metrics,
                 );
                 header_durations.append(&mut durations);
                 analyze_results("HeaderLookupIndex", &header_durations, batch_size);
 
                 durations = uniform_bench.run_benchmark(
-                    &UniformLookupIndex::new_with_window_size(uniform_metrics.clone(), window_size),
+                    &UniformLookupIndex::new_with_window_size(window_size),
                     num_lookups,
                     batch_size,
+                    &uniform_metrics,
                 );
                 uniform_durations.append(&mut durations);
                 analyze_results("UniformLookupIndex", &uniform_durations, batch_size);

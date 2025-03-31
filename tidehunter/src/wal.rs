@@ -1,31 +1,23 @@
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    fs::{File, OpenOptions},
-    io,
-    mem,
-    ops::Range,
-    os::unix::fs::FileExt,
-    path::Path,
-    ptr,
-    sync::{mpsc, Arc},
-    thread,
-    thread::JoinHandle,
-};
-
+use crate::{crc::{CrcFrame, CrcReadError, IntoBytesFixed}, key_shape::KeySpaceDesc};
+use crate::file_reader::{align_size, set_direct_options, FileReader};
+use crate::index::index_format::IndexFormat;
+use crate::lookup::{FileRange, RandomRead};
+use crate::metrics::{Metrics, TimerExt};
+use crate::wal_syncer::WalSyncer;
 use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-
-use crate::{
-    crc::{CrcFrame, CrcReadError, IntoBytesFixed},
-    file_reader::{align_size, set_direct_options, FileReader},
-    index::{index_format::IndexFormat, INDEX_FORMAT},
-    lookup::{FileRange, RandomRead},
-    metrics::{Metrics, TimerExt},
-    runtime::Instant,
-    wal_syncer::WalSyncer,
-};
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::ops::Range;
+use std::os::unix::fs::FileExt;
+use std::path::Path;
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
+use crate::runtime::Instant;
+use std::{io, mem, ptr, thread};
 
 pub struct WalWriter {
     wal: Arc<Wal>,
@@ -295,10 +287,11 @@ impl Wal {
 
     pub fn random_reader_at(
         &self,
+        ks: &KeySpaceDesc,
         pos: WalPosition,
         inner_offset: usize,
     ) -> Result<WalRandomRead, WalError> {
-        if INDEX_FORMAT.use_unbounded_reader() {
+        if ks.index_format().use_unbounded_reader() {
             self.random_reader_at_unbounded(pos, inner_offset)
         } else {
             self.random_reader_at_bounded(pos, inner_offset)

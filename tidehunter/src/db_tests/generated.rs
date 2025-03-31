@@ -33,3 +33,13 @@ fn test_remove_prefixed() {
 fn test_remove_uniform() {
     test_remove(default_key_shape())
 }
+
+#[test]
+fn test_multiple_index_formats_uniform() {
+    test_multiple_index_formats(uniform_two_key_spaces())
+}
+
+#[test]
+fn test_multiple_index_formats_prefix() {
+    test_multiple_index_formats(prefix_two_key_spaces())
+}

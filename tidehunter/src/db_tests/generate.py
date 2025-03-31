@@ -1,6 +1,11 @@
 def default_variants():
     return [("prefixed", "prefix_key_shape()"), ("uniform", "default_key_shape()")]
 
+def two_key_spaces_variants():
+    return [
+        ("uniform", "uniform_two_key_spaces()"),
+        ("prefix", "prefix_two_key_spaces()"),
+    ]
 
 def print_test(name, variants):
     for (variant_name, variant_arg) in variants:
@@ -20,3 +25,4 @@ print()
 print_test("db_test", default_variants())
 print_test("test_iterator", default_variants())
 print_test("test_remove", default_variants())
+print_test("test_multiple_index_formats", two_key_spaces_variants())

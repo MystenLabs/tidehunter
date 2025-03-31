@@ -1,30 +1,27 @@
-use std::{
-    io,
-    path::{Path, PathBuf},
-    sync::{mpsc, Arc, Weak},
-    thread,
-    time::Duration,
+use crate::batch::WriteBatch;
+use crate::cell::CellId;
+use crate::config::Config;
+use crate::control::{ControlRegion, ControlRegionStore};
+use crate::crc::IntoBytesFixed;
+use crate::flusher::IndexFlusher;
+use crate::index::index_format::IndexFormat;
+use crate::index::index_table::IndexTable;
+use crate::iterators::db_iterator::DbIterator;
+use crate::iterators::IteratorResult;
+use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
+use crate::large_table::{GetResult, LargeTable, Loader};
+use crate::metrics::{Metrics, TimerExt};
+use crate::wal::{
+    PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
 };
-
 use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
-
-use crate::{
-    batch::WriteBatch,
-    cell::CellId,
-    config::Config,
-    control::{ControlRegion, ControlRegionStore},
-    crc::IntoBytesFixed,
-    flusher::IndexFlusher,
-    index::{index_format::IndexFormat, index_table::IndexTable, INDEX_FORMAT},
-    iterators::{db_iterator::DbIterator, IteratorResult},
-    key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType},
-    large_table::{GetResult, LargeTable, Loader},
-    metrics::{Metrics, TimerExt},
-    wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter},
-};
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Weak};
+use std::time::Duration;
+use std::{io, thread};
 
 pub struct Db {
     large_table: LargeTable,
@@ -472,7 +469,7 @@ impl Db {
             .flushed_keys
             .with_label_values(&[ksd.name()])
             .inc_by(index.len() as u64);
-        let index = INDEX_FORMAT.to_bytes(&index, ksd);
+        let index = ksd.index_format().to_bytes(&index, ksd);
         self.metrics
             .flushed_bytes
             .with_label_values(&[ksd.name()])
@@ -498,7 +495,7 @@ impl Db {
 
     fn read_index(ks: &KeySpaceDesc, entry: WalEntry) -> DbResult<IndexTable> {
         if let WalEntry::Index(_, bytes) = entry {
-            let entry = INDEX_FORMAT.from_bytes(ks, bytes);
+            let entry = ks.index_format().from_bytes(ks, bytes);
             Ok(entry)
         } else {
             panic!("Unexpected wal entry where expected record");
@@ -547,8 +544,12 @@ impl Loader for Wal {
         Db::read_index(ks, entry)
     }
 
-    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
-        Ok(self.random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
+    fn index_reader(
+        &self,
+        ks: &KeySpaceDesc,
+        position: WalPosition,
+    ) -> Result<WalRandomRead, Self::Error> {
+        Ok(self.random_reader_at(ks, position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
     fn flush_supported(&self) -> bool {
@@ -568,10 +569,14 @@ impl Loader for Db {
         Self::read_index(ks, entry)
     }
 
-    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+    fn index_reader(
+        &self,
+        ks: &KeySpaceDesc,
+        position: WalPosition,
+    ) -> Result<WalRandomRead, Self::Error> {
         Ok(self
             .wal
-            .random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
+            .random_reader_at(ks, position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
     fn flush_supported(&self) -> bool {

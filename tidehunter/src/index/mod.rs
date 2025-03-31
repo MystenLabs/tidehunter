@@ -10,15 +10,6 @@ use std::collections::BTreeMap;
 
 use crate::{key_shape::KeySpaceDesc, wal::WalPosition};
 
-use std::sync::LazyLock;
-// use single_hop::UniformLookupIndex;
-// pub static PERSISTED_INDEX: LazyLock<UniformLookupIndex> =
-//     LazyLock::new(|| UniformLookupIndex::new());
-
-use lookup_header::LookupHeaderIndex;
-pub static INDEX_FORMAT: LazyLock<LookupHeaderIndex> =
-    LazyLock::new(|| LookupHeaderIndex::new_with_default_metrics());
-
 /// Writes key-value pairs from IndexTable to a BytesMut buffer
 /// Returns the populated buffer
 pub fn serialize_index_entries(
