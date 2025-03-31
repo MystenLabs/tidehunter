@@ -1,9 +1,7 @@
-use std::time::Instant;
-
 use parking_lot::{Mutex, MutexGuard};
 use prometheus::Histogram;
 
-use crate::runtime;
+use crate::runtime::{self, Instant};
 
 pub struct ShardedMutex<V>(Box<[Mutex<V>]>);
 

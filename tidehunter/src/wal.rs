@@ -1,6 +1,7 @@
-use crate::{crc::{CrcFrame, CrcReadError, IntoBytesFixed}, key_shape::KeySpaceDesc};
+use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::file_reader::{align_size, set_direct_options, FileReader};
 use crate::index::index_format::IndexFormat;
+use crate::key_shape::KeySpaceDesc;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal_syncer::WalSyncer;
@@ -718,11 +719,9 @@ impl From<io::Error> for WalError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
-    use bytes::BytesMut;
-
     use super::*;
+    use bytes::BytesMut;
+    use std::collections::HashSet;
 
     #[test]
     fn test_wal() {
