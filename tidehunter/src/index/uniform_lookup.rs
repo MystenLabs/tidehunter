@@ -1,7 +1,7 @@
 use minibytes::Bytes;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Instant;
+use crate::runtime::Instant;
 
 use super::index_format::IndexFormat;
 use super::{deserialize_index_entries, serialize_index_entries};
@@ -557,8 +557,7 @@ mod test {
 
     #[test]
     fn test_persisted_index_with_filerange() {
-        use std::fs::OpenOptions;
-        use std::io::Write;
+        use std::{fs::OpenOptions, io::Write};
 
         // 1) Choose which PersistedIndex to test:
         let index_impl = UniformLookupIndex::new(Metrics::new());

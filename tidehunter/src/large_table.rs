@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use crate::runtime::Instant;
 use std::{cmp, mem};
 
 pub struct LargeTable {
@@ -156,7 +156,7 @@ impl LargeTable {
         v: WalPosition,
         value: &Bytes,
         loader: &L,
-    ) -> Result<(), L::Error> {
+    ) {
         let (mut row, cell) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
@@ -185,7 +185,6 @@ impl LargeTable {
             .max_index_size_metric
             .set(max_index_size as i64);
         self.metrics.index_size.observe(index_size as f64);
-        Ok(())
     }
 
     pub fn remove<L: Loader>(
@@ -275,12 +274,9 @@ impl LargeTable {
         };
         // drop row to avoid holding mutex during IO
         drop(row);
-        // todo move tokio dep under a feature
         let now = Instant::now();
         let index_reader = loader.index_reader(index_position)?;
-        // todo - consider only doing block_in_place for the syscall random reader
-        let result =
-            tokio::task::block_in_place(|| INDEX_FORMAT.lookup_unloaded(ks, &index_reader, k));
+        let result = runtime::block_in_place(|| INDEX_FORMAT.lookup_unloaded(ks, &index_reader, k));
         self.metrics
             .lookup_mcs
             .with_label_values(&[index_reader.kind_str(), ks.name()])
