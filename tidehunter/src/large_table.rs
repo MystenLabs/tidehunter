@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use crate::runtime::Instant;
+use crate::runtime::{self,Instant};
 use std::{cmp, mem};
 
 pub struct LargeTable {
