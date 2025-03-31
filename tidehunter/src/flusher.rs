@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use crate::runtime::Instant;
 
 pub struct IndexFlusher {
     sender: mpsc::Sender<FlusherCommand>,

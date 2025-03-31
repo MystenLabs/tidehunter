@@ -3,7 +3,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     mem,
     sync::{atomic::Ordering, Arc},
-    time::Instant,
 };
 
 use bloom::{BloomFilter, ASMS};
@@ -23,6 +22,8 @@ use crate::{
     key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType},
     metrics::Metrics,
     primitives::{arc_cow::ArcCow, range_from_excluding, sharded_mutex::ShardedMutex},
+    runtime,
+    runtime::Instant,
     wal::{WalPosition, WalRandomRead},
 };
 
@@ -276,12 +277,9 @@ impl LargeTable {
         };
         // drop row to avoid holding mutex during IO
         drop(row);
-        // todo move tokio dep under a feature
         let now = Instant::now();
         let index_reader = loader.index_reader(index_position)?;
-        // todo - consider only doing block_in_place for the syscall random reader
-        let result =
-            tokio::task::block_in_place(|| INDEX_FORMAT.lookup_unloaded(ks, &index_reader, k));
+        let result = runtime::block_in_place(|| INDEX_FORMAT.lookup_unloaded(ks, &index_reader, k));
         self.metrics
             .lookup_mcs
             .with_label_values(&[index_reader.kind_str(), ks.name()])

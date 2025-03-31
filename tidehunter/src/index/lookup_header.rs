@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use crate::runtime::Instant;
 
 use bytes::{Buf, BufMut};
 use minibytes::Bytes;
