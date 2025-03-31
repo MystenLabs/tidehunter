@@ -120,9 +120,8 @@ pub fn binary_search_entries(
             }
             std::cmp::Ordering::Equal => {
                 // parse wal position
-                let mut pos_slice =
-                    &buffer[(entry_offset + key_size)..(entry_offset + element_size)];
-                let position = WalPosition::read_from_buf(&mut pos_slice);
+                let pos_slice = &buffer[(entry_offset + key_size)..(entry_offset + element_size)];
+                let position = WalPosition::from_slice(&pos_slice);
                 metrics
                     .lookup_scan_mcs
                     .inc_by(scan_start.elapsed().as_micros() as u64);

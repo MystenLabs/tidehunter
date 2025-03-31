@@ -176,7 +176,6 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 }
 
 struct IndexBenchmark<'a> {
-    index_count: u64,
     readers: Vec<FileRange<'a>>,
     key_shape: KeyShape,
     ks: KeySpace,
@@ -215,7 +214,6 @@ impl<'a> IndexBenchmark<'a> {
         let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::uniform(1));
 
         Ok(Self {
-            index_count,
             readers,
             key_shape,
             ks,
@@ -239,25 +237,16 @@ impl<'a> IndexBenchmark<'a> {
         let ks_desc = self.key_shape.ks(self.ks);
         let start = Instant::now();
 
-        // Divide the indices equally among threads
-        let indices_per_thread = (self.index_count as usize + num_threads - 1) / num_threads;
-
         let thread_durations = thread::scope(|s| {
             // Spawn worker threads
             let handles: Vec<_> = (0..num_threads)
-                .map(|thread_id| {
+                .map(|_| {
                     let index_format = index_format.clone();
                     let ks_desc = ks_desc.clone();
 
-                    // Calculate the range of indices for this thread
-                    let start_idx = thread_id * indices_per_thread;
-                    let end_idx = std::cmp::min(
-                        (thread_id + 1) * indices_per_thread,
-                        (self.index_count - 1) as usize,
-                    );
+                    // Each thread gets access to all readers
+                    let thread_readers = &self.readers[..];
 
-                    // Get a slice of readers for this thread
-                    let thread_readers = &self.readers[start_idx..end_idx];
                     s.spawn(move || {
                         let mut rng = rand::thread_rng();
                         let mut durations = Vec::with_capacity(num_lookups / batch_size);
@@ -266,8 +255,8 @@ impl<'a> IndexBenchmark<'a> {
                             let start = Instant::now();
 
                             for _ in 0..batch_size {
-                                // Choose a random index from this thread's shard
-                                let index_idx = rng.gen_range(0..thread_readers.len());
+                                // Choose a random index from all readers
+                                let index_idx = rng.gen_range(0..thread_readers.len() - 1);
                                 let reader = &thread_readers[index_idx];
 
                                 // Create a random key to look up
