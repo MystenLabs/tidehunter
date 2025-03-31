@@ -630,8 +630,8 @@ impl Map {
     pub fn write_buf_at(&self, offset: usize, len: usize) -> &mut [u8] {
         assert!(self.writeable, "Attempt to write into read-only map");
         unsafe {
-            #[allow(mutable_transmutes)] // is there a better way?
-            mem::transmute::<&[u8], &mut [u8]>(&self.data[offset..offset + len])
+            let ptr = self.data.as_ptr().add(offset) as *mut u8;
+            std::slice::from_raw_parts_mut(ptr, len)
         }
     }
 }
