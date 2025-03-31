@@ -1,12 +1,14 @@
-use crate::runtime::Instant;
+use std::time::Instant;
 
 use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 
+use crate::index::index_table::IndexTable;
+use crate::key_shape::KeySpaceDesc;
+use crate::lookup::RandomRead;
 use crate::math::rescale_u32;
 use crate::metrics::Metrics;
 use crate::wal::WalPosition;
-use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 use super::index_format::{IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE};
 use super::{deserialize_index_entries, serialize_index_entries};

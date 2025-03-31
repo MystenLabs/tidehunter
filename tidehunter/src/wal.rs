@@ -4,7 +4,6 @@ use crate::index::index_format::IndexFormat;
 use crate::key_shape::KeySpaceDesc;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
-use crate::runtime::Instant;
 use crate::wal_syncer::WalSyncer;
 use bytes::{Buf, BufMut};
 use minibytes::Bytes;
@@ -18,6 +17,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
+use std::time::Instant;
 use std::{io, mem, ptr, thread};
 
 pub struct WalWriter {

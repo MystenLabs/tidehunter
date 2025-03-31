@@ -10,7 +10,7 @@ use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::range_from_excluding;
 use crate::primitives::sharded_mutex::ShardedMutex;
-use crate::runtime::{self, Instant};
+use crate::runtime;
 use crate::wal::{WalPosition, WalRandomRead};
 use bloom::{BloomFilter, ASMS};
 use lru::LruCache;
@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 use std::{cmp, mem};
 
 pub struct LargeTable {

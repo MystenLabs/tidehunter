@@ -12,9 +12,3 @@ where
     #[cfg(not(feature = "tokio"))]
     f()
 }
-
-/// A type that represents a point in time.
-#[cfg(feature = "tokio")]
-pub type Instant = tokio::time::Instant;
-#[cfg(not(feature = "tokio"))]
-pub type Instant = std::time::Instant;

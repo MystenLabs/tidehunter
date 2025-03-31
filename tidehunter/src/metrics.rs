@@ -1,10 +1,10 @@
-use crate::runtime::Instant;
 use prometheus::{
     exponential_buckets, linear_buckets, Histogram, HistogramVec, IntCounter, IntCounterVec,
     IntGauge, IntGaugeVec, Registry,
 };
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct Metrics {
     pub replayed_wal_records: IntCounter,
