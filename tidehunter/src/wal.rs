@@ -474,6 +474,11 @@ impl Wal {
     fn file_reader(&self) -> FileReader {
         FileReader::new(&self.file, self.layout.direct_io)
     }
+
+    /// Ensure the file is written to disk (blocking call).
+    pub fn fsync(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
 }
 
 impl WalMapper {

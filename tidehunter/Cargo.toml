@@ -14,7 +14,7 @@ bincode = "1.3.3"
 serde = { version = "1.0.208", features = ["derive"] }
 rand = {workspace = true}
 prometheus = {workspace = true}
-tokio = { version = "1.36.0", features = ["full"] }
+tokio = { version = "1.36.0", features = ["full"], optional = true}
 bloom = "0.3.2"
 lru = "0.12.2"
 
@@ -22,3 +22,6 @@ lru = "0.12.2"
 tempdir = "0.3.7"
 hex-literal = "1.0.0"
 parking_lot = {workspace = true, features = ["arc_lock"]}
+
+[features]
+tokio = ["dep:tokio"]

@@ -4,7 +4,7 @@ use prometheus::{
 };
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use tokio::time::Instant;
+use std::time::Instant;
 
 pub struct Metrics {
     pub replayed_wal_records: IntCounter,
