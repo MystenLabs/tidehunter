@@ -27,7 +27,7 @@ use std::{cmp, mem};
 pub struct LargeTable {
     table: Vec<KsTable>,
     config: Arc<Config>,
-    flusher: IndexFlusher,
+    pub(crate) flusher: IndexFlusher,
     metrics: Arc<Metrics>,
 }
 

@@ -21,6 +21,7 @@ lru = "0.12.2"
 [dev-dependencies]
 tempdir = "0.3.7"
 hex-literal = "1.0.0"
+parking_lot = {workspace = true, features = ["arc_lock"]}
 
 [features]
 tokio = ["dep:tokio"]

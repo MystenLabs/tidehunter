@@ -420,6 +420,11 @@ impl KeySpace {
     pub(crate) fn as_usize(&self) -> usize {
         self.0 as usize
     }
+
+    #[cfg(test)]
+    pub fn new_test(v: u8) -> Self {
+        Self(v)
+    }
 }
 
 impl Deref for KeySpaceDesc {
