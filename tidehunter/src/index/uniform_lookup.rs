@@ -5,11 +5,10 @@ use std::time::Instant;
 use super::index_format::IndexFormat;
 use super::{deserialize_index_entries, serialize_index_entries};
 use crate::index::index_format::{binary_search_entries, PREFIX_LENGTH};
-use crate::index::index_table::IndexTable;
-use crate::key_shape::{KeySpaceDesc, CELL_PREFIX_LENGTH};
-use crate::lookup::RandomRead;
+use crate::key_shape::CELL_PREFIX_LENGTH;
 use crate::metrics::Metrics;
 use crate::wal::WalPosition;
+use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 const DEFAULT_WINDOW_SIZE: usize = 800;
 const NUM_WINDOW_SIZES: usize = 1;
@@ -224,11 +223,9 @@ mod test {
     use rand::Rng;
 
     use super::*;
-    use crate::file_reader::FileReader;
-    use crate::index::index_format::test::*;
-    use crate::key_shape::{KeyShape, KeyType};
-    use std::cell::Cell;
-    use std::collections::HashSet;
+    use crate::key_shape::KeyType;
+    use crate::{file_reader::FileReader, index::index_format::test::*, key_shape::KeyShape};
+    use std::{cell::Cell, collections::HashSet};
 
     #[test]
     pub fn test_index_lookup() {
