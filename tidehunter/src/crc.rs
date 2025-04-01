@@ -2,6 +2,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use std::ops::Range;
 
+#[derive(Debug)]
 pub struct CrcFrame {
     bytes: Bytes,
 }
@@ -28,6 +29,11 @@ impl CrcFrame {
         Self { bytes }
     }
 
+    #[cfg(test)]
+    pub fn new_unsafe(bytes: Bytes) -> Self {
+        Self {bytes}
+    }
+
     pub fn read_from_slice(b: &[u8], pos: usize) -> Result<&[u8], CrcReadError> {
         let len = Self::checked_read(&b, pos)?;
         Ok(&b[Self::data_range(pos, len)])
@@ -43,7 +49,7 @@ impl CrcFrame {
         b.get_u32() as usize
     }
 
-    fn checked_read(b: &[u8], pos: usize) -> Result<usize, CrcReadError> {
+    pub fn checked_read(b: &[u8], pos: usize) -> Result<usize, CrcReadError> {
         if b.len() < pos + Self::CRC_HEADER_LENGTH {
             return Err(CrcReadError::OutOfBoundsHeader);
         }
@@ -67,8 +73,12 @@ impl CrcFrame {
         Ok(len)
     }
 
-    fn data_range(pos: usize, len: usize) -> Range<usize> {
+    pub fn data_range(pos: usize, len: usize) -> Range<usize> {
         pos + Self::CRC_HEADER_LENGTH..pos + Self::CRC_HEADER_LENGTH + len
+    }
+
+    pub fn frame_range(pos: usize, len: usize) -> Range<usize> {
+        pos ..pos + Self::CRC_HEADER_LENGTH + len
     }
 
     fn crc(b: &[u8]) -> u32 {

@@ -3,8 +3,7 @@ use crate::batch::WriteBatch;
 use crate::config::Config;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
-use crate::key_shape::{KeyShape, KeySpace, KeyType};
-use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
+use crate::key_shape::{KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
 use crate::metrics::Metrics;
 use minibytes::Bytes;
 use rand::rngs::ThreadRng;
@@ -1152,6 +1151,90 @@ pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeyS
         assert_eq!(
             Some(vec![26, 27].into()),
             db.get(ks2, &[5, 6, 7, 8]).unwrap()
+        );
+    }
+}
+
+#[test]
+fn test_last_four_bytes_corruption() {
+    let dir = tempdir::TempDir::new("test_last_four_bytes_corruption").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+
+    // Open the db and insert some data
+    let val_3_position = {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
+        db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
+        let position = db.wal_writer.wal_position();
+        db.insert(ks, vec![2, 4, 6, 8], vec![1, 3]).unwrap();
+
+        position
+    };
+
+    // Corrupt the last four bytes of the last database entry
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        // let (wal_key, v) = db.read_record(position).unwrap();
+        let v = db.wal.read_raw_frame(val_3_position).unwrap();
+        println!("---> READ LAST FRAME: {v:?}");
+        
+        let mut bytes = v.into_vec();
+        let l = bytes.len();
+        bytes[l - 1] = 1;
+       
+        let corrupted_frame = PreparedWalWrite::new_unsafe(bytes.into());
+        db.wal_writer.position_and_map().lock().0.position = val_3_position.0;
+        db.wal_writer.write(&corrupted_frame).unwrap();
+        
+    }
+
+    // Re-open the db and verify the data
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, vec![1, 3, 5, 7], vec![6]).unwrap();
+    }
+
+    // Re-open the db and verify the data
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+        assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
+        assert_eq!(
+            None,
+            db.get(ks, &[2, 4, 6, 8]).unwrap()
+        );
+        assert_eq!(
+            Some(vec![6].into()),
+            db.get(ks, &[1, 3, 5, 7]).unwrap()
         );
     }
 }
