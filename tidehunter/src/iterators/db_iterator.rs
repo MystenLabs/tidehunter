@@ -7,8 +7,9 @@ use std::sync::Arc;
 pub struct DbIterator {
     db: Arc<Db>,
     ks: KeySpace,
-    next_cell: Option<CellId>,
-    next_key: Option<Bytes>,
+    cell: Option<CellId>,
+    prev_key: Option<Bytes>,
+    prev_key_included: bool,
     full_lower_bound: Option<Bytes>,
     full_upper_bound: Option<Bytes>,
     with_key_reduction: bool,
@@ -20,12 +21,13 @@ impl DbIterator {
     pub(crate) fn new(db: Arc<Db>, ks: KeySpace) -> Self {
         let ksd = db.ks(ks);
         let with_key_reduction = ksd.key_reduction().is_some();
-        let next_cell = ksd.first_cell();
+        let cell = ksd.first_cell();
         Self {
             db,
             ks,
-            next_cell: Some(next_cell),
-            next_key: None,
+            cell: Some(cell),
+            prev_key: None,
+            prev_key_included: false,
             full_lower_bound: None,
             full_upper_bound: None,
             end_cell_exclusive: None,
@@ -45,8 +47,9 @@ impl DbIterator {
                 self.db
                     .next_cell(ks, &ks.cell_id(&reduced_lower_bound), true);
         } else {
-            self.next_cell = Some(ks.cell_id(&reduced_lower_bound));
-            self.next_key = Some(reduced_lower_bound);
+            self.cell = Some(ks.cell_id(&reduced_lower_bound));
+            self.prev_key = Some(reduced_lower_bound);
+            self.prev_key_included = true;
         }
         self.full_lower_bound = Some(full_lower_bound);
     }
@@ -63,8 +66,9 @@ impl DbIterator {
             } else {
                 saturated_decrement_vec(&reduced_upper_bound)
             };
-            self.next_cell = Some(ks.cell_id(&next_key));
-            self.next_key = Some(next_key);
+            self.cell = Some(ks.cell_id(&next_key));
+            self.prev_key = Some(next_key);
+            self.prev_key_included = true;
         } else {
             self.end_cell_exclusive =
                 self.db
@@ -84,28 +88,31 @@ impl DbIterator {
     }
 
     fn try_next(&mut self) -> Result<Option<DbResult<(Bytes, Bytes)>>, IteratorAction> {
-        let Some(next_cell) = self.next_cell.take() else {
+        let Some(cell) = self.cell.take() else {
             return Ok(None);
         };
-        let next_key = self.next_key.take();
-        if let Some(next_key) = &next_key {
+        let prev_key = self.prev_key.take();
+        if let Some(prev_key) = &prev_key {
             // todo - implement with key reduction to reduce calls to storage.next_entry
             // This can be be used as is with key reduction
             // because next_key is a reduced key
             if !self.with_key_reduction {
-                self.check_bounds(&next_key)?;
+                self.check_bounds(&prev_key)?;
             }
         }
         match self.db.next_entry(
             self.ks,
-            next_cell,
-            next_key,
+            cell,
+            prev_key,
+            self.prev_key_included,
             &self.end_cell_exclusive,
             self.reverse,
         ) {
             Ok(Some(result)) => {
-                self.next_cell = result.next_cell;
-                self.next_key = result.next_key;
+                self.cell = result.cell;
+                let ks = self.db.ks(self.ks);
+                self.prev_key = Some(ks.reduced_key_bytes(result.key.clone()));
+                self.prev_key_included = false;
                 self.check_bounds(&result.key)?;
                 Ok(Some(Ok((result.key, result.value))))
             }

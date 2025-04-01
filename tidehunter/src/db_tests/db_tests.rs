@@ -273,9 +273,9 @@ fn test_iterator_gen() {
     random.sort();
     for reduced in [true, false] {
         let ks_config = if reduced {
-            KeySpaceConfig::default()
-        } else {
             KeySpaceConfig::default().with_key_reduction(0..16)
+        } else {
+            KeySpaceConfig::default()
         };
         println!("Starting sequential test, reduced={reduced}");
         test_iterator_run(sequential.clone(), ks_config.clone());
@@ -386,6 +386,34 @@ fn test_ordered_iterator() {
             &(vec![1, 2, 3, 4, 6].into(), vec![1].into())
         );
     }
+}
+
+#[test]
+fn test_insert_while_iterating() {
+    let dir = tempdir::TempDir::new("test-insert-while-iterating").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+    db.insert(ks, vec![1, 2, 3, 4, 5], vec![1]).unwrap();
+    db.insert(ks, vec![1, 2, 3, 4, 8], vec![2]).unwrap();
+    let mut it = db.iterator(ks);
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 5]);
+
+    db.insert(ks, vec![1, 2, 3, 4, 6], vec![3]).unwrap();
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 6]);
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 8]);
 }
 
 #[test]

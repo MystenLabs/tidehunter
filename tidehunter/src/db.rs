@@ -295,31 +295,25 @@ impl Db {
         self.key_shape.ks(ks)
     }
 
-    /// Returns the next entry in the database.
-    /// Iterator must specify the cell to inspect and the (Optional) next key.
+    /// Returns the next entry in the database, after the specified previous key.
+    /// Iterator must specify the cell to inspect and the (Optional) previous key.
     ///
-    /// If the next_key is set to None, the first key in the cell is returned.
+    /// If the prev_key is set to None, the first key in the cell is returned.
     ///
-    /// When iterating the entire DB, the iterator starts with cell=0 and next_key=None.
+    /// When iterating the entire DB, the iterator starts with cell=0 and prev_key=None.
     ///
     /// The returned values:
-    /// (1) Next cell to read, None if iterator has reached the end of the DB.
-    /// (2) Next key to read.
-    ///     This value should be passed as is to next call of next_entry.
-    ///     None here **does not** mean iteration has ended.
-    /// (3) the key fetched by the iterator
-    /// (4) the value fetched by the iterator
+    /// (1) the key fetched by the iterator
+    /// (2) the value fetched by the iterator
     ///
     /// This function allows concurrent modification of the database.
-    /// If next_key is deleted,
-    /// the function will return the key-value pair next after the deleted key.
-    ///
-    /// As such, the returned key might not match the value passed in the next_key.
+    /// The function will return the key-value pair next after the deleted key.
     pub(crate) fn next_entry(
         &self,
         ks: KeySpace,
         cell: CellId,
-        next_key: Option<Bytes>,
+        prev_key: Option<Bytes>,
+        prev_key_included: bool,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> DbResult<Option<IteratorResult<Bytes>>> {
@@ -329,9 +323,15 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["next_entry", ks.name()])
             .mcs_timer();
-        let Some(result) =
-            self.large_table
-                .next_entry(ks, cell, next_key, self, end_cell_exclusive, reverse)?
+        let Some(result) = self.large_table.next_entry(
+            ks,
+            cell,
+            prev_key,
+            prev_key_included,
+            self,
+            end_cell_exclusive,
+            reverse,
+        )?
         else {
             return Ok(None);
         };
