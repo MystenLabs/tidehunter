@@ -63,7 +63,6 @@ struct Row {
 
 enum Entries {
     Array(usize /*num_mutexes*/, Box<[LargeTableEntry]>),
-    #[allow(dead_code)]
     Tree(BTreeMap<CellIdBytesContainer, LargeTableEntry>),
 }
 
