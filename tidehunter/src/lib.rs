@@ -16,6 +16,7 @@ mod math;
 pub mod metrics;
 mod primitives;
 mod runtime;
+mod state_snapshot;
 pub mod wal;
 mod wal_syncer;
 

@@ -36,6 +36,7 @@ pub struct Db {
 pub type DbResult<T> = Result<T, DbError>;
 
 pub const MAX_KEY_LEN: usize = u16::MAX as usize;
+pub const CONTROL_REGION_FILE: &str = "cr";
 
 impl Db {
     pub fn open(
@@ -45,7 +46,7 @@ impl Db {
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
         let (control_region_store, control_region) =
-            Self::read_or_create_control_region(path.join("cr"), &key_shape)?;
+            Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let (flusher_sender, flusher_receiver) = mpsc::channel();
         let flusher = IndexFlusher::new(flusher_sender);
         let large_table = LargeTable::from_unloaded(
