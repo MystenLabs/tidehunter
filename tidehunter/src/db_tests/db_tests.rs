@@ -1159,10 +1159,15 @@ pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeyS
 fn test_last_four_bytes_corruption() {
     let dir = tempdir::TempDir::new("test_last_four_bytes_corruption").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(2, 12, KeyType::uniform(12));
 
-    // Open the db and insert some data
-    let val_3_position = {
+    let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
+    let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
+    let (key_3, value_3) = (vec![3, 3], vec![3, 13]);
+    let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
+
+    // Open the db and insert some data. Record the position of the last entry
+    let last_position = {
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
@@ -1171,15 +1176,15 @@ fn test_last_four_bytes_corruption() {
         )
         .unwrap();
 
-        db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
-        db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
+        db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
+        db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
         let position = db.wal_writer.wal_position();
-        db.insert(ks, vec![2, 4, 6, 8], vec![1, 3]).unwrap();
+        db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
 
         position
     };
 
-    // Corrupt the last four bytes of the last database entry
+    // Re-open the database and corrupt the last four bytes of the last database entry
     {
         let db = Db::open(
             dir.path(),
@@ -1189,21 +1194,19 @@ fn test_last_four_bytes_corruption() {
         )
         .unwrap();
 
-        // let (wal_key, v) = db.read_record(position).unwrap();
-        let v = db.wal.read_raw_frame(val_3_position).unwrap();
-        println!("---> READ LAST FRAME: {v:?}");
-        
-        let mut bytes = v.into_vec();
-        let l = bytes.len();
-        bytes[l - 1] = !bytes[l - 1];
-       
+        let frame = db.wal.read_raw_frame(last_position).unwrap();
+        let mut bytes = frame.into_vec();
+        let length = bytes.len();
+        bytes[length - 1] = !bytes[length - 1]; // Corrupt the last byte
         let corrupted_frame = PreparedWalWrite::new_unsafe(bytes.into());
-        db.wal_writer.position_and_map().lock().0.position = val_3_position.0;
+
+        let mut position_and_map = db.wal_writer.position_and_map().lock();
+        position_and_map.0.update_position_unsafe(&last_position);
+        drop(position_and_map);
         db.wal_writer.write(&corrupted_frame).unwrap();
-        
     }
 
-    // Re-open the db and verify the data
+    // Re-open the database and insert some new data
     {
         let db = Db::open(
             dir.path(),
@@ -1213,10 +1216,11 @@ fn test_last_four_bytes_corruption() {
         )
         .unwrap();
 
-        db.insert(ks, vec![1, 3, 5, 7], vec![6]).unwrap();
+        db.insert(ks, key_4.clone(), value_4.clone()).unwrap();
     }
 
-    // Re-open the db and verify the data
+    // Re-open the database; verify that the corrupt data is not accessible
+    // and all other data is intact
     {
         let db = Db::open(
             dir.path(),
@@ -1226,16 +1230,10 @@ fn test_last_four_bytes_corruption() {
         )
         .unwrap();
 
-        assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
-        assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
-        assert_eq!(
-            None,
-            db.get(ks, &[2, 4, 6, 8]).unwrap()
-        );
-        assert_eq!(
-            Some(vec![6].into()),
-            db.get(ks, &[1, 3, 5, 7]).unwrap()
-        );
+        assert_eq!(Some(value_1.into()), db.get(ks, &key_1).unwrap());
+        assert_eq!(Some(value_2.into()), db.get(ks, &key_2).unwrap());
+        assert_eq!(None, db.get(ks, &key_3).unwrap());
+        assert_eq!(Some(value_4.into()), db.get(ks, &key_4).unwrap());
     }
 }
 
@@ -1243,10 +1241,15 @@ fn test_last_four_bytes_corruption() {
 fn test_first_four_bytes_corruption() {
     let dir = tempdir::TempDir::new("test_first_four_bytes_corruption").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(2, 12, KeyType::uniform(12));
 
-    // Open the db and insert some data
-    let val_3_position = {
+    let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
+    let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
+    let (key_3, value_3) = (vec![3, 3], vec![3, 13]);
+    let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
+
+    // Open the db and insert some data. Record the position of the last entry
+    let last_position = {
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
@@ -1255,15 +1258,15 @@ fn test_first_four_bytes_corruption() {
         )
         .unwrap();
 
-        db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
-        db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
+        db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
+        db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
         let position = db.wal_writer.wal_position();
-        db.insert(ks, vec![2, 4, 6, 8], vec![1, 3]).unwrap();
+        db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
 
         position
     };
 
-    // Corrupt the last four bytes of the last database entry
+    // Re-open the database and corrupt the first four bytes of the last database entry
     {
         let db = Db::open(
             dir.path(),
@@ -1273,20 +1276,18 @@ fn test_first_four_bytes_corruption() {
         )
         .unwrap();
 
-        // let (wal_key, v) = db.read_record(position).unwrap();
-        let v = db.wal.read_raw_frame(val_3_position).unwrap();
-        println!("---> READ LAST FRAME: {v:?}");
-        
-        let mut bytes = v.into_vec();
-        bytes[1] = !bytes[1];
-       
+        let frame = db.wal.read_raw_frame(last_position).unwrap();
+        let mut bytes = frame.into_vec();
+        bytes[1] = !bytes[1]; // Corrupt the first byte
         let corrupted_frame = PreparedWalWrite::new_unsafe(bytes.into());
-        db.wal_writer.position_and_map().lock().0.position = val_3_position.0;
+
+        let mut position_and_map = db.wal_writer.position_and_map().lock();
+        position_and_map.0.update_position_unsafe(&last_position);
+        drop(position_and_map);
         db.wal_writer.write(&corrupted_frame).unwrap();
-        
     }
 
-    // Re-open the db and verify the data
+    // Re-open the database and insert some new data
     {
         let db = Db::open(
             dir.path(),
@@ -1296,10 +1297,11 @@ fn test_first_four_bytes_corruption() {
         )
         .unwrap();
 
-        db.insert(ks, vec![1, 3, 5, 7], vec![6]).unwrap();
+        db.insert(ks, key_4.clone(), value_4.clone()).unwrap();
     }
 
-    // Re-open the db and verify the data
+    // Re-open the database; verify that the corrupt data is not accessible
+    // and all other data is intact
     {
         let db = Db::open(
             dir.path(),
@@ -1309,15 +1311,9 @@ fn test_first_four_bytes_corruption() {
         )
         .unwrap();
 
-        assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
-        assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
-        assert_eq!(
-            None,
-            db.get(ks, &[2, 4, 6, 8]).unwrap()
-        );
-        assert_eq!(
-            Some(vec![6].into()),
-            db.get(ks, &[1, 3, 5, 7]).unwrap()
-        );
+        assert_eq!(Some(value_1.into()), db.get(ks, &key_1).unwrap());
+        assert_eq!(Some(value_2.into()), db.get(ks, &key_2).unwrap());
+        assert_eq!(None, db.get(ks, &key_3).unwrap());
+        assert_eq!(Some(value_4.into()), db.get(ks, &key_4).unwrap());
     }
 }

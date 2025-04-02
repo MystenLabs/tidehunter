@@ -61,7 +61,7 @@ pub(crate) struct Map {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct WalPosition(pub u64);
+pub struct WalPosition(u64);
 
 pub enum WalRandomRead<'a> {
     Mapped(Bytes),
@@ -70,7 +70,6 @@ pub enum WalRandomRead<'a> {
 
 impl WalWriter {
     pub fn write(&self, w: &PreparedWalWrite) -> Result<WalPosition, WalError> {
-        println!("----> writing frame: {w:?}");
         let len = w.frame.len_with_header() as u64;
         let len_aligned = self.wal.layout.align(len);
         let mut current_map_and_position = self.position_and_map.lock();
@@ -122,6 +121,8 @@ impl WalWriter {
         WalPosition(self.position_and_map.lock().0.position)
     }
 
+    /// Return the current position and map
+    #[cfg(test)]
     pub(crate) fn position_and_map(&self) -> &Mutex<(IncrementalWalPosition, Map)> {
         &self.position_and_map
     }
@@ -129,7 +130,7 @@ impl WalWriter {
 
 #[derive(Clone)]
 pub(crate) struct IncrementalWalPosition {
-    pub position: u64,
+    position: u64,
     layout: WalLayout,
 }
 
@@ -143,6 +144,12 @@ impl IncrementalWalPosition {
         let result = (position, self.position);
         self.position = position + len_aligned;
         result
+    }
+
+    /// Manually update the position without checking the layout
+    #[cfg(test)]
+    pub fn update_position_unsafe(&mut self, pos: &WalPosition) {
+        self.position = pos.0;
     }
 }
 
@@ -238,7 +245,8 @@ impl Wal {
         Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
     }
 
-    #[doc(hidden)]
+    /// Read the wal position without mapping. This function returns the raw bytes
+    /// in the frame, not only the value. (This is used for testing.)
     #[cfg(test)]
     pub fn read_raw_frame(&self, pos: WalPosition) -> Result<Bytes, WalError> {
         assert_ne!(
@@ -249,13 +257,10 @@ impl Wal {
         let (map, offset) = self.layout.locate(pos.0);
         let map = self.map(map, false)?;
         // todo avoid clone, introduce Bytes::slice_in_place
-        // Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
 
         let len = CrcFrame::checked_read(&map.data, offset as usize)?;
         let data = map.data.slice(CrcFrame::frame_range(offset as usize, len));
         Ok(data)
-
-        
     }
 
     /// Read the wal position without mapping.
