@@ -876,13 +876,11 @@ impl LargeTableEntry {
             let flush_kind = self
                 .flush_kind()
                 .expect("unload_if_ks_enabled is called in clean state");
-            println!("Flushing {:?}", self.cell);
             flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
         }
     }
 
     pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
-        println!("update_flushed_index {:?}", self.cell);
         assert!(
             self.flush_pending,
             "update_merged_index called while flush_pending is not set"
