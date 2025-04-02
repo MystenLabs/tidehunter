@@ -11,7 +11,6 @@ use rand::rngs::ThreadRng;
 use rand::Rng;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 // see generate.py
 pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
@@ -643,12 +642,12 @@ fn test_dirty_unloading() {
         db.insert(ks, vec![1, 2, 3, 4, 6], vec![6]).unwrap();
         db.insert(ks, vec![1, 2, 3, 4, 7], vec![7]).unwrap();
         db.insert(ks, vec![1, 2, 3, 4, 8], vec![8]).unwrap();
-        thread::sleep(Duration::from_millis(100)); // todo use barrier w/ flusher thread instead
+        db.large_table.flusher.barrier();
         check_metrics(&db.metrics, 0, 1, 0, 0);
         db.insert(ks, vec![1, 2, 3, 4, 9], vec![9]).unwrap();
         db.insert(ks, vec![1, 2, 3, 4, 10], vec![10]).unwrap();
         check_all(&db, ks, 10);
-        thread::sleep(Duration::from_millis(100)); // todo use barrier w/ flusher thread instead
+        db.large_table.flusher.barrier();
         check_metrics(&db.metrics, 0, 1, 1, 0);
     }
     {
@@ -672,7 +671,7 @@ fn test_dirty_unloading() {
         .unwrap();
         db.insert(ks, vec![1, 2, 3, 4, 11], vec![11]).unwrap();
         db.insert(ks, vec![1, 2, 3, 4, 12], vec![12]).unwrap();
-        thread::sleep(Duration::from_millis(100)); // todo use barrier w/ flusher thread instead
+        db.large_table.flusher.barrier();
         check_metrics(&db.metrics, 0, 1, 0, 0);
         check_all(&db, ks, 12);
         db.insert(ks, vec![1, 2, 3, 4, 13], vec![13]).unwrap();

@@ -1,8 +1,34 @@
 #!/bin/bash
 
-# Constants
-ENTRIES_PER_INDEX=1000000 # !!! MAKE SURE THIS IS THE SAME AS THE INDEX_SIZE IN run.sh !!!
+# Default entries per index
+DEFAULT_ENTRIES_PER_INDEX=1000000 # Should match DEFAULT_INDEX_SIZE in run.sh (1M)
 ENTRY_SIZE_BYTES=40  # Each entry is approximately 40 bytes
+
+# Parse command line arguments
+function usage {
+    echo "Usage: $0 [--entries-per-index NUM]"
+    echo "  --entries-per-index NUM: Number of entries per index (default: $DEFAULT_ENTRIES_PER_INDEX)"
+    echo "                         IMPORTANT: Should match --index-size in run.sh"
+    exit 1
+}
+
+# Parse arguments
+ENTRIES_PER_INDEX=$DEFAULT_ENTRIES_PER_INDEX
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --entries-per-index)
+            ENTRIES_PER_INDEX="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
 
 # Compute the index size in bytes (approximation)
 INDEX_SIZE_BYTES=$((ENTRIES_PER_INDEX * ENTRY_SIZE_BYTES))
@@ -11,8 +37,6 @@ echo "Index size: $ENTRIES_PER_INDEX entries x $ENTRY_SIZE_BYTES bytes = $INDEX_
 # File sizes to generate
 FILE_SIZES=(
   "1TB:1000000000000"
-  "100GB:100000000000"
-  "10GB:10000000000"
 )
 
 # Function to format numbers with k/M suffix

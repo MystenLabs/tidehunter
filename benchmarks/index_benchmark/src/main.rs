@@ -1,15 +1,15 @@
 use clap::{Parser, Subcommand};
 use prometheus::Registry;
-use rand::Rng;
-use std::env;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
+use std::thread;
 use tidehunter::metrics::print_histogram_stats;
 
 use minibytes::Bytes;
-use std::io::Read;
 use std::time::{Duration, Instant};
 use tidehunter::file_reader::{set_direct_options, FileReader};
 use tidehunter::index::index_format::IndexFormat;
@@ -44,86 +44,115 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 
     let start = Instant::now();
 
-    // Create a temporary directory for index chunks
-    let project_root = env::current_dir()?;
-    let temp_dir = tempfile::Builder::new()
-        .prefix("tidehunter_index_gen_")
-        .tempdir_in(project_root)?;
-
     // Create a tokio runtime for parallel processing
+    let num_threads = num_cpus::get();
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_cpus::get())
+        .worker_threads(num_threads)
         .build()
         .unwrap();
 
-    // No need to clone index_format since we own it
-    // let index_format = index_format.clone();
     let ks_desc = ks_desc.clone();
 
-    // Generate indices in parallel and write to temporary files
-    // todo replace temporary files with a channel
+    // Generate indices in parallel and send through a channel
     runtime.block_on(async {
-        let mut tasks = Vec::new();
+        // Create a channel for sending indices
+        let (tx, rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(num_threads);
 
-        for i in 0..n_indices {
+        // Spawn a task to consume indices and write to the file
+        let consumer = tokio::spawn(async move {
+            let mut rx = rx;
+            let mut indices_written = 0;
+
+            while let Some((i, buffer)) = rx.recv().await {
+                if i % 100 == 0 {
+                    println!("  Merging index {} into main file...", i);
+                }
+
+                // Write the serialized index to the main file
+                file.write_all(&buffer)?;
+                indices_written += 1;
+            }
+
+            assert_eq!(
+                indices_written, n_indices,
+                "Not all indices were written to the file"
+            );
+            file.flush()?;
+
+            Ok::<_, std::io::Error>(())
+        });
+
+        // Spawn tasks to generate indices
+        let mut producer_tasks = Vec::new();
+        for i in 0..num_threads {
+            let tx_clone = tx.clone();
             let index_format_clone = index_format.clone();
             let ks_desc_clone = ks_desc.clone();
-            let temp_path = temp_dir.path().join(format!("index_{}.tmp", i));
 
-            // Spawn a task for each index
+            // Spawn a task for each thread
             let task = tokio::spawn(async move {
-                if i % 100 == 0 {
-                    println!("  Generating index {}...", i);
-                }
+                println!("  Starting task {}...", i);
+                let batch_size = if i < num_threads - 1 {
+                    n_indices / num_threads
+                } else {
+                    n_indices / num_threads + n_indices % num_threads
+                };
 
-                // Create an IndexTable with m entries
-                let mut index = IndexTable::default();
-                let mut rng = rand::thread_rng();
-
-                // Fill with random entries
-                for _ in 0..entries_per_index {
-                    // Create a random key (32 bytes)
-                    let mut key = vec![0u8; 32];
-                    rng.fill(&mut key[..]);
-
-                    // Create a random WalPosition
-                    let position = WalPosition::test_value(rng.gen());
-
-                    // Insert into the index
-                    index.insert(Bytes::from(key), position);
-                }
-
-                // Serialize the index
-                let bytes = index_format_clone.to_bytes(&index, &ks_desc_clone);
-
-                // Write the serialized index to a temporary file
-                let mut temp_file = File::create(&temp_path)?;
-                temp_file.write_all(&bytes)?;
-
-                Ok::<_, std::io::Error>((i, temp_path))
-            });
-
-            tasks.push(task);
-        }
-
-        // Process completed tasks as they finish
-        for task in futures::future::join_all(tasks).await {
-            match task {
-                Ok(Ok((i, temp_path))) => {
-                    if i % 100 == 0 {
-                        println!("  Merging index {} into main file...", i);
+                for j in 0..batch_size {
+                    let index_idx = i * batch_size + j;
+                    if index_idx % 1000 == 0 {
+                        println!("  Generating index {}...", index_idx);
                     }
 
-                    // Read the temporary file
-                    let mut temp_file = File::open(&temp_path)?;
-                    let mut buffer = Vec::new();
-                    temp_file.read_to_end(&mut buffer)?;
+                    // Create an IndexTable with m entries
+                    let mut index = IndexTable::default();
+                    let mut rng = StdRng::from_entropy();
 
-                    // Append to the main file
-                    file.write_all(&buffer)?;
+                    // Fill with random entries
+                    for _ in 0..entries_per_index {
+                        // Create a random key (32 bytes)
+                        let mut key = vec![0u8; 32];
+                        rng.fill(&mut key[..]);
 
-                    Ok::<_, std::io::Error>(())
+                        // Create a random WalPosition
+                        let position = WalPosition::test_value(rng.gen());
+
+                        // Insert into the index
+                        index.insert(Bytes::from(key), position);
+                    }
+
+                    // Serialize the index
+                    let bytes = index_format_clone.to_bytes(&index, &ks_desc_clone);
+
+                    // Send the serialized index through the channel
+                    let result = tx_clone
+                        .send((index_idx, bytes.as_ref().to_vec()))
+                        .await
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("Failed to send index through channel: {}", e),
+                            )
+                        });
+
+                    if let Err(e) = result {
+                        println!("Failed to send index through channel: {}", e);
+                        return Err(e);
+                    }
                 }
+                Ok(())
+            });
+
+            producer_tasks.push(task);
+        }
+
+        // Drop the original sender so the channel will close when all producer tasks are done
+        drop(tx);
+
+        // Wait for all producer tasks to complete
+        for task in futures::future::join_all(producer_tasks).await {
+            match task {
+                Ok(Ok(())) => Ok(()),
                 Ok(Err(e)) => Err(e),
                 Err(e) => Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -132,16 +161,21 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
             }?
         }
 
-        Ok::<_, std::io::Error>(())
+        // Wait for the consumer task to complete
+        match consumer.await {
+            Ok(result) => result,
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )),
+        }
     })?;
 
-    file.flush()?;
     println!("Index file generated successfully in {:?}", start.elapsed());
     Ok(())
 }
 
 struct IndexBenchmark<'a> {
-    index_count: u64,
     readers: Vec<FileRange<'a>>,
     key_shape: KeyShape,
     ks: KeySpace,
@@ -180,86 +214,164 @@ impl<'a> IndexBenchmark<'a> {
         let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::uniform(1));
 
         Ok(Self {
-            index_count,
             readers,
             key_shape,
             ks,
         })
     }
 
-    fn run_benchmark<P: IndexFormat>(
+    fn run_benchmark_multithreaded<P: IndexFormat + Clone + Send + 'static>(
         &self,
-        index_format: &P,
+        index_format: P,
         num_lookups: usize,
         batch_size: usize,
+        num_threads: usize,
         metrics: &Metrics,
-    ) -> Vec<Duration> {
-        let ks_desc = self.key_shape.ks(self.ks);
-        let mut rng = rand::thread_rng();
-        let mut durations = Vec::with_capacity(num_lookups / batch_size);
-
+    ) -> (Duration, Vec<Vec<Duration>>) {
         println!(
-            "Running {} lookups in batches of {}",
-            num_lookups, batch_size
+            "Running multithreaded benchmark with {} threads, {} lookups per thread in batches of {}",
+            num_threads, num_lookups, batch_size
         );
 
-        for _ in 0..(num_lookups / batch_size) {
-            let start = Instant::now();
+        // Use thread::scope to manage threads and collect results
+        let ks_desc = self.key_shape.ks(self.ks);
+        let start = Instant::now();
 
-            for _ in 0..batch_size {
-                // Choose a random index
-                // todo revert to self.index_count. this solution avoid alignment issues
-                let index_idx = rng.gen_range(0..self.index_count - 1) as usize;
-                let reader = &self.readers[index_idx];
+        let thread_durations = thread::scope(|s| {
+            // Spawn worker threads
+            let handles: Vec<_> = (0..num_threads)
+                .map(|_| {
+                    let index_format = index_format.clone();
+                    let ks_desc = ks_desc.clone();
 
-                // Create a random key to look up
-                let mut key = vec![0u8; 32];
-                rng.fill(&mut key[..]);
+                    // Each thread gets access to all readers
+                    let thread_readers = &self.readers[..];
 
-                // Look up the key
-                index_format.lookup_unloaded(ks_desc, reader, &key, &metrics);
-            }
+                    s.spawn(move || {
+                        let mut rng = rand::thread_rng();
+                        let mut durations = Vec::with_capacity(num_lookups / batch_size);
 
-            durations.push(start.elapsed());
-        }
+                        for _ in 0..(num_lookups / batch_size) {
+                            let start = Instant::now();
 
-        durations
+                            for _ in 0..batch_size {
+                                // Choose a random index from all readers
+                                let index_idx = rng.gen_range(0..thread_readers.len() - 1);
+                                let reader = &thread_readers[index_idx];
+
+                                // Create a random key to look up
+                                let mut key = vec![0u8; 32];
+                                rng.fill(&mut key[..]);
+
+                                // Look up the key
+                                index_format.lookup_unloaded(&ks_desc, reader, &key, metrics);
+                            }
+
+                            durations.push(start.elapsed());
+                        }
+
+                        durations
+                    })
+                })
+                .collect();
+
+            // Collect results from all threads
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<Vec<Duration>>>()
+        });
+
+        let total_time = start.elapsed();
+        (total_time, thread_durations)
     }
 }
 
-fn analyze_results(name: &str, durations: &[Duration], batch_size: usize) {
-    let total_lookups = durations.len() * batch_size;
-    let total_time: Duration = durations.iter().sum();
-    let throughput = total_lookups as f64 / total_time.as_secs_f64();
+fn analyze_multithreaded_results(
+    name: &str,
+    end_to_end_time: Duration,
+    thread_durations: &[Vec<Duration>],
+    batch_size: usize,
+    num_threads: usize,
+) {
+    // Calculate overall statistics
+    let total_lookups = thread_durations
+        .iter()
+        .map(|t| t.len() * batch_size)
+        .sum::<usize>();
+    let end_to_end_throughput = total_lookups as f64 / end_to_end_time.as_secs_f64();
 
-    // Calculate simple statistics without statrs dependency
-    let ns_per_lookup: Vec<f64> = durations
+    // Flatten all durations for overall latency stats
+    let all_durations: Vec<Duration> = thread_durations.iter().flatten().cloned().collect();
+
+    println!("{} Multithreaded Results:", name);
+    println!("  Threads: {}", num_threads);
+    println!("  End-to-end time: {:.2?}", end_to_end_time);
+    println!("  Total lookups: {}", total_lookups);
+    println!(
+        "  End-to-end throughput: {:.2} lookups/sec",
+        end_to_end_throughput
+    );
+
+    // Calculate per-thread statistics
+    for (i, thread_dur) in thread_durations.iter().enumerate() {
+        let thread_total_lookups = thread_dur.len() * batch_size;
+        let thread_total_time: Duration = thread_dur.iter().sum();
+        let thread_throughput = thread_total_lookups as f64 / thread_total_time.as_secs_f64();
+
+        // Calculate per-thread latency stats
+        let ns_per_lookup: Vec<f64> = thread_dur
+            .iter()
+            .map(|d| d.as_nanos() as f64 / batch_size as f64)
+            .collect();
+
+        let mean = ns_per_lookup.iter().sum::<f64>() / ns_per_lookup.len() as f64;
+        let variance = ns_per_lookup
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>()
+            / ns_per_lookup.len() as f64;
+        let std_dev = variance.sqrt();
+        let min = ns_per_lookup.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max = ns_per_lookup
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+        println!("  Thread {} Results:", i);
+        println!("    Lookups: {}", thread_total_lookups);
+        println!("    Throughput: {:.2} lookups/sec", thread_throughput);
+        println!("    Latency per lookup:");
+        println!("      Mean: {:.2} ns", mean);
+        println!("      Std Dev: {:.2} ns", std_dev);
+        println!("      Min: {:.2} ns", min);
+        println!("      Max: {:.2} ns", max);
+    }
+
+    // Calculate overall latency statistics
+    let all_ns_per_lookup: Vec<f64> = all_durations
         .iter()
         .map(|d| d.as_nanos() as f64 / batch_size as f64)
         .collect();
 
-    let mean = ns_per_lookup.iter().sum::<f64>() / ns_per_lookup.len() as f64;
-
-    let variance = ns_per_lookup
+    let all_mean = all_ns_per_lookup.iter().sum::<f64>() / all_ns_per_lookup.len() as f64;
+    let all_variance = all_ns_per_lookup
         .iter()
-        .map(|x| (x - mean).powi(2))
+        .map(|x| (x - all_mean).powi(2))
         .sum::<f64>()
-        / ns_per_lookup.len() as f64;
-    let std_dev = variance.sqrt();
-
-    let min = ns_per_lookup.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let max = ns_per_lookup
+        / all_ns_per_lookup.len() as f64;
+    let all_std_dev = all_variance.sqrt();
+    let all_min = all_ns_per_lookup
+        .iter()
+        .fold(f64::INFINITY, |a, &b| a.min(b));
+    let all_max = all_ns_per_lookup
         .iter()
         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
-    println!("{} Results:", name);
-    println!("  Total: {} lookups in {:.2?}", total_lookups, total_time);
-    println!("  Throughput: {:.2} lookups/sec", throughput);
-    println!("  Latency per lookup:");
-    println!("    Mean: {:.2} ns", mean);
-    println!("    Std Dev: {:.2} ns", std_dev);
-    println!("    Min: {:.2} ns", min);
-    println!("    Max: {:.2} ns", max);
+    println!("  Overall Latency Statistics:");
+    println!("    Mean: {:.2} ns", all_mean);
+    println!("    Std Dev: {:.2} ns", all_std_dev);
+    println!("    Min: {:.2} ns", all_min);
+    println!("    Max: {:.2} ns", all_max);
 }
 
 #[derive(Parser)]
@@ -298,7 +410,7 @@ enum Commands {
         #[arg(long, default_value_t = 1000)]
         batch_size: usize,
         /// Window size for uniform index
-        #[arg(long, default_value_t = 500)]
+        #[arg(long, default_value_t = 800)]
         window_size: usize,
         /// Input file for header index
         #[arg(long, default_value = "data/bench-header-100GB-100K.dat")]
@@ -309,6 +421,9 @@ enum Commands {
         /// Whether to use direct I/O
         #[arg(long, default_value_t = false)]
         direct_io: bool,
+        /// Number of threads to use for benchmark
+        #[arg(long, default_value_t = 1)]
+        num_threads: usize,
     },
 }
 
@@ -354,6 +469,7 @@ fn main() {
             header_file,
             uniform_file,
             direct_io,
+            num_threads,
         } => {
             let header_registry = Registry::new();
             let uniform_registry = Registry::new();
@@ -386,27 +502,50 @@ fn main() {
                 IndexBenchmark::load_from_file(&header_file, header_file_length, direct_io)
                     .expect("Failed to load HeaderLookupIndex benchmark file");
 
-            let mut header_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
-            let mut uniform_durations = Vec::with_capacity(num_runs * num_lookups / batch_size);
-            for _ in 0..num_runs {
-                let mut durations = header_bench.run_benchmark(
-                    &LookupHeaderIndex,
-                    num_lookups,
-                    batch_size,
-                    &header_metrics,
-                );
-                header_durations.append(&mut durations);
-                analyze_results("HeaderLookupIndex", &header_durations, batch_size);
+            println!(
+                "Running multithreaded benchmark with {} threads",
+                num_threads
+            );
+            for run in 0..num_runs {
+                println!("Run {}/{}", run + 1, num_runs);
 
-                durations = uniform_bench.run_benchmark(
-                    &UniformLookupIndex::new_with_window_size(window_size),
-                    num_lookups,
+                // Run HeaderLookupIndex benchmark
+                let (header_total_time, header_thread_durations) = header_bench
+                    .run_benchmark_multithreaded(
+                        LookupHeaderIndex,
+                        num_lookups,
+                        batch_size,
+                        num_threads,
+                        &header_metrics,
+                    );
+
+                analyze_multithreaded_results(
+                    "HeaderLookupIndex",
+                    header_total_time,
+                    &header_thread_durations,
                     batch_size,
-                    &uniform_metrics,
+                    num_threads,
                 );
-                uniform_durations.append(&mut durations);
-                analyze_results("UniformLookupIndex", &uniform_durations, batch_size);
+
+                // Run UniformLookupIndex benchmark
+                let (uniform_total_time, uniform_thread_durations) = uniform_bench
+                    .run_benchmark_multithreaded(
+                        UniformLookupIndex::new_with_window_size(window_size),
+                        num_lookups,
+                        batch_size,
+                        num_threads,
+                        &uniform_metrics,
+                    );
+
+                analyze_multithreaded_results(
+                    "UniformLookupIndex",
+                    uniform_total_time,
+                    &uniform_thread_durations,
+                    batch_size,
+                    num_threads,
+                );
             }
+            // }
 
             // Print HeaderLookupIndex stats
             println!(

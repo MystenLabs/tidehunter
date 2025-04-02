@@ -31,6 +31,8 @@ pub struct FlusherCommand {
 pub enum FlushKind {
     MergeUnloaded(WalPosition, Arc<IndexTable>),
     FlushLoaded(Arc<IndexTable>),
+    #[cfg(test)]
+    Barrier(#[allow(dead_code)] SendGuard),
 }
 
 impl IndexFlusher {
@@ -71,6 +73,21 @@ impl IndexFlusher {
         let (sender, _receiver) = mpsc::channel();
         Self::new(sender)
     }
+
+    /// Wait until all messages that are currently queued for flusher are processed
+    #[cfg(test)]
+    pub fn barrier(&self) {
+        use parking_lot::Mutex;
+        let mutex = Arc::new(Mutex::new(()));
+        let lock = mutex.lock_arc();
+        let command = FlusherCommand {
+            ks: KeySpace::new_test(0),
+            cell: CellId::Integer(0),
+            flush_kind: FlushKind::Barrier(SendGuard(lock)),
+        };
+        self.sender.send(command).unwrap();
+        let _ = mutex.lock();
+    }
 }
 
 impl IndexFlusherThread {
@@ -99,6 +116,8 @@ impl IndexFlusherThread {
                     let index_copy = IndexTable::clone(&index);
                     (index, index_copy)
                 }
+                #[cfg(test)]
+                FlushKind::Barrier(_) => continue,
             };
             let ks = db.ks(command.ks);
             self.run_compactor(ks, &mut merged_index);
@@ -126,3 +145,13 @@ impl IndexFlusherThread {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) struct SendGuard(
+    #[allow(dead_code)] parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>,
+);
+
+#[cfg(test)]
+// Rather than enable send_guard feature globally in parking_lot,
+// using this just for flusher barrier
+unsafe impl Send for SendGuard {}

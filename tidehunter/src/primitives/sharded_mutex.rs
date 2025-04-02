@@ -1,3 +1,4 @@
+use crate::runtime;
 use parking_lot::{Mutex, MutexGuard};
 use prometheus::Histogram;
 use std::time::Instant;
@@ -16,8 +17,7 @@ impl<V> ShardedMutex<V> {
             return lock;
         }
         let now = Instant::now();
-        // todo move tokio dep under a feature
-        let lock = tokio::task::block_in_place(|| mutex.lock());
+        let lock = runtime::block_in_place(|| mutex.lock());
         metric.observe(now.elapsed().as_micros() as f64);
         lock
     }

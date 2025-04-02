@@ -10,6 +10,7 @@ use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::range_from_excluding;
 use crate::primitives::sharded_mutex::ShardedMutex;
+use crate::runtime;
 use crate::wal::{WalPosition, WalRandomRead};
 use bloom::{BloomFilter, ASMS};
 use lru::LruCache;
@@ -26,7 +27,7 @@ use std::{cmp, mem};
 pub struct LargeTable {
     table: Vec<KsTable>,
     config: Arc<Config>,
-    flusher: IndexFlusher,
+    pub(crate) flusher: IndexFlusher,
     metrics: Arc<Metrics>,
 }
 
@@ -62,7 +63,6 @@ struct Row {
 
 enum Entries {
     Array(usize /*num_mutexes*/, Box<[LargeTableEntry]>),
-    #[allow(dead_code)]
     Tree(BTreeMap<CellIdBytesContainer, LargeTableEntry>),
 }
 
@@ -155,7 +155,7 @@ impl LargeTable {
         v: WalPosition,
         value: &Bytes,
         loader: &L,
-    ) -> Result<(), L::Error> {
+    ) {
         let (mut row, cell) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
@@ -184,7 +184,6 @@ impl LargeTable {
             .max_index_size_metric
             .set(max_index_size as i64);
         self.metrics.index_size.observe(index_size as f64);
-        Ok(())
     }
 
     pub fn remove<L: Loader>(
@@ -274,11 +273,10 @@ impl LargeTable {
         };
         // drop row to avoid holding mutex during IO
         drop(row);
-        // todo move tokio dep under a feature
         let now = Instant::now();
         let index_reader = loader.index_reader(ks, index_position)?;
         // todo - consider only doing block_in_place for the syscall random reader
-        let result = tokio::task::block_in_place(|| {
+        let result = runtime::block_in_place(|| {
             ks.index_format()
                 .lookup_unloaded(ks, &index_reader, k, &self.metrics)
         });
