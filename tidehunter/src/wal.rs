@@ -671,7 +671,6 @@ impl Map {
     }
 }
 
-#[derive(Debug)]
 pub struct PreparedWalWrite {
     frame: CrcFrame,
 }
