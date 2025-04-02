@@ -473,7 +473,6 @@ impl LargeTable {
         ks: &KeySpaceDesc,
         mut cell: CellId,
         mut prev_key: Option<Bytes>,
-        prev_key_included: bool,
         loader: &L,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
@@ -489,14 +488,7 @@ impl LargeTable {
                         .large_table_contention
                         .with_label_values(&[ks.name()]),
                 );
-                self.next_in_cell(
-                    loader,
-                    &mut row,
-                    &cell,
-                    prev_key,
-                    prev_key_included,
-                    reverse,
-                )?
+                self.next_in_cell(loader, &mut row, &cell, prev_key, reverse)?
                 // drop row mutex as required by Self::next_cell called below
             };
             if let Some((key, value)) = next_in_cell {
@@ -532,7 +524,6 @@ impl LargeTable {
         row: &mut Row,
         cell: &CellId,
         prev_key: Option<Bytes>,
-        prev_key_included: bool,
         reverse: bool,
     ) -> Result<Option<(Bytes, WalPosition)>, L::Error> {
         let Some(entry) = row.try_entry_mut(cell) else {
@@ -540,7 +531,7 @@ impl LargeTable {
         };
         // todo read from disk instead of loading
         entry.maybe_load(loader)?;
-        Ok(entry.next_entry(prev_key, prev_key_included, reverse))
+        Ok(entry.next_entry(prev_key, reverse))
     }
 
     /// See Db::next_cell for documentation
@@ -811,13 +802,12 @@ impl LargeTableEntry {
     pub fn next_entry(
         &self,
         prev_key: Option<Bytes>,
-        prev_key_included: bool,
         reverse: bool,
     ) -> Option<(Bytes, WalPosition)> {
         if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
             panic!("Can't next_entry in unloaded state");
         }
-        self.data.next_entry(prev_key, prev_key_included, reverse)
+        self.data.next_entry(prev_key, reverse)
     }
 
     pub fn maybe_load<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {

@@ -85,24 +85,18 @@ impl IndexTable {
 
     /// If prev is None returns first entry.
     ///
-    /// If prev is not None, returns entry on or after specified prev.
+    /// If prev is not None, returns entry after specified prev.
     ///
     /// Returns tuple of a key, value.
     ///
     /// This works even if prev is set to Some(k), but the value at k does not exist (for ex. was deleted).
-    pub fn next_entry(
-        &self,
-        prev: Option<Bytes>,
-        prev_included: bool,
-        reverse: bool,
-    ) -> Option<(Bytes, WalPosition)> {
+    pub fn next_entry(&self, prev: Option<Bytes>, reverse: bool) -> Option<(Bytes, WalPosition)> {
         fn take_next<'a>(
             mut iter: impl Iterator<Item = (&'a Bytes, &'a WalPosition)>,
             prev: Option<Bytes>,
-            included: bool,
         ) -> Option<(Bytes, WalPosition)> {
             let (key, value) = iter.next()?;
-            if !included && prev.is_some() && key.eq(&prev.unwrap()) {
+            if prev.is_some() && key.eq(&prev.unwrap()) {
                 let (key, value) = iter.next()?;
                 Some((key.clone(), *value))
             } else {
@@ -114,18 +108,18 @@ impl IndexTable {
             if reverse {
                 let prev_clone = prev.clone();
                 let range = self.data.range(..=prev_clone);
-                take_next(range.into_iter().rev(), Some(prev), prev_included)
+                take_next(range.into_iter().rev(), Some(prev))
             } else {
                 let prev_clone = prev.clone();
                 let range = self.data.range(prev_clone..);
-                take_next(range.into_iter(), Some(prev), prev_included)
+                take_next(range.into_iter(), Some(prev))
             }
         } else {
             let iterator = self.data.iter();
             if reverse {
-                take_next(iterator.rev(), None, false)
+                take_next(iterator.rev(), None)
             } else {
-                take_next(iterator, None, false)
+                take_next(iterator, None)
             }
         }
     }
@@ -183,90 +177,46 @@ mod tests {
 
         // Reverse = false
 
-        // existing element - next found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), true, false);
-        let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
-        assert_eq!(next.1, WalPosition::test_value(2));
-
         // existing element - next found exclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), false, false);
+        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), false);
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 4, 5]));
         assert_eq!(next.1, WalPosition::test_value(3));
-
-        // not existing element - next found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 6].into()), true, false);
-        let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
-        assert_eq!(next.1, WalPosition::test_value(2));
 
         // not existing element - next found exclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 6].into()), false, false);
+        let next = table.next_entry(Some(vec![1, 2, 3, 6].into()), false);
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
         assert_eq!(next.1, WalPosition::test_value(2));
 
-        // existing element - next not found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 4, 5].into()), true, false);
-        let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 4, 5]));
-        assert_eq!(next.1, WalPosition::test_value(3));
-
-        // existing element - next not found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 4, 5].into()), false, false);
+        // existing element - next not found exclusive
+        let next = table.next_entry(Some(vec![1, 2, 4, 5].into()), false);
         assert!(next.is_none());
 
         // not existing element - next not found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 4, 6].into()), true, false);
-        assert!(next.is_none());
-
-        // not existing element - next not found exclusive
-        let next = table.next_entry(Some(vec![1, 2, 4, 6].into()), false, false);
+        let next = table.next_entry(Some(vec![1, 2, 4, 6].into()), false);
         assert!(next.is_none());
 
         // Reverse = true
 
-        // existing element - next found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), true, true);
-        let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
-        assert_eq!(next.1, WalPosition::test_value(2));
-
         // existing element - next found exclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), false, true);
+        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), true);
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 4]));
         assert_eq!(next.1, WalPosition::test_value(1));
 
         // not existing element - next found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 8].into()), true, true);
+        let next = table.next_entry(Some(vec![1, 2, 3, 8].into()), true);
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
         assert_eq!(next.1, WalPosition::test_value(2));
-
-        // not existing element - next found exclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 8].into()), false, true);
-        let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
-        assert_eq!(next.1, WalPosition::test_value(2));
-
-        // existing element - next not found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), true, true);
-        let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 4]));
-        assert_eq!(next.1, WalPosition::test_value(1));
 
         // existing element - next not found exclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), false, true);
+        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), true);
         assert!(next.is_none());
 
         // not existing element - next not found inclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 3].into()), true, true);
-        assert!(next.is_none());
-
-        // not existing element - next not found exclusive
-        let next = table.next_entry(Some(vec![1, 2, 3, 3].into()), false, true);
+        let next = table.next_entry(Some(vec![1, 2, 3, 3].into()), true);
         assert!(next.is_none());
     }
 
@@ -276,13 +226,13 @@ mod tests {
         table.insert(vec![1, 2, 3, 4].into(), WalPosition::test_value(1));
         table.insert(vec![1, 2, 3, 7].into(), WalPosition::test_value(2));
 
-        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), false, false);
+        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), false);
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
         assert_eq!(next.1, WalPosition::test_value(2));
 
         table.insert(vec![1, 2, 3, 6].into(), WalPosition::test_value(3));
-        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), false, false);
+        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), false);
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 6]));
         assert_eq!(next.1, WalPosition::test_value(3));

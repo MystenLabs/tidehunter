@@ -9,7 +9,6 @@ pub struct DbIterator {
     ks: KeySpace,
     cell: Option<CellId>,
     prev_key: Option<Bytes>,
-    prev_key_included: bool,
     full_lower_bound: Option<Bytes>,
     full_upper_bound: Option<Bytes>,
     with_key_reduction: bool,
@@ -27,7 +26,6 @@ impl DbIterator {
             ks,
             cell: Some(cell),
             prev_key: None,
-            prev_key_included: false,
             full_lower_bound: None,
             full_upper_bound: None,
             end_cell_exclusive: None,
@@ -47,9 +45,14 @@ impl DbIterator {
                 self.db
                     .next_cell(ks, &ks.cell_id(&reduced_lower_bound), true);
         } else {
-            self.cell = Some(ks.cell_id(&reduced_lower_bound));
-            self.prev_key = Some(reduced_lower_bound);
-            self.prev_key_included = true;
+            let next_key = saturated_decrement_vec(&reduced_lower_bound);
+
+            self.cell = Some(ks.cell_id(&next_key));
+            self.prev_key = if is_nonzero(&next_key) {
+                Some(next_key)
+            } else {
+                None
+            };
         }
         self.full_lower_bound = Some(full_lower_bound);
     }
@@ -62,13 +65,20 @@ impl DbIterator {
         let reduced_upper_bound = ks.reduced_key_bytes(full_upper_bound.clone());
         if self.reverse {
             let next_key = if self.with_key_reduction {
-                reduced_upper_bound
+                saturated_increment_vec(&reduced_upper_bound)
             } else {
-                saturated_decrement_vec(&reduced_upper_bound)
+                reduced_upper_bound
             };
             self.cell = Some(ks.cell_id(&next_key));
-            self.prev_key = Some(next_key);
-            self.prev_key_included = true;
+            self.prev_key = if !self.with_key_reduction {
+                Some(next_key)
+            } else {
+                if is_nonmax(&next_key) {
+                    Some(next_key)
+                } else {
+                    None
+                }
+            };
         } else {
             self.end_cell_exclusive =
                 self.db
@@ -104,7 +114,6 @@ impl DbIterator {
             self.ks,
             cell,
             prev_key,
-            self.prev_key_included,
             &self.end_cell_exclusive,
             self.reverse,
         ) {
@@ -112,7 +121,6 @@ impl DbIterator {
                 self.cell = result.cell;
                 let ks = self.db.ks(self.ks);
                 self.prev_key = Some(ks.reduced_key_bytes(result.key.clone()));
-                self.prev_key_included = false;
                 self.check_bounds(&result.key)?;
                 Ok(Some(Ok((result.key, result.value))))
             }
@@ -193,6 +201,28 @@ fn saturated_decrement_vec(original_bytes: &[u8]) -> Bytes {
     original_bytes.to_vec().into()
 }
 
+fn saturated_increment_vec(original_bytes: &[u8]) -> Bytes {
+    let mut bytes = original_bytes.to_vec();
+    for v in bytes.iter_mut().rev() {
+        let add = v.checked_add(1);
+        if let Some(add) = add {
+            *v = add;
+            return bytes.into();
+        } else {
+            *v = 0;
+        }
+    }
+    original_bytes.to_vec().into()
+}
+
+fn is_nonzero(bytes: &[u8]) -> bool {
+    bytes.iter().any(|v| *v != 0)
+}
+
+fn is_nonmax(bytes: &[u8]) -> bool {
+    bytes.iter().any(|v| *v != 255)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +233,15 @@ mod tests {
         assert_eq!(saturated_decrement_vec(&[1, 2, 0]).as_ref(), &[1, 1, 255]);
         assert_eq!(saturated_decrement_vec(&[1, 0, 0]).as_ref(), &[0, 255, 255]);
         assert_eq!(saturated_decrement_vec(&[0, 0, 0]).as_ref(), &[0, 0, 0]);
+    }
+
+    #[test]
+    fn test_saturated_increment_vec() {
+        assert_eq!(saturated_increment_vec(&[1, 2, 3]).as_ref(), &[1, 2, 4]);
+        assert_eq!(saturated_increment_vec(&[1, 2, 255]).as_ref(), &[1, 3, 0]);
+        assert_eq!(
+            saturated_increment_vec(&[255, 255, 255]).as_ref(),
+            &[255, 255, 255]
+        );
     }
 }

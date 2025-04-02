@@ -417,6 +417,120 @@ fn test_insert_while_iterating() {
 }
 
 #[test]
+fn test_iterator_bounds_no_reduction() {
+    let dir = tempdir::TempDir::new("test-iterator-bounds").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 254], vec![2]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 255], vec![2]).unwrap();
+
+    // forward iterator from 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator to 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+}
+
+#[test]
+fn test_iterator_bounds_with_reduction() {
+    let dir = tempdir::TempDir::new("test-iterator-bounds-with-reduction").unwrap();
+    let config = Arc::new(Config::small());
+    let ks_config = KeySpaceConfig::new().with_key_reduction(0..2);
+    let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 253], vec![2]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 254], vec![2]).unwrap();
+
+    // forward iterator from 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator to 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+}
+
+#[test]
 fn test_empty() {
     let dir = tempdir::TempDir::new("test-empty").unwrap();
     let config = Arc::new(Config::small());

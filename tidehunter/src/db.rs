@@ -313,7 +313,6 @@ impl Db {
         ks: KeySpace,
         cell: CellId,
         prev_key: Option<Bytes>,
-        prev_key_included: bool,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> DbResult<Option<IteratorResult<Bytes>>> {
@@ -323,15 +322,9 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["next_entry", ks.name()])
             .mcs_timer();
-        let Some(result) = self.large_table.next_entry(
-            ks,
-            cell,
-            prev_key,
-            prev_key_included,
-            self,
-            end_cell_exclusive,
-            reverse,
-        )?
+        let Some(result) =
+            self.large_table
+                .next_entry(ks, cell, prev_key, self, end_cell_exclusive, reverse)?
         else {
             return Ok(None);
         };
