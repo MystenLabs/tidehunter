@@ -43,7 +43,7 @@ impl StateSnapshot {
     }
 
     /// Load the state snapshot from the saved files. It copies the control region
-    /// back to the source path and loads the WAL pointer from the saved file. The 
+    /// back to the source path and loads the WAL pointer from the saved file. The
     /// returned `WalPosition` can be used to truncate the WAL file.
     pub fn load(&self) -> DbResult<WalPosition> {
         // Copy back the control region
