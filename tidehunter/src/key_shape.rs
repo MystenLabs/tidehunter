@@ -12,7 +12,7 @@ use std::ops::{Deref, Range, RangeInclusive};
 use std::sync::Arc;
 
 pub(crate) const CELL_PREFIX_LENGTH: usize = 4; // in bytes
-const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
+pub(crate) const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
 
 #[derive(Clone)]
 pub struct KeyShape {
