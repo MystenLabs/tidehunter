@@ -48,7 +48,7 @@ impl DbIterator {
             let next_key = saturated_decrement_vec(&reduced_lower_bound);
 
             self.cell = Some(ks.cell_id(&next_key));
-            self.prev_key = if is_nonzero(&next_key) {
+            self.prev_key = if is_nonzero(&next_key) || is_nonzero(&reduced_lower_bound) {
                 Some(next_key)
             } else {
                 None

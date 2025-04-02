@@ -431,6 +431,7 @@ fn test_iterator_bounds_no_reduction() {
     .unwrap();
 
     db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
+    db.insert(ks, vec![0, 0, 0, 1], vec![1]).unwrap();
     db.insert(ks, vec![255, 255, 255, 254], vec![2]).unwrap();
     db.insert(ks, vec![255, 255, 255, 255], vec![2]).unwrap();
 
@@ -440,6 +441,15 @@ fn test_iterator_bounds_no_reduction() {
     it.set_upper_bound(vec![0, 0, 0, 1]);
     let (k, v) = it.next().unwrap().unwrap();
     assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator from 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 1]);
     assert_eq!(v, vec![1]);
     assert!(it.next().is_none());
 
@@ -453,6 +463,16 @@ fn test_iterator_bounds_no_reduction() {
     assert_eq!(v, vec![1]);
     assert!(it.next().is_none());
 
+    // reverse iterator to 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 1]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
     // forward iterator to 255
     let mut it = db.iterator(ks);
     it.set_lower_bound(vec![255, 255, 255, 254]);
@@ -460,6 +480,12 @@ fn test_iterator_bounds_no_reduction() {
     let (k, v) = it.next().unwrap().unwrap();
     assert_eq!(k, vec![255, 255, 255, 254]);
     assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // forward iterator to 254
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 253]);
+    it.set_upper_bound(vec![255, 255, 255, 254]);
     assert!(it.next().is_none());
 
     // reverse iterator from 255
@@ -470,6 +496,13 @@ fn test_iterator_bounds_no_reduction() {
     let (k, v) = it.next().unwrap().unwrap();
     assert_eq!(k, vec![255, 255, 255, 254]);
     assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 253]);
+    it.set_upper_bound(vec![255, 255, 255, 254]);
+    it.reverse();
     assert!(it.next().is_none());
 }
 
@@ -500,6 +533,12 @@ fn test_iterator_bounds_with_reduction() {
     assert_eq!(v, vec![1]);
     assert!(it.next().is_none());
 
+    // forward iterator from 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    assert!(it.next().is_none());
+
     // reverse iterator to 0
     let mut it = db.iterator(ks);
     it.set_lower_bound(vec![0, 0, 0, 0]);
@@ -508,6 +547,13 @@ fn test_iterator_bounds_with_reduction() {
     let (k, v) = it.next().unwrap().unwrap();
     assert_eq!(k, vec![0, 0, 0, 0]);
     assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    it.reverse();
     assert!(it.next().is_none());
 
     // forward iterator to 255
