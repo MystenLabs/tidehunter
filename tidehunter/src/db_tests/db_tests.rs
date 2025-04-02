@@ -1184,7 +1184,7 @@ fn test_last_four_bytes_corruption() {
         position
     };
 
-    // Re-open the database and corrupt the last four bytes of the last database entry
+    // Re-open the database and insert a corruption in the last four bytes of the last database entry
     {
         let db = Db::open(
             dir.path(),
@@ -1266,7 +1266,7 @@ fn test_first_four_bytes_corruption() {
         position
     };
 
-    // Re-open the database and corrupt the first four bytes of the last database entry
+    // Re-open the database and insert a corruption in the first four bytes of the last database entry
     {
         let db = Db::open(
             dir.path(),
