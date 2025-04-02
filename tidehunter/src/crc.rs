@@ -2,7 +2,6 @@ use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use std::ops::Range;
 
-#[derive(Debug)]
 pub struct CrcFrame {
     bytes: Bytes,
 }
