@@ -74,6 +74,7 @@ struct StressArgs {
 enum KeyLayout {
     Uniform,
     SequenceChoice,
+    ChoiceSequence,
 }
 
 pub fn main() {
@@ -390,6 +391,12 @@ impl<T: Storage> StressThread<T> {
                 // Next 8 bytes are choice of value in range 0..255 (like consensus validator index)
                 key[8..16].copy_from_slice(&u64::to_be_bytes(global_pos % 256));
             }
+            KeyLayout::ChoiceSequence => {
+                let global_pos = self.global_pos(pos) as u64;
+                // Doing the same as above in different order
+                key[..8].copy_from_slice(&u64::to_be_bytes(global_pos % 256));
+                key[8..16].copy_from_slice(&u64::to_be_bytes(global_pos / 256));
+            }
         }
         rng.fill_bytes(&mut value);
         (key, value)
@@ -417,9 +424,11 @@ impl FromStr for KeyLayout {
             Ok(Self::Uniform)
         } else if s == "sc" {
             Ok(Self::SequenceChoice)
+        } else if s == "cs" {
+            Ok(Self::ChoiceSequence)
         } else {
             anyhow::bail!(
-                "Only allowed choices for key_layout are 'u'(uniform) or 'sc'(sequence-choice)"
+                "Only allowed choices for key_layout are 'u'(uniform) or 'sc'(sequence-choice) or 'cs'(choice-sequence)"
             );
         }
     }
