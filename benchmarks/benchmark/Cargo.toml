@@ -16,6 +16,7 @@ tempdir = "0.3.7"
 tokio = { version = "1.44.1", features = ["full"] }
 minibytes = { path = "../../third-party/minibytes", default-features = false, features = ["frommmap", "frombytes"] }
 rocksdb = { version = "0.21.0", default-features = false, features = ["snappy", "lz4", "zstd", "zlib", "multi-threaded-cf"], optional = true }
+anyhow = "1.0.97"
 
 [features]
 rocks = ["rocksdb"]

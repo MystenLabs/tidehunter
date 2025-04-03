@@ -5,6 +5,7 @@ use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -14,6 +15,8 @@ use std::{fs, thread};
 use tidehunter::config::Config;
 #[cfg(not(feature = "rocks"))]
 use tidehunter::db::Db;
+#[cfg(not(feature = "rocks"))]
+use tidehunter::key_shape::{KeyShape, KeyType};
 
 #[allow(dead_code)]
 mod prometheus;
@@ -59,6 +62,14 @@ struct StressArgs {
     path: Option<String>,
     #[arg(long, help = "Print report file", default_value = "false")]
     report: bool,
+    #[arg(long, help = "Key layout", default_value = "u")]
+    key_layout: KeyLayout,
+}
+
+#[derive(Debug, Clone)]
+enum KeyLayout {
+    Uniform,
+    SequenceChoice,
 }
 
 pub fn main() {
@@ -71,6 +82,7 @@ pub fn main() {
         tempdir::TempDir::new("stress").unwrap()
     };
     println!("Path to storage: {}", dir.path().display());
+    println!("Using {:?} key layout", args.key_layout);
     let print_report = args.report;
     #[cfg(not(feature = "rocks"))]
     let storage = {
@@ -78,7 +90,7 @@ pub fn main() {
         config.max_dirty_keys = 1024;
         config.direct_io = args.direct_io;
         config.frag_size = 1024 * 1024 * 1024;
-        config.max_maps = 8;
+        config.max_maps = 32;
         config.snapshot_unload_threshold = 128 * 1024 * 1024 * 1024;
         config.snapshot_written_bytes = 64 * 1024 * 1024 * 1024;
         config.unload_jitter_pct = 30;
@@ -86,7 +98,14 @@ pub fn main() {
             report!(report, "Using **direct IO**");
         }
         use crate::storage::tidehunter::TidehunterStorage;
-        let storage = TidehunterStorage::open(config, dir.path());
+        let (key_shape, ks) = match args.key_layout {
+            KeyLayout::Uniform => KeyShape::new_single(32, 1024, KeyType::uniform(32)),
+            KeyLayout::SequenceChoice => {
+                let key_type = KeyType::prefix_uniform(7, 0);
+                KeyShape::new_single(32, 1024, key_type)
+            }
+        };
+        let storage = TidehunterStorage::open(config, dir.path(), (key_shape, ks));
         if !args.no_snapshot {
             report!(report, "Periodic snapshot **enabled**");
             storage.db.start_periodic_snapshot();
@@ -313,8 +332,24 @@ impl<T: Storage> StressThread<T> {
         let mut key = vec![0u8; self.args.key_len];
         let mut rng = self.rng_at(pos as u64);
         rng.fill_bytes(&mut key);
+        match self.args.key_layout {
+            KeyLayout::Uniform => {}
+            KeyLayout::SequenceChoice => {
+                let global_pos = self.global_pos(pos) as u64;
+                // the first 16 bytes of a key are not random anymore
+                // First 8 bytes are a sequentially growing value (like consensus round)
+                key[..8].copy_from_slice(&u64::to_be_bytes(global_pos / 256));
+                // Next 8 bytes are choice of value in range 0..255 (like consensus validator index)
+                key[8..16].copy_from_slice(&u64::to_be_bytes(global_pos % 256));
+            }
+        }
         rng.fill_bytes(&mut value);
         (key, value)
+    }
+
+    /// Maps local index into continuous global space
+    fn global_pos(&self, pos: usize) -> usize {
+        pos * self.args.threads + self.index as usize
     }
 
     fn rng_at(&self, pos: u64) -> StdRng {
@@ -323,5 +358,21 @@ impl<T: Storage> StressThread<T> {
         writer.put_u64(self.index);
         writer.put_u64(pos);
         StdRng::from_seed(seed)
+    }
+}
+
+impl FromStr for KeyLayout {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "u" {
+            Ok(Self::Uniform)
+        } else if s == "sc" {
+            Ok(Self::SequenceChoice)
+        } else {
+            anyhow::bail!(
+                "Only allowed choices for key_layout are 'u'(uniform) or 'sc'(sequence-choice)"
+            );
+        }
     }
 }
