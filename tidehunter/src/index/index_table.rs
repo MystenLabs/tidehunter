@@ -1,3 +1,4 @@
+use crate::primitives::range_from_excluding::RangeFromExcluding;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use std::collections::btree_map::Entry;
@@ -91,35 +92,31 @@ impl IndexTable {
     ///
     /// This works even if prev is set to Some(k), but the value at k does not exist (for ex. was deleted).
     pub fn next_entry(&self, prev: Option<Bytes>, reverse: bool) -> Option<(Bytes, WalPosition)> {
-        fn take_next<'a>(
-            mut iter: impl Iterator<Item = (&'a Bytes, &'a WalPosition)>,
-            prev: Option<Bytes>,
-        ) -> Option<(Bytes, WalPosition)> {
-            let (key, value) = iter.next()?;
-            if prev.is_some() && key.eq(&prev.unwrap()) {
-                let (key, value) = iter.next()?;
-                Some((key.clone(), *value))
-            } else {
-                Some((key.clone(), *value))
-            }
-        }
-
         if let Some(prev) = prev {
             if reverse {
-                let prev_clone = prev.clone();
-                let range = self.data.range(..=prev_clone);
-                take_next(range.into_iter().rev(), Some(prev))
+                let range = self.data.range(..prev);
+                range
+                    .into_iter()
+                    .rev()
+                    .next()
+                    .map(|(key, value)| (key.clone(), *value))
             } else {
-                let prev_clone = prev.clone();
-                let range = self.data.range(prev_clone..);
-                take_next(range.into_iter(), Some(prev))
+                let range = RangeFromExcluding { from: &prev };
+                let range = self.data.range(range);
+                range
+                    .into_iter()
+                    .next()
+                    .map(|(key, value)| (key.clone(), *value))
             }
         } else {
-            let iterator = self.data.iter();
+            let mut iterator = self.data.iter();
             if reverse {
-                take_next(iterator.rev(), None)
+                iterator
+                    .rev()
+                    .next()
+                    .map(|(key, value)| (key.clone(), *value))
             } else {
-                take_next(iterator, None)
+                iterator.next().map(|(key, value)| (key.clone(), *value))
             }
         }
     }
