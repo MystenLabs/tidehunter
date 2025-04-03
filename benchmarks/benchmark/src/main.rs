@@ -5,11 +5,13 @@ use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 #[cfg(not(feature = "rocks"))]
 use tidehunter::config::Config;
@@ -64,6 +66,8 @@ struct StressArgs {
     report: bool,
     #[arg(long, help = "Key layout", default_value = "u")]
     key_layout: KeyLayout,
+    #[arg(long, help = "Print tldr report", default_value = "")]
+    tldr: String,
 }
 
 #[derive(Debug, Clone)]
@@ -73,8 +77,9 @@ enum KeyLayout {
 }
 
 pub fn main() {
+    let start_time = SystemTime::now();
     let mut report = Report::default();
-    let args = StressArgs::parse();
+    let args: StressArgs = StressArgs::parse();
     let args = Arc::new(args);
     let dir = if let Some(path) = &args.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()
@@ -125,10 +130,11 @@ pub fn main() {
     let written = stress.args.writes * stress.args.threads;
     let written_bytes = written * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
+    let write_sec = dec_div(written / msecs * 1000);
     report!(
         report,
         "Write test done in {elapsed:?}: {} writes/s, {}/sec",
-        dec_div(written / msecs * 1000),
+        write_sec,
         byte_div(written_bytes / msecs * 1000)
     );
     #[cfg(not(feature = "rocks"))]
@@ -152,10 +158,11 @@ pub fn main() {
     let read = stress.args.reads * stress.args.threads;
     let read_bytes = read * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
+    let read_sec = dec_div(read / msecs * 1000);
     report!(
         report,
         "Read test done in {elapsed:?}: {} reads/s, {}/sec",
-        dec_div(read / msecs * 1000),
+        read_sec,
         byte_div(read_bytes / msecs * 1000)
     );
     #[cfg(not(feature = "rocks"))]
@@ -171,6 +178,29 @@ pub fn main() {
     if print_report {
         println!("Writing report file");
         fs::write("report.txt", &report.lines).unwrap();
+    }
+    if !stress.args.tldr.is_empty() {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create(true)
+            .open("tldr.txt")
+            .unwrap();
+        let start_time = start_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let end_time = SystemTime::now();
+        let end_time = end_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        writeln!(
+            file,
+            "{: <12}|{: <12}|{: <24}|{: <8}|{: <8}",
+            start_time, end_time, stress.args.tldr, write_sec, read_sec
+        )
+        .unwrap();
     }
 }
 
