@@ -7,8 +7,8 @@ use crate::key_shape::{KeyShape, KeySpace, KeyType};
 use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
 use crate::metrics::Metrics;
 use minibytes::Bytes;
-use rand::rngs::ThreadRng;
-use rand::Rng;
+use rand::rngs::{StdRng, ThreadRng};
+use rand::{Rng, SeedableRng};
 use std::sync::Arc;
 use std::thread;
 
@@ -1136,7 +1136,12 @@ fn test_cluster_bits_choice_sequence() {
 fn test_cluster_bits(sc: bool) {
     let dir = tempdir::TempDir::new(&format!("test_cluster_bits_{sc}")).unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::prefix_uniform(8, 2));
+    let key_type = if sc {
+        KeyType::prefix_uniform(8, 4)
+    } else {
+        KeyType::prefix_uniform(15, 4)
+    };
+    let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
     let metrics = Metrics::new();
     let db = Db::open(
         dir.path(),
@@ -1145,10 +1150,11 @@ fn test_cluster_bits(sc: bool) {
         metrics.clone(),
     )
     .unwrap();
-    let mut rng = ThreadRng::default();
+    let mut rng = StdRng::from_seed(Default::default());
 
     for i in 0..0xffff {
         let mut key = vec![0; 32];
+        let i = i * 121;
         if sc {
             key[..8].copy_from_slice(&u64::to_be_bytes(i / 256));
             key[8..16].copy_from_slice(&u64::to_be_bytes(i % 256));

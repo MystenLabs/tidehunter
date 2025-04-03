@@ -22,6 +22,7 @@ lru = "0.12.2"
 tempdir = "0.3.7"
 hex-literal = "1.0.0"
 parking_lot = {workspace = true, features = ["arc_lock"]}
+hex = "0.4.3"
 
 [features]
 tokio = ["dep:tokio"]
