@@ -106,7 +106,7 @@ pub fn main() {
         use crate::storage::tidehunter::TidehunterStorage;
         let (key_shape, ks) = match args.key_layout {
             KeyLayout::Uniform => KeyShape::new_single(32, 1024, KeyType::uniform(32)),
-            KeyLayout::SequenceChoice => {
+            KeyLayout::SequenceChoice | KeyLayout::ChoiceSequence => {
                 let key_type = KeyType::prefix_uniform(7, 0);
                 KeyShape::new_single(32, 1024, key_type)
             }
