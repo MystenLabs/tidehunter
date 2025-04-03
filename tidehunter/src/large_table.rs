@@ -33,7 +33,7 @@ pub struct LargeTable {
 
 pub struct LargeTableEntry {
     cell: CellId,
-    data: ArcCow<IndexTable>,
+    pub(crate) data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
     context: KsContext,
@@ -629,6 +629,19 @@ impl LargeTable {
         );
         let entry = row.entry_mut(cell);
         entry.update_flushed_index(original_index, position);
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn each_entry(&self, f: impl Fn(&mut LargeTableEntry)) {
+        for ks_table in &self.table {
+            for mutex in ks_table.rows.mutexes() {
+                let mut lock = mutex.lock();
+                for (_, entry) in lock.entries.iter_mut() {
+                    f(entry);
+                }
+            }
+        }
     }
 
     #[cfg(test)]

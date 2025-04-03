@@ -1123,6 +1123,46 @@ fn test_key_reduction_lru() {
     assert_eq!(4, lru_lookups("root", &metrics));
 }
 
+#[test]
+fn test_cluster_bits_sequence_choice() {
+    test_cluster_bits(true)
+}
+
+#[test]
+fn test_cluster_bits_choice_sequence() {
+    test_cluster_bits(false)
+}
+
+fn test_cluster_bits(sc: bool) {
+    let dir = tempdir::TempDir::new(&format!("test_cluster_bits_{sc}")).unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::prefix_uniform(8, 2));
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        metrics.clone(),
+    )
+    .unwrap();
+    let mut rng = ThreadRng::default();
+
+    for i in 0..0xffff {
+        let mut key = vec![0; 32];
+        if sc {
+            key[..8].copy_from_slice(&u64::to_be_bytes(i / 256));
+            key[8..16].copy_from_slice(&u64::to_be_bytes(i % 256));
+        } else {
+            key[..8].copy_from_slice(&u64::to_be_bytes(i % 256));
+            key[8..16].copy_from_slice(&u64::to_be_bytes(i / 256));
+        }
+        rng.fill(&mut key[16..]);
+        db.insert(ks, key, vec![]).unwrap();
+    }
+    db.large_table
+        .each_entry(|entry| println!("Dirty {}", entry.data.len()));
+}
+
 pub(super) fn default_key_shape() -> (KeyShape, KeySpace) {
     KeyShape::new_single(4, 12, KeyType::uniform(12))
 }

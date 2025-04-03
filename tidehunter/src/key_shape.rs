@@ -252,7 +252,7 @@ impl KeySpaceDesc {
             }
             (KeyType::PrefixedUniform(prefix_config), CellId::Bytes(cell)) => {
                 // CellId can not be empty
-                prefix_config.prefix_range(cell[0])
+                prefix_config.prefix_range(cell[cell.len() - 1])
             }
             (KeyType::Uniform(_), CellId::Bytes(_)) => {
                 panic!("index_prefix_range called for uniform key type and bytes cell id")
@@ -555,9 +555,9 @@ impl PrefixedUniformKeyConfig {
         self.reset_mask != u8::MAX
     }
 
-    fn prefix_range(&self, first_byte: u8) -> Range<u64> {
+    fn prefix_range(&self, last_byte: u8) -> Range<u64> {
         if self.has_cluster_bits() {
-            let range_u8 = self.prefix_range_u8(first_byte);
+            let range_u8 = self.prefix_range_u8(last_byte);
             let start_inclusive = (*range_u8.start() as u64) << 24;
             let end_inclusive = (*range_u8.end() as u64) << 24;
             let end_exclusive = end_inclusive + 1;
@@ -581,8 +581,8 @@ impl PrefixedUniformKeyConfig {
     ///
     /// See prefix_range_u8 for examples.
     #[inline(always)]
-    fn prefix_range_u8(&self, first_byte: u8) -> RangeInclusive<u8> {
-        let min_byte = first_byte & self.reset_mask;
+    fn prefix_range_u8(&self, last_byte: u8) -> RangeInclusive<u8> {
+        let min_byte = last_byte & self.reset_mask;
         // Mask that has all zeroes followed by cluster_bits ones at the end.
         // E.g., for cluster_bits=2 the compliment_mask is 0000_0011
         // This naturally turns out to be !self.reset_mask
