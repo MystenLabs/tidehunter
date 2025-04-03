@@ -8,7 +8,7 @@ use rand::{Rng, RngCore, SeedableRng};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -219,7 +219,7 @@ impl<T: Storage> Stress<T> {
         &self,
         f: F,
     ) -> Arc<AtomicBool> {
-        let (_, manual_stop, _) = self.start_threads(f);
+        let (_, manual_stop, _, _) = self.start_threads(f);
         manual_stop
     }
 
@@ -228,7 +228,7 @@ impl<T: Storage> Stress<T> {
         f: F,
         report: &mut Report,
     ) -> Duration {
-        let (threads, _, latency) = self.start_threads(f);
+        let (threads, _, latency, latency_errors) = self.start_threads(f);
         let start = Instant::now();
         for t in threads {
             t.join().unwrap();
@@ -239,7 +239,13 @@ impl<T: Storage> Stress<T> {
             .unwrap()
             .unwrap();
         let p = move |i: usize| percentiles.get(i).unwrap().1.range();
-        report!(report, "Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}",
+        let latency_errors = latency_errors.load(Ordering::Relaxed);
+        let latency_errors = if latency_errors > 0 {
+            format!(", {latency_errors} out of bound")
+        } else {
+            "".to_string()
+        };
+        report!(report, "Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}{latency_errors}",
         p(0), p(1), p(2), p(3), p(4), p(5));
         start.elapsed()
     }
@@ -247,13 +253,19 @@ impl<T: Storage> Stress<T> {
     fn start_threads<F: FnOnce(StressThread<T>) + Clone + Send + 'static>(
         &self,
         f: F,
-    ) -> (Vec<JoinHandle<()>>, Arc<AtomicBool>, Arc<AtomicHistogram>) {
+    ) -> (
+        Vec<JoinHandle<()>>,
+        Arc<AtomicBool>,
+        Arc<AtomicHistogram>,
+        Arc<AtomicUsize>,
+    ) {
         let mut threads = Vec::with_capacity(self.args.threads);
         let start_lock = Arc::new(RwLock::new(()));
         let start_w = start_lock.write();
         let manual_stop = Arc::new(AtomicBool::new(false));
-        let latency = AtomicHistogram::new(12, 22).unwrap();
+        let latency = AtomicHistogram::new(12, 26).unwrap();
         let latency = Arc::new(latency);
+        let latency_errors = Arc::new(AtomicUsize::default());
         for index in 0..self.args.threads {
             let thread = StressThread {
                 db: self.storage.clone(),
@@ -263,13 +275,14 @@ impl<T: Storage> Stress<T> {
                 manual_stop: manual_stop.clone(),
 
                 latency: latency.clone(),
+                latency_errors: latency_errors.clone(),
             };
             let f = f.clone();
             let thread = thread::spawn(move || f(thread));
             threads.push(thread);
         }
         drop(start_w);
-        (threads, manual_stop, latency)
+        (threads, manual_stop, latency, latency_errors)
     }
 }
 
@@ -305,6 +318,7 @@ struct StressThread<T> {
     manual_stop: Arc<AtomicBool>,
 
     latency: Arc<AtomicHistogram>,
+    latency_errors: Arc<AtomicUsize>,
 }
 
 impl<T: Storage> StressThread<T> {
@@ -346,9 +360,13 @@ impl<T: Storage> StressThread<T> {
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             let found_value = self.db.get(&key).expect("Expected value not found");
-            self.latency
+            if self
+                .latency
                 .increment(timer.elapsed().as_micros() as u64)
-                .unwrap();
+                .is_err()
+            {
+                self.latency_errors.fetch_add(1, Ordering::Relaxed);
+            }
             assert_eq!(
                 &value[..],
                 &found_value[..],
