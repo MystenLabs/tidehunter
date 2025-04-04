@@ -61,7 +61,7 @@ pub(crate) struct Map {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct WalPosition(u64);
+pub struct WalPosition(pub u64);
 
 pub enum WalRandomRead<'a> {
     Mapped(Bytes),
@@ -120,12 +120,6 @@ impl WalWriter {
     pub fn wal_position(&self) -> WalPosition {
         WalPosition(self.position_and_map.lock().0.position)
     }
-
-    /// Return the current position and map
-    #[cfg(test)]
-    pub(crate) fn position_and_map(&self) -> &Mutex<(IncrementalWalPosition, Map)> {
-        &self.position_and_map
-    }
 }
 
 #[derive(Clone)]
@@ -144,12 +138,6 @@ impl IncrementalWalPosition {
         let result = (position, self.position);
         self.position = position + len_aligned;
         result
-    }
-
-    /// Manually update the position without checking the layout
-    #[cfg(test)]
-    pub fn update_position_unsafe(&mut self, pos: &WalPosition) {
-        self.position = pos.0;
     }
 }
 
@@ -508,6 +496,12 @@ impl Wal {
     /// Ensure the file is written to disk (blocking call).
     pub fn fsync(&self) -> io::Result<()> {
         self.file.sync_all()
+    }
+
+    /// Returns the file descriptor of the wal file
+    #[cfg(test)]
+    pub fn file(&self) -> &File {
+        &self.file
     }
 }
 

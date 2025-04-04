@@ -9,6 +9,7 @@ use crate::metrics::Metrics;
 use minibytes::Bytes;
 use rand::rngs::ThreadRng;
 use rand::Rng;
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::thread;
 
@@ -1198,12 +1199,8 @@ fn test_last_four_bytes_corruption() {
         let mut bytes = frame.into_vec();
         let length = bytes.len();
         bytes[length - 1] = !bytes[length - 1]; // Corrupt the last byte
-        let corrupted_frame = PreparedWalWrite::new_unsafe(bytes.into());
 
-        let mut position_and_map = db.wal_writer.position_and_map().lock();
-        position_and_map.0.update_position_unsafe(&last_position);
-        drop(position_and_map);
-        db.wal_writer.write(&corrupted_frame).unwrap();
+        db.wal.file().write_all_at(&bytes, last_position.0).unwrap();
     }
 
     // Re-open the database and insert some new data
@@ -1279,12 +1276,8 @@ fn test_first_four_bytes_corruption() {
         let frame = db.wal.read_raw_frame(last_position).unwrap();
         let mut bytes = frame.into_vec();
         bytes[1] = !bytes[1]; // Corrupt the first byte
-        let corrupted_frame = PreparedWalWrite::new_unsafe(bytes.into());
 
-        let mut position_and_map = db.wal_writer.position_and_map().lock();
-        position_and_map.0.update_position_unsafe(&last_position);
-        drop(position_and_map);
-        db.wal_writer.write(&corrupted_frame).unwrap();
+        db.wal.file().write_all_at(&bytes, last_position.0).unwrap();
     }
 
     // Re-open the database and insert some new data
