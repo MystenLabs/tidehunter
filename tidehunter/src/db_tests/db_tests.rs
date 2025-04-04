@@ -7,8 +7,8 @@ use crate::key_shape::{KeyShape, KeySpace, KeyType};
 use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
 use crate::metrics::Metrics;
 use minibytes::Bytes;
-use rand::rngs::ThreadRng;
-use rand::Rng;
+use rand::rngs::{StdRng, ThreadRng};
+use rand::{Rng, SeedableRng};
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::thread;
@@ -274,9 +274,9 @@ fn test_iterator_gen() {
     random.sort();
     for reduced in [true, false] {
         let ks_config = if reduced {
-            KeySpaceConfig::default()
-        } else {
             KeySpaceConfig::default().with_key_reduction(0..16)
+        } else {
+            KeySpaceConfig::default()
         };
         println!("Starting sequential test, reduced={reduced}");
         test_iterator_run(sequential.clone(), ks_config.clone());
@@ -387,6 +387,194 @@ fn test_ordered_iterator() {
             &(vec![1, 2, 3, 4, 6].into(), vec![1].into())
         );
     }
+}
+
+#[test]
+fn test_insert_while_iterating() {
+    let dir = tempdir::TempDir::new("test-insert-while-iterating").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+    db.insert(ks, vec![1, 2, 3, 4, 5], vec![1]).unwrap();
+    db.insert(ks, vec![1, 2, 3, 4, 8], vec![2]).unwrap();
+    let mut it = db.iterator(ks);
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 5]);
+
+    db.insert(ks, vec![1, 2, 3, 4, 6], vec![3]).unwrap();
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 6]);
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 8]);
+}
+
+#[test]
+fn test_iterator_bounds_no_reduction() {
+    let dir = tempdir::TempDir::new("test-iterator-bounds").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
+    db.insert(ks, vec![0, 0, 0, 1], vec![1]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 254], vec![2]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 255], vec![2]).unwrap();
+
+    // forward iterator from 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator from 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 1]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 1]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator to 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // forward iterator to 254
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 253]);
+    it.set_upper_bound(vec![255, 255, 255, 254]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 253]);
+    it.set_upper_bound(vec![255, 255, 255, 254]);
+    it.reverse();
+    assert!(it.next().is_none());
+}
+
+#[test]
+fn test_iterator_bounds_with_reduction() {
+    let dir = tempdir::TempDir::new("test-iterator-bounds-with-reduction").unwrap();
+    let config = Arc::new(Config::small());
+    let ks_config = KeySpaceConfig::new().with_key_reduction(0..2);
+    let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 253], vec![2]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 254], vec![2]).unwrap();
+
+    // forward iterator from 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator from 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    it.reverse();
+    assert!(it.next().is_none());
+
+    // forward iterator to 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
 }
 
 #[test]
@@ -934,6 +1122,52 @@ fn test_key_reduction_lru() {
     // the next lookup comes from the lru cache
     assert_eq!(db.get(ks, &[1, 2, 3, 4]).unwrap().unwrap().as_ref(), &[1]);
     assert_eq!(4, lru_lookups("root", &metrics));
+}
+
+#[test]
+fn test_cluster_bits_sequence_choice() {
+    test_cluster_bits(true)
+}
+
+#[test]
+fn test_cluster_bits_choice_sequence() {
+    test_cluster_bits(false)
+}
+
+fn test_cluster_bits(sc: bool) {
+    let dir = tempdir::TempDir::new(&format!("test_cluster_bits_{sc}")).unwrap();
+    let config = Arc::new(Config::small());
+    let key_type = if sc {
+        KeyType::prefix_uniform(8, 4)
+    } else {
+        KeyType::prefix_uniform(15, 4)
+    };
+    let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        metrics.clone(),
+    )
+    .unwrap();
+    let mut rng = StdRng::from_seed(Default::default());
+
+    for i in 0..0xffff {
+        let mut key = vec![0; 32];
+        let i = i * 121;
+        if sc {
+            key[..8].copy_from_slice(&u64::to_be_bytes(i / 256));
+            key[8..16].copy_from_slice(&u64::to_be_bytes(i % 256));
+        } else {
+            key[..8].copy_from_slice(&u64::to_be_bytes(i % 256));
+            key[8..16].copy_from_slice(&u64::to_be_bytes(i / 256));
+        }
+        rng.fill(&mut key[16..]);
+        db.insert(ks, key, vec![]).unwrap();
+    }
+    db.large_table
+        .each_entry(|entry| println!("Dirty {}", entry.data.len()));
 }
 
 pub(super) fn default_key_shape() -> (KeyShape, KeySpace) {

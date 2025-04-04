@@ -33,7 +33,7 @@ pub struct LargeTable {
 
 pub struct LargeTableEntry {
     cell: CellId,
-    data: ArcCow<IndexTable>,
+    pub(crate) data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
     context: KsContext,
@@ -472,7 +472,7 @@ impl LargeTable {
         &self,
         ks: &KeySpaceDesc,
         mut cell: CellId,
-        mut next_key: Option<Bytes>,
+        mut prev_key: Option<Bytes>,
         loader: &L,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
@@ -488,23 +488,17 @@ impl LargeTable {
                         .large_table_contention
                         .with_label_values(&[ks.name()]),
                 );
-                self.next_in_cell(loader, &mut row, &cell, next_key, reverse)?
+                self.next_in_cell(loader, &mut row, &cell, prev_key, reverse)?
                 // drop row mutex as required by Self::next_cell called below
             };
-            if let Some((key, value, next_key)) = next_in_cell {
-                let next_cell = if next_key.is_none() {
-                    self.next_cell(ks, &cell, reverse)
-                } else {
-                    Some(cell)
-                };
+            if let Some((key, value)) = next_in_cell {
                 return Ok(Some(IteratorResult {
-                    next_cell,
-                    next_key,
+                    cell: Some(cell),
                     key,
                     value,
                 }));
             } else {
-                next_key = None;
+                prev_key = None;
                 let Some(next_cell) = self.next_cell(ks, &cell, reverse) else {
                     return Ok(None);
                 };
@@ -529,15 +523,15 @@ impl LargeTable {
         loader: &L,
         row: &mut Row,
         cell: &CellId,
-        next_key: Option<Bytes>,
+        prev_key: Option<Bytes>,
         reverse: bool,
-    ) -> Result<Option<(Bytes, WalPosition, Option<Bytes>)>, L::Error> {
+    ) -> Result<Option<(Bytes, WalPosition)>, L::Error> {
         let Some(entry) = row.try_entry_mut(cell) else {
             return Ok(None);
         };
         // todo read from disk instead of loading
         entry.maybe_load(loader)?;
-        Ok(entry.next_entry(next_key, reverse))
+        Ok(entry.next_entry(prev_key, reverse))
     }
 
     /// See Db::next_cell for documentation
@@ -635,6 +629,19 @@ impl LargeTable {
         );
         let entry = row.entry_mut(cell);
         entry.update_flushed_index(original_index, position);
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn each_entry(&self, f: impl Fn(&mut LargeTableEntry)) {
+        for ks_table in &self.table {
+            for mutex in ks_table.rows.mutexes() {
+                let mut lock = mutex.lock();
+                for (_, entry) in lock.entries.iter_mut() {
+                    f(entry);
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -807,13 +814,13 @@ impl LargeTableEntry {
     /// See IndexTable::next_entry for documentation.
     pub fn next_entry(
         &self,
-        next_key: Option<Bytes>,
+        prev_key: Option<Bytes>,
         reverse: bool,
-    ) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
+    ) -> Option<(Bytes, WalPosition)> {
         if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
             panic!("Can't next_entry in unloaded state");
         }
-        self.data.next_entry(next_key, reverse)
+        self.data.next_entry(prev_key, reverse)
     }
 
     pub fn maybe_load<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
@@ -876,13 +883,11 @@ impl LargeTableEntry {
             let flush_kind = self
                 .flush_kind()
                 .expect("unload_if_ks_enabled is called in clean state");
-            println!("Flushing {:?}", self.cell);
             flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
         }
     }
 
     pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
-        println!("update_flushed_index {:?}", self.cell);
         assert!(
             self.flush_pending,
             "update_merged_index called while flush_pending is not set"

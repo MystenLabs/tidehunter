@@ -142,7 +142,7 @@ pub mod test {
     use minibytes::Bytes;
     use rand::{rngs::ThreadRng, Rng, RngCore};
 
-    use crate::key_shape::KeyType;
+    use crate::key_shape::{KeyType, MAX_U32_PLUS_ONE};
     use crate::{
         index::{index_format::IndexFormat, index_table::IndexTable},
         key_shape::KeyShape,
@@ -200,8 +200,10 @@ pub mod test {
         let mut index = IndexTable::default();
         let mut rng = ThreadRng::default();
         let target_bucket = rng.gen_range(0..((M * P) as u32));
-        let bucket_size = u32::MAX / ((M * P) as u32);
-        let target_range = target_bucket * bucket_size..(target_bucket + 1) * bucket_size;
+        let bucket_size = (MAX_U32_PLUS_ONE / ((M * P) as u64)) as u32;
+        let target_range =
+            target_bucket * bucket_size..(target_bucket + 1).saturating_mul(bucket_size);
+
         const ITERATIONS: usize = 100_000;
         for _ in 0..ITERATIONS {
             let key = rng.gen_range(target_range.clone());

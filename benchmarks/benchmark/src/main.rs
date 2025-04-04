@@ -5,15 +5,20 @@ use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 #[cfg(not(feature = "rocks"))]
 use tidehunter::config::Config;
 #[cfg(not(feature = "rocks"))]
 use tidehunter::db::Db;
+#[cfg(not(feature = "rocks"))]
+use tidehunter::key_shape::{KeyShape, KeyType};
 
 #[allow(dead_code)]
 mod prometheus;
@@ -59,11 +64,23 @@ struct StressArgs {
     path: Option<String>,
     #[arg(long, help = "Print report file", default_value = "false")]
     report: bool,
+    #[arg(long, help = "Key layout", default_value = "u")]
+    key_layout: KeyLayout,
+    #[arg(long, help = "Print tldr report", default_value = "")]
+    tldr: String,
+}
+
+#[derive(Debug, Clone)]
+enum KeyLayout {
+    Uniform,
+    SequenceChoice,
+    ChoiceSequence,
 }
 
 pub fn main() {
+    let start_time = SystemTime::now();
     let mut report = Report::default();
-    let args = StressArgs::parse();
+    let args: StressArgs = StressArgs::parse();
     let args = Arc::new(args);
     let dir = if let Some(path) = &args.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()
@@ -71,6 +88,7 @@ pub fn main() {
         tempdir::TempDir::new("stress").unwrap()
     };
     println!("Path to storage: {}", dir.path().display());
+    println!("Using {:?} key layout", args.key_layout);
     let print_report = args.report;
     #[cfg(not(feature = "rocks"))]
     let storage = {
@@ -78,7 +96,7 @@ pub fn main() {
         config.max_dirty_keys = 1024;
         config.direct_io = args.direct_io;
         config.frag_size = 1024 * 1024 * 1024;
-        config.max_maps = 8;
+        config.max_maps = 32;
         config.snapshot_unload_threshold = 128 * 1024 * 1024 * 1024;
         config.snapshot_written_bytes = 64 * 1024 * 1024 * 1024;
         config.unload_jitter_pct = 30;
@@ -86,7 +104,18 @@ pub fn main() {
             report!(report, "Using **direct IO**");
         }
         use crate::storage::tidehunter::TidehunterStorage;
-        let storage = TidehunterStorage::open(config, dir.path());
+        let (key_shape, ks) = match args.key_layout {
+            KeyLayout::Uniform => KeyShape::new_single(32, 1024, KeyType::uniform(32)),
+            KeyLayout::SequenceChoice => {
+                let key_type = KeyType::prefix_uniform(8, 2);
+                KeyShape::new_single(32, 1024, key_type)
+            }
+            KeyLayout::ChoiceSequence => {
+                let key_type = KeyType::prefix_uniform(15, 4);
+                KeyShape::new_single(32, 1024, key_type)
+            }
+        };
+        let storage = TidehunterStorage::open(config, dir.path(), (key_shape, ks));
         if !args.no_snapshot {
             report!(report, "Periodic snapshot **enabled**");
             storage.db.start_periodic_snapshot();
@@ -106,10 +135,11 @@ pub fn main() {
     let written = stress.args.writes * stress.args.threads;
     let written_bytes = written * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
+    let write_sec = dec_div(written / msecs * 1000);
     report!(
         report,
         "Write test done in {elapsed:?}: {} writes/s, {}/sec",
-        dec_div(written / msecs * 1000),
+        write_sec,
         byte_div(written_bytes / msecs * 1000)
     );
     #[cfg(not(feature = "rocks"))]
@@ -133,10 +163,11 @@ pub fn main() {
     let read = stress.args.reads * stress.args.threads;
     let read_bytes = read * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
+    let read_sec = dec_div(read / msecs * 1000);
     report!(
         report,
         "Read test done in {elapsed:?}: {} reads/s, {}/sec",
-        dec_div(read / msecs * 1000),
+        read_sec,
         byte_div(read_bytes / msecs * 1000)
     );
     #[cfg(not(feature = "rocks"))]
@@ -152,6 +183,29 @@ pub fn main() {
     if print_report {
         println!("Writing report file");
         fs::write("report.txt", &report.lines).unwrap();
+    }
+    if !stress.args.tldr.is_empty() {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create(true)
+            .open("tldr.txt")
+            .unwrap();
+        let start_time = start_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let end_time = SystemTime::now();
+        let end_time = end_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        writeln!(
+            file,
+            "{: <12}|{: <12}|{: <24}|{: <8}|{: <8}",
+            start_time, end_time, stress.args.tldr, write_sec, read_sec
+        )
+        .unwrap();
     }
 }
 
@@ -170,7 +224,7 @@ impl<T: Storage> Stress<T> {
         &self,
         f: F,
     ) -> Arc<AtomicBool> {
-        let (_, manual_stop, _) = self.start_threads(f);
+        let (_, manual_stop, _, _) = self.start_threads(f);
         manual_stop
     }
 
@@ -179,7 +233,7 @@ impl<T: Storage> Stress<T> {
         f: F,
         report: &mut Report,
     ) -> Duration {
-        let (threads, _, latency) = self.start_threads(f);
+        let (threads, _, latency, latency_errors) = self.start_threads(f);
         let start = Instant::now();
         for t in threads {
             t.join().unwrap();
@@ -190,7 +244,13 @@ impl<T: Storage> Stress<T> {
             .unwrap()
             .unwrap();
         let p = move |i: usize| percentiles.get(i).unwrap().1.range();
-        report!(report, "Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}",
+        let latency_errors = latency_errors.load(Ordering::Relaxed);
+        let latency_errors = if latency_errors > 0 {
+            format!(", {latency_errors} out of bound")
+        } else {
+            "".to_string()
+        };
+        report!(report, "Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}{latency_errors}",
         p(0), p(1), p(2), p(3), p(4), p(5));
         start.elapsed()
     }
@@ -198,13 +258,19 @@ impl<T: Storage> Stress<T> {
     fn start_threads<F: FnOnce(StressThread<T>) + Clone + Send + 'static>(
         &self,
         f: F,
-    ) -> (Vec<JoinHandle<()>>, Arc<AtomicBool>, Arc<AtomicHistogram>) {
+    ) -> (
+        Vec<JoinHandle<()>>,
+        Arc<AtomicBool>,
+        Arc<AtomicHistogram>,
+        Arc<AtomicUsize>,
+    ) {
         let mut threads = Vec::with_capacity(self.args.threads);
         let start_lock = Arc::new(RwLock::new(()));
         let start_w = start_lock.write();
         let manual_stop = Arc::new(AtomicBool::new(false));
-        let latency = AtomicHistogram::new(12, 22).unwrap();
+        let latency = AtomicHistogram::new(12, 26).unwrap();
         let latency = Arc::new(latency);
+        let latency_errors = Arc::new(AtomicUsize::default());
         for index in 0..self.args.threads {
             let thread = StressThread {
                 db: self.storage.clone(),
@@ -214,13 +280,14 @@ impl<T: Storage> Stress<T> {
                 manual_stop: manual_stop.clone(),
 
                 latency: latency.clone(),
+                latency_errors: latency_errors.clone(),
             };
             let f = f.clone();
             let thread = thread::spawn(move || f(thread));
             threads.push(thread);
         }
         drop(start_w);
-        (threads, manual_stop, latency)
+        (threads, manual_stop, latency, latency_errors)
     }
 }
 
@@ -256,6 +323,7 @@ struct StressThread<T> {
     manual_stop: Arc<AtomicBool>,
 
     latency: Arc<AtomicHistogram>,
+    latency_errors: Arc<AtomicUsize>,
 }
 
 impl<T: Storage> StressThread<T> {
@@ -297,9 +365,13 @@ impl<T: Storage> StressThread<T> {
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             let found_value = self.db.get(&key).expect("Expected value not found");
-            self.latency
+            if self
+                .latency
                 .increment(timer.elapsed().as_micros() as u64)
-                .unwrap();
+                .is_err()
+            {
+                self.latency_errors.fetch_add(1, Ordering::Relaxed);
+            }
             assert_eq!(
                 &value[..],
                 &found_value[..],
@@ -313,8 +385,30 @@ impl<T: Storage> StressThread<T> {
         let mut key = vec![0u8; self.args.key_len];
         let mut rng = self.rng_at(pos as u64);
         rng.fill_bytes(&mut key);
+        match self.args.key_layout {
+            KeyLayout::Uniform => {}
+            KeyLayout::SequenceChoice => {
+                let global_pos = self.global_pos(pos) as u64;
+                // the first 16 bytes of a key are not random anymore
+                // First 8 bytes are a sequentially growing value (like consensus round)
+                key[..8].copy_from_slice(&u64::to_be_bytes(global_pos / 256));
+                // Next 8 bytes are choice of value in range 0..255 (like consensus validator index)
+                key[8..16].copy_from_slice(&u64::to_be_bytes(global_pos % 256));
+            }
+            KeyLayout::ChoiceSequence => {
+                let global_pos = self.global_pos(pos) as u64;
+                // Doing the same as above in different order
+                key[..8].copy_from_slice(&u64::to_be_bytes(global_pos % 256));
+                key[8..16].copy_from_slice(&u64::to_be_bytes(global_pos / 256));
+            }
+        }
         rng.fill_bytes(&mut value);
         (key, value)
+    }
+
+    /// Maps local index into continuous global space
+    fn global_pos(&self, pos: usize) -> usize {
+        pos * self.args.threads + self.index as usize
     }
 
     fn rng_at(&self, pos: u64) -> StdRng {
@@ -323,5 +417,23 @@ impl<T: Storage> StressThread<T> {
         writer.put_u64(self.index);
         writer.put_u64(pos);
         StdRng::from_seed(seed)
+    }
+}
+
+impl FromStr for KeyLayout {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "u" {
+            Ok(Self::Uniform)
+        } else if s == "sc" {
+            Ok(Self::SequenceChoice)
+        } else if s == "cs" {
+            Ok(Self::ChoiceSequence)
+        } else {
+            anyhow::bail!(
+                "Only allowed choices for key_layout are 'u'(uniform) or 'sc'(sequence-choice) or 'cs'(choice-sequence)"
+            );
+        }
     }
 }

@@ -3,7 +3,7 @@ use std::ops::RangeBounds;
 
 /// Range that excludes starting point
 pub struct RangeFromExcluding<'a, T> {
-    from: &'a T,
+    pub(crate) from: &'a T,
 }
 
 impl<'a, T> RangeBounds<T> for RangeFromExcluding<'a, T> {

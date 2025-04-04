@@ -20,6 +20,13 @@ impl LookupHeaderIndex {
         let prefix = ks.index_prefix_u32(key);
         let cell = ks.cell_id(key);
         let cell_prefix_range = ks.index_prefix_range(&cell);
+        #[cfg(debug_assertions)]
+        {
+            let prefix = prefix as u64;
+            if !cell_prefix_range.contains(&prefix) {
+                panic!("prefix do not fall in prefix range. key {key:?}, cell {cell:?}, prefix {prefix:x}, range {cell_prefix_range:x?}");
+            }
+        }
         let cell_offset = prefix
             // cell_prefix_range.start is always u32 (but not cell_prefix_range.end)
             .checked_sub(cell_prefix_range.start as u32)

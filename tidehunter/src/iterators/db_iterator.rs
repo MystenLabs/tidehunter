@@ -7,8 +7,8 @@ use std::sync::Arc;
 pub struct DbIterator {
     db: Arc<Db>,
     ks: KeySpace,
-    next_cell: Option<CellId>,
-    next_key: Option<Bytes>,
+    cell: Option<CellId>,
+    prev_key: Option<Bytes>,
     full_lower_bound: Option<Bytes>,
     full_upper_bound: Option<Bytes>,
     with_key_reduction: bool,
@@ -20,12 +20,12 @@ impl DbIterator {
     pub(crate) fn new(db: Arc<Db>, ks: KeySpace) -> Self {
         let ksd = db.ks(ks);
         let with_key_reduction = ksd.key_reduction().is_some();
-        let next_cell = ksd.first_cell();
+        let cell = ksd.first_cell();
         Self {
             db,
             ks,
-            next_cell: Some(next_cell),
-            next_key: None,
+            cell: Some(cell),
+            prev_key: None,
             full_lower_bound: None,
             full_upper_bound: None,
             end_cell_exclusive: None,
@@ -45,8 +45,14 @@ impl DbIterator {
                 self.db
                     .next_cell(ks, &ks.cell_id(&reduced_lower_bound), true);
         } else {
-            self.next_cell = Some(ks.cell_id(&reduced_lower_bound));
-            self.next_key = Some(reduced_lower_bound);
+            let next_key = saturated_decrement_vec(&reduced_lower_bound);
+
+            self.cell = Some(ks.cell_id(&next_key));
+            self.prev_key = if is_nonzero(&next_key) || is_nonzero(&reduced_lower_bound) {
+                Some(next_key)
+            } else {
+                None
+            };
         }
         self.full_lower_bound = Some(full_lower_bound);
     }
@@ -59,12 +65,20 @@ impl DbIterator {
         let reduced_upper_bound = ks.reduced_key_bytes(full_upper_bound.clone());
         if self.reverse {
             let next_key = if self.with_key_reduction {
-                reduced_upper_bound
+                saturated_increment_vec(&reduced_upper_bound)
             } else {
-                saturated_decrement_vec(&reduced_upper_bound)
+                reduced_upper_bound
             };
-            self.next_cell = Some(ks.cell_id(&next_key));
-            self.next_key = Some(next_key);
+            self.cell = Some(ks.cell_id(&next_key));
+            self.prev_key = if !self.with_key_reduction {
+                Some(next_key)
+            } else {
+                if is_nonmax(&next_key) {
+                    Some(next_key)
+                } else {
+                    None
+                }
+            };
         } else {
             self.end_cell_exclusive =
                 self.db
@@ -84,28 +98,29 @@ impl DbIterator {
     }
 
     fn try_next(&mut self) -> Result<Option<DbResult<(Bytes, Bytes)>>, IteratorAction> {
-        let Some(next_cell) = self.next_cell.take() else {
+        let Some(cell) = self.cell.take() else {
             return Ok(None);
         };
-        let next_key = self.next_key.take();
-        if let Some(next_key) = &next_key {
+        let prev_key = self.prev_key.take();
+        if let Some(prev_key) = &prev_key {
             // todo - implement with key reduction to reduce calls to storage.next_entry
             // This can be be used as is with key reduction
             // because next_key is a reduced key
             if !self.with_key_reduction {
-                self.check_bounds(&next_key)?;
+                self.check_bounds(&prev_key)?;
             }
         }
         match self.db.next_entry(
             self.ks,
-            next_cell,
-            next_key,
+            cell,
+            prev_key,
             &self.end_cell_exclusive,
             self.reverse,
         ) {
             Ok(Some(result)) => {
-                self.next_cell = result.next_cell;
-                self.next_key = result.next_key;
+                self.cell = result.cell;
+                let ks = self.db.ks(self.ks);
+                self.prev_key = Some(ks.reduced_key_bytes(result.key.clone()));
                 self.check_bounds(&result.key)?;
                 Ok(Some(Ok((result.key, result.value))))
             }
@@ -186,6 +201,28 @@ fn saturated_decrement_vec(original_bytes: &[u8]) -> Bytes {
     original_bytes.to_vec().into()
 }
 
+fn saturated_increment_vec(original_bytes: &[u8]) -> Bytes {
+    let mut bytes = original_bytes.to_vec();
+    for v in bytes.iter_mut().rev() {
+        let add = v.checked_add(1);
+        if let Some(add) = add {
+            *v = add;
+            return bytes.into();
+        } else {
+            *v = 0;
+        }
+    }
+    original_bytes.to_vec().into()
+}
+
+fn is_nonzero(bytes: &[u8]) -> bool {
+    bytes.iter().any(|v| *v != 0)
+}
+
+fn is_nonmax(bytes: &[u8]) -> bool {
+    bytes.iter().any(|v| *v != 255)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +233,15 @@ mod tests {
         assert_eq!(saturated_decrement_vec(&[1, 2, 0]).as_ref(), &[1, 1, 255]);
         assert_eq!(saturated_decrement_vec(&[1, 0, 0]).as_ref(), &[0, 255, 255]);
         assert_eq!(saturated_decrement_vec(&[0, 0, 0]).as_ref(), &[0, 0, 0]);
+    }
+
+    #[test]
+    fn test_saturated_increment_vec() {
+        assert_eq!(saturated_increment_vec(&[1, 2, 3]).as_ref(), &[1, 2, 4]);
+        assert_eq!(saturated_increment_vec(&[1, 2, 255]).as_ref(), &[1, 3, 0]);
+        assert_eq!(
+            saturated_increment_vec(&[255, 255, 255]).as_ref(),
+            &[255, 255, 255]
+        );
     }
 }
