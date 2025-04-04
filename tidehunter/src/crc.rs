@@ -28,12 +28,6 @@ impl CrcFrame {
         Self { bytes }
     }
 
-    /// Creates a new frame from bytes, without any check.
-    #[cfg(test)]
-    pub fn new_unsafe(bytes: Bytes) -> Self {
-        Self { bytes }
-    }
-
     pub fn read_from_slice(b: &[u8], pos: usize) -> Result<&[u8], CrcReadError> {
         let len = Self::checked_read(&b, pos)?;
         Ok(&b[Self::data_range(pos, len)])

@@ -675,12 +675,6 @@ impl PreparedWalWrite {
         Self { frame }
     }
 
-    #[cfg(test)]
-    pub fn new_unsafe(t: Bytes) -> Self {
-        let frame = CrcFrame::new_unsafe(t);
-        Self { frame }
-    }
-
     pub fn len(&self) -> usize {
         self.frame.len_with_header()
     }
