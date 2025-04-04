@@ -1,4 +1,6 @@
+use crate::metrics::BenchmarkMetrics;
 use crate::storage::Storage;
+use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
 use histogram::AtomicHistogram;
@@ -20,6 +22,7 @@ use tidehunter::db::Db;
 #[cfg(not(feature = "rocks"))]
 use tidehunter::key_shape::{KeyShape, KeyType};
 
+mod metrics;
 #[allow(dead_code)]
 mod prometheus;
 mod storage;
@@ -90,6 +93,9 @@ pub fn main() {
     println!("Path to storage: {}", dir.path().display());
     println!("Using {:?} key layout", args.key_layout);
     let print_report = args.report;
+    let registry = Registry::new();
+    let benchmark_metrics = BenchmarkMetrics::new_in(&registry);
+    prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
     #[cfg(not(feature = "rocks"))]
     let storage = {
         let mut config = Config::default();
@@ -115,7 +121,7 @@ pub fn main() {
                 KeyShape::new_single(32, 1024, key_type)
             }
         };
-        let storage = TidehunterStorage::open(config, dir.path(), (key_shape, ks));
+        let storage = TidehunterStorage::open(&registry, config, dir.path(), (key_shape, ks));
         if !args.no_snapshot {
             report!(report, "Periodic snapshot **enabled**");
             storage.db.start_periodic_snapshot();
@@ -129,7 +135,11 @@ pub fn main() {
         use crate::storage::rocks::RocksStorage;
         RocksStorage::open(dir.path())
     };
-    let stress = Stress { storage, args };
+    let stress = Stress {
+        storage,
+        args,
+        benchmark_metrics,
+    };
     println!("Starting write test");
     let elapsed = stress.measure(StressThread::run_writes, &mut report);
     let written = stress.args.writes * stress.args.threads;
@@ -212,6 +222,7 @@ pub fn main() {
 struct Stress<T> {
     storage: T,
     args: Arc<StressArgs>,
+    benchmark_metrics: Arc<BenchmarkMetrics>,
 }
 
 #[derive(Default)]
@@ -281,6 +292,7 @@ impl<T: Storage> Stress<T> {
 
                 latency: latency.clone(),
                 latency_errors: latency_errors.clone(),
+                benchmark_metrics: self.benchmark_metrics.clone(),
             };
             let f = f.clone();
             let thread = thread::spawn(move || f(thread));
@@ -324,6 +336,7 @@ struct StressThread<T> {
 
     latency: Arc<AtomicHistogram>,
     latency_errors: Arc<AtomicUsize>,
+    benchmark_metrics: Arc<BenchmarkMetrics>,
 }
 
 impl<T: Storage> StressThread<T> {
@@ -333,9 +346,12 @@ impl<T: Storage> StressThread<T> {
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             self.db.insert(key.into(), value.into());
-            self.latency
-                .increment(timer.elapsed().as_micros() as u64)
-                .unwrap();
+            let latency = timer.elapsed().as_micros();
+            self.benchmark_metrics
+                .bench_writes
+                .with_label_values(&[T::name()])
+                .observe(latency as f64);
+            self.latency.increment(latency as u64).unwrap();
         }
     }
 
@@ -365,11 +381,12 @@ impl<T: Storage> StressThread<T> {
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             let found_value = self.db.get(&key).expect("Expected value not found");
-            if self
-                .latency
-                .increment(timer.elapsed().as_micros() as u64)
-                .is_err()
-            {
+            let latency = timer.elapsed().as_micros();
+            self.benchmark_metrics
+                .bench_reads
+                .with_label_values(&[T::name()])
+                .observe(latency as f64);
+            if self.latency.increment(latency as u64).is_err() {
                 self.latency_errors.fetch_add(1, Ordering::Relaxed);
             }
             assert_eq!(

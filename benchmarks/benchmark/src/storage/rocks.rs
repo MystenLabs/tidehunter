@@ -95,6 +95,10 @@ impl Storage for Arc<RocksStorage> {
     fn get(&self, k: &[u8]) -> Option<Bytes> {
         self.db.get(k).unwrap().map(Into::into)
     }
+
+    fn name() -> &'static str {
+        "rocksdb"
+    }
 }
 
 impl Drop for RocksStorage {
