@@ -1,3 +1,4 @@
+use crate::batch::WriteBatch;
 use crate::cell::CellId;
 use crate::config::Config;
 use crate::control::{ControlRegion, ControlRegionStore};
@@ -10,10 +11,10 @@ use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
+use crate::state_snapshot;
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
 };
-use crate::{batch::WriteBatch, state_snapshot};
 use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
