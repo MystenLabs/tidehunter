@@ -483,7 +483,7 @@ mod test {
     fn test_singlehopindex_with_short_keys() {
         let metrics = Metrics::new();
         // 1) Build a KeyShape that expects e.g. 4‐byte keys
-        let (shape, ks_id) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+        let (shape, ks_id) = KeyShape::new_single(4, 16, KeyType::uniform(16));
         let ks = shape.ks(ks_id);
 
         // 2) Insert a few short keys into IndexTable
@@ -527,7 +527,7 @@ mod test {
         let index_impl = UniformLookupIndex::new();
 
         // 2) Build a KeyShape, e.g. 8-byte keys
-        let (shape, ks_id) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+        let (shape, ks_id) = KeyShape::new_single(4, 16, KeyType::uniform(16));
         let ks = shape.ks(ks_id);
 
         // 3) Populate an IndexTable

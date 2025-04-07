@@ -115,6 +115,11 @@ impl KeyShapeBuilder {
     ) -> KeySpace {
         let name = name.into();
         assert!(mutexes > 0, "mutexes should be greater then 0");
+        // also see test_prefix_falls_in_range
+        assert!(
+            mutexes.is_power_of_two(),
+            "mutexes should be power of 2, given {mutexes}"
+        );
 
         assert!(
             self.key_spaces.len() < (u8::MAX - 1) as usize,
@@ -376,6 +381,10 @@ impl KeyShape {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> (Self, KeySpace) {
+        assert!(
+            mutexes.is_power_of_two(),
+            "mutexes should be power of 2, given {mutexes}"
+        );
         let key_space = KeySpaceDescInner {
             id: KeySpace(0),
             name: "root".into(),
@@ -487,6 +496,10 @@ impl UniformKeyConfig {
             cells_per_mutex > 0,
             "cells_per_mutex should be greater then 0"
         );
+        assert!(
+            cells_per_mutex.is_power_of_two(),
+            "cells_per_mutex should be power of two, given {cells_per_mutex}"
+        );
         Self { cells_per_mutex }
     }
 
@@ -562,7 +575,7 @@ impl PrefixedUniformKeyConfig {
             let range_u8 = self.prefix_range_u8(last_byte);
             let start_inclusive = (*range_u8.start() as u64) << 24;
             let end_inclusive = (*range_u8.end() as u64) << 24;
-            let end_exclusive = end_inclusive + 0xffffff;
+            let end_exclusive = end_inclusive + 0x1000000;
             start_inclusive..end_exclusive
         } else {
             0..MAX_U32_PLUS_ONE
@@ -644,38 +657,56 @@ mod tests {
         let config = PrefixedUniformKeyConfig::new(1, 0);
         assert_prefix_range_eq(0x0000_0000..0x1_0000_0000, config.prefix_range(111));
         let config = PrefixedUniformKeyConfig::new(1, 7);
-        assert_prefix_range_eq(0x0000_0000..0x7fff_ffff, config.prefix_range(0));
-        assert_prefix_range_eq(0x0000_0000..0x7fff_ffff, config.prefix_range(15));
-        assert_prefix_range_eq(0x0000_0000..0x7fff_ffff, config.prefix_range(0x7f));
-        assert_prefix_range_eq(0x8000_0000..0xffff_ffff, config.prefix_range(0x80));
-        assert_prefix_range_eq(0x8000_0000..0xffff_ffff, config.prefix_range(0xff));
+        assert_prefix_range_eq(0x0000_0000..0x8000_0000, config.prefix_range(0));
+        assert_prefix_range_eq(0x0000_0000..0x8000_0000, config.prefix_range(15));
+        assert_prefix_range_eq(0x0000_0000..0x8000_0000, config.prefix_range(0x7f));
+        assert_prefix_range_eq(0x8000_0000..0x1_0000_0000, config.prefix_range(0x80));
+        assert_prefix_range_eq(0x8000_0000..0x1_0000_0000, config.prefix_range(0xff));
     }
 
     #[test]
     fn test_prefix_falls_in_range() {
-        test_prefix_falls_in_range_impl(KeyType::uniform(64));
-        test_prefix_falls_in_range_impl(KeyType::prefix_uniform(8, 4));
-        test_prefix_falls_in_range_impl(KeyType::prefix_uniform(15, 4));
+        // todo do we want to support num mutexes that are not power of 2?
+        for mutexes in [1, 16, 256 /*, 12*/] {
+            test_prefix_falls_in_range_impl(mutexes, KeyType::uniform(1));
+            test_prefix_falls_in_range_impl(mutexes, KeyType::uniform(64));
+            test_prefix_falls_in_range_impl(mutexes, KeyType::uniform(256));
+            test_prefix_falls_in_range_impl(mutexes, KeyType::prefix_uniform(8, 4));
+            test_prefix_falls_in_range_impl(mutexes, KeyType::prefix_uniform(15, 4));
+        }
     }
 
-    fn test_prefix_falls_in_range_impl(key_type: KeyType) {
-        let (key_shape, ks) = KeyShape::new_single(32, 12, key_type.clone());
+    fn test_prefix_falls_in_range_impl(mutexes: usize, key_type: KeyType) {
+        let (key_shape, ks) = KeyShape::new_single(32, mutexes, key_type.clone());
         let ks = key_shape.ks(ks);
         let mut rng = StdRng::from_seed(Default::default());
         for _ in 0..1024 {
             let mut key = vec![0u8; 32];
             rng.fill(&mut key[..]);
-            let prefix = ks.index_prefix_u32(&key) as u64;
-            let cell = ks.cell_id(&key);
-            let range = ks.index_prefix_range(&cell);
-            if !range.contains(&prefix) {
-                let mut formatted_key = String::default();
-                for chunk in key.chunks(8) {
-                    formatted_key.push_str(&hex::encode(chunk));
-                    formatted_key.push('_');
-                }
-                panic!("Failed for key {formatted_key}, cell {cell:x?}, prefix {prefix:x}, range {range:x?}, key type {key_type:?}");
+            test_prefix_falls_in_range_for_key(mutexes, &key_type, ks, &key);
+        }
+        // border values
+        test_prefix_falls_in_range_for_key(mutexes, &key_type, ks, &[0x0u8; 32]);
+        test_prefix_falls_in_range_for_key(mutexes, &key_type, ks, &[0xffu8; 32]);
+    }
+
+    #[track_caller]
+    fn test_prefix_falls_in_range_for_key(
+        mutexes: usize,
+        key_type: &KeyType,
+        ks: &KeySpaceDesc,
+        key: &[u8],
+    ) {
+        let prefix = ks.index_prefix_u32(&key) as u64;
+        let cell = ks.cell_id(&key);
+        let range = ks.index_prefix_range(&cell);
+        if !range.contains(&prefix) {
+            let mut formatted_key = String::default();
+            for chunk in key.chunks(8) {
+                formatted_key.push_str(&hex::encode(chunk));
+                formatted_key.push('_');
             }
+            panic!("Failed for key {formatted_key}, cell {cell:x?}, prefix {prefix:x}, range {range:x?}, key type {key_type:?}, mutexes {mutexes}");
         }
     }
 

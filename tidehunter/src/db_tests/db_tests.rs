@@ -93,7 +93,7 @@ fn test_multi_thread_write() {
     let dir = tempdir::TempDir::new("test-batch").unwrap();
     let config = Config::small();
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(8, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(8, 16, KeyType::uniform(16));
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
     let threads = 8u64;
     let mut jhs = Vec::with_capacity(threads as usize);
@@ -129,7 +129,7 @@ fn test_multi_thread_write() {
 fn test_batch() {
     let dir = tempdir::TempDir::new("test-batch").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
     let mut batch = WriteBatch::new();
     batch.write(ks, vec![5, 6, 7, 8], vec![15]);
@@ -333,7 +333,7 @@ fn test_iterator_slice(db: &Arc<Db>, ks: KeySpace, slice: &[u128], reverse: bool
 fn test_ordered_iterator() {
     let dir = tempdir::TempDir::new("test-ordered-iterator").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
     {
         let db = Db::open(
             dir.path(),
@@ -392,7 +392,7 @@ fn test_ordered_iterator() {
 fn test_insert_while_iterating() {
     let dir = tempdir::TempDir::new("test-insert-while-iterating").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -420,7 +420,7 @@ fn test_insert_while_iterating() {
 fn test_iterator_bounds_no_reduction() {
     let dir = tempdir::TempDir::new("test-iterator-bounds").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
 
     let db = Db::open(
         dir.path(),
@@ -580,7 +580,7 @@ fn test_iterator_bounds_with_reduction() {
 fn test_empty() {
     let dir = tempdir::TempDir::new("test-empty").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
     {
         let db = Db::open(
             dir.path(),
@@ -610,10 +610,10 @@ fn test_small_keys() {
     let dir = tempdir::TempDir::new("test-small-keys").unwrap();
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
-    let ks0 = ksb.add_key_space("a", 0, 12, KeyType::uniform(12));
-    let ks1 = ksb.add_key_space("b", 1, 12, KeyType::uniform(12));
-    let ks2 = ksb.add_key_space("c", 2, 12, KeyType::uniform(12));
-    let _ks3 = ksb.add_key_space("d", 3, 12, KeyType::uniform(12));
+    let ks0 = ksb.add_key_space("a", 0, 16, KeyType::uniform(16));
+    let ks1 = ksb.add_key_space("b", 1, 16, KeyType::uniform(16));
+    let ks2 = ksb.add_key_space("c", 2, 16, KeyType::uniform(16));
+    let _ks3 = ksb.add_key_space("d", 3, 16, KeyType::uniform(16));
     let key_shape = ksb.build();
     {
         let db = Db::open(
@@ -648,7 +648,7 @@ fn test_small_keys() {
 fn test_last_in_range() {
     let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -1170,11 +1170,11 @@ fn test_cluster_bits(sc: bool) {
 }
 
 pub(super) fn default_key_shape() -> (KeyShape, KeySpace) {
-    KeyShape::new_single(4, 12, KeyType::uniform(12))
+    KeyShape::new_single(4, 16, KeyType::uniform(16))
 }
 
 pub(super) fn prefix_key_shape() -> (KeyShape, KeySpace) {
-    KeyShape::new_single(4, 12, KeyType::prefix_uniform(2, 0))
+    KeyShape::new_single(4, 16, KeyType::prefix_uniform(2, 0))
 }
 
 fn lru_lookups(ks: &str, metrics: &Metrics) -> u64 {
@@ -1211,21 +1211,21 @@ pub(super) fn uniform_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
     let mut builder = KeyShapeBuilder::new();
 
     // First key space with default LookupHeader index format
-    let ks1 = builder.add_key_space("lookup_header", 4, 12, KeyType::uniform(12));
+    let ks1 = builder.add_key_space("lookup_header", 4, 16, KeyType::uniform(16));
 
     // Second key space with UniformLookup index format
     let uniform_index = UniformLookupIndex::new();
     let ks2_config =
         KeySpaceConfig::default().with_index_format(IndexFormatType::Uniform(uniform_index));
     let ks2 =
-        builder.add_key_space_config("uniform_lookup", 4, 12, KeyType::uniform(12), ks2_config);
+        builder.add_key_space_config("uniform_lookup", 4, 16, KeyType::uniform(16), ks2_config);
 
     (builder.build(), ks1, ks2)
 }
 
 pub(super) fn prefix_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
     let mut builder = KeyShapeBuilder::new();
-    let ks1 = builder.add_key_space("lookup_header", 4, 12, KeyType::prefix_uniform(2, 0));
+    let ks1 = builder.add_key_space("lookup_header", 4, 16, KeyType::prefix_uniform(2, 0));
     // Second key space with UniformLookup index format
     let uniform_index = UniformLookupIndex::new();
     let ks2_config =
@@ -1233,7 +1233,7 @@ pub(super) fn prefix_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
     let ks2 = builder.add_key_space_config(
         "prefix_lookup",
         4,
-        12,
+        16,
         KeyType::prefix_uniform(2, 0),
         ks2_config,
     );
