@@ -17,7 +17,7 @@ fn control_region_path(dir: PathBuf) -> PathBuf {
     dir.join(CONTROL_REGION_FILE)
 }
 
-/// Return the path to the control region file in the specified directory.
+/// Return the path to the WAL pointer file in the specified directory.
 fn wal_position_path(dir: PathBuf) -> PathBuf {
     dir.join(WAL_POSITION_FILE)
 }
