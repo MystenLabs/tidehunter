@@ -1154,3 +1154,82 @@ pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeyS
         );
     }
 }
+
+#[test]
+fn test_state_snapshot() {
+    let db_path = tempdir::TempDir::new("test-state-snapshot-db").unwrap();
+    let snapshot_path = tempdir::TempDir::new("test-state-snapshot-saved").unwrap();
+    // let db_path = PathBuf::from("/Users/alberto/Downloads/test-state-snapshot-db");
+    // let snapshot_path = PathBuf::from("/Users/alberto/Downloads/test-state-snapshot-saved");
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+
+    {
+        let db = Db::open(
+            db_path.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        let position = db.wal_writer.position();
+        println!("WAL position 0 : {}", position);
+
+        db.insert(ks, vec![1, 2, 3, 4, 5], vec![1]).unwrap();
+        db.insert(ks, vec![1, 2, 3, 4, 6], vec![2]).unwrap();
+        db.insert(ks, vec![1, 2, 3, 4, 7], vec![3]).unwrap();
+
+        let position = db.wal_writer.position();
+        println!("WAL position 1 : {}", position);
+
+        db.rebuild_control_region().unwrap();
+
+        db.create_state_snapshot(PathBuf::from(snapshot_path.path()))
+            .unwrap();
+
+        db.insert(ks, vec![1, 2, 3, 4, 8], vec![4]).unwrap();
+        db.insert(ks, vec![1, 2, 3, 4, 9], vec![5]).unwrap();
+
+        let position = db.wal_writer.position();
+        println!("WAL position 2 : {}", position);
+
+        db.rebuild_control_region().unwrap();
+    }
+
+    let db = Db::restore_state_snapshot(
+        PathBuf::from(snapshot_path.path()),
+        PathBuf::from(db_path.path()),
+        key_shape,
+        config,
+        Metrics::new(),
+    )
+    .unwrap();
+
+    let position = db.wal_writer.position();
+        println!("WAL position 3 : {}", position);
+
+    assert_eq!(
+        Some(vec![1].into()),
+        db.get(ks, &[1, 2, 3, 4, 5]).unwrap()
+    );
+
+    assert_eq!(
+        Some(vec![2].into()),
+        db.get(ks, &[1, 2, 3, 4, 6]).unwrap()
+    );
+    assert_eq!(
+        Some(vec![3].into()),
+        db.get(ks, &[1, 2, 3, 4, 7]).unwrap()
+    );
+    
+    // PROBLEM: OPENING THE DB MEANS WE UPDATE THE LARGE TABLE.
+    assert_eq!(
+        None,
+        db.get(ks, &[1, 2, 3, 4, 8]).unwrap()
+    );
+    assert_eq!(
+        None,
+        db.get(ks, &[1, 2, 3, 4, 9]).unwrap()
+    );
+}

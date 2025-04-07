@@ -58,15 +58,14 @@ pub fn load(
         .expect("Wal position should be deserializable");
 
     // Truncate the WAL file to the last position
-    let mut wal_iterator = wal.wal_iterator(last_wal_position)?;
-    let mut next_position = last_wal_position;
+    let mut wal_iterator = wal.wal_iterator_no_skip(last_wal_position)?;
     loop {
         match wal_iterator.next() {
             Ok((position, entry)) => {
                 let length = entry.len();
                 let empty = vec![0; length];
+                println!("----> writing empty ({length}B) entry at {position:?}");
                 wal.file().write_all_at(&empty, position.as_u64())?;
-                next_position = position;
             }
             Err(WalError::Crc(_)) => {
                 // CRC errors indicate the end of the WAL file
@@ -78,5 +77,5 @@ pub fn load(
         }
     }
 
-    Ok(next_position)
+    Ok(last_wal_position)
 }

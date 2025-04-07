@@ -481,6 +481,27 @@ impl Wal {
         Ok(iterator)
     }
 
+    /// Iterate wal from the given position
+    /// If WalPosition::INVALID is specified, iterate from start
+    pub fn wal_iterator_no_skip(
+        self: &Arc<Self>,
+        position: WalPosition,
+    ) -> Result<WalIterator, WalError> {
+        let position = if position == WalPosition::INVALID {
+            0
+        } else {
+            position.0
+        };
+        let (map_id, _) = self.layout.locate(position);
+        Self::extend_to_map(&self.layout, &self.file, map_id)?;
+        let map = self.map(map_id, true)?;
+        Ok(WalIterator {
+            wal: self.clone(),
+            position,
+            map,
+        })
+    }
+
     fn file_reader(&self) -> FileReader {
         FileReader::new(&self.file, self.layout.direct_io)
     }

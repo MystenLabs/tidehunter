@@ -176,7 +176,9 @@ impl Db {
                 Ok(Some(value))
             }
             GetResult::WalPosition(w) => {
+                println!("-----> B0, pos: {w:?}");
                 let value = self.read_record_check_key(k, w)?;
+                println!("-----> B1");
                 let Some(value) = value else {
                     return Ok(None);
                 };
@@ -536,6 +538,14 @@ impl Db {
             .set(maps_estimate as i64);
     }
 
+    /// Create a snapshot of the current db state
+    pub fn create_state_snapshot(&self, snapshot_path: PathBuf) -> DbResult<()> {
+        let guard = self.control_region_store.lock();
+        let control_region_path = guard.path();
+        let wal_position = self.wal_writer.wal_position();
+        state_snapshot::create(&wal_position, control_region_path, snapshot_path)
+    }
+
     /// Restore the database from a snapshot
     pub fn restore_state_snapshot(
         snapshot_path: PathBuf,
@@ -556,14 +566,6 @@ impl Db {
         db.wal_writer.truncate(wal_position);
 
         Ok(db)
-    }
-
-    /// Create a snapshot of the current db state
-    pub fn create_state_snapshot(&self, snapshot_path: PathBuf) -> DbResult<()> {
-        let guard = self.control_region_store.lock();
-        let control_region_path = guard.path();
-        let wal_position = self.wal_writer.wal_position();
-        state_snapshot::create(&wal_position, control_region_path, snapshot_path)
     }
 }
 
