@@ -1,4 +1,3 @@
-use crate::batch::WriteBatch;
 use crate::cell::CellId;
 use crate::config::Config;
 use crate::control::{ControlRegion, ControlRegionStore};
@@ -14,6 +13,7 @@ use crate::metrics::{Metrics, TimerExt};
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
 };
+use crate::{batch::WriteBatch, state_snapshot};
 use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
@@ -534,6 +534,36 @@ impl Db {
             .memory_estimate
             .with_label_values(&["_", "maps"])
             .set(maps_estimate as i64);
+    }
+
+    /// Restore the database from a snapshot
+    pub fn restore_state_snapshot(
+        snapshot_path: PathBuf,
+        database_path: PathBuf,
+        key_shape: KeyShape,
+        config: Arc<Config>,
+        metrics: Arc<Metrics>,
+    ) -> DbResult<Arc<Self>> {
+        // Open the db
+        // TODO: this operation iterates needlessly through WAL entries that will potentially be deleted.
+        let db = Self::open(&database_path, key_shape, config.clone(), metrics.clone())?;
+
+        // Copy the control region and clear the WAL after the recoded position
+        let wal_position = state_snapshot::load(&db.wal, snapshot_path, database_path)?;
+
+        // Record the new position in the control region, ensuring that future writes
+        // will be recorded after this position.
+        db.wal_writer.truncate(wal_position);
+
+        Ok(db)
+    }
+
+    /// Create a snapshot of the current db state
+    pub fn create_state_snapshot(&self, snapshot_path: PathBuf) -> DbResult<()> {
+        let guard = self.control_region_store.lock();
+        let control_region_path = guard.path();
+        let wal_position = self.wal_writer.wal_position();
+        state_snapshot::create(&wal_position, control_region_path, snapshot_path)
     }
 }
 

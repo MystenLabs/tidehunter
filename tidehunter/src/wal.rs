@@ -120,6 +120,16 @@ impl WalWriter {
     pub fn wal_position(&self) -> WalPosition {
         WalPosition(self.position_and_map.lock().0.position)
     }
+
+    /// Truncate the WAL to the given position. That is, all entries after the given position
+    /// will be potentially overwritten.
+    pub fn truncate(&self, position: WalPosition) {
+        let mut guard = self.position_and_map.lock();
+        let current_position = guard.0.position;
+        if current_position > position.0 {
+            guard.0.position = position.0;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -478,6 +488,11 @@ impl Wal {
     /// Ensure the file is written to disk (blocking call).
     pub fn fsync(&self) -> io::Result<()> {
         self.file.sync_all()
+    }
+
+    /// Return a file handle to the WAL file
+    pub fn file(&self) -> &File {
+        &self.file
     }
 }
 
