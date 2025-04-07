@@ -212,7 +212,7 @@ pub fn main() {
             .as_millis();
         writeln!(
             file,
-            "{: <12}|{: <12}|{: <24}|{: <8}|{: <8}",
+            "{: <15}|{: <15}|{: <24}|{: <8}|{: <8}",
             start_time, end_time, stress.args.tldr, write_sec, read_sec
         )
         .unwrap();
