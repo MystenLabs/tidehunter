@@ -43,7 +43,7 @@ impl CrcFrame {
         b.get_u32() as usize
     }
 
-    pub fn checked_read(b: &[u8], pos: usize) -> Result<usize, CrcReadError> {
+    fn checked_read(b: &[u8], pos: usize) -> Result<usize, CrcReadError> {
         if b.len() < pos + Self::CRC_HEADER_LENGTH {
             return Err(CrcReadError::OutOfBoundsHeader);
         }

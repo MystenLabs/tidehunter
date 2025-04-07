@@ -123,7 +123,7 @@ impl WalWriter {
 }
 
 #[derive(Clone)]
-pub(crate) struct IncrementalWalPosition {
+pub struct IncrementalWalPosition {
     position: u64,
     layout: WalLayout,
 }
