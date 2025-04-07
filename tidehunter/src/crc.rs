@@ -43,7 +43,7 @@ impl CrcFrame {
         b.get_u32() as usize
     }
 
-    pub(crate) fn checked_read(b: &[u8], pos: usize) -> Result<usize, CrcReadError> {
+    pub fn checked_read(b: &[u8], pos: usize) -> Result<usize, CrcReadError> {
         if b.len() < pos + Self::CRC_HEADER_LENGTH {
             return Err(CrcReadError::OutOfBoundsHeader);
         }
@@ -69,12 +69,6 @@ impl CrcFrame {
 
     fn data_range(pos: usize, len: usize) -> Range<usize> {
         pos + Self::CRC_HEADER_LENGTH..pos + Self::CRC_HEADER_LENGTH + len
-    }
-
-    /// Returns the range of the whole frame, including the header.
-    #[cfg(test)]
-    pub fn frame_range(pos: usize, len: usize) -> Range<usize> {
-        pos..pos + Self::CRC_HEADER_LENGTH + len
     }
 
     fn crc(b: &[u8]) -> u32 {

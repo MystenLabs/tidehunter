@@ -1,11 +1,11 @@
 use super::super::*;
-use crate::batch::WriteBatch;
 use crate::config::Config;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{KeyShape, KeySpace, KeyType};
 use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
 use crate::metrics::Metrics;
+use crate::{batch::WriteBatch, crc::CrcFrame};
 use minibytes::Bytes;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};
@@ -1402,7 +1402,7 @@ fn test_last_four_bytes_corruption() {
     let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
 
     // Open the db and insert some data. Record the position of the last entry
-    let last_position = {
+    let (last_position, file, frag_size) = {
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
@@ -1413,29 +1413,22 @@ fn test_last_four_bytes_corruption() {
 
         db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
         db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
-        let position = db.wal_writer.wal_position();
+        let position = db.wal_writer.position();
         db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
 
-        position
+        let file = db.wal.file().try_clone().unwrap();
+        let frag_size = db.wal.layout().frag_size;
+        (position, file, frag_size)
     };
 
-    // Re-open the database and insert a corruption in the last four bytes of the last database entry
-    {
-        let db = Db::open(
-            dir.path(),
-            key_shape.clone(),
-            config.clone(),
-            Metrics::new(),
-        )
-        .unwrap();
-
-        let frame = db.wal.read_raw_frame(last_position).unwrap();
-        let mut bytes = frame.into_vec();
-        let length = bytes.len();
-        bytes[length - 1] = !bytes[length - 1]; // Corrupt the last byte
-
-        db.wal.file().write_all_at(&bytes, last_position.0).unwrap();
-    }
+    // Insert a corruption in the last byte of the last database entry
+    let mut data = [0u8; 1];
+    let offset = last_position % frag_size;
+    let len = key_3.len() + value_3.len() + CrcFrame::CRC_HEADER_LENGTH + 4;
+    let position = offset + len as u64 - 1;
+    file.read_exact_at(&mut data, position).unwrap();
+    data[0] = !data[0];
+    file.write_all_at(&mut data, position).unwrap();
 
     // Re-open the database and insert some new data
     {
@@ -1480,7 +1473,7 @@ fn test_first_four_bytes_corruption() {
     let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
 
     // Open the db and insert some data. Record the position of the last entry
-    let last_position = {
+    let (last_position, file, frag_size) = {
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
@@ -1491,28 +1484,21 @@ fn test_first_four_bytes_corruption() {
 
         db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
         db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
-        let position = db.wal_writer.wal_position();
+        let position = db.wal_writer.position();
         db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
 
-        position
+        let file = db.wal.file().try_clone().unwrap();
+        let frag_size = db.wal.layout().frag_size;
+        (position, file, frag_size)
     };
 
-    // Re-open the database and insert a corruption in the first four bytes of the last database entry
-    {
-        let db = Db::open(
-            dir.path(),
-            key_shape.clone(),
-            config.clone(),
-            Metrics::new(),
-        )
-        .unwrap();
-
-        let frame = db.wal.read_raw_frame(last_position).unwrap();
-        let mut bytes = frame.into_vec();
-        bytes[1] = !bytes[1]; // Corrupt the first byte
-
-        db.wal.file().write_all_at(&bytes, last_position.0).unwrap();
-    }
+    // Insert a corruption in the first byte of the last database entry
+    let mut data = [0u8; 1];
+    let offset = last_position % frag_size;
+    let position = offset;
+    file.read_exact_at(&mut data, position).unwrap();
+    data[0] = !data[0];
+    file.write_all_at(&mut data, position).unwrap();
 
     // Re-open the database and insert some new data
     {

@@ -61,7 +61,7 @@ pub(crate) struct Map {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct WalPosition(pub u64);
+pub struct WalPosition(u64);
 
 pub enum WalRandomRead<'a> {
     Mapped(Bytes),
@@ -231,24 +231,6 @@ impl Wal {
         let map = self.map(map, false)?;
         // todo avoid clone, introduce Bytes::slice_in_place
         Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
-    }
-
-    /// Read the wal position without mapping. This function returns the raw bytes
-    /// in the frame, not only the value. (This is used for testing.)
-    #[cfg(test)]
-    pub fn read_raw_frame(&self, pos: WalPosition) -> Result<Bytes, WalError> {
-        assert_ne!(
-            pos,
-            WalPosition::INVALID,
-            "Trying to read invalid wal position"
-        );
-        let (map, offset) = self.layout.locate(pos.0);
-        let map = self.map(map, false)?;
-        // todo avoid clone, introduce Bytes::slice_in_place
-
-        let len = CrcFrame::checked_read(&map.data, offset as usize)?;
-        let data = map.data.slice(CrcFrame::frame_range(offset as usize, len));
-        Ok(data)
     }
 
     /// Read the wal position without mapping.
@@ -500,8 +482,14 @@ impl Wal {
 
     /// Returns the file descriptor of the wal file
     #[cfg(test)]
-    pub fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &File {
         &self.file
+    }
+
+    /// Returns the layout of the wal
+    #[cfg(test)]
+    pub(crate) fn layout(&self) -> &WalLayout {
+        &self.layout
     }
 }
 
