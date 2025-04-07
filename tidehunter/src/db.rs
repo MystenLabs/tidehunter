@@ -176,9 +176,7 @@ impl Db {
                 Ok(Some(value))
             }
             GetResult::WalPosition(w) => {
-                println!("-----> B0, pos: {w:?}");
                 let value = self.read_record_check_key(k, w)?;
-                println!("-----> B1");
                 let Some(value) = value else {
                     return Ok(None);
                 };
@@ -554,18 +552,12 @@ impl Db {
         config: Arc<Config>,
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
-        // Open the db
-        // TODO: this operation iterates needlessly through WAL entries that will potentially be deleted.
-        let db = Self::open(&database_path, key_shape, config.clone(), metrics.clone())?;
+        state_snapshot::load(snapshot_path, database_path, key_shape, config, metrics)
+    }
 
-        // Copy the control region and clear the WAL after the recoded position
-        let wal_position = state_snapshot::load(&db.wal, snapshot_path, database_path)?;
-
-        // Record the new position in the control region, ensuring that future writes
-        // will be recorded after this position.
-        db.wal_writer.truncate(wal_position);
-
-        Ok(db)
+    /// Return a reference to the WAL
+    pub fn wal(&self) -> &Arc<Wal> {
+        &self.wal
     }
 }
 

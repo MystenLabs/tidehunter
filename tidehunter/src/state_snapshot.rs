@@ -1,5 +1,8 @@
 use crate::{
-    db::{DbResult, CONTROL_REGION_FILE},
+    config::Config,
+    db::{Db, DbResult, CONTROL_REGION_FILE},
+    key_shape::KeyShape,
+    metrics::Metrics,
     wal::{Wal, WalError},
     WalPosition,
 };
@@ -42,13 +45,16 @@ pub fn create(
 /// back to the source path and loads the WAL pointer from the saved file. The
 /// returned `WalPosition` can be used to truncate the WAL file.
 pub fn load(
-    wal: &Arc<Wal>,
     snapshot_path: PathBuf,
     database_path: PathBuf,
-) -> DbResult<WalPosition> {
+    key_shape: KeyShape,
+    config: Arc<Config>,
+    metrics: Arc<Metrics>,
+) -> DbResult<Arc<Db>> {
     // Copy back the control region
     let saved_control_region_path = control_region_path(snapshot_path.clone());
-    let db_control_region_path = control_region_path(database_path);
+    let db_control_region_path = control_region_path(database_path.clone());
+    let _ = fs::remove_file(&db_control_region_path); // Ignore error if file doesn't exist
     fs::copy(&saved_control_region_path, &db_control_region_path)?;
 
     // Load the WAL pointer from file
@@ -58,13 +64,17 @@ pub fn load(
         .expect("Wal position should be deserializable");
 
     // Truncate the WAL file to the last position
+    let wal = Wal::open(
+        &Db::wal_path(&database_path),
+        config.wal_layout(),
+        metrics.clone(),
+    )?;
     let mut wal_iterator = wal.wal_iterator_no_skip(last_wal_position)?;
     loop {
         match wal_iterator.next() {
             Ok((position, entry)) => {
                 let length = entry.len();
                 let empty = vec![0; length];
-                println!("----> writing empty ({length}B) entry at {position:?}");
                 wal.file().write_all_at(&empty, position.as_u64())?;
             }
             Err(WalError::Crc(_)) => {
@@ -77,5 +87,8 @@ pub fn load(
         }
     }
 
-    Ok(last_wal_position)
+    // Open the db
+    let db = Db::open(&database_path, key_shape, config, metrics)?;
+
+    Ok(db)
 }
