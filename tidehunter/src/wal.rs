@@ -123,7 +123,7 @@ impl WalWriter {
 }
 
 #[derive(Clone)]
-pub struct IncrementalWalPosition {
+struct IncrementalWalPosition {
     position: u64,
     layout: WalLayout,
 }
@@ -484,12 +484,6 @@ impl Wal {
     #[cfg(test)]
     pub(crate) fn file(&self) -> &File {
         &self.file
-    }
-
-    /// Returns the layout of the wal
-    #[cfg(test)]
-    pub(crate) fn layout(&self) -> &WalLayout {
-        &self.layout
     }
 }
 
