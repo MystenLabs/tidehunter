@@ -204,12 +204,12 @@ pub fn main() {
         let start_time = start_time
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis();
         let end_time = SystemTime::now();
         let end_time = end_time
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis();
         writeln!(
             file,
             "{: <12}|{: <12}|{: <24}|{: <8}|{: <8}",
