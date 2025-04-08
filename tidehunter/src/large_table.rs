@@ -4,6 +4,7 @@ use crate::context::KsContext;
 use crate::flusher::{FlushKind, IndexFlusher};
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
+use crate::index::lookup_header::Direction;
 use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
@@ -529,9 +530,127 @@ impl LargeTable {
         let Some(entry) = row.try_entry_mut(cell) else {
             return Ok(None);
         };
-        // todo read from disk instead of loading
-        entry.maybe_load(loader)?;
-        Ok(entry.next_entry(prev_key, reverse))
+
+        match &entry.state {
+            // If already loaded, just use what's in memory
+            LargeTableEntryState::Loaded(_) | LargeTableEntryState::DirtyLoaded(_, _) => {
+                let mut result = entry.next_entry(prev_key.clone(), reverse);
+
+                // Skip entries marked as invalid (deleted)
+                while let Some((key, pos)) = result {
+                    if pos != WalPosition::INVALID {
+                        return Ok(Some((key, pos)));
+                    }
+                    // Get next entry after the invalid one
+                    result = entry.next_entry(Some(key), reverse);
+                }
+
+                Ok(None)
+            }
+
+            // For empty state, we have nothing to return
+            LargeTableEntryState::Empty => Ok(None),
+
+            // For unloaded states, read from disk without loading everything
+            LargeTableEntryState::Unloaded(position) => {
+                // Get reader for on-disk index
+                let index_reader = loader.index_reader(&entry.context.ks_config, *position)?;
+                let format = entry.context.ks_config.index_format();
+
+                // Use the format to find the next entry from on-disk index
+                let result = runtime::block_in_place(|| {
+                    let direction = if reverse {
+                        Direction::Backward
+                    } else {
+                        Direction::Forward
+                    };
+
+                    format.next_entry_unloaded(
+                        &entry.context.ks_config,
+                        &index_reader,
+                        prev_key.as_deref(),
+                        direction,
+                        &entry.context.metrics,
+                    )
+                });
+
+                // Convert Vec<u8> to Bytes if we got a result
+                Ok(result.map(|(key, pos)| (Bytes::from(key), pos)))
+            }
+
+            // For dirty unloaded, combine in-memory and on-disk entries
+            LargeTableEntryState::DirtyUnloaded(position, _) => {
+                // Check in-memory part first (dirty keys)
+                let in_memory_next = entry.next_entry(prev_key.clone(), reverse);
+
+                // Get reader for on-disk index
+                let index_reader = loader.index_reader(&entry.context.ks_config, *position)?;
+                let format = entry.context.ks_config.index_format();
+
+                // Use the format to find the next entry from on-disk index
+                let on_disk_next = runtime::block_in_place(|| {
+                    let direction = if reverse {
+                        Direction::Backward
+                    } else {
+                        Direction::Forward
+                    };
+
+                    format
+                        .next_entry_unloaded(
+                            &entry.context.ks_config,
+                            &index_reader,
+                            prev_key.as_deref(),
+                            direction,
+                            &entry.context.metrics,
+                        )
+                        .map(|(key, pos)| (Bytes::from(key), pos))
+                });
+
+                // Compare and decide which one to return
+                let result = match (in_memory_next, on_disk_next) {
+                    (None, None) => None,
+                    (Some((k, v)), None) => {
+                        if v != WalPosition::INVALID {
+                            Some((k, v))
+                        } else {
+                            // Recursively call with the next key as prev_key to skip the deleted entry
+                            return self.next_in_cell(loader, row, cell, Some(k), reverse);
+                        }
+                    }
+                    (None, Some((k, v))) => Some((k, v)),
+                    (Some((k_mem, v_mem)), Some((k_disk, v_disk))) => {
+                        // Choose based on key ordering and direction
+                        let compare = k_mem.as_ref().cmp(k_disk.as_ref());
+                        let first_is_memory = if reverse {
+                            compare == std::cmp::Ordering::Greater
+                        } else {
+                            compare == std::cmp::Ordering::Less
+                        };
+
+                        if first_is_memory {
+                            if v_mem != WalPosition::INVALID {
+                                Some((k_mem, v_mem))
+                            } else {
+                                // Skip deleted entry and continue
+                                return self.next_in_cell(loader, row, cell, Some(k_mem), reverse);
+                            }
+                        } else if compare == std::cmp::Ordering::Equal {
+                            // Same key, prefer in-memory version
+                            if v_mem != WalPosition::INVALID {
+                                Some((k_mem, v_mem))
+                            } else {
+                                // In-memory version is deleted, skip this key
+                                return self.next_in_cell(loader, row, cell, Some(k_mem), reverse);
+                            }
+                        } else {
+                            Some((k_disk, v_disk))
+                        }
+                    }
+                };
+
+                Ok(result)
+            }
+        }
     }
 
     /// See Db::next_cell for documentation
@@ -1287,6 +1406,7 @@ impl Entries {
 mod tests {
     use super::*;
     use crate::key_shape::KeyShapeBuilder;
+    use std::io;
 
     #[test]
     fn test_ks_allocation() {
@@ -1313,5 +1433,319 @@ mod tests {
     fn test_bloom_size() {
         let f = BloomFilter::with_rate(0.01, 8000);
         println!("hashes: {}, bytes: {}", f.num_hashes(), f.num_bits() / 8);
+    }
+
+    #[test]
+    fn test_next_in_cell() {
+        // Create a test setup with different entry states
+        let metrics = Metrics::new();
+        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let ks = shape.ks(ks_id);
+        let context = KsContext {
+            ks_config: ks.clone(),
+            config: Arc::new(Config::small()),
+            metrics: metrics.clone(),
+        };
+
+        // A cell ID to use in our tests
+        let cell_id = CellId::Integer(0);
+
+        // Create mock loader implementation
+        struct MockLoader {
+            disk_index: IndexTable,
+            serialized_data: Bytes,
+        }
+
+        impl Loader for MockLoader {
+            type Error = io::Error;
+
+            fn load(
+                &self,
+                _ks: &KeySpaceDesc,
+                _position: WalPosition,
+            ) -> Result<IndexTable, Self::Error> {
+                Ok(self.disk_index.clone())
+            }
+
+            fn index_reader(
+                &self,
+                _ks: &KeySpaceDesc,
+                _position: WalPosition,
+            ) -> Result<WalRandomRead, Self::Error> {
+                Ok(WalRandomRead::Mapped(self.serialized_data.clone()))
+            }
+
+            fn flush_supported(&self) -> bool {
+                true
+            }
+
+            fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> Result<WalPosition, Self::Error> {
+                Ok(WalPosition::test_value(100))
+            }
+        }
+
+        // Create test data for our disk index
+        let mut disk_index = IndexTable::default();
+        for i in 1..6 {
+            let key = (i as u64 * 10).to_be_bytes().to_vec();
+            disk_index.insert(Bytes::from(key), WalPosition::test_value(i));
+        }
+        // We now have keys [10, 20, 30, 40, 50] in the on-disk index
+
+        // Serialize the disk index for our mock reader
+        let format = ks.index_format();
+        let serialized_data = format.to_bytes(&disk_index, ks);
+
+        let loader = MockLoader {
+            disk_index: disk_index.clone(),
+            serialized_data,
+        };
+
+        // Create a large table for testing
+        let table = LargeTable {
+            table: Vec::new(), // Not used in this test
+            config: context.config.clone(),
+            flusher: IndexFlusher::new_unstarted_for_test(),
+            metrics: metrics.clone(),
+        };
+
+        // TEST CASE 1: Empty state
+        {
+            // Create a row with an Empty entry
+            let mut row = Row {
+                value_lru: None,
+                context: context.clone(),
+                entries: Entries::Array(
+                    1,
+                    Box::new([LargeTableEntry::new_empty(
+                        context.clone(),
+                        cell_id.clone(),
+                        0,
+                    )]),
+                ),
+            };
+
+            // Test next_in_cell with empty state
+            let result = table
+                .next_in_cell(&loader, &mut row, &cell_id, None, false)
+                .unwrap();
+            assert!(result.is_none(), "Empty state should return None");
+        }
+
+        // TEST CASE 2: Loaded state
+        {
+            // Create a row with a Loaded entry
+            let mut entry = LargeTableEntry::new_empty(context.clone(), cell_id.clone(), 0);
+            entry.data = ArcCow::new_owned(disk_index.clone());
+            entry.state = LargeTableEntryState::Loaded(WalPosition::test_value(42));
+
+            let mut row = Row {
+                value_lru: None,
+                context: context.clone(),
+                entries: Entries::Array(1, Box::new([entry])),
+            };
+
+            // Test forward iteration with loaded state
+            let result = table
+                .next_in_cell(&loader, &mut row, &cell_id, None, false)
+                .unwrap();
+            assert!(result.is_some(), "Loaded state should return first entry");
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 10_u64.to_be_bytes());
+            assert_eq!(pos, WalPosition::test_value(1));
+
+            // Test forward iteration from a key
+            let result = table
+                .next_in_cell(
+                    &loader,
+                    &mut row,
+                    &cell_id,
+                    Some(Bytes::from(20_u64.to_be_bytes().to_vec())),
+                    false,
+                )
+                .unwrap();
+            assert!(result.is_some());
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 30_u64.to_be_bytes());
+            assert_eq!(pos, WalPosition::test_value(3));
+
+            // Test backward iteration
+            let result = table
+                .next_in_cell(&loader, &mut row, &cell_id, None, true)
+                .unwrap();
+            assert!(result.is_some());
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 50_u64.to_be_bytes());
+            assert_eq!(pos, WalPosition::test_value(5));
+        }
+
+        // TEST CASE 3: Unloaded state
+        {
+            // Create a row with an Unloaded entry
+            let entry = LargeTableEntry::new_unloaded(
+                context.clone(),
+                cell_id.clone(),
+                WalPosition::test_value(42),
+                0,
+            );
+
+            let mut row = Row {
+                value_lru: None,
+                context: context.clone(),
+                entries: Entries::Array(1, Box::new([entry])),
+            };
+
+            // Test forward iteration with unloaded state
+            let result = table
+                .next_in_cell(&loader, &mut row, &cell_id, None, false)
+                .unwrap();
+            assert!(
+                result.is_some(),
+                "Unloaded state should return first entry from disk"
+            );
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 10_u64.to_be_bytes());
+            assert_eq!(pos, WalPosition::test_value(1));
+
+            // Test forward iteration from a key
+            let result = table
+                .next_in_cell(
+                    &loader,
+                    &mut row,
+                    &cell_id,
+                    Some(Bytes::from(20_u64.to_be_bytes().to_vec())),
+                    false,
+                )
+                .unwrap();
+            assert!(result.is_some());
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 30_u64.to_be_bytes());
+            assert_eq!(pos, WalPosition::test_value(3));
+        }
+
+        // TEST CASE 4: DirtyLoaded state
+        {
+            // Create a row with a DirtyLoaded entry
+            let mut entry = LargeTableEntry::new_empty(context.clone(), cell_id.clone(), 0);
+            entry.data = ArcCow::new_owned(disk_index.clone());
+
+            // Add a new key and mark one as deleted
+            entry.data.make_mut().insert(
+                Bytes::from(15_u64.to_be_bytes().to_vec()),
+                WalPosition::test_value(15),
+            );
+            entry.data.make_mut().insert(
+                Bytes::from(40_u64.to_be_bytes().to_vec()),
+                WalPosition::INVALID,
+            ); // Deleted key
+
+            let mut dirty_keys = HashSet::new();
+            dirty_keys.insert(Bytes::from(15_u64.to_be_bytes().to_vec()));
+            dirty_keys.insert(Bytes::from(40_u64.to_be_bytes().to_vec()));
+
+            entry.state =
+                LargeTableEntryState::DirtyLoaded(WalPosition::test_value(42), dirty_keys);
+
+            let mut row = Row {
+                value_lru: None,
+                context: context.clone(),
+                entries: Entries::Array(1, Box::new([entry])),
+            };
+
+            // Test iteration with deleted key
+            let result = table
+                .next_in_cell(
+                    &loader,
+                    &mut row,
+                    &cell_id,
+                    Some(Bytes::from(30_u64.to_be_bytes().to_vec())),
+                    false,
+                )
+                .unwrap();
+            assert!(result.is_some());
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 50_u64.to_be_bytes()); // Should skip over the deleted 40
+            assert_eq!(pos, WalPosition::test_value(5));
+
+            // Test finding the new key
+            let result = table
+                .next_in_cell(
+                    &loader,
+                    &mut row,
+                    &cell_id,
+                    Some(Bytes::from(10_u64.to_be_bytes().to_vec())),
+                    false,
+                )
+                .unwrap();
+            assert!(result.is_some());
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 15_u64.to_be_bytes()); // Should find our new key
+            assert_eq!(pos, WalPosition::test_value(15));
+        }
+
+        // TEST CASE 5: DirtyUnloaded state
+        {
+            // Create a row with a DirtyUnloaded entry
+            let mut entry = LargeTableEntry::new_unloaded(
+                context.clone(),
+                cell_id.clone(),
+                WalPosition::test_value(42),
+                0,
+            );
+
+            // Add a new key (in-memory but marked dirty)
+            entry.data.make_mut().insert(
+                Bytes::from(15_u64.to_be_bytes().to_vec()),
+                WalPosition::test_value(15),
+            );
+            // Add a deleted key (in-memory but marked as deleted)
+            entry.data.make_mut().insert(
+                Bytes::from(40_u64.to_be_bytes().to_vec()),
+                WalPosition::INVALID,
+            );
+
+            let mut dirty_keys = HashSet::new();
+            dirty_keys.insert(Bytes::from(15_u64.to_be_bytes().to_vec()));
+            dirty_keys.insert(Bytes::from(40_u64.to_be_bytes().to_vec()));
+
+            entry.state =
+                LargeTableEntryState::DirtyUnloaded(WalPosition::test_value(42), dirty_keys);
+
+            let mut row = Row {
+                value_lru: None,
+                context: context.clone(),
+                entries: Entries::Array(1, Box::new([entry])),
+            };
+
+            // Test finding the in-memory added key
+            let result = table
+                .next_in_cell(
+                    &loader,
+                    &mut row,
+                    &cell_id,
+                    Some(Bytes::from(10_u64.to_be_bytes().to_vec())),
+                    false,
+                )
+                .unwrap();
+            assert!(result.is_some());
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 15_u64.to_be_bytes());
+            assert_eq!(pos, WalPosition::test_value(15));
+
+            // Test skipping the in-memory deleted key and finding the next on-disk key
+            let result = table
+                .next_in_cell(
+                    &loader,
+                    &mut row,
+                    &cell_id,
+                    Some(Bytes::from(30_u64.to_be_bytes().to_vec())),
+                    false,
+                )
+                .unwrap();
+            assert!(result.is_some());
+            let (key, pos) = result.unwrap();
+            assert_eq!(key.as_ref(), 50_u64.to_be_bytes()); // Should skip over the deleted 40
+            assert_eq!(pos, WalPosition::test_value(5));
+        }
     }
 }
