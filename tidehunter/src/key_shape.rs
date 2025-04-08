@@ -2,7 +2,7 @@ use crate::cell::CellId;
 use crate::db::MAX_KEY_LEN;
 use crate::index::index_format::IndexFormatType;
 use crate::math;
-use crate::math::{downscale_u32, starting_u32};
+use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use smallvec::SmallVec;
@@ -224,6 +224,11 @@ impl KeySpaceDesc {
     /// Returns u32 prefix
     pub(crate) fn index_prefix_u32(&self, k: &[u8]) -> u32 {
         starting_u32(self.index_prefix(k))
+    }
+
+    /// Returns u64 prefix
+    pub(crate) fn index_prefix_u64(&self, k: &[u8]) -> u64 {
+        starting_u64(self.index_prefix(k))
     }
 
     fn index_prefix<'a>(&self, k: &'a [u8]) -> &'a [u8] {

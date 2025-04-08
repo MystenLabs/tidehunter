@@ -45,6 +45,7 @@ impl UniformLookupIndex {
 
     fn probable_key_offset_and_window_size(
         &self,
+        ks: &KeySpaceDesc,
         cell_prefix_range: &Range<u64>,
         key: &[u8],
         file_length: usize,
@@ -59,7 +60,7 @@ impl UniformLookupIndex {
 
         assert!(PREFIX_LENGTH >= CELL_PREFIX_LENGTH);
         assert!(PREFIX_LENGTH <= 8); // we want the prefix to fit in u64
-        let prefix = Self::bytes_to_key(&key);
+        let prefix = ks.index_prefix_u64(&key);
         if long_prefix_range_start > prefix || prefix > long_prefix_range_end {
             panic!("Key prefix out of range: key prefix={prefix}, long_prefix_range={long_prefix_range_start}..{long_prefix_range_end}");
         }
@@ -115,13 +116,6 @@ impl UniformLookupIndex {
             .clamp(0, file_length);
         (new_from_offset, new_to_offset)
     }
-
-    fn bytes_to_key(bytes: &[u8]) -> u64 {
-        let mut p = [0u8; PREFIX_LENGTH];
-        let copy_len = bytes.len().min(PREFIX_LENGTH);
-        p[..copy_len].copy_from_slice(&bytes[..copy_len]);
-        u64::from_be_bytes(p)
-    }
 }
 
 impl IndexFormat for UniformLookupIndex {
@@ -157,7 +151,7 @@ impl IndexFormat for UniformLookupIndex {
         // compute probable offset
         let file_length = reader.len();
         let (probable_offset, half_window_size) =
-            self.probable_key_offset_and_window_size(&cell_prefix_range, key, file_length);
+            self.probable_key_offset_and_window_size(ks, &cell_prefix_range, key, file_length);
 
         // compute start and end of the window around probable offset
         let (mut from_offset, mut to_offset) =
@@ -425,57 +419,60 @@ mod test {
         let cell_prefix_range = 0..100;
         let file_length = 1000; // test with file larger than range
         let pi = UniformLookupIndex::new();
+        // key shape with one uniform cell
+        let (key_shape, ks) = KeyShape::new_single(1, 1, KeyType::uniform(1));
+        let ks = key_shape.ks(ks);
 
         let key = [0, 0, 0, 0, 0, 0, 0, 0];
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key: [u8; 9] = [0, 0, 0, 0, 0, 0, 0, 0, 255];
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key = k64(0);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key = k64((cell_prefix_range.end << 32) - 1);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, file_length - 1);
 
         let key = k64((cell_prefix_range.end << 32) / 2);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, file_length / 2);
 
         let file_length = 10; // test with file smaller than range
 
         let key = [0, 0, 0, 0, 0, 0, 0, 0];
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key: [u8; 9] = [0, 0, 0, 0, 0, 0, 0, 0, 255];
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key = k64(0);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key = k64((cell_prefix_range.end << 32) - 1);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, file_length - 1);
 
         let key = k64((cell_prefix_range.end << 32) / 2);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, file_length / 2);
     }
 
