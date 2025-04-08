@@ -640,6 +640,7 @@ impl IntoBytesFixed for WalEntry {
             WalEntry::Record(ks, k, v) => {
                 buf.put_u8(Self::WAL_ENTRY_RECORD);
                 buf.put_u8(ks.0);
+                // todo use key len from ks instead
                 buf.put_u16(k.len() as u16);
                 buf.put_slice(&k);
                 buf.put_slice(&v);
