@@ -1394,7 +1394,7 @@ pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeyS
 fn test_last_four_bytes_corruption() {
     let dir = tempdir::TempDir::new("test_last_four_bytes_corruption").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
 
     let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
     let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
@@ -1462,7 +1462,7 @@ fn test_last_four_bytes_corruption() {
 fn test_first_four_bytes_corruption() {
     let dir = tempdir::TempDir::new("test_first_four_bytes_corruption").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
 
     let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
     let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
