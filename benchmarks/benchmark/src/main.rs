@@ -19,6 +19,9 @@ use std::{fs, thread};
 use tidehunter::config::Config;
 #[cfg(not(feature = "rocks"))]
 use tidehunter::db::Db;
+use tidehunter::index::index_format::IndexFormatType;
+use tidehunter::index::uniform_lookup::UniformLookupIndex;
+use tidehunter::key_shape::KeySpaceConfig;
 #[cfg(not(feature = "rocks"))]
 use tidehunter::key_shape::{KeyShape, KeyType};
 
@@ -71,6 +74,10 @@ struct StressArgs {
     key_layout: KeyLayout,
     #[arg(long, help = "Print tldr report", default_value = "")]
     tldr: String,
+    #[arg(long, help = "Preserve generated directory", default_value = "false")]
+    preserve: bool,
+    #[arg(long, help = "Use pre-generated DB")]
+    reuse: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,12 +92,19 @@ pub fn main() {
     let mut report = Report::default();
     let args: StressArgs = StressArgs::parse();
     let args = Arc::new(args);
-    let dir = if let Some(path) = &args.path {
+    let temp_dir = if let Some(path) = &args.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()
     } else {
         tempdir::TempDir::new("stress").unwrap()
     };
-    println!("Path to storage: {}", dir.path().display());
+
+    let path = if let Some(reuse) = &args.reuse {
+        reuse.parse().unwrap()
+    } else {
+        temp_dir.path().to_path_buf()
+    };
+
+    println!("Path to storage: {}", path.display());
     println!("Using {:?} key layout", args.key_layout);
     let print_report = args.report;
     let registry = Registry::new();
@@ -114,14 +128,14 @@ pub fn main() {
             KeyLayout::Uniform => KeyShape::new_single(32, 1024, KeyType::uniform(32)),
             KeyLayout::SequenceChoice => {
                 let key_type = KeyType::prefix_uniform(8, 2);
-                KeyShape::new_single(32, 1024, key_type)
+                KeyShape::new_single_config(32, 1024, key_type, key_space_config())
             }
             KeyLayout::ChoiceSequence => {
                 let key_type = KeyType::prefix_uniform(15, 4);
-                KeyShape::new_single(32, 1024, key_type)
+                KeyShape::new_single_config(32, 1024, key_type, key_space_config())
             }
         };
-        let storage = TidehunterStorage::open(&registry, config, dir.path(), (key_shape, ks));
+        let storage = TidehunterStorage::open(&registry, config, &path, (key_shape, ks));
         if !args.no_snapshot {
             report!(report, "Periodic snapshot **enabled**");
             storage.db.start_periodic_snapshot();
@@ -133,7 +147,7 @@ pub fn main() {
     #[cfg(feature = "rocks")]
     let storage = {
         use crate::storage::rocks::RocksStorage;
-        RocksStorage::open(dir.path())
+        RocksStorage::open(&path)
     };
     let stress = Stress {
         storage,
@@ -154,7 +168,7 @@ pub fn main() {
     );
     #[cfg(not(feature = "rocks"))]
     {
-        let wal = Db::wal_path(dir.path());
+        let wal = Db::wal_path(&path);
         let wal_len = fs::metadata(wal).unwrap().len();
         report!(
             report,
@@ -217,6 +231,16 @@ pub fn main() {
         )
         .unwrap();
     }
+    if stress.args.preserve {
+        temp_dir.into_path();
+    }
+}
+
+#[cfg(not(feature = "rocks"))]
+fn key_space_config() -> KeySpaceConfig {
+    KeySpaceConfig::new().with_index_format(IndexFormatType::Uniform(
+        UniformLookupIndex::new_with_window_size(80),
+    ))
 }
 
 struct Stress<T> {
