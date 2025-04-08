@@ -118,13 +118,6 @@ impl UniformLookupIndex {
         (new_from_offset, new_to_offset)
     }
 
-    fn bytes_to_key(bytes: &[u8]) -> u64 {
-        let mut p = [0u8; PREFIX_LENGTH];
-        let copy_len = bytes.len().min(PREFIX_LENGTH);
-        p[..copy_len].copy_from_slice(&bytes[..copy_len]);
-        u64::from_be_bytes(p)
-    }
-
     fn next_entry_unloaded_no_prev(
         &self,
         ks: &KeySpaceDesc,
@@ -295,7 +288,7 @@ impl IndexFormat for UniformLookupIndex {
         let cell = ks.cell_id(prev_key);
         let cell_prefix_range = ks.index_prefix_range(&cell);
         let (probable_offset, half_window_size) =
-            self.probable_key_offset_and_window_size(&cell_prefix_range, prev_key, file_length);
+            self.probable_key_offset_and_window_size(ks, &cell_prefix_range, prev_key, file_length);
 
         // Compute the initial window around the probable offset
         let (mut from_offset, mut to_offset) =
