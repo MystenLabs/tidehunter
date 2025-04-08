@@ -479,6 +479,12 @@ impl Wal {
     pub fn fsync(&self) -> io::Result<()> {
         self.file.sync_all()
     }
+
+    /// Returns the file descriptor of the wal file
+    #[cfg(test)]
+    pub(crate) fn file(&self) -> &File {
+        &self.file
+    }
 }
 
 impl WalMapper {
