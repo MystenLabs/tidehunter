@@ -19,8 +19,7 @@ use std::{fs, thread};
 use tidehunter::config::Config;
 #[cfg(not(feature = "rocks"))]
 use tidehunter::db::Db;
-use tidehunter::index::index_format::IndexFormatType;
-use tidehunter::index::uniform_lookup::UniformLookupIndex;
+#[cfg(not(feature = "rocks"))]
 use tidehunter::key_shape::KeySpaceConfig;
 #[cfg(not(feature = "rocks"))]
 use tidehunter::key_shape::{KeyShape, KeyType};
@@ -131,7 +130,7 @@ pub fn main() {
                 KeyShape::new_single_config(32, 1024, key_type, key_space_config())
             }
             KeyLayout::ChoiceSequence => {
-                let key_type = KeyType::prefix_uniform(15, 4);
+                let key_type = KeyType::prefix_uniform(15, 5);
                 KeyShape::new_single_config(32, 1024, key_type, key_space_config())
             }
         };
@@ -238,9 +237,13 @@ pub fn main() {
 
 #[cfg(not(feature = "rocks"))]
 fn key_space_config() -> KeySpaceConfig {
-    KeySpaceConfig::new().with_index_format(IndexFormatType::Uniform(
-        UniformLookupIndex::new_with_window_size(80),
-    ))
+    KeySpaceConfig::new()
+    /*
+        use tidehunter::index::index_format::IndexFormatType;
+        use tidehunter::index::uniform_lookup::UniformLookupIndex;
+        .with_index_format(IndexFormatType::Uniform(
+        UniformLookupIndex::new_with_window_size(300),
+    ))*/
 }
 
 struct Stress<T> {
@@ -367,6 +370,7 @@ impl<T: Storage> StressThread<T> {
     pub fn run_writes(self) {
         let _ = self.start_lock.read();
         for pos in 0..self.args.writes {
+            let pos = self.global_pos(pos);
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             self.db.insert(key.into(), value.into());
@@ -383,10 +387,11 @@ impl<T: Storage> StressThread<T> {
         let writes_per_thread = self.args.background_writes / self.args.threads;
         let delay = Duration::from_micros(1_000_000 / writes_per_thread as u64);
         let mut deadline = Instant::now();
-        let mut pos = usize::MAX;
+        let mut pos = u32::MAX;
         while !self.manual_stop.load(Ordering::Relaxed) {
             deadline = deadline + delay;
             pos -= 1;
+            let pos = self.global_pos(pos as usize);
             let (key, value) = self.key_value(pos);
             self.db.insert(key.into(), value.into());
             thread::sleep(
@@ -400,8 +405,9 @@ impl<T: Storage> StressThread<T> {
     pub fn run_reads(self) {
         let _ = self.start_lock.read();
         let mut pos_rng = ThreadRng::default();
+        let max_pos = self.max_global_pos();
         for _ in 0..self.args.reads {
-            let pos = pos_rng.gen_range(0..self.args.writes);
+            let pos = pos_rng.gen_range(0..max_pos);
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             let found_value = self.db.get(&key).expect("Expected value not found");
@@ -421,41 +427,53 @@ impl<T: Storage> StressThread<T> {
         }
     }
 
-    fn key_value(&self, pos: usize) -> (Vec<u8>, Vec<u8>) {
-        let mut value = vec![0u8; self.args.write_size];
+    #[allow(dead_code)]
+    fn key(&self, pos: u64) -> Vec<u8> {
+        let (key, _) = self.key_and_rng(pos);
+        key
+    }
+
+    fn key_and_rng(&self, pos: u64) -> (Vec<u8>, StdRng) {
+        let mut rng = Self::rng_at(pos);
         let mut key = vec![0u8; self.args.key_len];
-        let mut rng = self.rng_at(pos as u64);
         rng.fill_bytes(&mut key);
         match self.args.key_layout {
             KeyLayout::Uniform => {}
             KeyLayout::SequenceChoice => {
-                let global_pos = self.global_pos(pos) as u64;
                 // the first 16 bytes of a key are not random anymore
                 // First 8 bytes are a sequentially growing value (like consensus round)
-                key[..8].copy_from_slice(&u64::to_be_bytes(global_pos / 256));
+                key[..8].copy_from_slice(&u64::to_be_bytes(pos / 256));
                 // Next 8 bytes are choice of value in range 0..255 (like consensus validator index)
-                key[8..16].copy_from_slice(&u64::to_be_bytes(global_pos % 256));
+                key[8..16].copy_from_slice(&u64::to_be_bytes(pos % 256));
             }
             KeyLayout::ChoiceSequence => {
-                let global_pos = self.global_pos(pos) as u64;
                 // Doing the same as above in different order
-                key[..8].copy_from_slice(&u64::to_be_bytes(global_pos % 256));
-                key[8..16].copy_from_slice(&u64::to_be_bytes(global_pos / 256));
+                key[..8].copy_from_slice(&u64::to_be_bytes(pos % 256));
+                key[8..16].copy_from_slice(&u64::to_be_bytes(pos / 256));
             }
         }
+        (key, rng)
+    }
+
+    fn key_value(&self, pos: u64) -> (Vec<u8>, Vec<u8>) {
+        let (key, mut rng) = self.key_and_rng(pos);
+        let mut value = vec![0u8; self.args.write_size];
         rng.fill_bytes(&mut value);
         (key, value)
     }
 
     /// Maps local index into continuous global space
-    fn global_pos(&self, pos: usize) -> usize {
-        pos * self.args.threads + self.index as usize
+    fn global_pos(&self, pos: usize) -> u64 {
+        (pos * self.args.threads) as u64 + self.index
     }
 
-    fn rng_at(&self, pos: u64) -> StdRng {
+    fn max_global_pos(&self) -> u64 {
+        (self.args.threads * self.args.writes) as u64
+    }
+
+    fn rng_at(pos: u64) -> StdRng {
         let mut seed = <StdRng as SeedableRng>::Seed::default();
         let mut writer = &mut seed[..];
-        writer.put_u64(self.index);
         writer.put_u64(pos);
         StdRng::from_seed(seed)
     }
