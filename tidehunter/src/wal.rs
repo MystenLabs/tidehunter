@@ -245,7 +245,7 @@ impl Wal {
             WalPosition::INVALID,
             "Trying to read invalid wal position"
         );
-        const INITIAL_READ_SIZE: usize = 4 * 1024; // todo probably need to increase even more
+        const INITIAL_READ_SIZE: usize = 1024; // todo probably need to increase even more
         let (map, offset) = self.layout.locate(pos.0);
         if let Some(map) = self.get_map(map) {
             // using CrcFrame::read_from_slice to avoid holding the larger byte array
@@ -390,6 +390,8 @@ impl Wal {
         pin_map_entry.writeable = false;
         // Remove memory mapping and copy over data to a regular byte array
         pin_map_entry.data = Bytes::copy_from_slice(&pin_map.data);
+        // Preserve mem mapping
+        // pin_map_entry.data = pin_map.data.clone();
         if maps.len() > self.layout.max_maps {
             maps.pop_first();
         }
