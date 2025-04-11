@@ -389,9 +389,9 @@ impl Wal {
         );
         pin_map_entry.writeable = false;
         // Remove memory mapping and copy over data to a regular byte array
-        pin_map_entry.data = Bytes::copy_from_slice(&pin_map.data);
+        // pin_map_entry.data = Bytes::copy_from_slice(&pin_map.data);
         // Preserve mem mapping
-        // pin_map_entry.data = pin_map.data.clone();
+        pin_map_entry.data = pin_map.data.clone();
         if maps.len() > self.layout.max_maps {
             maps.pop_first();
         }
