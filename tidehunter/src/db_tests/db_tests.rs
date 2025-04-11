@@ -1,11 +1,11 @@
 use super::super::*;
+use crate::batch::WriteBatch;
 use crate::config::Config;
+use crate::crc::CrcFrame;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
-use crate::key_shape::{KeyShape, KeySpace, KeyType};
-use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
+use crate::key_shape::{KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
 use crate::metrics::Metrics;
-use crate::{batch::WriteBatch, crc::CrcFrame};
 use minibytes::Bytes;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};
@@ -1391,8 +1391,8 @@ pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeyS
 }
 
 #[test]
-fn test_last_four_bytes_corruption() {
-    let dir = tempdir::TempDir::new("test_last_four_bytes_corruption").unwrap();
+fn test_value_corruption() {
+    let dir = tempdir::TempDir::new("test_value_corruption").unwrap();
     let config = Arc::new(Config::small());
     let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
 
@@ -1459,8 +1459,8 @@ fn test_last_four_bytes_corruption() {
 }
 
 #[test]
-fn test_first_four_bytes_corruption() {
-    let dir = tempdir::TempDir::new("test_first_four_bytes_corruption").unwrap();
+fn test_header_corruption() {
+    let dir = tempdir::TempDir::new("test_header_corruption").unwrap();
     let config = Arc::new(Config::small());
     let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
 
@@ -1493,6 +1493,71 @@ fn test_first_four_bytes_corruption() {
     file.read_exact_at(&mut data, last_position).unwrap();
     data[0] = !data[0];
     file.write_all_at(&mut data, last_position).unwrap();
+
+    // Re-open the database and insert some new data
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_4.clone(), value_4.clone()).unwrap();
+    }
+
+    // Re-open the database; verify that the corrupt data is not accessible
+    // and all other data is intact
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        assert_eq!(Some(value_1.into()), db.get(ks, &key_1).unwrap());
+        assert_eq!(Some(value_2.into()), db.get(ks, &key_2).unwrap());
+        assert_eq!(None, db.get(ks, &key_3).unwrap());
+        assert_eq!(Some(value_4.into()), db.get(ks, &key_4).unwrap());
+    }
+}
+
+#[test]
+fn test_max_value_header_corruption() {
+    let dir = tempdir::TempDir::new("test_max_value_header_corruption").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+
+    let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
+    let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
+    let (key_3, value_3) = (vec![3, 3], vec![3, 13]);
+    let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
+
+    // Open the db and insert some data. Record the position of the last entry
+    let (last_position, file) = {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
+        db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
+        let position = db.wal_writer.position();
+        db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
+
+        let file = db.wal.file().try_clone().unwrap();
+        (position, file)
+    };
+
+    // Insert a corruption in the first byte of the last database entry
+    let data = [0xffu8; 8];
+    file.write_all_at(&data, last_position).unwrap();
 
     // Re-open the database and insert some new data
     {
