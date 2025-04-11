@@ -203,6 +203,7 @@ impl Wal {
         options.create(true).read(true).write(true);
         set_direct_options(&mut options, layout.direct_io);
         let file = options.open(p)?;
+        Self::resize(&layout, &file)?;
         Ok(Self::from_file(file, layout, metrics))
     }
 
@@ -447,6 +448,16 @@ impl Wal {
         let len = file.metadata()?.len();
         if len < range.end {
             file.set_len(range.end)?;
+        }
+        Ok(())
+    }
+
+    /// Resize the file to fit the current layout
+    fn resize(layout: &WalLayout, file: &File) -> io::Result<()> {
+        let len = file.metadata()?.len();
+        let r = len % layout.frag_size;
+        if r != 0 {
+            file.set_len(len + layout.frag_size - r)?;
         }
         Ok(())
     }
@@ -884,6 +895,44 @@ mod tests {
         let mut buf = bytes.as_ref();
         let position = WalPosition::read_from_buf(&mut buf);
         assert_eq!(position, WalPosition::TEST);
+    }
+
+    /// Test that the wal file is resized correctly when the file is corrupted in such a way that
+    /// the file length is not a multiple of the frag size.
+    #[test]
+    fn test_wal_resize() {
+        let dir = tempdir::TempDir::new("test_wal_resize").unwrap();
+        let file_path = dir.path().join("wal");
+        let frag_size = 512;
+        let layout = WalLayout {
+            frag_size,
+            max_maps: 2,
+            direct_io: false,
+        };
+
+        // Write an entry into the WAl
+        let position = {
+            let wal = Wal::open(&file_path, layout.clone(), Metrics::new()).unwrap();
+            let writer = wal
+                .wal_iterator(WalPosition::INVALID)
+                .unwrap()
+                .into_writer();
+            writer
+                .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
+                .unwrap()
+        };
+
+        // Corrupt the file length
+        let file = OpenOptions::new().write(true).open(&file_path).unwrap();
+        let len = file.metadata().unwrap().len();
+        file.set_len(len - frag_size / 2).unwrap();
+        assert_ne!(file.metadata().unwrap().len() % frag_size, 0);
+
+        // Re-open the WAL and ensure it resizes correctly
+        let wal = Wal::open(&file_path, layout, Metrics::new()).unwrap();
+        let data = wal.read(position).unwrap();
+        assert_eq!(&[1, 2, 3], data.as_ref());
+        assert_eq!(file.metadata().unwrap().len() % frag_size, 0);
     }
 
     #[track_caller]
