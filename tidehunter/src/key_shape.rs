@@ -53,6 +53,7 @@ pub struct KeySpaceConfig {
     value_cache_size: usize,
     key_reduction: Option<Range<usize>>,
     index_format: IndexFormatType,
+    unloaded_iterator: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -319,6 +320,10 @@ impl KeySpaceDesc {
         self.config.disable_unload
     }
 
+    pub(crate) fn unloaded_iterator_enabled(&self) -> bool {
+        self.config.unloaded_iterator
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -371,6 +376,11 @@ impl KeySpaceConfig {
 
     pub fn with_index_format(mut self, index_format: IndexFormatType) -> Self {
         self.index_format = index_format;
+        self
+    }
+
+    pub fn with_unloaded_iterator(mut self, enabled: bool) -> Self {
+        self.unloaded_iterator = enabled;
         self
     }
 }

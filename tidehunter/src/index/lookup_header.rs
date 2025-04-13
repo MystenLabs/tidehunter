@@ -3,22 +3,15 @@ use std::time::Instant;
 use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 
-use crate::math::rescale_u32;
+use crate::math::{next_bounded, rescale_u32};
 use crate::metrics::Metrics;
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 use super::index_format::{
-    binary_search, IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE,
+    binary_search, Direction, IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE,
 };
 use super::{deserialize_index_entries, serialize_index_entries};
-
-/// Direction for index navigation
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Direction {
-    Forward,
-    Backward,
-}
 
 #[derive(Clone)]
 pub struct LookupHeaderIndex;
@@ -87,7 +80,7 @@ impl LookupHeaderIndex {
         key_size: usize,
         element_size: usize,
         metrics: &Metrics,
-    ) -> Option<(Vec<u8>, WalPosition)> {
+    ) -> Option<(Bytes, WalPosition)> {
         let (buffer, _, _) = self.read_micro_cell_section(reader, micro_cell, metrics)?;
 
         if buffer.is_empty() {
@@ -146,7 +139,7 @@ impl LookupHeaderIndex {
 
         // Extract the key and value at the position
         let entry_start = start_pos * element_size;
-        let key = buffer[entry_start..entry_start + key_size].to_vec();
+        let key = buffer.slice(entry_start..entry_start + key_size);
         let value_bytes = &buffer[entry_start + key_size..entry_start + element_size];
         let pos = WalPosition::from_slice(value_bytes);
 
@@ -207,7 +200,7 @@ impl IndexFormat for LookupHeaderIndex {
         prev: Option<&[u8]>,
         direction: Direction,
         metrics: &Metrics,
-    ) -> Option<(Vec<u8>, WalPosition)> {
+    ) -> Option<(Bytes, WalPosition)> {
         let key_size = ks.reduced_key_size();
         let element_size = Self::element_size(ks);
 
@@ -223,37 +216,8 @@ impl IndexFormat for LookupHeaderIndex {
             }
         };
 
-        // Try to find the entry in the start micro-cell
-        if let result @ Some(_) = self.process_micro_cell(
-            reader,
-            start_micro_cell,
-            prev,
-            direction,
-            key_size,
-            element_size,
-            metrics,
-        ) {
-            return result;
-        }
-
-        // If not found in the start micro-cell, try adjacent cells
         let mut current_micro_cell = start_micro_cell;
         loop {
-            match direction {
-                Direction::Forward => {
-                    current_micro_cell += 1;
-                    if current_micro_cell >= HEADER_ELEMENTS {
-                        break None; // No more micro-cells
-                    }
-                }
-                Direction::Backward => {
-                    if current_micro_cell == 0 {
-                        break None; // No more micro-cells
-                    }
-                    current_micro_cell -= 1;
-                }
-            }
-
             if let result @ Some(_) = self.process_micro_cell(
                 reader,
                 current_micro_cell,
@@ -264,6 +228,14 @@ impl IndexFormat for LookupHeaderIndex {
                 metrics,
             ) {
                 break result;
+            }
+            match next_bounded(
+                current_micro_cell,
+                HEADER_ELEMENTS,
+                direction == Direction::Backward,
+            ) {
+                Some(micro_cell) => current_micro_cell = micro_cell,
+                None => return None,
             }
         }
     }
