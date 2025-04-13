@@ -692,6 +692,10 @@ impl WalPosition {
         self.0
     }
 
+    pub fn is_valid(self) -> bool {
+        self != Self::INVALID
+    }
+
     #[allow(dead_code)]
     pub fn test_value(v: u64) -> Self {
         Self(v)

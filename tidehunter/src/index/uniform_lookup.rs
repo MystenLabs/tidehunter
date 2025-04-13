@@ -2,8 +2,7 @@ use minibytes::Bytes;
 use std::ops::Range;
 use std::time::Instant;
 
-use super::index_format::IndexFormat;
-use super::lookup_header::Direction;
+use super::index_format::{Direction, IndexFormat};
 use super::{deserialize_index_entries, serialize_index_entries};
 use crate::index::index_format::{binary_search, PREFIX_LENGTH};
 use crate::key_shape::CELL_PREFIX_LENGTH;
@@ -124,7 +123,7 @@ impl UniformLookupIndex {
         reader: &impl RandomRead,
         direction: Direction,
         metrics: &Metrics,
-    ) -> Option<(Vec<u8>, WalPosition)> {
+    ) -> Option<(Bytes, WalPosition)> {
         let element_size = Self::element_size(ks);
         let key_size = ks.reduced_key_size();
         let file_length = reader.len();
@@ -166,7 +165,7 @@ impl UniformLookupIndex {
         };
 
         let entry_start = pos * element_size;
-        let key = buffer[entry_start..entry_start + key_size].to_vec();
+        let key = buffer.slice(entry_start..entry_start + key_size);
         let value_bytes = &buffer[entry_start + key_size..entry_start + element_size];
         let pos = WalPosition::from_slice(value_bytes);
 
@@ -270,18 +269,16 @@ impl IndexFormat for UniformLookupIndex {
         prev: Option<&[u8]>,
         direction: Direction,
         metrics: &Metrics,
-    ) -> Option<(Vec<u8>, WalPosition)> {
+    ) -> Option<(Bytes, WalPosition)> {
         let element_size = Self::element_size(ks);
         let key_size = ks.reduced_key_size();
         let file_length = reader.len();
 
         // If there's no previous key, just start at the beginning/end
-        if prev.is_none() {
+        let Some(prev_key) = prev else {
             return self.next_entry_unloaded_no_prev(ks, reader, direction, metrics);
-        }
+        };
 
-        // We have a previous key, so first find its location
-        let prev_key = prev.unwrap();
         assert_eq!(prev_key.len(), key_size);
 
         // Find the cell and compute probable offset
@@ -410,7 +407,7 @@ impl IndexFormat for UniformLookupIndex {
 
             // Extract the key and value at the position
             let entry_start = next_pos * element_size;
-            let key = buffer[entry_start..entry_start + key_size].to_vec();
+            let key = buffer.slice(entry_start..entry_start + key_size);
             let value_bytes = &buffer[entry_start + key_size..entry_start + element_size];
             let pos = WalPosition::from_slice(value_bytes);
 

@@ -2,7 +2,6 @@ use std::time::Instant;
 
 use minibytes::Bytes;
 
-use super::lookup_header::Direction;
 use super::lookup_header::LookupHeaderIndex;
 use super::uniform_lookup::UniformLookupIndex;
 use crate::metrics::Metrics;
@@ -34,7 +33,7 @@ pub trait IndexFormat {
         prev: Option<&[u8]>,
         direction: Direction,
         metrics: &Metrics,
-    ) -> Option<(Vec<u8>, WalPosition)>;
+    ) -> Option<(Bytes, WalPosition)>;
 
     fn element_size(ks: &KeySpaceDesc) -> usize {
         ks.reduced_key_size() + WalPosition::LENGTH
@@ -85,7 +84,7 @@ impl IndexFormat for IndexFormatType {
         prev: Option<&[u8]>,
         direction: Direction,
         metrics: &Metrics,
-    ) -> Option<(Vec<u8>, WalPosition)> {
+    ) -> Option<(Bytes, WalPosition)> {
         match self {
             IndexFormatType::Header => {
                 LookupHeaderIndex.next_entry_unloaded(ks, reader, prev, direction, metrics)
@@ -100,6 +99,23 @@ impl IndexFormat for IndexFormatType {
         match self {
             IndexFormatType::Header => LookupHeaderIndex.use_unbounded_reader(),
             IndexFormatType::Uniform(index) => index.use_unbounded_reader(),
+        }
+    }
+}
+
+/// Direction for index navigation
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Direction {
+    Forward,
+    Backward,
+}
+
+impl Direction {
+    pub fn from_bool(reverse: bool) -> Self {
+        if reverse {
+            Self::Backward
+        } else {
+            Self::Forward
         }
     }
 }
@@ -186,7 +202,7 @@ pub mod test {
     use rand::{rngs::ThreadRng, Rng, RngCore};
 
     use crate::index::index_format::binary_search;
-    use crate::index::lookup_header::Direction;
+    use crate::index::index_format::Direction;
     use crate::key_shape::{KeyType, MAX_U32_PLUS_ONE};
     use crate::lookup::RandomRead;
     use crate::{

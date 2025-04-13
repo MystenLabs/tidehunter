@@ -2,9 +2,10 @@ use crate::cell::{CellId, CellIdBytesContainer};
 use crate::config::Config;
 use crate::context::KsContext;
 use crate::flusher::{FlushKind, IndexFlusher};
+use crate::index::index_format::Direction;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
-use crate::index::lookup_header::Direction;
+use crate::index::utils::take_next_entry;
 use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
@@ -531,18 +532,22 @@ impl LargeTable {
             return Ok(None);
         };
 
+        if !entry.context.ks_config.unloaded_iterator_enabled() {
+            entry.maybe_load(loader)?;
+            return Ok(entry.next_entry(prev_key, reverse));
+        }
+
         match &entry.state {
             // If already loaded, just use what's in memory
             LargeTableEntryState::Loaded(_) | LargeTableEntryState::DirtyLoaded(_, _) => {
-                let mut result = entry.next_entry(prev_key.clone(), reverse);
-
+                let mut prev_key = prev_key;
                 // Skip entries marked as invalid (deleted)
-                while let Some((key, pos)) = result {
-                    if pos != WalPosition::INVALID {
+                while let Some((key, pos)) = entry.next_entry(prev_key.take(), reverse) {
+                    if pos.is_valid() {
                         return Ok(Some((key, pos)));
                     }
                     // Get next entry after the invalid one
-                    result = entry.next_entry(Some(key), reverse);
+                    prev_key = Some(key);
                 }
 
                 Ok(None)
@@ -559,11 +564,7 @@ impl LargeTable {
 
                 // Use the format to find the next entry from on-disk index
                 let result = runtime::block_in_place(|| {
-                    let direction = if reverse {
-                        Direction::Backward
-                    } else {
-                        Direction::Forward
-                    };
+                    let direction = Direction::from_bool(reverse);
 
                     format.next_entry_unloaded(
                         &entry.context.ks_config,
@@ -589,11 +590,7 @@ impl LargeTable {
 
                 // Use the format to find the next entry from on-disk index
                 let on_disk_next = runtime::block_in_place(|| {
-                    let direction = if reverse {
-                        Direction::Backward
-                    } else {
-                        Direction::Forward
-                    };
+                    let direction = Direction::from_bool(reverse);
 
                     format
                         .next_entry_unloaded(
@@ -606,45 +603,14 @@ impl LargeTable {
                         .map(|(key, pos)| (Bytes::from(key), pos))
                 });
 
-                // Compare and decide which one to return
-                let result = match (in_memory_next, on_disk_next) {
-                    (None, None) => None,
-                    (Some((k, v)), None) => {
-                        if v != WalPosition::INVALID {
-                            Some((k, v))
-                        } else {
-                            // Recursively call with the next key as prev_key to skip the deleted entry
-                            return self.next_in_cell(loader, row, cell, Some(k), reverse);
-                        }
-                    }
-                    (None, Some((k, v))) => Some((k, v)),
-                    (Some((k_mem, v_mem)), Some((k_disk, v_disk))) => {
-                        // Choose based on key ordering and direction
-                        let compare = k_mem.as_ref().cmp(k_disk.as_ref());
-                        let first_is_memory = if reverse {
-                            compare == std::cmp::Ordering::Greater
-                        } else {
-                            compare == std::cmp::Ordering::Less
-                        };
-
-                        if first_is_memory {
-                            if v_mem != WalPosition::INVALID {
-                                Some((k_mem, v_mem))
-                            } else {
-                                // Skip deleted entry and continue
-                                return self.next_in_cell(loader, row, cell, Some(k_mem), reverse);
-                            }
-                        } else if compare == std::cmp::Ordering::Equal {
-                            // Same key, prefer in-memory version
-                            if v_mem != WalPosition::INVALID {
-                                Some((k_mem, v_mem))
-                            } else {
-                                // In-memory version is deleted, skip this key
-                                return self.next_in_cell(loader, row, cell, Some(k_mem), reverse);
-                            }
-                        } else {
-                            Some((k_disk, v_disk))
-                        }
+                // Use the utility function to determine the next entry
+                let direction = Direction::from_bool(reverse);
+                let result = match take_next_entry(in_memory_next, on_disk_next, direction) {
+                    None => None,
+                    Some(Ok(result)) => Some(result),
+                    Some(Err(skip_key)) => {
+                        // Recursively call with the key to skip
+                        return self.next_in_cell(loader, row, cell, Some(skip_key), reverse);
                     }
                 };
 
@@ -1405,7 +1371,7 @@ impl Entries {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key_shape::KeyShapeBuilder;
+    use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
     use std::io;
 
     #[test]
@@ -1439,7 +1405,11 @@ mod tests {
     fn test_next_in_cell() {
         // Create a test setup with different entry states
         let metrics = Metrics::new();
-        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
+
+        // Create key space with unloaded_iterator enabled
+        let config = KeySpaceConfig::default().with_unloaded_iterator(true);
+        let (shape, ks_id) = KeyShape::new_single_config(8, 1, KeyType::uniform(1), config);
+
         let ks = shape.ks(ks_id);
         let context = KsContext {
             ks_config: ks.clone(),
