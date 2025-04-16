@@ -394,7 +394,12 @@ impl Wal {
         // Preserve mem mapping
         pin_map_entry.data = pin_map.data.clone();
         if maps.len() > self.layout.max_maps {
-            maps.pop_first();
+            if let Some((_, popped_map)) = maps.pop_first() {
+                drop(maps);
+                // self.maps write lock is very expensive as it blocks any IO operation
+                // dropping popped_map can result in syscall, therefore doing it after lock is released
+                drop(popped_map);
+            }
         }
         map
     }
