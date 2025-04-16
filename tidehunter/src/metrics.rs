@@ -45,6 +45,7 @@ pub struct Metrics {
     pub flush_update: IntCounterVec,
     pub flushed_keys: IntCounterVec,
     pub flushed_bytes: IntCounterVec,
+    pub flush_pending: IntGauge,
 
     pub memory_estimate: IntGaugeVec,
     pub value_cache_size: IntGaugeVec,
@@ -143,6 +144,7 @@ impl Metrics {
             flush_update: counter_vec!("flush_update", &["kind"], registry),
             flushed_keys: counter_vec!("flushed_keys", &["ks"], registry),
             flushed_bytes: counter_vec!("flushed_bytes", &["ks"], registry),
+            flush_pending: gauge!("flush_pending", registry),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),
             value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry),

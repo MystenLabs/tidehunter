@@ -14,6 +14,7 @@ use std::time::Instant;
 
 pub struct IndexFlusher {
     sender: mpsc::Sender<FlusherCommand>,
+    metrics: Arc<Metrics>,
 }
 
 struct IndexFlusherThread {
@@ -36,8 +37,8 @@ pub enum FlushKind {
 }
 
 impl IndexFlusher {
-    pub fn new(sender: mpsc::Sender<FlusherCommand>) -> Self {
-        Self { sender }
+    pub fn new(sender: mpsc::Sender<FlusherCommand>, metrics: Arc<Metrics>) -> Self {
+        Self { sender, metrics }
     }
 
     pub fn start_thread(
@@ -63,6 +64,7 @@ impl IndexFlusher {
             cell,
             flush_kind,
         };
+        self.metrics.flush_pending.add(1);
         self.sender
             .send(command)
             .expect("Flusher has stopped unexpectedly")
@@ -71,7 +73,7 @@ impl IndexFlusher {
     #[cfg(test)]
     pub fn new_unstarted_for_test() -> Self {
         let (sender, _receiver) = mpsc::channel();
-        Self::new(sender)
+        Self::new(sender, Metrics::new())
     }
 
     /// Wait until all messages that are currently queued for flusher are processed
@@ -85,6 +87,7 @@ impl IndexFlusher {
             cell: CellId::Integer(0),
             flush_kind: FlushKind::Barrier(SendGuard(lock)),
         };
+        self.metrics.flush_pending.add(1);
         self.sender.send(command).unwrap();
         let _ = mutex.lock();
     }
@@ -92,8 +95,8 @@ impl IndexFlusher {
 
 impl IndexFlusherThread {
     pub fn run(self) {
-        // todo run compactor with flusher
         while let Ok(command) = self.receiver.recv() {
+            self.metrics.flush_pending.add(-1);
             let now = Instant::now();
             let Some(db) = self.db.upgrade() else {
                 return;

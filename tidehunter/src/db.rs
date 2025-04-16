@@ -47,7 +47,7 @@ impl Db {
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join("cr"), &key_shape)?;
         let (flusher_sender, flusher_receiver) = mpsc::channel();
-        let flusher = IndexFlusher::new(flusher_sender);
+        let flusher = IndexFlusher::new(flusher_sender, metrics.clone());
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
