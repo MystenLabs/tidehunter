@@ -9,7 +9,7 @@ use crate::metrics::Metrics;
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
-pub const HEADER_ELEMENTS: usize = 1024;
+pub const HEADER_ELEMENTS: usize = 128;
 pub const HEADER_ELEMENT_SIZE: usize = 8;
 pub const HEADER_SIZE: usize = HEADER_ELEMENTS * HEADER_ELEMENT_SIZE;
 pub const PREFIX_LENGTH: usize = 8; // prefix of key used to estimate position in file, in bytes
