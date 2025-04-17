@@ -5,7 +5,7 @@ use crate::flusher::{FlushKind, IndexFlusher};
 use crate::index::index_format::Direction;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
-use crate::index::utils::take_next_entry;
+use crate::index::utils::{take_next_entry, NextEntryResult};
 use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
@@ -575,8 +575,7 @@ impl LargeTable {
                     )
                 });
 
-                // Convert Vec<u8> to Bytes if we got a result
-                Ok(result.map(|(key, pos)| (Bytes::from(key), pos)))
+                Ok(result)
             }
 
             // For dirty unloaded, combine in-memory and on-disk entries
@@ -592,24 +591,22 @@ impl LargeTable {
                 let on_disk_next = runtime::block_in_place(|| {
                     let direction = Direction::from_bool(reverse);
 
-                    format
-                        .next_entry_unloaded(
-                            &entry.context.ks_config,
-                            &index_reader,
-                            prev_key.as_deref(),
-                            direction,
-                            &entry.context.metrics,
-                        )
-                        .map(|(key, pos)| (Bytes::from(key), pos))
+                    format.next_entry_unloaded(
+                        &entry.context.ks_config,
+                        &index_reader,
+                        prev_key.as_deref(),
+                        direction,
+                        &entry.context.metrics,
+                    )
                 });
 
                 // Use the utility function to determine the next entry
                 let direction = Direction::from_bool(reverse);
                 let result = match take_next_entry(in_memory_next, on_disk_next, direction) {
-                    None => None,
-                    Some(Ok(result)) => Some(result),
-                    Some(Err(skip_key)) => {
-                        // Recursively call with the key to skip
+                    NextEntryResult::NotFound => None,
+                    NextEntryResult::Found(key, val) => Some((key, val)),
+                    NextEntryResult::SkipDeleted(skip_key) => {
+                        // todo remove recursion
                         return self.next_in_cell(loader, row, cell, Some(skip_key), reverse);
                     }
                 };

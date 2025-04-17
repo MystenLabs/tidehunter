@@ -159,10 +159,7 @@ impl UniformLookupIndex {
         }
 
         // Return first or last entry based on direction
-        let pos = match direction {
-            Direction::Forward => 0,
-            Direction::Backward => entry_count - 1,
-        };
+        let pos = direction.first_in_range(0..entry_count);
 
         let entry_start = pos * element_size;
         let key = buffer.slice(entry_start..entry_start + key_size);
