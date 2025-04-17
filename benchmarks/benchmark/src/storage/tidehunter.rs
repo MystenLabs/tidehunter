@@ -11,7 +11,6 @@ use tidehunter::metrics::Metrics;
 pub struct TidehunterStorage {
     pub db: Arc<Db>,
     ks: KeySpace,
-    pub metrics: Arc<Metrics>,
 }
 
 impl Storage for Arc<TidehunterStorage> {
@@ -31,7 +30,7 @@ impl Storage for Arc<TidehunterStorage> {
         Some(next.expect("Db error").1)
     }
 
-    fn name() -> &'static str {
+    fn name(&self) -> &'static str {
         "tidehunter"
     }
 }
@@ -45,8 +44,8 @@ impl TidehunterStorage {
     ) -> Arc<Self> {
         let config = Arc::new(config);
         let metrics = Metrics::new_in(registry);
-        let db = Db::open(path, key_shape, config, metrics.clone()).unwrap();
-        let this = Self { db, ks, metrics };
+        let db = Db::open(path, key_shape, config, metrics).unwrap();
+        let this = Self { db, ks };
         Arc::new(this)
     }
 }

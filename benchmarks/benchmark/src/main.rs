@@ -1,4 +1,5 @@
 use crate::metrics::BenchmarkMetrics;
+use crate::storage::rocks::RocksStorage;
 use crate::storage::Storage;
 use ::prometheus::Registry;
 use bytes::BufMut;
@@ -15,13 +16,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
-#[cfg(not(feature = "rocks"))]
 use tidehunter::config::Config;
-#[cfg(not(feature = "rocks"))]
-use tidehunter::db::Db;
-#[cfg(not(feature = "rocks"))]
 use tidehunter::key_shape::KeySpaceConfig;
-#[cfg(not(feature = "rocks"))]
 use tidehunter::key_shape::{KeyShape, KeyType};
 
 mod metrics;
@@ -42,7 +38,7 @@ macro_rules! report {
 struct StressArgs {
     #[arg(long, short = 't', help = "Number of write threads")]
     threads: usize,
-    #[arg(long, short = 'b', help = "Length of the value")]
+    #[arg(long, short = 'v', help = "Length of the value")]
     write_size: usize,
     #[arg(long, short = 'k', help = "Length of the key")]
     key_len: usize,
@@ -79,6 +75,8 @@ struct StressArgs {
     reuse: Option<String>,
     #[arg(long, help = "Read mode", default_value = "get")]
     read_mode: ReadMode,
+    #[arg(long, short = "b", help = "Backend")]
+    backend: Backend,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +90,12 @@ enum KeyLayout {
 enum ReadMode {
     Get,
     Lt,
+}
+
+#[derive(Debug, Clone)]
+enum Backend {
+    Tidehunter,
+    Rocksdb,
 }
 
 pub fn main() {
@@ -117,44 +121,44 @@ pub fn main() {
     let registry = Registry::new();
     let benchmark_metrics = BenchmarkMetrics::new_in(&registry);
     prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
-    #[cfg(not(feature = "rocks"))]
-    let storage = {
-        let mut config = Config::default();
-        config.max_dirty_keys = 1024;
-        config.direct_io = args.direct_io;
-        config.frag_size = 1024 * 1024 * 1024;
-        config.max_maps = 100;
-        config.snapshot_unload_threshold = 128 * 1024 * 1024 * 1024;
-        config.snapshot_written_bytes = 64 * 1024 * 1024 * 1024;
-        config.unload_jitter_pct = 30;
-        if args.direct_io {
-            report!(report, "Using **direct IO**");
-        }
-        use crate::storage::tidehunter::TidehunterStorage;
-        let (key_shape, ks) = match args.key_layout {
-            KeyLayout::Uniform => KeyShape::new_single(32, 2048, KeyType::uniform(32)),
-            KeyLayout::SequenceChoice => {
-                let key_type = KeyType::prefix_uniform(8, 2);
-                KeyShape::new_single_config(32, 1024, key_type, key_space_config())
+    let storage: Arc<dyn Storage> = match args.backend {
+        Backend::Tidehunter => {
+            let mut config = Config::default();
+            config.max_dirty_keys = 1024;
+            config.direct_io = args.direct_io;
+            config.frag_size = 1024 * 1024 * 1024;
+            config.max_maps = 100;
+            config.snapshot_unload_threshold = 128 * 1024 * 1024 * 1024;
+            config.snapshot_written_bytes = 64 * 1024 * 1024 * 1024;
+            config.unload_jitter_pct = 30;
+            if args.direct_io {
+                report!(report, "Using **direct IO**");
             }
-            KeyLayout::ChoiceSequence => {
-                let key_type = KeyType::prefix_uniform(15, 5);
-                KeyShape::new_single_config(32, 1024, key_type, key_space_config())
+            use crate::storage::tidehunter::TidehunterStorage;
+            let (key_shape, ks) = match args.key_layout {
+                KeyLayout::Uniform => KeyShape::new_single(32, 2048, KeyType::uniform(32)),
+                KeyLayout::SequenceChoice => {
+                    let key_type = KeyType::prefix_uniform(8, 2);
+                    KeyShape::new_single_config(32, 1024, key_type, key_space_config())
+                }
+                KeyLayout::ChoiceSequence => {
+                    let key_type = KeyType::prefix_uniform(15, 5);
+                    KeyShape::new_single_config(32, 1024, key_type, key_space_config())
+                }
+            };
+            let storage = TidehunterStorage::open(&registry, config, &path, (key_shape, ks));
+            if !args.no_snapshot {
+                report!(report, "Periodic snapshot **enabled**");
+                storage.db.start_periodic_snapshot();
+            } else {
+                report!(report, "Periodic snapshot **disabled**");
             }
-        };
-        let storage = TidehunterStorage::open(&registry, config, &path, (key_shape, ks));
-        if !args.no_snapshot {
-            report!(report, "Periodic snapshot **enabled**");
-            storage.db.start_periodic_snapshot();
-        } else {
-            report!(report, "Periodic snapshot **disabled**");
+            Arc::new(storage)
         }
-        storage
-    };
-    #[cfg(feature = "rocks")]
-    let storage = {
-        use crate::storage::rocks::RocksStorage;
-        RocksStorage::open(&path)
+        Backend::Rocksdb => {
+            let storage = RocksStorage::open(&path);
+            Arc::new(storage)
+        }
     };
     let stress = Stress {
         storage,
@@ -173,14 +177,12 @@ pub fn main() {
         write_sec,
         byte_div(written_bytes / msecs * 1000)
     );
-    #[cfg(not(feature = "rocks"))]
     {
-        let wal = Db::wal_path(&path);
-        let wal_len = fs::metadata(wal).unwrap().len();
+        let storage_len = fs_extra::dir::get_size(&path).unwrap();
         report!(
             report,
-            "Wal size {:.1} Gb",
-            wal_len as f64 / 1024. / 1024. / 1024.
+            "Storage used {:.1} Gb",
+            storage_len as f64 / 1024. / 1024. / 1024.
         );
     }
     println!("Starting read test");
@@ -200,16 +202,6 @@ pub fn main() {
         "Read test done in {elapsed:?}: {} reads/s, {}/sec",
         read_sec,
         byte_div(read_bytes / msecs * 1000)
-    );
-    #[cfg(not(feature = "rocks"))]
-    report!(
-        report,
-        "Max index size {} entries",
-        stress
-            .storage
-            .metrics
-            .max_index_size
-            .load(Ordering::Relaxed)
     );
     if print_report {
         println!("Writing report file");
@@ -243,7 +235,6 @@ pub fn main() {
     }
 }
 
-#[cfg(not(feature = "rocks"))]
 fn key_space_config() -> KeySpaceConfig {
     KeySpaceConfig::new()
     /*
@@ -254,8 +245,8 @@ fn key_space_config() -> KeySpaceConfig {
     ))*/
 }
 
-struct Stress<T> {
-    storage: T,
+struct Stress {
+    storage: Arc<dyn Storage>,
     args: Arc<StressArgs>,
     benchmark_metrics: Arc<BenchmarkMetrics>,
 }
@@ -265,8 +256,8 @@ struct Report {
     lines: String,
 }
 
-impl<T: Storage> Stress<T> {
-    pub fn background<F: FnOnce(StressThread<T>) + Clone + Send + 'static>(
+impl Stress {
+    pub fn background<F: FnOnce(StressThread) + Clone + Send + 'static>(
         &self,
         f: F,
     ) -> Arc<AtomicBool> {
@@ -274,7 +265,7 @@ impl<T: Storage> Stress<T> {
         manual_stop
     }
 
-    pub fn measure<F: FnOnce(StressThread<T>) + Clone + Send + 'static>(
+    pub fn measure<F: FnOnce(StressThread) + Clone + Send + 'static>(
         &self,
         f: F,
         report: &mut Report,
@@ -301,7 +292,7 @@ impl<T: Storage> Stress<T> {
         start.elapsed()
     }
 
-    fn start_threads<F: FnOnce(StressThread<T>) + Clone + Send + 'static>(
+    fn start_threads<F: FnOnce(StressThread) + Clone + Send + 'static>(
         &self,
         f: F,
     ) -> (
@@ -362,8 +353,8 @@ fn byte_div(n: usize) -> String {
     }
 }
 
-struct StressThread<T> {
-    db: T,
+struct StressThread {
+    db: Arc<dyn Storage>,
     start_lock: Arc<RwLock<()>>,
     args: Arc<StressArgs>,
     index: u64,
@@ -374,7 +365,7 @@ struct StressThread<T> {
     benchmark_metrics: Arc<BenchmarkMetrics>,
 }
 
-impl<T: Storage> StressThread<T> {
+impl StressThread {
     pub fn run_writes(self) {
         let _ = self.start_lock.read();
         for pos in 0..self.args.writes {
@@ -385,7 +376,7 @@ impl<T: Storage> StressThread<T> {
             let latency = timer.elapsed().as_micros();
             self.benchmark_metrics
                 .bench_writes
-                .with_label_values(&[T::name()])
+                .with_label_values(&[self.db.name()])
                 .observe(latency as f64);
             self.latency.increment(latency as u64).unwrap();
         }
@@ -447,7 +438,7 @@ impl<T: Storage> StressThread<T> {
             let latency = timer.elapsed().as_micros();
             self.benchmark_metrics
                 .bench_reads
-                .with_label_values(&[T::name()])
+                .with_label_values(&[self.db.name()])
                 .observe(latency as f64);
             if self.latency.increment(latency as u64).is_err() {
                 self.latency_errors.fetch_add(1, Ordering::Relaxed);
@@ -536,6 +527,22 @@ impl FromStr for ReadMode {
         } else {
             anyhow::bail!(
                 "Only allowed choices for read_mode are 'get'(get) or 'lt'(iterator less then)"
+            );
+        }
+    }
+}
+
+impl FromStr for Backend {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "thdb" {
+            Ok(Self::Tidehunter)
+        } else if s == "rocks" {
+            Ok(Self::Rocksdb)
+        } else {
+            anyhow::bail!(
+                "Only allowed choices for backend are 'thdb'(Tidehunter) or 'rocks'(RocksDB)"
             );
         }
     }

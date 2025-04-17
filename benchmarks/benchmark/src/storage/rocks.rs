@@ -102,7 +102,7 @@ impl Storage for Arc<RocksStorage> {
         Some(next.expect("Db error").1.into())
     }
 
-    fn name() -> &'static str {
+    fn name(&self) -> &'static str {
         "rocksdb"
     }
 }
