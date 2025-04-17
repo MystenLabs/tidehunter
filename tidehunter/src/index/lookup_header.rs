@@ -110,26 +110,15 @@ impl LookupHeaderIndex {
                 }
                 Direction::Backward => {
                     if let Some(pos) = found_pos {
-                        // Move to the previous position before the found key
-                        if pos == 0 {
-                            return None; // No previous entry in this micro-cell
-                        }
-                        pos - 1
+                        pos.checked_sub(1)?
                     } else {
-                        // If key not found, use the position before insertion point
-                        if insertion_point == 0 {
-                            return None; // No previous entry in this micro-cell
-                        }
-                        insertion_point - 1
+                        insertion_point.checked_sub(1)?
                     }
                 }
             }
         } else {
             // No previous key, start from the beginning or end based on direction
-            match direction {
-                Direction::Forward => 0,
-                Direction::Backward => entry_count - 1,
-            }
+            direction.first_in_range(0..entry_count)
         };
 
         // Check if there's a valid entry at the position
@@ -210,10 +199,7 @@ impl IndexFormat for LookupHeaderIndex {
             assert_eq!(prev_key.len(), key_size);
             Self::key_micro_cell(ks, prev_key)
         } else {
-            match direction {
-                Direction::Forward => 0,
-                Direction::Backward => HEADER_ELEMENTS - 1,
-            }
+            direction.first_in_range(0..HEADER_ELEMENTS)
         };
 
         let mut current_micro_cell = start_micro_cell;
@@ -229,14 +215,11 @@ impl IndexFormat for LookupHeaderIndex {
             ) {
                 break result;
             }
-            match next_bounded(
+            current_micro_cell = next_bounded(
                 current_micro_cell,
                 HEADER_ELEMENTS,
                 direction == Direction::Backward,
-            ) {
-                Some(micro_cell) => current_micro_cell = micro_cell,
-                None => return None,
-            }
+            )?;
         }
     }
 

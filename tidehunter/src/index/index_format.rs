@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::time::Instant;
 
 use minibytes::Bytes;
@@ -116,6 +117,13 @@ impl Direction {
             Self::Backward
         } else {
             Self::Forward
+        }
+    }
+
+    pub fn first_in_range(&self, range: Range<usize>) -> usize {
+        match self {
+            Self::Forward => range.start,
+            Self::Backward => range.end - 1,
         }
     }
 }
