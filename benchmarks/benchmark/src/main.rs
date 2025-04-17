@@ -77,6 +77,8 @@ struct StressArgs {
     preserve: bool,
     #[arg(long, help = "Use pre-generated DB")]
     reuse: Option<String>,
+    #[arg(long, help = "Read mode", default_value = "get")]
+    read_mode: ReadMode,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +86,12 @@ enum KeyLayout {
     Uniform,
     SequenceChoice,
     ChoiceSequence,
+}
+
+#[derive(Debug, Clone)]
+enum ReadMode {
+    Get,
+    Lt,
 }
 
 pub fn main() {
@@ -115,7 +123,7 @@ pub fn main() {
         config.max_dirty_keys = 1024;
         config.direct_io = args.direct_io;
         config.frag_size = 1024 * 1024 * 1024;
-        config.max_maps = 32;
+        config.max_maps = 100;
         config.snapshot_unload_threshold = 128 * 1024 * 1024 * 1024;
         config.snapshot_written_bytes = 64 * 1024 * 1024 * 1024;
         config.unload_jitter_pct = 30;
@@ -124,7 +132,7 @@ pub fn main() {
         }
         use crate::storage::tidehunter::TidehunterStorage;
         let (key_shape, ks) = match args.key_layout {
-            KeyLayout::Uniform => KeyShape::new_single(32, 1024, KeyType::uniform(32)),
+            KeyLayout::Uniform => KeyShape::new_single(32, 2048, KeyType::uniform(32)),
             KeyLayout::SequenceChoice => {
                 let key_type = KeyType::prefix_uniform(8, 2);
                 KeyShape::new_single_config(32, 1024, key_type, key_space_config())
@@ -404,13 +412,38 @@ impl<T: Storage> StressThread<T> {
 
     pub fn run_reads(self) {
         let _ = self.start_lock.read();
-        let mut pos_rng = ThreadRng::default();
+        let mut thread_rng = ThreadRng::default();
         let max_pos = self.max_global_pos();
         for _ in 0..self.args.reads {
-            let pos = pos_rng.gen_range(0..max_pos);
-            let (key, value) = self.key_value(pos);
-            let timer = Instant::now();
-            let found_value = self.db.get(&key).expect("Expected value not found");
+            let pos = thread_rng.gen_range(0..max_pos);
+            let timer;
+            match self.args.read_mode {
+                ReadMode::Get => {
+                    let (key, value) = self.key_value(pos);
+                    timer = Instant::now();
+                    let found_value = self.db.get(&key).expect("Expected value not found");
+                    assert_eq!(
+                        &value[..],
+                        &found_value[..],
+                        "Found value does not match expected value"
+                    );
+                }
+                ReadMode::Lt => {
+                    let mut key = vec![0u8; self.args.key_len];
+                    thread_rng.fill(&mut key[..]);
+                    timer = Instant::now();
+                    let result = self.db.get_lt(&key);
+                    let result = if result.is_some() {
+                        "found"
+                    } else {
+                        "not_found"
+                    };
+                    self.benchmark_metrics
+                        .get_lt_result
+                        .with_label_values(&[result])
+                        .inc();
+                }
+            }
             let latency = timer.elapsed().as_micros();
             self.benchmark_metrics
                 .bench_reads
@@ -419,11 +452,6 @@ impl<T: Storage> StressThread<T> {
             if self.latency.increment(latency as u64).is_err() {
                 self.latency_errors.fetch_add(1, Ordering::Relaxed);
             }
-            assert_eq!(
-                &value[..],
-                &found_value[..],
-                "Found value does not match expected value"
-            );
         }
     }
 
@@ -492,6 +520,22 @@ impl FromStr for KeyLayout {
         } else {
             anyhow::bail!(
                 "Only allowed choices for key_layout are 'u'(uniform) or 'sc'(sequence-choice) or 'cs'(choice-sequence)"
+            );
+        }
+    }
+}
+
+impl FromStr for ReadMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "get" {
+            Ok(Self::Get)
+        } else if s == "lt" {
+            Ok(Self::Lt)
+        } else {
+            anyhow::bail!(
+                "Only allowed choices for read_mode are 'get'(get) or 'lt'(iterator less then)"
             );
         }
     }

@@ -23,6 +23,14 @@ impl Storage for Arc<TidehunterStorage> {
         self.db.get(self.ks, k).unwrap()
     }
 
+    fn get_lt(&self, k: &[u8]) -> Option<Bytes> {
+        let mut iterator = self.db.iterator(self.ks);
+        iterator.set_upper_bound(k.to_vec());
+        iterator.reverse();
+        let next = iterator.next()?;
+        Some(next.expect("Db error").1)
+    }
+
     fn name() -> &'static str {
         "tidehunter"
     }

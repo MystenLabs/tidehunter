@@ -1,10 +1,11 @@
-use prometheus::{exponential_buckets, HistogramVec, Registry};
+use prometheus::{exponential_buckets, HistogramVec, IntCounterVec, Registry};
 use std::sync::Arc;
-use tidehunter::histogram_vec;
+use tidehunter::{counter_vec, histogram_vec};
 
 pub struct BenchmarkMetrics {
     pub bench_reads: HistogramVec,
     pub bench_writes: HistogramVec,
+    pub get_lt_result: IntCounterVec,
 }
 
 impl BenchmarkMetrics {
@@ -18,6 +19,7 @@ impl BenchmarkMetrics {
                 latency_buckets.clone(),
                 registry
             ),
+            get_lt_result: counter_vec!("get_lt_result", &["result"], registry),
         };
         Arc::new(this)
     }

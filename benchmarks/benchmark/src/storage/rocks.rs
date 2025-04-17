@@ -1,6 +1,6 @@
 use crate::storage::Storage;
 use minibytes::Bytes;
-use rocksdb::{BlockBasedOptions, Cache, Options, DB};
+use rocksdb::{BlockBasedOptions, Cache, Direction, IteratorMode, Options, DB};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -94,6 +94,12 @@ impl Storage for Arc<RocksStorage> {
 
     fn get(&self, k: &[u8]) -> Option<Bytes> {
         self.db.get(k).unwrap().map(Into::into)
+    }
+
+    fn get_lt(&self, k: &[u8]) -> Option<Bytes> {
+        let mut iterator = self.db.iterator(IteratorMode::From(k, Direction::Reverse));
+        let next = iterator.next()?;
+        Some(next.expect("Db error").1.into())
     }
 
     fn name() -> &'static str {
