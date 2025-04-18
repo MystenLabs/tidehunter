@@ -75,7 +75,7 @@ struct StressArgs {
     reuse: Option<String>,
     #[arg(long, help = "Read mode", default_value = "get")]
     read_mode: ReadMode,
-    #[arg(long, short = "b", help = "Backend")]
+    #[arg(long, short = 'b', help = "Backend")]
     backend: Backend,
 }
 
@@ -135,15 +135,21 @@ pub fn main() {
                 report!(report, "Using **direct IO**");
             }
             use crate::storage::tidehunter::TidehunterStorage;
+            let mutexes = 4096;
             let (key_shape, ks) = match args.key_layout {
-                KeyLayout::Uniform => KeyShape::new_single(32, 2048, KeyType::uniform(32)),
+                KeyLayout::Uniform => KeyShape::new_single_config(
+                    32,
+                    mutexes,
+                    KeyType::uniform(32),
+                    key_space_config(),
+                ),
                 KeyLayout::SequenceChoice => {
                     let key_type = KeyType::prefix_uniform(8, 2);
-                    KeyShape::new_single_config(32, 1024, key_type, key_space_config())
+                    KeyShape::new_single_config(32, mutexes, key_type, key_space_config())
                 }
                 KeyLayout::ChoiceSequence => {
                     let key_type = KeyType::prefix_uniform(15, 5);
-                    KeyShape::new_single_config(32, 1024, key_type, key_space_config())
+                    KeyShape::new_single_config(32, mutexes, key_type, key_space_config())
                 }
             };
             let storage = TidehunterStorage::open(&registry, config, &path, (key_shape, ks));
