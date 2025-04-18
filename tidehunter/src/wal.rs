@@ -82,9 +82,15 @@ impl WalWriter {
                 let (prev_map, prev_offset) = self.wal.layout.locate(prev_block_end);
                 assert_eq!(prev_map, current_map_and_position.1.id);
                 let skip_marker = CrcFrame::skip_marker();
-                let buf = current_map_and_position
-                    .1
-                    .write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
+                assert!(
+                    current_map_and_position.1.writeable,
+                    "Attempt to write into read-only map"
+                );
+                let buf = write_buf_at(
+                    &current_map_and_position.1.data,
+                    prev_offset as usize,
+                    skip_marker.as_ref().len(),
+                );
                 buf.copy_from_slice(skip_marker.as_ref());
             }
             let mut offloaded_map =
@@ -100,9 +106,14 @@ impl WalWriter {
         }
         // safety: pos calculation logic guarantees non-overlapping writes
         // position only available after write here completes
-        let buf = current_map_and_position
-            .1
-            .write_buf_at(offset as usize, len as usize);
+        assert!(
+            current_map_and_position.1.writeable,
+            "Attempt to write into read-only map"
+        );
+        let data = current_map_and_position.1.data.clone();
+        // Dropping lock to allow data copy to be done in parallel
+        drop(current_map_and_position);
+        let buf = write_buf_at(&data, offset as usize, len as usize);
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
@@ -655,13 +666,10 @@ impl RandomRead for WalRandomRead<'_> {
     }
 }
 
-impl Map {
-    pub fn write_buf_at(&self, offset: usize, len: usize) -> &mut [u8] {
-        assert!(self.writeable, "Attempt to write into read-only map");
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset) as *mut u8;
-            std::slice::from_raw_parts_mut(ptr, len)
-        }
+fn write_buf_at(data: &Bytes, offset: usize, len: usize) -> &mut [u8] {
+    unsafe {
+        let ptr = data.as_ptr().add(offset) as *mut u8;
+        std::slice::from_raw_parts_mut(ptr, len)
     }
 }
 
