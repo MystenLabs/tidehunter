@@ -135,12 +135,12 @@ pub fn main() {
                 report!(report, "Using **direct IO**");
             }
             use crate::storage::tidehunter::TidehunterStorage;
-            let mutexes = 4096;
+            let mutexes = 4096 * 16;
             let (key_shape, ks) = match args.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     32,
                     mutexes,
-                    KeyType::uniform(32),
+                    KeyType::uniform(1),
                     key_space_config(),
                 ),
                 KeyLayout::SequenceChoice => {
