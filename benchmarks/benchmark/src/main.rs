@@ -172,17 +172,23 @@ pub fn main() {
         benchmark_metrics,
     };
     println!("Starting write test");
-    let elapsed = stress.measure(StressThread::run_writes, &mut report);
-    let written = stress.args.writes * stress.args.threads;
-    let written_bytes = written * stress.args.write_size;
-    let msecs = elapsed.as_millis() as usize;
-    let write_sec = dec_div(written / msecs * 1000);
-    report!(
-        report,
-        "Write test done in {elapsed:?}: {} writes/s, {}/sec",
-        write_sec,
-        byte_div(written_bytes / msecs * 1000)
-    );
+    let write_sec;
+    if stress.args.reuse.is_none() {
+        let elapsed = stress.measure(StressThread::run_writes, &mut report);
+        let written = stress.args.writes * stress.args.threads;
+        let written_bytes = written * stress.args.write_size;
+        let msecs = elapsed.as_millis() as usize;
+        write_sec = dec_div(written / msecs * 1000);
+        report!(
+            report,
+            "Write test done in {elapsed:?}: {} writes/s, {}/sec",
+            write_sec,
+            byte_div(written_bytes / msecs * 1000)
+        );
+    } else {
+        write_sec = "".to_string();
+        println!("Skipping writes because reuse is specified");
+    }
     {
         let storage_len = fs_extra::dir::get_size(&path).unwrap();
         report!(
