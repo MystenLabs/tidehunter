@@ -44,6 +44,7 @@ struct WalMapperThread {
     last_map: u64,
     file: File,
     layout: WalLayout,
+    metrics: Arc<Metrics>,
 }
 
 pub struct WalIterator {
@@ -517,13 +518,14 @@ impl Wal {
 }
 
 impl WalMapper {
-    pub fn start(last_map: u64, file: File, layout: WalLayout) -> Self {
+    pub fn start(last_map: u64, file: File, layout: WalLayout, metrics: Arc<Metrics>) -> Self {
         let (sender, receiver) = mpsc::sync_channel(2);
         let this = WalMapperThread {
             last_map,
             file,
             layout,
             sender,
+            metrics,
         };
         let jh = thread::Builder::new()
             .name("wal-mapper".to_string())
@@ -559,6 +561,7 @@ impl Drop for WalMapper {
 impl WalMapperThread {
     pub fn run(mut self) {
         loop {
+            let timer = Instant::now();
             let id = self.last_map + 1;
             Wal::extend_to_map(&self.layout, &self.file, id).expect("Failed to extend wal file");
             let range = self.layout.map_range(id);
@@ -579,6 +582,9 @@ impl WalMapperThread {
                 data,
             };
             self.last_map = id;
+            self.metrics
+                .wal_mapper_time_mcs
+                .inc_by(timer.elapsed().as_micros() as u64);
             // todo ideally figure out a way to not create a map when sender closes
             if self.sender.send(map).is_err() {
                 return;
@@ -625,6 +631,7 @@ impl WalIterator {
             self.map.id,
             self.wal.file.try_clone().unwrap(),
             self.wal.layout.clone(),
+            self.wal().metrics.clone(),
         );
         assert_eq!(self.wal.layout.locate(position.position).0, self.map.id);
         let position_and_map = (position, self.map);

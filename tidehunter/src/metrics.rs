@@ -34,6 +34,7 @@ pub struct Metrics {
     pub wal_synced_position: IntGauge,
     pub db_op_mcs: HistogramVec,
     pub map_time_mcs: Histogram,
+    pub wal_mapper_time_mcs: IntCounter,
 
     pub snapshot_lock_time_mcs: Histogram,
     pub snapshot_force_unload: IntCounterVec,
@@ -125,6 +126,7 @@ impl Metrics {
             wal_synced_position: gauge!("wal_synced_position", registry),
             db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry),
             map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry),
+            wal_mapper_time_mcs: counter!("wal_mapper_time_mcs", registry),
 
             snapshot_lock_time_mcs: histogram!(
                 "snapshot_lock_time_mcs",
