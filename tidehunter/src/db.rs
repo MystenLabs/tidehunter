@@ -91,7 +91,7 @@ impl Db {
 
     fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
         loop {
-            thread::sleep(Duration::from_secs(30));
+            thread::sleep(Duration::from_secs(60));
             let db = weak.upgrade()?;
             db.large_table.report_entries_state();
             // todo when we get to wal position wrapping around this will need to be fixed
