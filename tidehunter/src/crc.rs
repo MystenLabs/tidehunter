@@ -18,6 +18,7 @@ impl CrcFrame {
         let mut bytes = BytesMut::with_capacity(t.len() + 8);
         bytes.put_u64(0);
         t.write_into_bytes(&mut bytes);
+        // todo - remove len from crc frame since we store it in wal position
         let len = (t.len() as u32).to_be_bytes();
         bytes[0..4].copy_from_slice(&len);
         let crc = Self::crc(&bytes[8..]);
