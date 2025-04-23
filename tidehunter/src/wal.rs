@@ -5,7 +5,7 @@ use crate::key_shape::KeySpaceDesc;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal_syncer::WalSyncer;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ pub(crate) struct Map {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct WalPosition(u64);
+pub struct WalPosition(u64, u32);
 
 pub enum WalRandomRead<'a> {
     Mapped(Bytes),
@@ -118,19 +118,13 @@ impl WalWriter {
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
-        Ok(WalPosition(pos))
+        Ok(WalPosition(pos, len as u32))
     }
 
     /// Current un-initialized position,
     /// not to be used as WalPosition, only as a metric to see how many bytes were written
     pub fn position(&self) -> u64 {
         self.position_and_map.lock().0.position
-    }
-
-    /// Current un-initialized position,
-    // todo need to re-think this and not return un-initialized position as WalPosition
-    pub fn wal_position(&self) -> WalPosition {
-        WalPosition(self.position_and_map.lock().0.position)
     }
 }
 
@@ -258,7 +252,6 @@ impl Wal {
             WalPosition::INVALID,
             "Trying to read invalid wal position"
         );
-        const INITIAL_READ_SIZE: usize = 1024; // todo probably need to increase even more
         let (map, offset) = self.layout.locate(pos.0);
         if let Some(map) = self.get_map(map) {
             // using CrcFrame::read_from_slice to avoid holding the larger byte array
@@ -269,31 +262,12 @@ impl Wal {
                     .into(),
             ))
         } else {
-            let mut buf = self.file_reader().io_buffer_bytes(INITIAL_READ_SIZE);
-            let read = self.file.read_at(&mut buf, pos.0)?;
-            assert!(read > CrcFrame::CRC_HEADER_LENGTH); // todo this is not actually guaranteed
-            let size = CrcFrame::read_size(&buf[..read]);
-            let target_size = size + CrcFrame::CRC_HEADER_LENGTH;
-            if target_size > read {
-                if self.layout.direct_io && read != INITIAL_READ_SIZE {
-                    panic!("read not aligned: {read}");
-                }
-                // todo more test coverage for those cases including when read != INITIAL_READ_SIZE
-                if target_size > INITIAL_READ_SIZE {
-                    let target_read_size = if self.layout.direct_io {
-                        self.layout.align(target_size as u64) as usize
-                    } else {
-                        target_size
-                    };
-                    buf = self.file_reader().reallocate(buf, target_read_size);
-                }
-                self.file
-                    .read_exact_at(&mut buf[read..], pos.0 + read as u64)?;
-            }
+            let mut buf = self.file_reader().io_buffer_bytes(pos.len());
+            self.file.read_exact_at(&mut buf, pos.0)?;
             let mut bytes = Bytes::from(bytes::Bytes::from(buf));
-            if self.layout.direct_io && bytes.len() > target_size {
+            if self.layout.direct_io && bytes.len() > pos.len() {
                 // Direct IO buffer can be larger then needed
-                bytes = bytes.slice(..target_size);
+                bytes = bytes.slice(..pos.len());
             }
             Ok((false, CrcFrame::read_from_bytes(&bytes, 0)?))
         }
@@ -604,7 +578,7 @@ impl WalIterator {
         } else {
             frame?
         };
-        let position = WalPosition(self.position);
+        let position = WalPosition(self.position, frame.len() as u32);
         self.position += self
             .wal
             .layout
@@ -696,27 +670,36 @@ impl PreparedWalWrite {
 }
 
 impl WalPosition {
-    pub const MAX: WalPosition = WalPosition(u64::MAX);
+    pub const MAX: WalPosition = WalPosition(u64::MAX, u32::MAX);
     pub const SIZE: usize = 8;
     pub const INVALID: WalPosition = Self::MAX;
-    pub const LENGTH: usize = 8;
+    pub const LENGTH: usize = 12;
     #[cfg(test)]
-    pub const TEST: WalPosition = WalPosition(3311);
+    pub const TEST: WalPosition = WalPosition(3311, 12);
 
     pub fn write_to_buf(&self, buf: &mut impl BufMut) {
         buf.put_u64(self.0);
+        buf.put_u32(self.1);
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut buf = BytesMut::with_capacity(Self::LENGTH);
+        self.write_to_buf(&mut buf);
+        buf.into()
     }
 
     pub fn read_from_buf(buf: &mut impl Buf) -> Self {
-        Self(buf.get_u64())
+        Self(buf.get_u64(), buf.get_u32())
     }
 
-    pub fn from_slice(slice: &[u8]) -> Self {
-        Self(u64::from_be_bytes(
-            slice
-                .try_into()
-                .expect("Invalid slice length for WalPosition::from_slice"),
-        ))
+    pub fn from_slice(mut slice: &[u8]) -> Self {
+        let r = Self::read_from_buf(&mut slice);
+        assert_eq!(0, slice.len());
+        r
+    }
+
+    pub fn len(&self) -> usize {
+        self.1 as usize
     }
 
     pub fn valid(self) -> Option<Self> {
@@ -737,7 +720,7 @@ impl WalPosition {
 
     #[allow(dead_code)]
     pub fn test_value(v: u64) -> Self {
-        Self(v)
+        Self(v, 0)
     }
 }
 

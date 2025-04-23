@@ -95,8 +95,8 @@ impl Db {
             let db = weak.upgrade()?;
             db.large_table.report_entries_state();
             // todo when we get to wal position wrapping around this will need to be fixed
-            let current_wal_position = db.wal_writer.wal_position();
-            let written = current_wal_position.as_u64().checked_sub(position).unwrap();
+            let current_wal_position = db.wal_writer.position();
+            let written = current_wal_position.checked_sub(position).unwrap();
             if written > db.config.snapshot_written_bytes() {
                 // todo taint storage instance on failure?
                 let snapshot_position = db
@@ -430,13 +430,10 @@ impl Db {
 
     #[cfg(test)]
     fn rebuild_control_region(&self) -> DbResult<WalPosition> {
-        self.rebuild_control_region_from(self.wal_writer.wal_position())
+        self.rebuild_control_region_from(self.wal_writer.position())
     }
 
-    fn rebuild_control_region_from(
-        &self,
-        current_wal_position: WalPosition,
-    ) -> DbResult<WalPosition> {
+    fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<WalPosition> {
         let mut crs = self.control_region_store.lock();
         let _timer = self
             .metrics
@@ -444,9 +441,7 @@ impl Db {
             .clone()
             .mcs_timer();
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
-        let snapshot = self
-            .large_table
-            .snapshot(current_wal_position.as_u64(), self)?;
+        let snapshot = self.large_table.snapshot(current_wal_position, self)?;
         self.wal.fsync()?;
         crs.store(snapshot.data, snapshot.last_added_position, &self.metrics);
         Ok(snapshot.last_added_position)

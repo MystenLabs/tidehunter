@@ -337,7 +337,7 @@ pub mod test {
     fn test_binary_search() {
         // Create a buffer with several entries
         let key_size = 4;
-        let element_size = 12; // 4-byte key + 8-byte value
+        let element_size = 16; // 4-byte key + 12-byte value
 
         // Create a sorted set of keys
         let keys = vec![
@@ -351,9 +351,8 @@ pub mod test {
         let mut buffer = Vec::new();
         for (i, key) in keys.iter().enumerate() {
             buffer.extend_from_slice(key);
-            // Add a custom value (8 bytes, value matches key position)
-            let value = (i as u64 + 100).to_be_bytes();
-            buffer.extend_from_slice(&value);
+            let wal_position = WalPosition::test_value(i as u64 + 100);
+            buffer.extend_from_slice(&wal_position.to_vec());
         }
 
         // Test key found - first key
@@ -362,10 +361,7 @@ pub mod test {
         assert_eq!(found_pos, Some(0));
         assert_eq!(insertion_point, 0);
         assert!(position.is_some());
-        assert_eq!(
-            position.unwrap(),
-            WalPosition::from_slice(&(100u64).to_be_bytes())
-        );
+        assert_eq!(position.unwrap(), WalPosition::test_value(100));
 
         // Test key found - middle key
         let (found_pos, insertion_point, position) =
@@ -373,10 +369,7 @@ pub mod test {
         assert_eq!(found_pos, Some(2));
         assert_eq!(insertion_point, 2);
         assert!(position.is_some());
-        assert_eq!(
-            position.unwrap(),
-            WalPosition::from_slice(&(102u64).to_be_bytes())
-        );
+        assert_eq!(position.unwrap(), WalPosition::test_value(102));
 
         // Test key not found - should find insertion point
         let missing_key = vec![3, 4, 5, 6]; // Between keys[0] and keys[1]
@@ -409,10 +402,7 @@ pub mod test {
         assert_eq!(found_pos, Some(3));
         assert_eq!(insertion_point, 3);
         assert!(position.is_some());
-        assert_eq!(
-            position.unwrap(),
-            WalPosition::from_slice(&(103u64).to_be_bytes())
-        );
+        assert_eq!(position.unwrap(), WalPosition::test_value(103));
         // Verify metrics were updated - metrics are likely wrapped in Atomics so we can't directly check value
         // Instead, we'll just assume they were updated as it's implementation-dependent
     }
