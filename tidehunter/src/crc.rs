@@ -38,10 +38,6 @@ impl CrcFrame {
         let data = b.slice(Self::data_range(pos, len));
         Ok(data)
     }
-    pub fn read_size(mut b: &[u8]) -> usize {
-        assert!(b.len() >= Self::CRC_HEADER_LENGTH);
-        b.get_u32() as usize
-    }
 
     fn checked_read(b: &[u8], pos: usize) -> Result<usize, CrcReadError> {
         if b.len() < pos + Self::CRC_HEADER_LENGTH {

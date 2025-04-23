@@ -276,7 +276,7 @@ impl LargeTable {
         // drop row to avoid holding mutex during IO
         drop(row);
         let now = Instant::now();
-        let index_reader = loader.index_reader(ks, index_position)?;
+        let index_reader = loader.index_reader(index_position)?;
         // todo - consider only doing block_in_place for the syscall random reader
         let result = runtime::block_in_place(|| {
             ks.index_format()
@@ -559,7 +559,7 @@ impl LargeTable {
             // For unloaded states, read from disk without loading everything
             LargeTableEntryState::Unloaded(position) => {
                 // Get reader for on-disk index
-                let index_reader = loader.index_reader(&entry.context.ks_config, *position)?;
+                let index_reader = loader.index_reader(*position)?;
                 let format = entry.context.ks_config.index_format();
 
                 // Use the format to find the next entry from on-disk index
@@ -584,7 +584,7 @@ impl LargeTable {
                 let in_memory_next = entry.next_entry(prev_key.clone(), reverse);
 
                 // Get reader for on-disk index
-                let index_reader = loader.index_reader(&entry.context.ks_config, *position)?;
+                let index_reader = loader.index_reader(*position)?;
                 let format = entry.context.ks_config.index_format();
 
                 // Use the format to find the next entry from on-disk index
@@ -757,11 +757,7 @@ pub trait Loader {
 
     fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> Result<IndexTable, Self::Error>;
 
-    fn index_reader(
-        &self,
-        ks: &KeySpaceDesc,
-        position: WalPosition,
-    ) -> Result<WalRandomRead, Self::Error>;
+    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error>;
 
     fn flush_supported(&self) -> bool;
 
@@ -1434,11 +1430,7 @@ mod tests {
                 Ok(self.disk_index.clone())
             }
 
-            fn index_reader(
-                &self,
-                _ks: &KeySpaceDesc,
-                _position: WalPosition,
-            ) -> Result<WalRandomRead, Self::Error> {
+            fn index_reader(&self, _position: WalPosition) -> Result<WalRandomRead, Self::Error> {
                 Ok(WalRandomRead::Mapped(self.serialized_data.clone()))
             }
 

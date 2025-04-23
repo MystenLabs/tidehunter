@@ -532,12 +532,8 @@ impl Loader for Wal {
         Db::read_index(ks, entry)
     }
 
-    fn index_reader(
-        &self,
-        ks: &KeySpaceDesc,
-        position: WalPosition,
-    ) -> Result<WalRandomRead, Self::Error> {
-        Ok(self.random_reader_at(ks, position, WalEntry::INDEX_PREFIX_SIZE)?)
+    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+        Ok(self.random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
     fn flush_supported(&self) -> bool {
@@ -557,14 +553,10 @@ impl Loader for Db {
         Self::read_index(ks, entry)
     }
 
-    fn index_reader(
-        &self,
-        ks: &KeySpaceDesc,
-        position: WalPosition,
-    ) -> Result<WalRandomRead, Self::Error> {
+    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
         Ok(self
             .wal
-            .random_reader_at(ks, position, WalEntry::INDEX_PREFIX_SIZE)?)
+            .random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
     fn flush_supported(&self) -> bool {

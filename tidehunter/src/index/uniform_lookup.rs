@@ -412,10 +412,6 @@ impl IndexFormat for UniformLookupIndex {
             return Some((key, pos));
         }
     }
-
-    fn use_unbounded_reader(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]

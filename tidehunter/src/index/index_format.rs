@@ -39,8 +39,6 @@ pub trait IndexFormat {
     fn element_size(ks: &KeySpaceDesc) -> usize {
         ks.reduced_key_size() + WalPosition::LENGTH
     }
-
-    fn use_unbounded_reader(&self) -> bool;
 }
 
 #[derive(Clone, Default)]
@@ -93,13 +91,6 @@ impl IndexFormat for IndexFormatType {
             IndexFormatType::Uniform(index) => {
                 index.next_entry_unloaded(ks, reader, prev, direction, metrics)
             }
-        }
-    }
-
-    fn use_unbounded_reader(&self) -> bool {
-        match self {
-            IndexFormatType::Header => LookupHeaderIndex.use_unbounded_reader(),
-            IndexFormatType::Uniform(index) => index.use_unbounded_reader(),
         }
     }
 }
