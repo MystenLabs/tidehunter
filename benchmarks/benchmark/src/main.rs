@@ -36,8 +36,10 @@ macro_rules! report {
 
 #[derive(Parser, Debug)]
 struct StressArgs {
-    #[arg(long, short = 't', help = "Number of write threads")]
-    threads: usize,
+    #[arg(long, help = "Number of read threads")]
+    read_threads: usize,
+    #[arg(long, help = "Number of write threads")]
+    write_threads: usize,
     #[arg(long, short = 'v', help = "Length of the value")]
     write_size: usize,
     #[arg(long, short = 'k', help = "Length of the key")]
@@ -174,8 +176,12 @@ pub fn main() {
     println!("Starting write test");
     let write_sec;
     if stress.args.reuse.is_none() {
-        let elapsed = stress.measure(StressThread::run_writes, &mut report);
-        let written = stress.args.writes * stress.args.threads;
+        let elapsed = stress.measure(
+            stress.args.write_threads,
+            StressThread::run_writes,
+            &mut report,
+        );
+        let written = stress.args.writes * stress.args.write_threads;
         let written_bytes = written * stress.args.write_size;
         let msecs = elapsed.as_millis() as usize;
         write_sec = dec_div(written / msecs * 1000);
@@ -199,13 +205,20 @@ pub fn main() {
     }
     println!("Starting read test");
     let manual_stop = if stress.args.background_writes > 0 {
-        stress.background(StressThread::run_background_writes)
+        stress.background(
+            stress.args.write_threads,
+            StressThread::run_background_writes,
+        )
     } else {
         Default::default()
     };
-    let elapsed = stress.measure(StressThread::run_reads, &mut report);
+    let elapsed = stress.measure(
+        stress.args.read_threads,
+        StressThread::run_reads,
+        &mut report,
+    );
     manual_stop.store(true, Ordering::Relaxed);
-    let read = stress.args.reads * stress.args.threads;
+    let read = stress.args.reads * stress.args.read_threads;
     let read_bytes = read * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
     let read_sec = dec_div(read / msecs * 1000);
@@ -269,18 +282,20 @@ struct Report {
 impl Stress {
     pub fn background<F: FnOnce(StressThread) + Clone + Send + 'static>(
         &self,
+        n: usize,
         f: F,
     ) -> Arc<AtomicBool> {
-        let (_, manual_stop, _, _) = self.start_threads(f);
+        let (_, manual_stop, _, _) = self.start_threads(n, f);
         manual_stop
     }
 
     pub fn measure<F: FnOnce(StressThread) + Clone + Send + 'static>(
         &self,
+        n: usize,
         f: F,
         report: &mut Report,
     ) -> Duration {
-        let (threads, _, latency, latency_errors) = self.start_threads(f);
+        let (threads, _, latency, latency_errors) = self.start_threads(n, f);
         let start = Instant::now();
         for t in threads {
             t.join().unwrap();
@@ -304,6 +319,7 @@ impl Stress {
 
     fn start_threads<F: FnOnce(StressThread) + Clone + Send + 'static>(
         &self,
+        n: usize,
         f: F,
     ) -> (
         Vec<JoinHandle<()>>,
@@ -311,14 +327,14 @@ impl Stress {
         Arc<AtomicHistogram>,
         Arc<AtomicUsize>,
     ) {
-        let mut threads = Vec::with_capacity(self.args.threads);
+        let mut threads = Vec::with_capacity(n);
         let start_lock = Arc::new(RwLock::new(()));
         let start_w = start_lock.write();
         let manual_stop = Arc::new(AtomicBool::new(false));
         let latency = AtomicHistogram::new(12, 26).unwrap();
         let latency = Arc::new(latency);
         let latency_errors = Arc::new(AtomicUsize::default());
-        for index in 0..self.args.threads {
+        for index in 0..n {
             let thread = StressThread {
                 db: self.storage.clone(),
                 start_lock: start_lock.clone(),
@@ -393,7 +409,7 @@ impl StressThread {
     }
 
     pub fn run_background_writes(self) {
-        let writes_per_thread = self.args.background_writes / self.args.threads;
+        let writes_per_thread = self.args.background_writes / self.args.write_threads;
         let delay = Duration::from_micros(1_000_000 / writes_per_thread as u64);
         let mut deadline = Instant::now();
         let mut pos = u32::MAX;
@@ -493,11 +509,11 @@ impl StressThread {
 
     /// Maps local index into continuous global space
     fn global_pos(&self, pos: usize) -> u64 {
-        (pos * self.args.threads) as u64 + self.index
+        (pos * self.args.write_threads) as u64 + self.index
     }
 
     fn max_global_pos(&self) -> u64 {
-        (self.args.threads * self.args.writes) as u64
+        (self.args.write_threads * self.args.writes) as u64
     }
 
     fn rng_at(pos: u64) -> StdRng {
