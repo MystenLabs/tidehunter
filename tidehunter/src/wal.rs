@@ -260,7 +260,12 @@ impl Wal {
                     .into(),
             ))
         } else {
-            let mut buf = self.file_reader().io_buffer_bytes(pos.len());
+            let buffer_size = if self.layout.direct_io {
+                self.layout.align(pos.len() as u64) as usize
+            } else {
+                pos.len()
+            };
+            let mut buf = self.file_reader().io_buffer_bytes(buffer_size);
             self.file.read_exact_at(&mut buf, pos.0)?;
             let mut bytes = Bytes::from(bytes::Bytes::from(buf));
             if self.layout.direct_io && bytes.len() > pos.len() {
