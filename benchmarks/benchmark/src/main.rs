@@ -137,7 +137,7 @@ pub fn main() {
                 report!(report, "Using **direct IO**");
             }
             use crate::storage::tidehunter::TidehunterStorage;
-            let mutexes = 4096 * 16 * 128;
+            let mutexes = 4096 * 32;
             let (key_shape, ks) = match args.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     32,
@@ -263,9 +263,11 @@ pub fn main() {
 fn key_space_config() -> KeySpaceConfig {
     use tidehunter::index::index_format::IndexFormatType;
     use tidehunter::index::uniform_lookup::UniformLookupIndex;
-    KeySpaceConfig::new().with_index_format(IndexFormatType::Uniform(
-        UniformLookupIndex::new_with_window_size(10000),
-    ))
+    KeySpaceConfig::new()
+        .with_index_format(IndexFormatType::Uniform(
+            UniformLookupIndex::new_with_window_size(744),
+        ))
+        .with_unloaded_iterator(true)
 }
 
 struct Stress {
