@@ -27,7 +27,6 @@ pub struct Metrics {
     pub lookup_scan_mcs: IntCounter,
     pub lookup_io_mcs: IntCounter,
     pub lookup_io_bytes: IntCounter,
-    pub direct_io_bytes: IntCounter,
 
     pub large_table_contention: HistogramVec,
     pub wal_contention: Histogram,
@@ -115,7 +114,6 @@ impl Metrics {
             lookup_scan_mcs: counter!("lookup_scan_mcs", registry),
             lookup_io_mcs: counter!("lookup_io_mcs", registry),
             lookup_io_bytes: counter!("lookup_io_bytes", registry),
-            direct_io_bytes: counter!("direct_io_bytes", registry),
             large_table_contention: histogram_vec!(
                 "large_table_contention",
                 &["ks"],
