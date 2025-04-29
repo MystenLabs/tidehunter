@@ -96,10 +96,18 @@ impl Storage for Arc<RocksStorage> {
         self.db.get(k).unwrap().map(Into::into)
     }
 
-    fn get_lt(&self, k: &[u8]) -> Option<Bytes> {
+    fn get_lt(&self, k: &[u8], iterations: usize) -> Vec<Bytes> {
         let mut iterator = self.db.iterator(IteratorMode::From(k, Direction::Reverse));
-        let next = iterator.next()?;
-        Some(next.expect("Db error").1.into())
+        let mut result = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let next = iterator.next();
+            if let Some(next) = next {
+                result.push(next.expect("Db error").1.into());
+            } else {
+                break;
+            }
+        }
+        result
     }
 
     fn name(&self) -> &'static str {

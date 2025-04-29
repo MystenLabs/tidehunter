@@ -91,7 +91,7 @@ enum KeyLayout {
 #[derive(Debug, Clone)]
 enum ReadMode {
     Get,
-    Lt,
+    Lt(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +119,7 @@ pub fn main() {
 
     println!("Path to storage: {}", path.display());
     println!("Using {:?} key layout", args.key_layout);
+    println!("Using {:?} read mode", args.read_mode);
     let print_report = args.report;
     let registry = Registry::new();
     let benchmark_metrics = BenchmarkMetrics::new_in(&registry);
@@ -447,15 +448,17 @@ impl StressThread {
                         "Found value does not match expected value"
                     );
                 }
-                ReadMode::Lt => {
+                ReadMode::Lt(iterations) => {
                     let mut key = vec![0u8; self.args.key_len];
                     thread_rng.fill(&mut key[..]);
                     timer = Instant::now();
-                    let result = self.db.get_lt(&key);
-                    let result = if result.is_some() {
+                    let result = self.db.get_lt(&key, iterations);
+                    let result = if result.len() == iterations {
                         "found"
-                    } else {
+                    } else if result.len() == 0 {
                         "not_found"
+                    } else {
+                        "partial"
                     };
                     self.benchmark_metrics
                         .get_lt_result
@@ -551,7 +554,9 @@ impl FromStr for ReadMode {
         if s == "get" {
             Ok(Self::Get)
         } else if s == "lt" {
-            Ok(Self::Lt)
+            Ok(Self::Lt(1))
+        } else if s.starts_with("lt:") {
+            Ok(Self::Lt(s[3..].parse().expect("Failed to parse read mode")))
         } else {
             anyhow::bail!(
                 "Only allowed choices for read_mode are 'get'(get) or 'lt'(iterator less then)"

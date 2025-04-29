@@ -22,12 +22,19 @@ impl Storage for Arc<TidehunterStorage> {
         self.db.get(self.ks, k).unwrap()
     }
 
-    fn get_lt(&self, k: &[u8]) -> Option<Bytes> {
+    fn get_lt(&self, k: &[u8], iterations: usize) -> Vec<Bytes> {
         let mut iterator = self.db.iterator(self.ks);
         iterator.set_upper_bound(k.to_vec());
         iterator.reverse();
-        let next = iterator.next()?;
-        Some(next.expect("Db error").1)
+        let mut result = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            if let Some(next) = iterator.next() {
+                result.push(next.expect("Db error").1);
+            } else {
+                break;
+            }
+        }
+        result
     }
 
     fn name(&self) -> &'static str {

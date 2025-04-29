@@ -8,7 +8,7 @@ pub trait Storage: Sync + Send + 'static {
 
     fn get(&self, k: &[u8]) -> Option<Bytes>;
 
-    fn get_lt(&self, k: &[u8]) -> Option<Bytes>;
+    fn get_lt(&self, k: &[u8], iterations: usize) -> Vec<Bytes>;
 
     fn name(&self) -> &'static str;
 }
