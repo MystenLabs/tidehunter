@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 
 use crate::math::{next_bounded, rescale_u32};
@@ -11,7 +11,7 @@ use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::Ran
 use super::index_format::{
     binary_search, Direction, IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE,
 };
-use super::{deserialize_index_entries, serialize_index_entries};
+use super::{deserialize_index_entries, index_element_size, serialize_index_entries};
 
 #[derive(Clone)]
 pub struct LookupHeaderIndex;
@@ -138,11 +138,13 @@ impl LookupHeaderIndex {
 
 impl IndexFormat for LookupHeaderIndex {
     fn to_bytes(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
         let capacity = element_size * table.data.len() + HEADER_SIZE;
+        let mut out = BytesMut::with_capacity(capacity);
+        out.put_bytes(0, HEADER_SIZE);
 
         // Use the common function to serialize entries
-        let mut out = serialize_index_entries(table, ks, capacity, HEADER_SIZE);
+        serialize_index_entries(table, ks, &mut out);
 
         // Build header
         let mut header = IndexTableHeaderBuilder::new(ks);
@@ -155,12 +157,11 @@ impl IndexFormat for LookupHeaderIndex {
 
         // Write header to the reserved space
         header.write_header(out.len(), &mut out[..HEADER_SIZE]);
-
         out.to_vec().into()
     }
 
     fn from_bytes(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
-        deserialize_index_entries(HEADER_SIZE, ks, b)
+        deserialize_index_entries(ks, b.slice(HEADER_SIZE..))
     }
 
     fn lookup_unloaded(
@@ -175,7 +176,7 @@ impl IndexFormat for LookupHeaderIndex {
         let micro_cell = Self::key_micro_cell(ks, key);
 
         let (buffer, _, _) = self.read_micro_cell_section(reader, micro_cell, metrics)?;
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
 
         // Use binary search instead of linear search
         let (_, _, pos) = binary_search(&buffer, key, element_size, key_size, Some(metrics));
@@ -191,7 +192,7 @@ impl IndexFormat for LookupHeaderIndex {
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
         let key_size = ks.reduced_key_size();
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
 
         // If no previous key is provided, start from the first or last micro-cell
         // depending on the direction

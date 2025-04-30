@@ -1,9 +1,10 @@
+use bytes::BytesMut;
 use minibytes::Bytes;
 use std::ops::Range;
 use std::time::Instant;
 
 use super::index_format::{Direction, IndexFormat};
-use super::{deserialize_index_entries, serialize_index_entries};
+use super::{deserialize_index_entries, index_element_size, serialize_index_entries};
 use crate::index::index_format::{binary_search, PREFIX_LENGTH};
 use crate::key_shape::CELL_PREFIX_LENGTH;
 use crate::metrics::Metrics;
@@ -124,7 +125,7 @@ impl UniformLookupIndex {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
         let key_size = ks.reduced_key_size();
         let file_length = reader.len();
 
@@ -172,17 +173,15 @@ impl UniformLookupIndex {
 
 impl IndexFormat for UniformLookupIndex {
     fn to_bytes(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
         let capacity = element_size * table.data.len();
-
-        // Use the common function with 0 header size
-        let out = serialize_index_entries(table, ks, capacity, 0);
+        let mut out = BytesMut::with_capacity(capacity);
+        serialize_index_entries(table, ks, &mut out);
         out.to_vec().into()
     }
 
     fn from_bytes(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
-        // Use the common function with 0 data offset
-        deserialize_index_entries(0, ks, b)
+        deserialize_index_entries(ks, b)
     }
 
     fn lookup_unloaded(
@@ -194,7 +193,7 @@ impl IndexFormat for UniformLookupIndex {
     ) -> Option<WalPosition> {
         // todo simplify this function
         // compute cell and prefix
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
         let key_size = ks.reduced_key_size();
         assert_eq!(key.len(), key_size);
         let cell = ks.cell_id(key);
@@ -267,7 +266,7 @@ impl IndexFormat for UniformLookupIndex {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
         let key_size = ks.reduced_key_size();
         let file_length = reader.len();
 

@@ -11,21 +11,13 @@ use std::collections::BTreeMap;
 
 use crate::{key_shape::KeySpaceDesc, wal::WalPosition};
 
+pub fn index_element_size(ks: &KeySpaceDesc) -> usize {
+    ks.reduced_key_size() + WalPosition::LENGTH
+}
+
 /// Writes key-value pairs from IndexTable to a BytesMut buffer
 /// Returns the populated buffer
-pub fn serialize_index_entries(
-    table: &IndexTable,
-    ks: &KeySpaceDesc,
-    initial_capacity: usize,
-    header_size: usize,
-) -> BytesMut {
-    let mut out = BytesMut::with_capacity(initial_capacity);
-
-    // If header is needed, reserve space for it
-    if header_size > 0 {
-        out.put_bytes(0, header_size);
-    }
-
+pub fn serialize_index_entries(table: &IndexTable, ks: &KeySpaceDesc, out: &mut BytesMut) {
     // Write each key-value pair
     for (key, value) in table.data.iter() {
         if key.len() != ks.reduced_key_size() {
@@ -37,10 +29,8 @@ pub fn serialize_index_entries(
             );
         }
         out.put_slice(&key);
-        value.write_to_buf(&mut out);
+        value.write_to_buf(out);
     }
-
-    out
 }
 
 /// Deserializes IndexTable from bytes
@@ -48,13 +38,7 @@ pub fn serialize_index_entries(
 /// - ks: KeySpaceDesc to determine element sizes
 /// - b: Source bytes
 /// Returns the deserialized IndexTable
-pub fn deserialize_index_entries(data_offset: usize, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
-    let data = if data_offset > 0 {
-        b.slice(data_offset..)
-    } else {
-        b
-    };
-
+pub fn deserialize_index_entries(ks: &KeySpaceDesc, data: Bytes) -> IndexTable {
     let element_size = ks.reduced_key_size() + WalPosition::LENGTH;
     let elements = data.len() / element_size;
     assert_eq!(

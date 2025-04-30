@@ -35,10 +35,6 @@ pub trait IndexFormat {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)>;
-
-    fn element_size(ks: &KeySpaceDesc) -> usize {
-        ks.reduced_key_size() + WalPosition::LENGTH
-    }
 }
 
 #[derive(Clone, Default)]
