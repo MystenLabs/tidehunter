@@ -63,6 +63,9 @@ pub fn load(
     // Open the db and truncate the WAL file
     let db = Db::open(&database_path, key_shape, config, metrics)?;
     db.wal_writer().set_wal_position(last_wal_position);
+    // Truncate the WAL file to the recorded position. The +1 is necessary because
+    // the truncation length is inclusive, and we need to include the byte at the
+    // last_wal_position.
     db.wal().file().set_len(last_wal_position + 1)?;
 
     Ok(db)
