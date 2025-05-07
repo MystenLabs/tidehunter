@@ -126,7 +126,7 @@ impl WalWriter {
     }
 
     /// Set wal position to a specific value
-    pub fn set_wal_position(&self, position: WalPosition) {
+    pub fn set_wal_position(&self, position: u64) {
         self.position_and_map.lock().0.set_position(position);
     }
 }
@@ -149,8 +149,8 @@ impl IncrementalWalPosition {
         result
     }
 
-    pub fn set_position(&mut self, position: WalPosition) {
-        self.position = position.0;
+    pub fn set_position(&mut self, position: u64) {
+        self.position = position;
     }
 }
 
@@ -443,27 +443,6 @@ impl Wal {
             iterator.next()?;
         }
         Ok(iterator)
-    }
-
-    /// Iterate wal from the given position
-    /// If WalPosition::INVALID is specified, iterate from start
-    pub fn wal_iterator_no_skip(
-        self: &Arc<Self>,
-        position: WalPosition,
-    ) -> Result<WalIterator, WalError> {
-        let position = if position == WalPosition::INVALID {
-            0
-        } else {
-            position.0
-        };
-        let (map_id, _) = self.layout.locate(position);
-        Self::extend_to_map(&self.layout, &self.file, map_id)?;
-        let map = self.map(map_id, true)?;
-        Ok(WalIterator {
-            wal: self.clone(),
-            position,
-            map,
-        })
     }
 
     fn file_reader(&self) -> FileReader {

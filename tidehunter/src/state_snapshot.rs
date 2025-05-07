@@ -40,7 +40,7 @@ pub fn create(
 
 /// Load the state snapshot from the saved files. It copies the control region
 /// back to the source path and loads the WAL pointer from the saved file. The
-/// returned `WalPosition` can be used to truncate the WAL file.
+/// returned WAL position can be used to truncate the WAL file.
 pub fn load(
     snapshot_path: PathBuf,
     database_path: PathBuf,
@@ -60,34 +60,10 @@ pub fn load(
     let last_wal_position = bincode::deserialize(&serialized_wal_position)
         .expect("Wal position should be deserializable");
 
-    // Truncate the WAL file to the last position
-    // let wal = Wal::open(
-    //     &Db::wal_path(&database_path),
-    //     config.wal_layout(),
-    //     metrics.clone(),
-    // )?;
-    // let mut wal_iterator = wal.wal_iterator_no_skip(last_wal_position)?;
-    // loop {
-    //     match wal_iterator.next() {
-    //         Ok((position, entry)) => {
-    //             let length = entry.len();
-    //             let empty = vec![0; length];
-    //             wal.file().write_all_at(&empty, position.as_u64())?;
-    //         }
-    //         Err(WalError::Crc(_)) => {
-    //             // CRC errors indicate the end of the WAL file
-    //             break;
-    //         }
-    //         error => {
-    //             error?;
-    //         }
-    //     }
-    // }
-
     // Open the db and truncate the WAL file
     let db = Db::open(&database_path, key_shape, config, metrics)?;
     db.wal_writer().set_wal_position(last_wal_position);
-    // db.wal().file().set_len(last_wal_position.as_u64())?;
+    db.wal().file().set_len(last_wal_position + 1)?;
 
     Ok(db)
 }

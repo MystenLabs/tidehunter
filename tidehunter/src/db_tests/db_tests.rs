@@ -1595,7 +1595,7 @@ fn test_state_snapshot() {
     let db_path = tempdir::TempDir::new("test-state-snapshot-db").unwrap();
     let snapshot_path = tempdir::TempDir::new("test-state-snapshot-saved").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
 
     let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
     let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
@@ -1668,7 +1668,7 @@ fn test_state_snapshot_empty() {
     let db_path = tempdir::TempDir::new("test-state-snapshot-empty-db").unwrap();
     let snapshot_path = tempdir::TempDir::new("test-state-snapshot-empty-saved").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
 
     // Create a new database
     let last_position = {
@@ -1704,6 +1704,6 @@ fn test_state_snapshot_empty() {
     assert_eq!(last_position, recovered_position);
 
     // Insert new data after restoring from snapshot
-    db.insert(ks, vec![1, 2, 3, 4, 5], vec![6]).unwrap();
-    assert_eq!(Some(vec![6].into()), db.get(ks, &[1, 2, 3, 4, 5]).unwrap());
+    db.insert(ks, vec![1, 2, 3, 4], vec![6]).unwrap();
+    assert_eq!(Some(vec![6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
 }
