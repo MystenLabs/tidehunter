@@ -2,7 +2,6 @@ use crate::config::Config;
 use crate::db::{Db, DbResult, CONTROL_REGION_FILE};
 use crate::key_shape::KeyShape;
 use crate::metrics::Metrics;
-use crate::WalPosition;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +21,7 @@ fn wal_position_path(dir: PathBuf) -> PathBuf {
 
 /// Create a state snapshot by copying the control region and saving the WAL pointer.
 pub fn create(
-    wal_position: &WalPosition,
+    wal_position: &u64,
     source_control_region_path: &Path,
     destination_path: PathBuf,
 ) -> DbResult<()> {

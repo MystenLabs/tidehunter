@@ -27,13 +27,13 @@ pub struct Metrics {
     pub lookup_scan_mcs: IntCounter,
     pub lookup_io_mcs: IntCounter,
     pub lookup_io_bytes: IntCounter,
-    pub direct_io_bytes: IntCounter,
 
     pub large_table_contention: HistogramVec,
     pub wal_contention: Histogram,
     pub wal_synced_position: IntGauge,
     pub db_op_mcs: HistogramVec,
     pub map_time_mcs: Histogram,
+    pub wal_mapper_time_mcs: IntCounter,
 
     pub snapshot_lock_time_mcs: Histogram,
     pub snapshot_force_unload: IntCounterVec,
@@ -45,6 +45,7 @@ pub struct Metrics {
     pub flush_update: IntCounterVec,
     pub flushed_keys: IntCounterVec,
     pub flushed_bytes: IntCounterVec,
+    pub flush_pending: IntGauge,
 
     pub memory_estimate: IntGaugeVec,
     pub value_cache_size: IntGaugeVec,
@@ -113,7 +114,6 @@ impl Metrics {
             lookup_scan_mcs: counter!("lookup_scan_mcs", registry),
             lookup_io_mcs: counter!("lookup_io_mcs", registry),
             lookup_io_bytes: counter!("lookup_io_bytes", registry),
-            direct_io_bytes: counter!("direct_io_bytes", registry),
             large_table_contention: histogram_vec!(
                 "large_table_contention",
                 &["ks"],
@@ -124,6 +124,7 @@ impl Metrics {
             wal_synced_position: gauge!("wal_synced_position", registry),
             db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry),
             map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry),
+            wal_mapper_time_mcs: counter!("wal_mapper_time_mcs", registry),
 
             snapshot_lock_time_mcs: histogram!(
                 "snapshot_lock_time_mcs",
@@ -143,6 +144,7 @@ impl Metrics {
             flush_update: counter_vec!("flush_update", &["kind"], registry),
             flushed_keys: counter_vec!("flushed_keys", &["ks"], registry),
             flushed_bytes: counter_vec!("flushed_bytes", &["ks"], registry),
+            flush_pending: gauge!("flush_pending", registry),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),
             value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry),

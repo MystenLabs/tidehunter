@@ -18,6 +18,7 @@ impl CrcFrame {
         let mut bytes = BytesMut::with_capacity(t.len() + 8);
         bytes.put_u64(0);
         t.write_into_bytes(&mut bytes);
+        // todo - remove len from crc frame since we store it in wal position
         let len = (t.len() as u32).to_be_bytes();
         bytes[0..4].copy_from_slice(&len);
         let crc = Self::crc(&bytes[8..]);
@@ -37,10 +38,6 @@ impl CrcFrame {
         let len = Self::checked_read(&b, pos)?;
         let data = b.slice(Self::data_range(pos, len));
         Ok(data)
-    }
-    pub fn read_size(mut b: &[u8]) -> usize {
-        assert!(b.len() >= Self::CRC_HEADER_LENGTH);
-        b.get_u32() as usize
     }
 
     fn checked_read(b: &[u8], pos: usize) -> Result<usize, CrcReadError> {

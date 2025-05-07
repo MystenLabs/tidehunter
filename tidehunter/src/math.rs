@@ -31,6 +31,13 @@ pub fn starting_u32(slice: &[u8]) -> u32 {
     u32::from_be_bytes(p)
 }
 
+pub fn starting_u64(slice: &[u8]) -> u64 {
+    let copy = cmp::min(slice.len(), 8);
+    let mut p = [0u8; 8];
+    p[..copy].copy_from_slice(&slice[..copy]);
+    u64::from_be_bytes(p)
+}
+
 /// Return next number in range 0..max_excluded, or None if at the end of the range
 pub fn next_bounded(n: usize, max_excluded: usize, reverse: bool) -> Option<usize> {
     if reverse {

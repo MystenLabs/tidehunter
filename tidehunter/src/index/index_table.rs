@@ -1,3 +1,4 @@
+use crate::primitives::range_from_excluding::RangeFromExcluding;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use std::collections::btree_map::Entry;
@@ -83,41 +84,39 @@ impl IndexTable {
         self.data.get(k).copied()
     }
 
-    /// If next_entry is None returns first entry.
+    /// If prev is None returns first entry.
     ///
-    /// If next_entry is not None, returns entry on or after specified next_entry.
+    /// If prev is not None, returns entry after specified prev.
     ///
-    /// Returns tuple of a key, value and an optional next key if present.
+    /// Returns tuple of a key, value.
     ///
-    /// This works even if next is set to Some(k), but the value at k does not exist (for ex. was deleted).
-    /// For this reason, the returned key might be different from the next key requested.
-    pub fn next_entry(
-        &self,
-        next: Option<Bytes>,
-        reverse: bool,
-    ) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
-        fn take_next<'a>(
-            mut iter: impl Iterator<Item = (&'a Bytes, &'a WalPosition)>,
-        ) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
-            let (key, value) = iter.next()?;
-            let next_key = iter.next().map(|(k, _v)| k.clone());
-            Some((key.clone(), *value, next_key))
-        }
-
-        if let Some(next) = next {
+    /// This works even if prev is set to Some(k), but the value at k does not exist (for ex. was deleted).
+    pub fn next_entry(&self, prev: Option<Bytes>, reverse: bool) -> Option<(Bytes, WalPosition)> {
+        if let Some(prev) = prev {
             if reverse {
-                let range = self.data.range(..=next);
-                take_next(range.into_iter().rev())
+                let range = self.data.range(..prev);
+                range
+                    .into_iter()
+                    .rev()
+                    .next()
+                    .map(|(key, value)| (key.clone(), *value))
             } else {
-                let range = self.data.range(next..);
-                take_next(range.into_iter())
+                let range = RangeFromExcluding { from: &prev };
+                let range = self.data.range(range);
+                range
+                    .into_iter()
+                    .next()
+                    .map(|(key, value)| (key.clone(), *value))
             }
         } else {
-            let iterator = self.data.iter();
+            let mut iterator = self.data.iter();
             if reverse {
-                take_next(iterator.rev())
+                iterator
+                    .rev()
+                    .next()
+                    .map(|(key, value)| (key.clone(), *value))
             } else {
-                take_next(iterator)
+                iterator.next().map(|(key, value)| (key.clone(), *value))
             }
         }
     }
@@ -175,56 +174,64 @@ mod tests {
 
         // Reverse = false
 
-        // existing element - next found
+        // existing element - next found exclusive
         let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), false);
         let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
-        assert_eq!(next.1, WalPosition::test_value(2));
-        assert_eq!(next.2, Some(vec![1, 2, 4, 5].into()));
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 4, 5]));
+        assert_eq!(next.1, WalPosition::test_value(3));
 
-        // not existing element - next found
+        // not existing element - next found exclusive
         let next = table.next_entry(Some(vec![1, 2, 3, 6].into()), false);
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
         assert_eq!(next.1, WalPosition::test_value(2));
-        assert_eq!(next.2, Some(vec![1, 2, 4, 5].into()));
 
-        // existing element - next not found
+        // existing element - next not found exclusive
         let next = table.next_entry(Some(vec![1, 2, 4, 5].into()), false);
-        let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 4, 5]));
-        assert_eq!(next.1, WalPosition::test_value(3));
-        assert_eq!(next.2, None);
+        assert!(next.is_none());
 
-        // not existing element - next not found
+        // not existing element - next not found inclusive
         let next = table.next_entry(Some(vec![1, 2, 4, 6].into()), false);
         assert!(next.is_none());
 
         // Reverse = true
 
-        // existing element - next found
+        // existing element - next found exclusive
         let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), true);
         let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
-        assert_eq!(next.1, WalPosition::test_value(2));
-        assert_eq!(next.2, Some(vec![1, 2, 3, 4].into()));
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 4]));
+        assert_eq!(next.1, WalPosition::test_value(1));
 
-        // not existing element - next found
+        // not existing element - next found inclusive
         let next = table.next_entry(Some(vec![1, 2, 3, 8].into()), true);
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
         assert_eq!(next.1, WalPosition::test_value(2));
-        assert_eq!(next.2, Some(vec![1, 2, 3, 4].into()));
 
-        // existing element - next not found
+        // existing element - next not found exclusive
         let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), true);
-        let next = next.unwrap();
-        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 4]));
-        assert_eq!(next.1, WalPosition::test_value(1));
-        assert_eq!(next.2, None);
+        assert!(next.is_none());
 
-        // not existing element - next not found
+        // not existing element - next not found inclusive
         let next = table.next_entry(Some(vec![1, 2, 3, 3].into()), true);
         assert!(next.is_none());
+    }
+
+    #[test]
+    fn test_insert_while_iterating() {
+        let mut table = IndexTable::default();
+        table.insert(vec![1, 2, 3, 4].into(), WalPosition::test_value(1));
+        table.insert(vec![1, 2, 3, 7].into(), WalPosition::test_value(2));
+
+        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), false);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
+        assert_eq!(next.1, WalPosition::test_value(2));
+
+        table.insert(vec![1, 2, 3, 6].into(), WalPosition::test_value(3));
+        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), false);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 6]));
+        assert_eq!(next.1, WalPosition::test_value(3));
     }
 }

@@ -2,17 +2,19 @@ use crate::cell::CellId;
 use crate::db::MAX_KEY_LEN;
 use crate::index::index_format::IndexFormatType;
 use crate::math;
-use crate::math::{downscale_u32, starting_u32};
+use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
+use std::fmt;
+use std::fmt::Debug;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::sync::Arc;
 
 pub(crate) const CELL_PREFIX_LENGTH: usize = 4; // in bytes
-const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
+pub(crate) const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
 
 #[derive(Clone)]
 pub struct KeyShape {
@@ -51,6 +53,7 @@ pub struct KeySpaceConfig {
     value_cache_size: usize,
     key_reduction: Option<Range<usize>>,
     index_format: IndexFormatType,
+    unloaded_iterator: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -113,6 +116,11 @@ impl KeyShapeBuilder {
     ) -> KeySpace {
         let name = name.into();
         assert!(mutexes > 0, "mutexes should be greater then 0");
+        // also see test_prefix_falls_in_range
+        assert!(
+            mutexes.is_power_of_two(),
+            "mutexes should be power of 2, given {mutexes}"
+        );
 
         assert!(
             self.key_spaces.len() < (u8::MAX - 1) as usize,
@@ -219,6 +227,11 @@ impl KeySpaceDesc {
         starting_u32(self.index_prefix(k))
     }
 
+    /// Returns u64 prefix
+    pub(crate) fn index_prefix_u64(&self, k: &[u8]) -> u64 {
+        starting_u64(self.index_prefix(k))
+    }
+
     fn index_prefix<'a>(&self, k: &'a [u8]) -> &'a [u8] {
         self.key_type.index_prefix(&k[self.config.key_offset..])
     }
@@ -252,7 +265,7 @@ impl KeySpaceDesc {
             }
             (KeyType::PrefixedUniform(prefix_config), CellId::Bytes(cell)) => {
                 // CellId can not be empty
-                prefix_config.prefix_range(cell[0])
+                prefix_config.prefix_range(cell[cell.len() - 1])
             }
             (KeyType::Uniform(_), CellId::Bytes(_)) => {
                 panic!("index_prefix_range called for uniform key type and bytes cell id")
@@ -305,6 +318,10 @@ impl KeySpaceDesc {
 
     pub(crate) fn unloading_disabled(&self) -> bool {
         self.config.disable_unload
+    }
+
+    pub(crate) fn unloaded_iterator_enabled(&self) -> bool {
+        self.config.unloaded_iterator
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -361,6 +378,11 @@ impl KeySpaceConfig {
         self.index_format = index_format;
         self
     }
+
+    pub fn with_unloaded_iterator(mut self, enabled: bool) -> Self {
+        self.unloaded_iterator = enabled;
+        self
+    }
 }
 
 impl KeyShape {
@@ -374,6 +396,10 @@ impl KeyShape {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> (Self, KeySpace) {
+        assert!(
+            mutexes.is_power_of_two(),
+            "mutexes should be power of 2, given {mutexes}"
+        );
         let key_space = KeySpaceDescInner {
             id: KeySpace(0),
             name: "root".into(),
@@ -485,6 +511,10 @@ impl UniformKeyConfig {
             cells_per_mutex > 0,
             "cells_per_mutex should be greater then 0"
         );
+        assert!(
+            cells_per_mutex.is_power_of_two(),
+            "cells_per_mutex should be power of two, given {cells_per_mutex}"
+        );
         Self { cells_per_mutex }
     }
 
@@ -555,12 +585,12 @@ impl PrefixedUniformKeyConfig {
         self.reset_mask != u8::MAX
     }
 
-    fn prefix_range(&self, first_byte: u8) -> Range<u64> {
+    fn prefix_range(&self, last_byte: u8) -> Range<u64> {
         if self.has_cluster_bits() {
-            let range_u8 = self.prefix_range_u8(first_byte);
+            let range_u8 = self.prefix_range_u8(last_byte);
             let start_inclusive = (*range_u8.start() as u64) << 24;
             let end_inclusive = (*range_u8.end() as u64) << 24;
-            let end_exclusive = end_inclusive + 1;
+            let end_exclusive = end_inclusive + 0x1000000;
             start_inclusive..end_exclusive
         } else {
             0..MAX_U32_PLUS_ONE
@@ -581,8 +611,8 @@ impl PrefixedUniformKeyConfig {
     ///
     /// See prefix_range_u8 for examples.
     #[inline(always)]
-    fn prefix_range_u8(&self, first_byte: u8) -> RangeInclusive<u8> {
-        let min_byte = first_byte & self.reset_mask;
+    fn prefix_range_u8(&self, last_byte: u8) -> RangeInclusive<u8> {
+        let min_byte = last_byte & self.reset_mask;
         // Mask that has all zeroes followed by cluster_bits ones at the end.
         // E.g., for cluster_bits=2 the compliment_mask is 0000_0011
         // This naturally turns out to be !self.reset_mask
@@ -592,11 +622,24 @@ impl PrefixedUniformKeyConfig {
     }
 }
 
+impl Debug for KeyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyType::Uniform(c) => write!(f, "uniform({})", c.cells_per_mutex),
+            KeyType::PrefixedUniform(c) => {
+                write!(f, "prefix({}, {})", c.prefix_len_bytes, c.cluster_bits)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cell::CellIdBytesContainer;
     use hex_literal::hex;
+    use rand::prelude::StdRng;
+    use rand::{Rng, SeedableRng};
     use std::collections::hash_map::Entry;
     use std::collections::HashMap;
 
@@ -629,11 +672,57 @@ mod tests {
         let config = PrefixedUniformKeyConfig::new(1, 0);
         assert_prefix_range_eq(0x0000_0000..0x1_0000_0000, config.prefix_range(111));
         let config = PrefixedUniformKeyConfig::new(1, 7);
-        assert_prefix_range_eq(0x0000_0000..0x7f00_0001, config.prefix_range(0));
-        assert_prefix_range_eq(0x0000_0000..0x7f00_0001, config.prefix_range(15));
-        assert_prefix_range_eq(0x0000_0000..0x7f00_0001, config.prefix_range(0x7f));
-        assert_prefix_range_eq(0x8000_0000..0xff00_0001, config.prefix_range(0x80));
-        assert_prefix_range_eq(0x8000_0000..0xff00_0001, config.prefix_range(0xff));
+        assert_prefix_range_eq(0x0000_0000..0x8000_0000, config.prefix_range(0));
+        assert_prefix_range_eq(0x0000_0000..0x8000_0000, config.prefix_range(15));
+        assert_prefix_range_eq(0x0000_0000..0x8000_0000, config.prefix_range(0x7f));
+        assert_prefix_range_eq(0x8000_0000..0x1_0000_0000, config.prefix_range(0x80));
+        assert_prefix_range_eq(0x8000_0000..0x1_0000_0000, config.prefix_range(0xff));
+    }
+
+    #[test]
+    fn test_prefix_falls_in_range() {
+        // todo do we want to support num mutexes that are not power of 2?
+        for mutexes in [1, 16, 256 /*, 12*/] {
+            test_prefix_falls_in_range_impl(mutexes, KeyType::uniform(1));
+            test_prefix_falls_in_range_impl(mutexes, KeyType::uniform(64));
+            test_prefix_falls_in_range_impl(mutexes, KeyType::uniform(256));
+            test_prefix_falls_in_range_impl(mutexes, KeyType::prefix_uniform(8, 4));
+            test_prefix_falls_in_range_impl(mutexes, KeyType::prefix_uniform(15, 4));
+        }
+    }
+
+    fn test_prefix_falls_in_range_impl(mutexes: usize, key_type: KeyType) {
+        let (key_shape, ks) = KeyShape::new_single(32, mutexes, key_type.clone());
+        let ks = key_shape.ks(ks);
+        let mut rng = StdRng::from_seed(Default::default());
+        for _ in 0..1024 {
+            let mut key = vec![0u8; 32];
+            rng.fill(&mut key[..]);
+            test_prefix_falls_in_range_for_key(mutexes, &key_type, ks, &key);
+        }
+        // border values
+        test_prefix_falls_in_range_for_key(mutexes, &key_type, ks, &[0x0u8; 32]);
+        test_prefix_falls_in_range_for_key(mutexes, &key_type, ks, &[0xffu8; 32]);
+    }
+
+    #[track_caller]
+    fn test_prefix_falls_in_range_for_key(
+        mutexes: usize,
+        key_type: &KeyType,
+        ks: &KeySpaceDesc,
+        key: &[u8],
+    ) {
+        let prefix = ks.index_prefix_u32(&key) as u64;
+        let cell = ks.cell_id(&key);
+        let range = ks.index_prefix_range(&cell);
+        if !range.contains(&prefix) {
+            let mut formatted_key = String::default();
+            for chunk in key.chunks(8) {
+                formatted_key.push_str(&hex::encode(chunk));
+                formatted_key.push('_');
+            }
+            panic!("Failed for key {formatted_key}, cell {cell:x?}, prefix {prefix:x}, range {range:x?}, key type {key_type:?}, mutexes {mutexes}");
+        }
     }
 
     #[track_caller]

@@ -49,7 +49,7 @@ impl Db {
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let (flusher_sender, flusher_receiver) = mpsc::channel();
-        let flusher = IndexFlusher::new(flusher_sender);
+        let flusher = IndexFlusher::new(flusher_sender, metrics.clone());
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
@@ -93,12 +93,12 @@ impl Db {
 
     fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
         loop {
-            thread::sleep(Duration::from_secs(30));
+            thread::sleep(Duration::from_secs(60));
             let db = weak.upgrade()?;
             db.large_table.report_entries_state();
             // todo when we get to wal position wrapping around this will need to be fixed
-            let current_wal_position = db.wal_writer.wal_position();
-            let written = current_wal_position.as_u64().checked_sub(position).unwrap();
+            let current_wal_position = db.wal_writer.position();
+            let written = current_wal_position.checked_sub(position).unwrap();
             if written > db.config.snapshot_written_bytes() {
                 // todo taint storage instance on failure?
                 let snapshot_position = db
@@ -297,31 +297,24 @@ impl Db {
         self.key_shape.ks(ks)
     }
 
-    /// Returns the next entry in the database.
-    /// Iterator must specify the cell to inspect and the (Optional) next key.
+    /// Returns the next entry in the database, after the specified previous key.
+    /// Iterator must specify the cell to inspect and the (Optional) previous key.
     ///
-    /// If the next_key is set to None, the first key in the cell is returned.
+    /// If the prev_key is set to None, the first key in the cell is returned.
     ///
-    /// When iterating the entire DB, the iterator starts with cell=0 and next_key=None.
+    /// When iterating the entire DB, the iterator starts with cell=0 and prev_key=None.
     ///
     /// The returned values:
-    /// (1) Next cell to read, None if iterator has reached the end of the DB.
-    /// (2) Next key to read.
-    ///     This value should be passed as is to next call of next_entry.
-    ///     None here **does not** mean iteration has ended.
-    /// (3) the key fetched by the iterator
-    /// (4) the value fetched by the iterator
+    /// (1) the key fetched by the iterator
+    /// (2) the value fetched by the iterator
     ///
     /// This function allows concurrent modification of the database.
-    /// If next_key is deleted,
-    /// the function will return the key-value pair next after the deleted key.
-    ///
-    /// As such, the returned key might not match the value passed in the next_key.
+    /// The function will return the key-value pair next after the deleted key.
     pub(crate) fn next_entry(
         &self,
         ks: KeySpace,
         cell: CellId,
-        next_key: Option<Bytes>,
+        prev_key: Option<Bytes>,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> DbResult<Option<IteratorResult<Bytes>>> {
@@ -333,7 +326,7 @@ impl Db {
             .mcs_timer();
         let Some(result) =
             self.large_table
-                .next_entry(ks, cell, next_key, self, end_cell_exclusive, reverse)?
+                .next_entry(ks, cell, prev_key, self, end_cell_exclusive, reverse)?
         else {
             return Ok(None);
         };
@@ -439,13 +432,10 @@ impl Db {
 
     #[cfg(test)]
     fn rebuild_control_region(&self) -> DbResult<WalPosition> {
-        self.rebuild_control_region_from(self.wal_writer.wal_position())
+        self.rebuild_control_region_from(self.wal_writer.position())
     }
 
-    fn rebuild_control_region_from(
-        &self,
-        current_wal_position: WalPosition,
-    ) -> DbResult<WalPosition> {
+    fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<WalPosition> {
         let mut crs = self.control_region_store.lock();
         let _timer = self
             .metrics
@@ -453,9 +443,7 @@ impl Db {
             .clone()
             .mcs_timer();
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
-        let snapshot = self
-            .large_table
-            .snapshot(current_wal_position.as_u64(), self)?;
+        let snapshot = self.large_table.snapshot(current_wal_position, self)?;
         self.wal.fsync()?;
         crs.store(snapshot.data, snapshot.last_added_position, &self.metrics);
         Ok(snapshot.last_added_position)
@@ -541,7 +529,7 @@ impl Db {
     pub fn create_state_snapshot(&self, snapshot_path: PathBuf) -> DbResult<()> {
         let guard = self.control_region_store.lock();
         let control_region_path = guard.path();
-        let wal_position = self.wal_writer.wal_position();
+        let wal_position = self.wal_writer.position();
         state_snapshot::create(&wal_position, control_region_path, snapshot_path)
     }
 
@@ -575,12 +563,8 @@ impl Loader for Wal {
         Db::read_index(ks, entry)
     }
 
-    fn index_reader(
-        &self,
-        ks: &KeySpaceDesc,
-        position: WalPosition,
-    ) -> Result<WalRandomRead, Self::Error> {
-        Ok(self.random_reader_at(ks, position, WalEntry::INDEX_PREFIX_SIZE)?)
+    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+        Ok(self.random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
     fn flush_supported(&self) -> bool {
@@ -600,14 +584,10 @@ impl Loader for Db {
         Self::read_index(ks, entry)
     }
 
-    fn index_reader(
-        &self,
-        ks: &KeySpaceDesc,
-        position: WalPosition,
-    ) -> Result<WalRandomRead, Self::Error> {
+    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
         Ok(self
             .wal
-            .random_reader_at(ks, position, WalEntry::INDEX_PREFIX_SIZE)?)
+            .random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
     fn flush_supported(&self) -> bool {
@@ -678,6 +658,7 @@ impl IntoBytesFixed for WalEntry {
             WalEntry::Record(ks, k, v) => {
                 buf.put_u8(Self::WAL_ENTRY_RECORD);
                 buf.put_u8(ks.0);
+                // todo use key len from ks instead
                 buf.put_u16(k.len() as u16);
                 buf.put_slice(&k);
                 buf.put_slice(&v);

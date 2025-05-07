@@ -5,13 +5,12 @@ use std::path::Path;
 use std::sync::Arc;
 use tidehunter::config::Config;
 use tidehunter::db::Db;
-use tidehunter::key_shape::{KeyShape, KeySpace, KeyType};
+use tidehunter::key_shape::{KeyShape, KeySpace};
 use tidehunter::metrics::Metrics;
 
 pub struct TidehunterStorage {
     pub db: Arc<Db>,
     ks: KeySpace,
-    pub metrics: Arc<Metrics>,
 }
 
 impl Storage for Arc<TidehunterStorage> {
@@ -22,17 +21,38 @@ impl Storage for Arc<TidehunterStorage> {
     fn get(&self, k: &[u8]) -> Option<Bytes> {
         self.db.get(self.ks, k).unwrap()
     }
+
+    fn get_lt(&self, k: &[u8], iterations: usize) -> Vec<Bytes> {
+        let mut iterator = self.db.iterator(self.ks);
+        iterator.set_upper_bound(k.to_vec());
+        iterator.reverse();
+        let mut result = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            if let Some(next) = iterator.next() {
+                result.push(next.expect("Db error").1);
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    fn name(&self) -> &'static str {
+        "tidehunter"
+    }
 }
 
 impl TidehunterStorage {
-    pub fn open(config: Config, path: &Path) -> Arc<Self> {
+    pub fn open(
+        registry: &Registry,
+        config: Config,
+        path: &Path,
+        (key_shape, ks): (KeyShape, KeySpace),
+    ) -> Arc<Self> {
         let config = Arc::new(config);
-        let registry = Registry::new();
-        let metrics = Metrics::new_in(&registry);
-        crate::prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
-        let (key_shape, ks) = KeyShape::new_single(32, 1024, KeyType::uniform(32));
-        let db = Db::open(path, key_shape, config, metrics.clone()).unwrap();
-        let this = Self { db, ks, metrics };
+        let metrics = Metrics::new_in(registry);
+        let db = Db::open(path, key_shape, config, metrics).unwrap();
+        let this = Self { db, ks };
         Arc::new(this)
     }
 }

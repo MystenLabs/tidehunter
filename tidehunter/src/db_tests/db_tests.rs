@@ -1,13 +1,15 @@
 use super::super::*;
 use crate::batch::WriteBatch;
 use crate::config::Config;
+use crate::crc::CrcFrame;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
 use crate::metrics::Metrics;
 use minibytes::Bytes;
-use rand::rngs::ThreadRng;
-use rand::Rng;
+use rand::rngs::{StdRng, ThreadRng};
+use rand::{Rng, SeedableRng};
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::thread;
 
@@ -92,7 +94,7 @@ fn test_multi_thread_write() {
     let dir = tempdir::TempDir::new("test-batch").unwrap();
     let config = Config::small();
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(8, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(8, 16, KeyType::uniform(16));
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
     let threads = 8u64;
     let mut jhs = Vec::with_capacity(threads as usize);
@@ -128,7 +130,7 @@ fn test_multi_thread_write() {
 fn test_batch() {
     let dir = tempdir::TempDir::new("test-batch").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
     let mut batch = WriteBatch::new();
     batch.write(ks, vec![5, 6, 7, 8], vec![15]);
@@ -272,9 +274,9 @@ fn test_iterator_gen() {
     random.sort();
     for reduced in [true, false] {
         let ks_config = if reduced {
-            KeySpaceConfig::default()
-        } else {
             KeySpaceConfig::default().with_key_reduction(0..16)
+        } else {
+            KeySpaceConfig::default()
         };
         println!("Starting sequential test, reduced={reduced}");
         test_iterator_run(sequential.clone(), ks_config.clone());
@@ -332,7 +334,7 @@ fn test_iterator_slice(db: &Arc<Db>, ks: KeySpace, slice: &[u128], reverse: bool
 fn test_ordered_iterator() {
     let dir = tempdir::TempDir::new("test-ordered-iterator").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
     {
         let db = Db::open(
             dir.path(),
@@ -388,10 +390,198 @@ fn test_ordered_iterator() {
 }
 
 #[test]
+fn test_insert_while_iterating() {
+    let dir = tempdir::TempDir::new("test-insert-while-iterating").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+    db.insert(ks, vec![1, 2, 3, 4, 5], vec![1]).unwrap();
+    db.insert(ks, vec![1, 2, 3, 4, 8], vec![2]).unwrap();
+    let mut it = db.iterator(ks);
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 5]);
+
+    db.insert(ks, vec![1, 2, 3, 4, 6], vec![3]).unwrap();
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 6]);
+
+    let (k, _) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![1, 2, 3, 4, 8]);
+}
+
+#[test]
+fn test_iterator_bounds_no_reduction() {
+    let dir = tempdir::TempDir::new("test-iterator-bounds").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
+    db.insert(ks, vec![0, 0, 0, 1], vec![1]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 254], vec![2]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 255], vec![2]).unwrap();
+
+    // forward iterator from 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator from 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 1]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 1]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator to 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // forward iterator to 254
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 253]);
+    it.set_upper_bound(vec![255, 255, 255, 254]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 253]);
+    it.set_upper_bound(vec![255, 255, 255, 254]);
+    it.reverse();
+    assert!(it.next().is_none());
+}
+
+#[test]
+fn test_iterator_bounds_with_reduction() {
+    let dir = tempdir::TempDir::new("test-iterator-bounds-with-reduction").unwrap();
+    let config = Arc::new(Config::small());
+    let ks_config = KeySpaceConfig::new().with_key_reduction(0..2);
+    let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 253], vec![2]).unwrap();
+    db.insert(ks, vec![255, 255, 255, 254], vec![2]).unwrap();
+
+    // forward iterator from 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // forward iterator from 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 0
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 0]);
+    it.set_upper_bound(vec![0, 0, 0, 1]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![0, 0, 0, 0]);
+    assert_eq!(v, vec![1]);
+    assert!(it.next().is_none());
+
+    // reverse iterator to 1
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![0, 0, 0, 1]);
+    it.set_upper_bound(vec![0, 0, 0, 2]);
+    it.reverse();
+    assert!(it.next().is_none());
+
+    // forward iterator to 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+
+    // reverse iterator from 255
+    let mut it = db.iterator(ks);
+    it.set_lower_bound(vec![255, 255, 255, 254]);
+    it.set_upper_bound(vec![255, 255, 255, 255]);
+    it.reverse();
+    let (k, v) = it.next().unwrap().unwrap();
+    assert_eq!(k, vec![255, 255, 255, 254]);
+    assert_eq!(v, vec![2]);
+    assert!(it.next().is_none());
+}
+
+#[test]
 fn test_empty() {
     let dir = tempdir::TempDir::new("test-empty").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
     {
         let db = Db::open(
             dir.path(),
@@ -421,10 +611,10 @@ fn test_small_keys() {
     let dir = tempdir::TempDir::new("test-small-keys").unwrap();
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
-    let ks0 = ksb.add_key_space("a", 0, 12, KeyType::uniform(12));
-    let ks1 = ksb.add_key_space("b", 1, 12, KeyType::uniform(12));
-    let ks2 = ksb.add_key_space("c", 2, 12, KeyType::uniform(12));
-    let _ks3 = ksb.add_key_space("d", 3, 12, KeyType::uniform(12));
+    let ks0 = ksb.add_key_space("a", 0, 16, KeyType::uniform(16));
+    let ks1 = ksb.add_key_space("b", 1, 16, KeyType::uniform(16));
+    let ks2 = ksb.add_key_space("c", 2, 16, KeyType::uniform(16));
+    let _ks3 = ksb.add_key_space("d", 3, 16, KeyType::uniform(16));
     let key_shape = ksb.build();
     {
         let db = Db::open(
@@ -459,7 +649,7 @@ fn test_small_keys() {
 fn test_last_in_range() {
     let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 12, KeyType::uniform(12));
+    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -934,12 +1124,58 @@ fn test_key_reduction_lru() {
     assert_eq!(4, lru_lookups("root", &metrics));
 }
 
+#[test]
+fn test_cluster_bits_sequence_choice() {
+    test_cluster_bits(true)
+}
+
+#[test]
+fn test_cluster_bits_choice_sequence() {
+    test_cluster_bits(false)
+}
+
+fn test_cluster_bits(sc: bool) {
+    let dir = tempdir::TempDir::new(&format!("test_cluster_bits_{sc}")).unwrap();
+    let config = Arc::new(Config::small());
+    let key_type = if sc {
+        KeyType::prefix_uniform(8, 4)
+    } else {
+        KeyType::prefix_uniform(15, 4)
+    };
+    let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        metrics.clone(),
+    )
+    .unwrap();
+    let mut rng = StdRng::from_seed(Default::default());
+
+    for i in 0..0xffff {
+        let mut key = vec![0; 32];
+        let i = i * 121;
+        if sc {
+            key[..8].copy_from_slice(&u64::to_be_bytes(i / 256));
+            key[8..16].copy_from_slice(&u64::to_be_bytes(i % 256));
+        } else {
+            key[..8].copy_from_slice(&u64::to_be_bytes(i % 256));
+            key[8..16].copy_from_slice(&u64::to_be_bytes(i / 256));
+        }
+        rng.fill(&mut key[16..]);
+        db.insert(ks, key, vec![]).unwrap();
+    }
+    db.large_table
+        .each_entry(|entry| println!("Dirty {}", entry.data.len()));
+}
+
 pub(super) fn default_key_shape() -> (KeyShape, KeySpace) {
-    KeyShape::new_single(4, 12, KeyType::uniform(12))
+    KeyShape::new_single(4, 16, KeyType::uniform(16))
 }
 
 pub(super) fn prefix_key_shape() -> (KeyShape, KeySpace) {
-    KeyShape::new_single(4, 12, KeyType::prefix_uniform(2, 0))
+    KeyShape::new_single(4, 16, KeyType::prefix_uniform(2, 0))
 }
 
 fn lru_lookups(ks: &str, metrics: &Metrics) -> u64 {
@@ -976,21 +1212,21 @@ pub(super) fn uniform_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
     let mut builder = KeyShapeBuilder::new();
 
     // First key space with default LookupHeader index format
-    let ks1 = builder.add_key_space("lookup_header", 4, 12, KeyType::uniform(12));
+    let ks1 = builder.add_key_space("lookup_header", 4, 16, KeyType::uniform(16));
 
     // Second key space with UniformLookup index format
     let uniform_index = UniformLookupIndex::new();
     let ks2_config =
         KeySpaceConfig::default().with_index_format(IndexFormatType::Uniform(uniform_index));
     let ks2 =
-        builder.add_key_space_config("uniform_lookup", 4, 12, KeyType::uniform(12), ks2_config);
+        builder.add_key_space_config("uniform_lookup", 4, 16, KeyType::uniform(16), ks2_config);
 
     (builder.build(), ks1, ks2)
 }
 
 pub(super) fn prefix_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
     let mut builder = KeyShapeBuilder::new();
-    let ks1 = builder.add_key_space("lookup_header", 4, 12, KeyType::prefix_uniform(2, 0));
+    let ks1 = builder.add_key_space("lookup_header", 4, 16, KeyType::prefix_uniform(2, 0));
     // Second key space with UniformLookup index format
     let uniform_index = UniformLookupIndex::new();
     let ks2_config =
@@ -998,7 +1234,7 @@ pub(super) fn prefix_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
     let ks2 = builder.add_key_space_config(
         "prefix_lookup",
         4,
-        12,
+        16,
         KeyType::prefix_uniform(2, 0),
         ks2_config,
     );
@@ -1151,6 +1387,206 @@ pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeyS
             Some(vec![26, 27].into()),
             db.get(ks2, &[5, 6, 7, 8]).unwrap()
         );
+    }
+}
+
+#[test]
+fn test_value_corruption() {
+    let dir = tempdir::TempDir::new("test_value_corruption").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+
+    let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
+    let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
+    let (key_3, value_3) = (vec![3, 3], vec![3, 13]);
+    let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
+
+    // Open the db and insert some data. Record the position of the last entry
+    let (last_position, file) = {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
+        db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
+        let position = db.wal_writer.position();
+        db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
+
+        let file = db.wal.file().try_clone().unwrap();
+        (position, file)
+    };
+
+    // Insert a corruption in the last byte of the last database entry
+    let mut data = [0u8; 1];
+    let position = last_position + CrcFrame::CRC_HEADER_LENGTH as u64;
+    file.read_exact_at(&mut data, position).unwrap();
+    data[0] = !data[0];
+    file.write_all_at(&mut data, position).unwrap();
+
+    // Re-open the database and insert some new data
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_4.clone(), value_4.clone()).unwrap();
+    }
+
+    // Re-open the database; verify that the corrupt data is not accessible
+    // and all other data is intact
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        assert_eq!(Some(value_1.into()), db.get(ks, &key_1).unwrap());
+        assert_eq!(Some(value_2.into()), db.get(ks, &key_2).unwrap());
+        assert_eq!(None, db.get(ks, &key_3).unwrap());
+        assert_eq!(Some(value_4.into()), db.get(ks, &key_4).unwrap());
+    }
+}
+
+#[test]
+fn test_header_corruption() {
+    let dir = tempdir::TempDir::new("test_header_corruption").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+
+    let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
+    let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
+    let (key_3, value_3) = (vec![3, 3], vec![3, 13]);
+    let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
+
+    // Open the db and insert some data. Record the position of the last entry
+    let (last_position, file) = {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
+        db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
+        let position = db.wal_writer.position();
+        db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
+
+        let file = db.wal.file().try_clone().unwrap();
+        (position, file)
+    };
+
+    // Insert a corruption in the first byte of the last database entry
+    let mut data = [0u8; 1];
+    file.read_exact_at(&mut data, last_position).unwrap();
+    data[0] = !data[0];
+    file.write_all_at(&mut data, last_position).unwrap();
+
+    // Re-open the database and insert some new data
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_4.clone(), value_4.clone()).unwrap();
+    }
+
+    // Re-open the database; verify that the corrupt data is not accessible
+    // and all other data is intact
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        assert_eq!(Some(value_1.into()), db.get(ks, &key_1).unwrap());
+        assert_eq!(Some(value_2.into()), db.get(ks, &key_2).unwrap());
+        assert_eq!(None, db.get(ks, &key_3).unwrap());
+        assert_eq!(Some(value_4.into()), db.get(ks, &key_4).unwrap());
+    }
+}
+
+#[test]
+fn test_max_value_header_corruption() {
+    let dir = tempdir::TempDir::new("test_max_value_header_corruption").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+
+    let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
+    let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
+    let (key_3, value_3) = (vec![3, 3], vec![3, 13]);
+    let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
+
+    // Open the db and insert some data. Record the position of the last entry
+    let (last_position, file) = {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
+        db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
+        let position = db.wal_writer.position();
+        db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
+
+        let file = db.wal.file().try_clone().unwrap();
+        (position, file)
+    };
+
+    // Insert a corruption in the first byte of the last database entry
+    let data = [0xffu8; 8];
+    file.write_all_at(&data, last_position).unwrap();
+
+    // Re-open the database and insert some new data
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_4.clone(), value_4.clone()).unwrap();
+    }
+
+    // Re-open the database; verify that the corrupt data is not accessible
+    // and all other data is intact
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        assert_eq!(Some(value_1.into()), db.get(ks, &key_1).unwrap());
+        assert_eq!(Some(value_2.into()), db.get(ks, &key_2).unwrap());
+        assert_eq!(None, db.get(ks, &key_3).unwrap());
+        assert_eq!(Some(value_4.into()), db.get(ks, &key_4).unwrap());
     }
 }
 

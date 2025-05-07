@@ -1,10 +1,11 @@
+use bytes::BytesMut;
 use minibytes::Bytes;
 use std::ops::Range;
 use std::time::Instant;
 
-use super::index_format::IndexFormat;
-use super::{deserialize_index_entries, serialize_index_entries};
-use crate::index::index_format::{binary_search_entries, PREFIX_LENGTH};
+use super::index_format::{Direction, IndexFormat};
+use super::{deserialize_index_entries, index_element_size, serialize_index_entries};
+use crate::index::index_format::{binary_search, PREFIX_LENGTH};
 use crate::key_shape::CELL_PREFIX_LENGTH;
 use crate::metrics::Metrics;
 use crate::wal::WalPosition;
@@ -45,6 +46,7 @@ impl UniformLookupIndex {
 
     fn probable_key_offset_and_window_size(
         &self,
+        ks: &KeySpaceDesc,
         cell_prefix_range: &Range<u64>,
         key: &[u8],
         file_length: usize,
@@ -59,7 +61,7 @@ impl UniformLookupIndex {
 
         assert!(PREFIX_LENGTH >= CELL_PREFIX_LENGTH);
         assert!(PREFIX_LENGTH <= 8); // we want the prefix to fit in u64
-        let prefix = Self::bytes_to_key(&key);
+        let prefix = ks.index_prefix_u64(&key);
         if long_prefix_range_start > prefix || prefix > long_prefix_range_end {
             panic!("Key prefix out of range: key prefix={prefix}, long_prefix_range={long_prefix_range_start}..{long_prefix_range_end}");
         }
@@ -116,27 +118,70 @@ impl UniformLookupIndex {
         (new_from_offset, new_to_offset)
     }
 
-    fn bytes_to_key(bytes: &[u8]) -> u64 {
-        let mut p = [0u8; PREFIX_LENGTH];
-        let copy_len = bytes.len().min(PREFIX_LENGTH);
-        p[..copy_len].copy_from_slice(&bytes[..copy_len]);
-        u64::from_be_bytes(p)
+    fn next_entry_unloaded_no_prev(
+        &self,
+        ks: &KeySpaceDesc,
+        reader: &impl RandomRead,
+        direction: Direction,
+        metrics: &Metrics,
+    ) -> Option<(Bytes, WalPosition)> {
+        let element_size = index_element_size(ks);
+        let key_size = ks.reduced_key_size();
+        let file_length = reader.len();
+
+        // Read a window from the beginning or end of the file
+        let window_size = self.window_sizes[0][0];
+        let (from_offset, to_offset) = match direction {
+            Direction::Forward => (0, (window_size * element_size).min(file_length)),
+            Direction::Backward => {
+                let from = file_length.saturating_sub(window_size * element_size);
+                (from, file_length)
+            }
+        };
+
+        if from_offset >= to_offset || from_offset >= file_length {
+            return None;
+        }
+
+        let io_start = Instant::now();
+        let buffer = reader.read(from_offset..to_offset);
+        metrics
+            .lookup_io_mcs
+            .inc_by(io_start.elapsed().as_micros() as u64);
+        metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
+
+        if buffer.is_empty() || buffer.len() < element_size {
+            return None;
+        }
+
+        let entry_count = buffer.len() / element_size;
+        if entry_count == 0 {
+            return None;
+        }
+
+        // Return first or last entry based on direction
+        let pos = direction.first_in_range(0..entry_count);
+
+        let entry_start = pos * element_size;
+        let key = buffer.slice(entry_start..entry_start + key_size);
+        let value_bytes = &buffer[entry_start + key_size..entry_start + element_size];
+        let pos = WalPosition::from_slice(value_bytes);
+
+        Some((key, pos))
     }
 }
 
 impl IndexFormat for UniformLookupIndex {
     fn to_bytes(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
         let capacity = element_size * table.data.len();
-
-        // Use the common function with 0 header size
-        let out = serialize_index_entries(table, ks, capacity, 0);
+        let mut out = BytesMut::with_capacity(capacity);
+        serialize_index_entries(table, ks, &mut out);
         out.to_vec().into()
     }
 
     fn from_bytes(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
-        // Use the common function with 0 data offset
-        deserialize_index_entries(0, ks, b)
+        deserialize_index_entries(ks, b)
     }
 
     fn lookup_unloaded(
@@ -148,7 +193,7 @@ impl IndexFormat for UniformLookupIndex {
     ) -> Option<WalPosition> {
         // todo simplify this function
         // compute cell and prefix
-        let element_size = Self::element_size(ks);
+        let element_size = index_element_size(ks);
         let key_size = ks.reduced_key_size();
         assert_eq!(key.len(), key_size);
         let cell = ks.cell_id(key);
@@ -157,7 +202,7 @@ impl IndexFormat for UniformLookupIndex {
         // compute probable offset
         let file_length = reader.len();
         let (probable_offset, half_window_size) =
-            self.probable_key_offset_and_window_size(&cell_prefix_range, key, file_length);
+            self.probable_key_offset_and_window_size(ks, &cell_prefix_range, key, file_length);
 
         // compute start and end of the window around probable offset
         let (mut from_offset, mut to_offset) =
@@ -207,14 +252,164 @@ impl IndexFormat for UniformLookupIndex {
             }
 
             // Use the extracted binary search function
-            let result = binary_search_entries(&buffer, key, element_size, key_size, metrics);
+            let (_, _, result) = binary_search(&buffer, key, element_size, key_size, Some(metrics));
             metrics.lookup_iterations.observe(iterations as f64);
             return result;
         }
     }
 
-    fn use_unbounded_reader(&self) -> bool {
-        false
+    fn next_entry_unloaded(
+        &self,
+        ks: &KeySpaceDesc,
+        reader: &impl RandomRead,
+        prev: Option<&[u8]>,
+        direction: Direction,
+        metrics: &Metrics,
+    ) -> Option<(Bytes, WalPosition)> {
+        let element_size = index_element_size(ks);
+        let key_size = ks.reduced_key_size();
+        let file_length = reader.len();
+
+        // If there's no previous key, just start at the beginning/end
+        let Some(prev_key) = prev else {
+            return self.next_entry_unloaded_no_prev(ks, reader, direction, metrics);
+        };
+
+        assert_eq!(prev_key.len(), key_size);
+
+        // Find the cell and compute probable offset
+        let cell = ks.cell_id(prev_key);
+        let cell_prefix_range = ks.index_prefix_range(&cell);
+        let (probable_offset, half_window_size) =
+            self.probable_key_offset_and_window_size(ks, &cell_prefix_range, prev_key, file_length);
+
+        // Compute the initial window around the probable offset
+        let (mut from_offset, mut to_offset) =
+            Self::lookup_window(half_window_size, probable_offset, element_size, file_length);
+
+        let mut iterations = 0;
+        loop {
+            iterations += 1;
+            if (to_offset - from_offset < element_size) || (from_offset >= file_length) {
+                metrics.lookup_iterations.observe(iterations as f64);
+                return None;
+            }
+
+            let io_start = Instant::now();
+            let buffer = reader.read(from_offset..to_offset);
+            metrics
+                .lookup_io_mcs
+                .inc_by(io_start.elapsed().as_micros() as u64);
+            metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
+
+            let first_element_key = &buffer[..key_size];
+            let last_element_key =
+                &buffer[buffer.len() - element_size..buffer.len() - element_size + key_size];
+
+            // Check if the buffer range contains the key
+            if prev_key < first_element_key && from_offset != 0 {
+                // Key is smaller than the first element in the buffer, move window down
+                (from_offset, to_offset) = Self::move_window_down(
+                    from_offset,
+                    half_window_size,
+                    element_size,
+                    file_length,
+                );
+                continue;
+            }
+
+            if prev_key > last_element_key && to_offset != file_length {
+                // Key is larger than the last element in the buffer, move window up
+                (from_offset, to_offset) =
+                    Self::move_window_up(to_offset, half_window_size, element_size, file_length);
+                continue;
+            }
+
+            // The key should be in this buffer (or its insertion point is)
+            let entry_count = buffer.len() / element_size;
+            if entry_count == 0 {
+                metrics.lookup_iterations.observe(iterations as f64);
+                return None;
+            }
+
+            // Use binary search to find the position
+            let (found_pos, insertion_point, _) =
+                binary_search(&buffer, prev_key, element_size, key_size, Some(metrics));
+
+            let next_pos = match direction {
+                Direction::Forward => {
+                    if let Some(pos) = found_pos {
+                        // Move to the next position after the found key
+                        pos + 1
+                    } else {
+                        // If key not found, use the insertion point
+                        insertion_point
+                    }
+                }
+                Direction::Backward => {
+                    if let Some(pos) = found_pos {
+                        // Move to the previous position before the found key
+                        if pos == 0 {
+                            // If at the beginning of this buffer, we might need to check previous buffers
+                            if from_offset == 0 {
+                                return None; // Already at the beginning of the file
+                            }
+
+                            // Move window down and continue search
+                            (from_offset, to_offset) = Self::move_window_down(
+                                from_offset,
+                                half_window_size,
+                                element_size,
+                                file_length,
+                            );
+                            continue;
+                        }
+                        pos - 1
+                    } else {
+                        // If key not found, use the position before insertion point
+                        if insertion_point == 0 {
+                            // If at the beginning of this buffer, we might need to check previous buffers
+                            if from_offset == 0 {
+                                return None; // Already at the beginning of the file
+                            }
+
+                            // Move window down and continue search
+                            (from_offset, to_offset) = Self::move_window_down(
+                                from_offset,
+                                half_window_size,
+                                element_size,
+                                file_length,
+                            );
+                            continue;
+                        }
+                        insertion_point - 1
+                    }
+                }
+            };
+
+            // Check if there's a valid entry at the position
+            if next_pos >= entry_count {
+                // If we've reached the end of this buffer, try to move up
+                if to_offset == file_length {
+                    metrics.lookup_iterations.observe(iterations as f64);
+                    return None; // Already at the end of the file
+                }
+
+                // Move window up and continue search
+                (from_offset, to_offset) =
+                    Self::move_window_up(to_offset, half_window_size, element_size, file_length);
+                continue;
+            }
+
+            // Extract the key and value at the position
+            let entry_start = next_pos * element_size;
+            let key = buffer.slice(entry_start..entry_start + key_size);
+            let value_bytes = &buffer[entry_start + key_size..entry_start + element_size];
+            let pos = WalPosition::from_slice(value_bytes);
+
+            metrics.lookup_iterations.observe(iterations as f64);
+            return Some((key, pos));
+        }
     }
 }
 
@@ -225,8 +420,7 @@ mod test {
     use super::*;
     use crate::key_shape::KeyType;
     use crate::{file_reader::FileReader, index::index_format::test::*, key_shape::KeyShape};
-    use std::{cell::Cell, collections::HashSet};
-
+    use std::collections::HashSet;
     #[test]
     pub fn test_index_lookup() {
         let pi = UniformLookupIndex::new();
@@ -237,43 +431,6 @@ mod test {
     pub fn test_index_lookup_random() {
         let pi = UniformLookupIndex::new();
         test_index_lookup_random_inner(&pi);
-    }
-
-    struct MockRandomRead {
-        data: Bytes,
-        read_calls: Cell<usize>,
-    }
-
-    impl MockRandomRead {
-        fn new(data: Bytes) -> Self {
-            Self {
-                data,
-                read_calls: Cell::new(0),
-            }
-        }
-
-        fn reset_call_count(&self) {
-            self.read_calls.set(0);
-        }
-
-        fn call_count(&self) -> usize {
-            self.read_calls.get()
-        }
-    }
-
-    impl RandomRead for MockRandomRead {
-        fn read(&self, range: Range<usize>) -> Bytes {
-            // Increment our call counter
-            let old = self.read_calls.get();
-            self.read_calls.set(old + 1);
-
-            let end = range.end.min(self.data.len());
-            self.data.slice(range.start.min(end)..end)
-        }
-
-        fn len(&self) -> usize {
-            self.data.len()
-        }
     }
 
     #[test]
@@ -425,57 +582,60 @@ mod test {
         let cell_prefix_range = 0..100;
         let file_length = 1000; // test with file larger than range
         let pi = UniformLookupIndex::new();
+        // key shape with one uniform cell
+        let (key_shape, ks) = KeyShape::new_single(1, 1, KeyType::uniform(1));
+        let ks = key_shape.ks(ks);
 
         let key = [0, 0, 0, 0, 0, 0, 0, 0];
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key: [u8; 9] = [0, 0, 0, 0, 0, 0, 0, 0, 255];
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key = k64(0);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key = k64((cell_prefix_range.end << 32) - 1);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, file_length - 1);
 
         let key = k64((cell_prefix_range.end << 32) / 2);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, file_length / 2);
 
         let file_length = 10; // test with file smaller than range
 
         let key = [0, 0, 0, 0, 0, 0, 0, 0];
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key: [u8; 9] = [0, 0, 0, 0, 0, 0, 0, 0, 255];
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key = k64(0);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, 0);
 
         let key = k64((cell_prefix_range.end << 32) - 1);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, file_length - 1);
 
         let key = k64((cell_prefix_range.end << 32) / 2);
         let (offset, _) =
-            pi.probable_key_offset_and_window_size(&cell_prefix_range, &key, file_length);
+            pi.probable_key_offset_and_window_size(ks, &cell_prefix_range, &key, file_length);
         assert_eq!(offset, file_length / 2);
     }
 
@@ -483,7 +643,7 @@ mod test {
     fn test_singlehopindex_with_short_keys() {
         let metrics = Metrics::new();
         // 1) Build a KeyShape that expects e.g. 4‐byte keys
-        let (shape, ks_id) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+        let (shape, ks_id) = KeyShape::new_single(4, 16, KeyType::uniform(16));
         let ks = shape.ks(ks_id);
 
         // 2) Insert a few short keys into IndexTable
@@ -527,7 +687,7 @@ mod test {
         let index_impl = UniformLookupIndex::new();
 
         // 2) Build a KeyShape, e.g. 8-byte keys
-        let (shape, ks_id) = KeyShape::new_single(4, 12, KeyType::uniform(12));
+        let (shape, ks_id) = KeyShape::new_single(4, 16, KeyType::uniform(16));
         let ks = shape.ks(ks_id);
 
         // 3) Populate an IndexTable
@@ -672,5 +832,53 @@ mod test {
 
         // If no assertion failed, we've verified that
         // the persisted index correctly round-trips these entries.
+    }
+
+    #[test]
+    fn test_next_entry_unloaded() {
+        let index_format = UniformLookupIndex::new();
+        crate::index::index_format::test::test_next_entry_unloaded_inner(&index_format);
+    }
+
+    #[test]
+    fn test_next_entry_unloaded_empty_index() {
+        let index_format = UniformLookupIndex::new();
+        crate::index::index_format::test::test_next_entry_unloaded_empty_index_inner(&index_format);
+    }
+
+    #[test]
+    fn test_next_entry_unloaded_no_prev() {
+        let metrics = Metrics::new();
+        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let ks = shape.ks(ks_id);
+
+        // Create an index with sorted entries
+        let mut table = IndexTable::default();
+        for i in 1..6 {
+            let key = (i as u64 * 10).to_be_bytes().to_vec();
+            table.insert(Bytes::from(key), WalPosition::test_value(i));
+        }
+
+        // Convert the table to bytes
+        let index_format = UniformLookupIndex::new();
+        let serialized = index_format.to_bytes(&table, ks);
+        let reader = MockRandomRead::new(serialized);
+
+        // Test the newly extracted function directly
+        // Test forward direction (should return first entry)
+        let result =
+            index_format.next_entry_unloaded_no_prev(ks, &reader, Direction::Forward, &metrics);
+        assert!(result.is_some());
+        let (key, pos) = result.unwrap();
+        assert_eq!(key, 10_u64.to_be_bytes());
+        assert_eq!(pos, WalPosition::test_value(1));
+
+        // Test backward direction (should return last entry)
+        let result =
+            index_format.next_entry_unloaded_no_prev(ks, &reader, Direction::Backward, &metrics);
+        assert!(result.is_some());
+        let (key, pos) = result.unwrap();
+        assert_eq!(key, 50_u64.to_be_bytes());
+        assert_eq!(pos, WalPosition::test_value(5));
     }
 }

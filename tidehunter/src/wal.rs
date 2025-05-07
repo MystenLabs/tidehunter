@@ -1,11 +1,9 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::file_reader::{align_size, set_direct_options, FileReader};
-use crate::index::index_format::IndexFormat;
-use crate::key_shape::KeySpaceDesc;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal_syncer::WalSyncer;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -44,6 +42,7 @@ struct WalMapperThread {
     last_map: u64,
     file: File,
     layout: WalLayout,
+    metrics: Arc<Metrics>,
 }
 
 pub struct WalIterator {
@@ -61,7 +60,7 @@ pub(crate) struct Map {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct WalPosition(u64);
+pub struct WalPosition(u64, u32);
 
 pub enum WalRandomRead<'a> {
     Mapped(Bytes),
@@ -82,9 +81,15 @@ impl WalWriter {
                 let (prev_map, prev_offset) = self.wal.layout.locate(prev_block_end);
                 assert_eq!(prev_map, current_map_and_position.1.id);
                 let skip_marker = CrcFrame::skip_marker();
-                let buf = current_map_and_position
-                    .1
-                    .write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
+                assert!(
+                    current_map_and_position.1.writeable,
+                    "Attempt to write into read-only map"
+                );
+                let buf = write_buf_at(
+                    &current_map_and_position.1.data,
+                    prev_offset as usize,
+                    skip_marker.as_ref().len(),
+                );
                 buf.copy_from_slice(skip_marker.as_ref());
             }
             let mut offloaded_map =
@@ -100,25 +105,24 @@ impl WalWriter {
         }
         // safety: pos calculation logic guarantees non-overlapping writes
         // position only available after write here completes
-        let buf = current_map_and_position
-            .1
-            .write_buf_at(offset as usize, len as usize);
+        assert!(
+            current_map_and_position.1.writeable,
+            "Attempt to write into read-only map"
+        );
+        let data = current_map_and_position.1.data.clone();
+        // Dropping lock to allow data copy to be done in parallel
+        drop(current_map_and_position);
+        let buf = write_buf_at(&data, offset as usize, len as usize);
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
-        Ok(WalPosition(pos))
+        Ok(WalPosition(pos, len as u32))
     }
 
     /// Current un-initialized position,
     /// not to be used as WalPosition, only as a metric to see how many bytes were written
     pub fn position(&self) -> u64 {
         self.position_and_map.lock().0.position
-    }
-
-    /// Current un-initialized position,
-    // todo need to re-think this and not return un-initialized position as WalPosition
-    pub fn wal_position(&self) -> WalPosition {
-        WalPosition(self.position_and_map.lock().0.position)
     }
 
     /// Set wal position to a specific value
@@ -212,6 +216,7 @@ impl Wal {
         options.create(true).read(true).write(true);
         set_direct_options(&mut options, layout.direct_io);
         let file = options.open(p)?;
+        Self::resize(&layout, &file)?;
         Ok(Self::from_file(file, layout, metrics))
     }
 
@@ -254,7 +259,6 @@ impl Wal {
             WalPosition::INVALID,
             "Trying to read invalid wal position"
         );
-        const INITIAL_READ_SIZE: usize = 4 * 1024; // todo probably need to increase even more
         let (map, offset) = self.layout.locate(pos.0);
         if let Some(map) = self.get_map(map) {
             // using CrcFrame::read_from_slice to avoid holding the larger byte array
@@ -265,31 +269,17 @@ impl Wal {
                     .into(),
             ))
         } else {
-            let mut buf = self.file_reader().io_buffer_bytes(INITIAL_READ_SIZE);
-            let read = self.file.read_at(&mut buf, pos.0)?;
-            assert!(read > CrcFrame::CRC_HEADER_LENGTH); // todo this is not actually guaranteed
-            let size = CrcFrame::read_size(&buf[..read]);
-            let target_size = size + CrcFrame::CRC_HEADER_LENGTH;
-            if target_size > read {
-                if self.layout.direct_io && read != INITIAL_READ_SIZE {
-                    panic!("read not aligned: {read}");
-                }
-                // todo more test coverage for those cases including when read != INITIAL_READ_SIZE
-                if target_size > INITIAL_READ_SIZE {
-                    let target_read_size = if self.layout.direct_io {
-                        self.layout.align(target_size as u64) as usize
-                    } else {
-                        target_size
-                    };
-                    buf = self.file_reader().reallocate(buf, target_read_size);
-                }
-                self.file
-                    .read_exact_at(&mut buf[read..], pos.0 + read as u64)?;
-            }
+            let buffer_size = if self.layout.direct_io {
+                self.layout.align(pos.len() as u64) as usize
+            } else {
+                pos.len()
+            };
+            let mut buf = self.file_reader().io_buffer_bytes(buffer_size);
+            self.file.read_exact_at(&mut buf, pos.0)?;
             let mut bytes = Bytes::from(bytes::Bytes::from(buf));
-            if self.layout.direct_io && bytes.len() > target_size {
+            if self.layout.direct_io && bytes.len() > pos.len() {
                 // Direct IO buffer can be larger then needed
-                bytes = bytes.slice(..target_size);
+                bytes = bytes.slice(..pos.len());
             }
             Ok((false, CrcFrame::read_from_bytes(&bytes, 0)?))
         }
@@ -297,19 +287,6 @@ impl Wal {
 
     pub fn random_reader_at(
         &self,
-        ks: &KeySpaceDesc,
-        pos: WalPosition,
-        inner_offset: usize,
-    ) -> Result<WalRandomRead, WalError> {
-        if ks.index_format().use_unbounded_reader() {
-            self.random_reader_at_unbounded(pos, inner_offset)
-        } else {
-            self.random_reader_at_bounded(pos, inner_offset)
-        }
-    }
-
-    pub fn random_reader_at_unbounded(
-        &self,
         pos: WalPosition,
         inner_offset: usize,
     ) -> Result<WalRandomRead, WalError> {
@@ -322,42 +299,13 @@ impl Wal {
         if let Some(map) = self.get_map(map) {
             let offset = offset as usize;
             let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
-            let data = map.data.slice(header_end + inner_offset..);
+            let data = map
+                .data
+                .slice(header_end + inner_offset..header_end + pos.len());
             Ok(WalRandomRead::Mapped(data))
         } else {
             let header_end = pos.0 + CrcFrame::CRC_HEADER_LENGTH as u64;
-            let frag_end = self.layout.map_range(map).end;
-            let range = (header_end + inner_offset as u64)..frag_end;
-            Ok(WalRandomRead::File(FileRange::new(
-                self.file_reader(),
-                range,
-            )))
-        }
-    }
-
-    pub fn random_reader_at_bounded(
-        &self,
-        pos: WalPosition,
-        inner_offset: usize,
-    ) -> Result<WalRandomRead, WalError> {
-        assert_ne!(
-            pos,
-            WalPosition::INVALID,
-            "Trying to read invalid wal position"
-        );
-        let (map, offset) = self.layout.locate(pos.0);
-        if let Some(map) = self.get_map(map) {
-            let offset = offset as usize;
-            let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
-            let size = CrcFrame::read_size(&map.data[offset..header_end]);
-            let data = map.data.slice(header_end + inner_offset..header_end + size);
-            Ok(WalRandomRead::Mapped(data))
-        } else {
-            let mut buf = [0; CrcFrame::CRC_HEADER_LENGTH];
-            self.file.read_exact_at(&mut buf, pos.0)?;
-            let size = CrcFrame::read_size(&buf);
-            let header_end = pos.0 + CrcFrame::CRC_HEADER_LENGTH as u64;
-            let range = (header_end + inner_offset as u64)..(header_end + size as u64);
+            let range = (header_end + inner_offset as u64)..(header_end + pos.len() as u64);
             Ok(WalRandomRead::File(FileRange::new(
                 self.file_reader(),
                 range,
@@ -398,9 +346,16 @@ impl Wal {
         );
         pin_map_entry.writeable = false;
         // Remove memory mapping and copy over data to a regular byte array
-        pin_map_entry.data = Bytes::copy_from_slice(&pin_map.data);
+        // pin_map_entry.data = Bytes::copy_from_slice(&pin_map.data);
+        // Preserve mem mapping
+        pin_map_entry.data = pin_map.data.clone();
         if maps.len() > self.layout.max_maps {
-            maps.pop_first();
+            if let Some((_, popped_map)) = maps.pop_first() {
+                drop(maps);
+                // self.maps write lock is very expensive as it blocks any IO operation
+                // dropping popped_map can result in syscall, therefore doing it after lock is released
+                drop(popped_map);
+            }
         }
         map
     }
@@ -454,6 +409,16 @@ impl Wal {
         let len = file.metadata()?.len();
         if len < range.end {
             file.set_len(range.end)?;
+        }
+        Ok(())
+    }
+
+    /// Resize the file to fit the current layout
+    fn resize(layout: &WalLayout, file: &File) -> io::Result<()> {
+        let len = file.metadata()?.len();
+        let r = len % layout.frag_size;
+        if r != 0 {
+            file.set_len(len + layout.frag_size - r)?;
         }
         Ok(())
     }
@@ -517,13 +482,14 @@ impl Wal {
 }
 
 impl WalMapper {
-    pub fn start(last_map: u64, file: File, layout: WalLayout) -> Self {
+    pub fn start(last_map: u64, file: File, layout: WalLayout, metrics: Arc<Metrics>) -> Self {
         let (sender, receiver) = mpsc::sync_channel(2);
         let this = WalMapperThread {
             last_map,
             file,
             layout,
             sender,
+            metrics,
         };
         let jh = thread::Builder::new()
             .name("wal-mapper".to_string())
@@ -559,6 +525,7 @@ impl Drop for WalMapper {
 impl WalMapperThread {
     pub fn run(mut self) {
         loop {
+            let timer = Instant::now();
             let id = self.last_map + 1;
             Wal::extend_to_map(&self.layout, &self.file, id).expect("Failed to extend wal file");
             let range = self.layout.map_range(id);
@@ -579,6 +546,9 @@ impl WalMapperThread {
                 data,
             };
             self.last_map = id;
+            self.metrics
+                .wal_mapper_time_mcs
+                .inc_by(timer.elapsed().as_micros() as u64);
             // todo ideally figure out a way to not create a map when sender closes
             if self.sender.send(map).is_err() {
                 return;
@@ -598,7 +568,7 @@ impl WalIterator {
         } else {
             frame?
         };
-        let position = WalPosition(self.position);
+        let position = WalPosition(self.position, frame.len() as u32);
         self.position += self
             .wal
             .layout
@@ -625,6 +595,7 @@ impl WalIterator {
             self.map.id,
             self.wal.file.try_clone().unwrap(),
             self.wal.layout.clone(),
+            self.wal().metrics.clone(),
         );
         assert_eq!(self.wal.layout.locate(position.position).0, self.map.id);
         let position_and_map = (position, self.map);
@@ -666,13 +637,10 @@ impl RandomRead for WalRandomRead<'_> {
     }
 }
 
-impl Map {
-    pub fn write_buf_at(&self, offset: usize, len: usize) -> &mut [u8] {
-        assert!(self.writeable, "Attempt to write into read-only map");
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset) as *mut u8;
-            std::slice::from_raw_parts_mut(ptr, len)
-        }
+fn write_buf_at(data: &Bytes, offset: usize, len: usize) -> &mut [u8] {
+    unsafe {
+        let ptr = data.as_ptr().add(offset) as *mut u8;
+        std::slice::from_raw_parts_mut(ptr, len)
     }
 }
 
@@ -692,27 +660,36 @@ impl PreparedWalWrite {
 }
 
 impl WalPosition {
-    pub const MAX: WalPosition = WalPosition(u64::MAX);
+    pub const MAX: WalPosition = WalPosition(u64::MAX, u32::MAX);
     pub const SIZE: usize = 8;
     pub const INVALID: WalPosition = Self::MAX;
-    pub const LENGTH: usize = 8;
+    pub const LENGTH: usize = 12;
     #[cfg(test)]
-    pub const TEST: WalPosition = WalPosition(3311);
+    pub const TEST: WalPosition = WalPosition(3311, 12);
 
     pub fn write_to_buf(&self, buf: &mut impl BufMut) {
         buf.put_u64(self.0);
+        buf.put_u32(self.1);
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut buf = BytesMut::with_capacity(Self::LENGTH);
+        self.write_to_buf(&mut buf);
+        buf.into()
     }
 
     pub fn read_from_buf(buf: &mut impl Buf) -> Self {
-        Self(buf.get_u64())
+        Self(buf.get_u64(), buf.get_u32())
     }
 
-    pub fn from_slice(slice: &[u8]) -> Self {
-        Self(u64::from_be_bytes(
-            slice
-                .try_into()
-                .expect("Invalid slice length for WalPosition::from_slice"),
-        ))
+    pub fn from_slice(mut slice: &[u8]) -> Self {
+        let r = Self::read_from_buf(&mut slice);
+        assert_eq!(0, slice.len());
+        r
+    }
+
+    pub fn len(&self) -> usize {
+        self.1 as usize
     }
 
     pub fn valid(self) -> Option<Self> {
@@ -727,9 +704,13 @@ impl WalPosition {
         self.0
     }
 
+    pub fn is_valid(self) -> bool {
+        self != Self::INVALID
+    }
+
     #[allow(dead_code)]
     pub fn test_value(v: u64) -> Self {
-        Self(v)
+        Self(v, 0)
     }
 }
 
@@ -911,6 +892,44 @@ mod tests {
         let mut buf = bytes.as_ref();
         let position = WalPosition::read_from_buf(&mut buf);
         assert_eq!(position, WalPosition::TEST);
+    }
+
+    /// Test that the wal file is resized correctly when the file is corrupted in such a way that
+    /// the file length is not a multiple of the frag size.
+    #[test]
+    fn test_wal_resize() {
+        let dir = tempdir::TempDir::new("test_wal_resize").unwrap();
+        let file_path = dir.path().join("wal");
+        let frag_size = 512;
+        let layout = WalLayout {
+            frag_size,
+            max_maps: 2,
+            direct_io: false,
+        };
+
+        // Write an entry into the WAl
+        let position = {
+            let wal = Wal::open(&file_path, layout.clone(), Metrics::new()).unwrap();
+            let writer = wal
+                .wal_iterator(WalPosition::INVALID)
+                .unwrap()
+                .into_writer();
+            writer
+                .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
+                .unwrap()
+        };
+
+        // Corrupt the file length
+        let file = OpenOptions::new().write(true).open(&file_path).unwrap();
+        let len = file.metadata().unwrap().len();
+        file.set_len(len - frag_size / 2).unwrap();
+        assert_ne!(file.metadata().unwrap().len() % frag_size, 0);
+
+        // Re-open the WAL and ensure it resizes correctly
+        let wal = Wal::open(&file_path, layout, Metrics::new()).unwrap();
+        let data = wal.read(position).unwrap();
+        assert_eq!(&[1, 2, 3], data.as_ref());
+        assert_eq!(file.metadata().unwrap().len() % frag_size, 0);
     }
 
     #[track_caller]
