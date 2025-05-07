@@ -1,13 +1,11 @@
-use crate::{
-    config::Config,
-    db::{Db, DbResult, CONTROL_REGION_FILE},
-    key_shape::KeyShape,
-    metrics::Metrics,
-    wal::{Wal, WalError},
-    WalPosition,
-};
-use std::{fs, path::PathBuf, sync::Arc};
-use std::{os::unix::fs::FileExt, path::Path};
+use crate::config::Config;
+use crate::db::{Db, DbResult, CONTROL_REGION_FILE};
+use crate::key_shape::KeyShape;
+use crate::metrics::Metrics;
+use crate::WalPosition;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The name of the control region file in the saved snapshot path
 const WAL_POSITION_FILE: &str = "ptr";
@@ -64,31 +62,33 @@ pub fn load(
         .expect("Wal position should be deserializable");
 
     // Truncate the WAL file to the last position
-    let wal = Wal::open(
-        &Db::wal_path(&database_path),
-        config.wal_layout(),
-        metrics.clone(),
-    )?;
-    let mut wal_iterator = wal.wal_iterator_no_skip(last_wal_position)?;
-    loop {
-        match wal_iterator.next() {
-            Ok((position, entry)) => {
-                let length = entry.len();
-                let empty = vec![0; length];
-                wal.file().write_all_at(&empty, position.as_u64())?;
-            }
-            Err(WalError::Crc(_)) => {
-                // CRC errors indicate the end of the WAL file
-                break;
-            }
-            error => {
-                error?;
-            }
-        }
-    }
+    // let wal = Wal::open(
+    //     &Db::wal_path(&database_path),
+    //     config.wal_layout(),
+    //     metrics.clone(),
+    // )?;
+    // let mut wal_iterator = wal.wal_iterator_no_skip(last_wal_position)?;
+    // loop {
+    //     match wal_iterator.next() {
+    //         Ok((position, entry)) => {
+    //             let length = entry.len();
+    //             let empty = vec![0; length];
+    //             wal.file().write_all_at(&empty, position.as_u64())?;
+    //         }
+    //         Err(WalError::Crc(_)) => {
+    //             // CRC errors indicate the end of the WAL file
+    //             break;
+    //         }
+    //         error => {
+    //             error?;
+    //         }
+    //     }
+    // }
 
-    // Open the db
+    // Open the db and truncate the WAL file
     let db = Db::open(&database_path, key_shape, config, metrics)?;
+    db.wal_writer().set_wal_position(last_wal_position);
+    // db.wal().file().set_len(last_wal_position.as_u64())?;
 
     Ok(db)
 }

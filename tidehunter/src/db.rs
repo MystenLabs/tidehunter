@@ -560,6 +560,11 @@ impl Db {
     pub fn wal(&self) -> &Arc<Wal> {
         &self.wal
     }
+
+    /// Return a reference to the WAL writer
+    pub fn wal_writer(&self) -> &WalWriter {
+        &self.wal_writer
+    }
 }
 
 impl Loader for Wal {
