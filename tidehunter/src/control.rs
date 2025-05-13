@@ -92,7 +92,7 @@ impl ControlRegionStore {
     }
 
     /// The path to the control region file
-    pub fn path(&self) -> &Path {
+    pub fn path(&self) -> &PathBuf {
         &self.path
     }
 }
