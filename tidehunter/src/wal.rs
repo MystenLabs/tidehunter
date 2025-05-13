@@ -124,11 +124,6 @@ impl WalWriter {
     pub fn position(&self) -> u64 {
         self.position_and_map.lock().0.position
     }
-
-    /// Set wal position to a specific value
-    pub fn set_wal_position(&self, position: u64) {
-        self.position_and_map.lock().0.set_position(position);
-    }
 }
 
 #[derive(Clone)]
@@ -147,10 +142,6 @@ impl IncrementalWalPosition {
         let result = (position, self.position);
         self.position = position + len_aligned;
         result
-    }
-
-    pub fn set_position(&mut self, position: u64) {
-        self.position = position;
     }
 }
 
