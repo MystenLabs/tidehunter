@@ -445,8 +445,8 @@ impl Wal {
         self.file.sync_all()
     }
 
-    #[cfg(test)]
     /// Returns the file descriptor of the wal file
+    #[cfg(test)]
     pub(crate) fn file(&self) -> &File {
         &self.file
     }
