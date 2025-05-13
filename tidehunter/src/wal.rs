@@ -446,7 +446,7 @@ impl Wal {
     }
 
     #[cfg(test)]
-    /// Return a file handle to the WAL file
+    /// Returns the file descriptor of the wal file
     pub(crate) fn file(&self) -> &File {
         &self.file
     }
