@@ -445,8 +445,9 @@ impl Wal {
         self.file.sync_all()
     }
 
+    #[cfg(test)]
     /// Return a file handle to the WAL file
-    pub fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &File {
         &self.file
     }
 }

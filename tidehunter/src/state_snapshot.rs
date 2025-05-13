@@ -56,8 +56,7 @@ pub fn load(
     // Load the WAL pointer from file
     let saved_wal_position_path = wal_position_path(snapshot_path);
     let serialized_wal_position = fs::read(&saved_wal_position_path)?;
-    let last_wal_position: u64 = bincode::deserialize(&serialized_wal_position)
-        .expect("Wal position should be deserializable");
+    let last_wal_position: u64 = bincode::deserialize(&serialized_wal_position)?;
 
     // Open the WAL file, truncate it, and then close it
     {
