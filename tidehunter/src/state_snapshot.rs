@@ -51,22 +51,20 @@ pub fn load(
     // Copy back the control region
     let saved_control_region_path = control_region_path(snapshot_path.clone());
     let db_control_region_path = control_region_path(database_path.clone());
-    let _ = fs::remove_file(&db_control_region_path); // Ignore error if file doesn't exist
     fs::copy(&saved_control_region_path, &db_control_region_path)?;
 
     // Load the WAL pointer from file
     let saved_wal_position_path = wal_position_path(snapshot_path);
     let serialized_wal_position = fs::read(&saved_wal_position_path)?;
-    let last_wal_position = bincode::deserialize(&serialized_wal_position)
+    let last_wal_position: u64 = bincode::deserialize(&serialized_wal_position)
         .expect("Wal position should be deserializable");
 
-    // Open the db and truncate the WAL file
-    let db = Db::open(&database_path, key_shape, config, metrics)?;
-    db.wal_writer().set_wal_position(last_wal_position);
-    // Truncate the WAL file to the recorded position. The +1 is necessary because
-    // the truncation length is inclusive, and we need to include the byte at the
-    // last_wal_position.
-    db.wal().file().set_len(last_wal_position + 1)?;
+    // Open the WAL file, truncate it, and then close it
+    {
+        let wal_path = Db::wal_path(&database_path);
+        let file = fs::OpenOptions::new().write(true).open(wal_path)?;
+        file.set_len(last_wal_position)?;
+    }
 
-    Ok(db)
+    Db::open(&database_path, key_shape, config, metrics)
 }
