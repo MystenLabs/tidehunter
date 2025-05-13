@@ -11,6 +11,7 @@ use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
+use crate::state_snapshot;
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
 };
@@ -36,6 +37,7 @@ pub struct Db {
 pub type DbResult<T> = Result<T, DbError>;
 
 pub const MAX_KEY_LEN: usize = u16::MAX as usize;
+pub const CONTROL_REGION_FILE: &str = "cr";
 
 impl Db {
     pub fn open(
@@ -45,7 +47,7 @@ impl Db {
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
         let (control_region_store, control_region) =
-            Self::read_or_create_control_region(path.join("cr"), &key_shape)?;
+            Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let (flusher_sender, flusher_receiver) = mpsc::channel();
         let flusher = IndexFlusher::new(flusher_sender, metrics.clone());
         let large_table = LargeTable::from_unloaded(
@@ -521,6 +523,26 @@ impl Db {
             .memory_estimate
             .with_label_values(&["_", "maps"])
             .set(maps_estimate as i64);
+    }
+
+    /// Create a snapshot of the current db state
+    pub fn create_state_snapshot(&self, snapshot_path: PathBuf) -> DbResult<()> {
+        let guard = self.control_region_store.lock();
+        let control_region_path = guard.path().clone();
+        drop(guard);
+        let wal_position = self.wal_writer.position();
+        state_snapshot::create(&wal_position, &control_region_path, snapshot_path)
+    }
+
+    /// Restore the database from a snapshot
+    pub fn restore_state_snapshot(
+        snapshot_path: PathBuf,
+        database_path: PathBuf,
+        key_shape: KeyShape,
+        config: Arc<Config>,
+        metrics: Arc<Metrics>,
+    ) -> DbResult<Arc<Self>> {
+        state_snapshot::load(snapshot_path, database_path, key_shape, config, metrics)
     }
 }
 

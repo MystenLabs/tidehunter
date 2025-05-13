@@ -1589,3 +1589,121 @@ fn test_max_value_header_corruption() {
         assert_eq!(Some(value_4.into()), db.get(ks, &key_4).unwrap());
     }
 }
+
+#[test]
+fn test_state_snapshot() {
+    let db_path = tempdir::TempDir::new("test-state-snapshot-db").unwrap();
+    let snapshot_path = tempdir::TempDir::new("test-state-snapshot-saved").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+
+    let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
+    let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
+    let (key_3, value_3) = (vec![3, 3], vec![3, 13]);
+    let (key_4, value_4) = (vec![4, 4], vec![4, 14]);
+    let (key_5, value_5) = (vec![5, 5], vec![5, 15]);
+    let (key_6, value_6) = (vec![6, 6], vec![6, 16]);
+
+    // Create a new database and insert some data
+    let last_position = {
+        let db = Db::open(
+            db_path.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, key_1.clone(), value_1.clone()).unwrap();
+        db.insert(ks, key_2.clone(), value_2.clone()).unwrap();
+        db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
+
+        let last_position = db.wal_writer.position();
+
+        db.rebuild_control_region().unwrap();
+
+        // Create a state snapshot
+        db.create_state_snapshot(PathBuf::from(snapshot_path.path()))
+            .unwrap();
+
+        // Insert more data after the snapshot
+        db.insert(ks, key_4.clone(), value_4.clone()).unwrap();
+        db.insert(ks, key_5.clone(), value_5.clone()).unwrap();
+
+        db.rebuild_control_region().unwrap();
+
+        last_position
+    };
+
+    // Restore the database from the snapshot
+    let db = Db::restore_state_snapshot(
+        PathBuf::from(snapshot_path.path()),
+        PathBuf::from(db_path.path()),
+        key_shape,
+        config,
+        Metrics::new(),
+    )
+    .unwrap();
+
+    // Check that the last position in the WAL matches the last position before snapshot
+    let recovered_position = db.wal_writer.position();
+    assert_eq!(last_position, recovered_position);
+
+    // Check that the data before the snapshot is still present
+    assert_eq!(Some(value_1.into()), db.get(ks, &key_1).unwrap());
+    assert_eq!(Some(value_2.into()), db.get(ks, &key_2).unwrap());
+    assert_eq!(Some(value_3.into()), db.get(ks, &key_3).unwrap());
+
+    // Check that the data after the snapshot is not present
+    assert_eq!(None, db.get(ks, &key_4).unwrap());
+    assert_eq!(None, db.get(ks, &key_5).unwrap());
+
+    // Insert new data after restoring from snapshot
+    db.insert(ks, key_6.clone(), value_6.clone()).unwrap();
+    assert_eq!(Some(value_6.into()), db.get(ks, &key_6).unwrap());
+}
+
+#[test]
+fn test_state_snapshot_empty() {
+    let db_path = tempdir::TempDir::new("test-state-snapshot-empty-db").unwrap();
+    let snapshot_path = tempdir::TempDir::new("test-state-snapshot-empty-saved").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+
+    // Create a new database
+    let last_position = {
+        let db = Db::open(
+            db_path.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.rebuild_control_region().unwrap();
+
+        // Create a state snapshot
+        db.create_state_snapshot(PathBuf::from(snapshot_path.path()))
+            .unwrap();
+
+        db.wal_writer.position()
+    };
+
+    // Restore the database from the snapshot
+    let db = Db::restore_state_snapshot(
+        PathBuf::from(snapshot_path.path()),
+        PathBuf::from(db_path.path()),
+        key_shape,
+        config,
+        Metrics::new(),
+    )
+    .unwrap();
+
+    // Check that the last position in the WAL matches the last position before snapshot
+    let recovered_position = db.wal_writer.position();
+    assert_eq!(last_position, recovered_position);
+
+    // Insert new data after restoring from snapshot
+    db.insert(ks, vec![1, 2, 3, 4], vec![6]).unwrap();
+    assert_eq!(Some(vec![6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+}

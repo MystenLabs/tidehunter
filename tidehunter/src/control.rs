@@ -90,4 +90,9 @@ impl ControlRegionStore {
             .inc_by(serialized.len() as u64);
         fs::rename(&temp_file, &self.path).expect("Failed to rename control region file");
     }
+
+    /// The path to the control region file
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
 }
