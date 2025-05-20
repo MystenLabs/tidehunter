@@ -676,6 +676,10 @@ impl KeyIndexing {
         Self::Reduction(key_length, range)
     }
 
+    pub fn hash() -> Self {
+        Self::Hash
+    }
+
     fn check_configured_key_size(key_size: usize) {
         assert!(
             key_size <= MAX_KEY_LEN,

@@ -1193,6 +1193,10 @@ pub(super) fn prefix_key_shape() -> (KeyShape, KeySpace) {
     KeyShape::new_single(4, 16, KeyType::prefix_uniform(2, 0))
 }
 
+pub(super) fn hashed_index_key_shape() -> (KeyShape, KeySpace) {
+    KeyShape::new_single_config_indexing(KeyIndexing::hash(), 16, KeyType::prefix_uniform(2, 0), KeySpaceConfig::default())
+}
+
 fn lru_lookups(ks: &str, metrics: &Metrics) -> u64 {
     metrics
         .lookup_result
