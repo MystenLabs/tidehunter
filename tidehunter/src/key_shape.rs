@@ -51,9 +51,22 @@ pub struct KeySpaceConfig {
     disable_unload: bool,
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
-    key_reduction: Option<Range<usize>>,
+    key_translation: KeyTranslation,
     index_format: IndexFormatType,
     unloaded_iterator: bool,
+}
+
+/// Key translation allows using a different key in the index then what user supplies.
+/// In other words, when a user puts a key-value pair (K, V) in the database,
+/// we write (K, V) into wal, but we use Translate(K) in the index, instead of K
+///
+/// This allows for various use cases such as
+/// * Key reduction (reducing index size by using fewer bytes from the key in the index)
+#[derive(Default, Clone)]
+pub enum KeyTranslation {
+    #[default]
+    None,
+    Reduction(Range<usize>),
 }
 
 #[derive(Clone, Copy)]
@@ -161,7 +174,7 @@ impl KeyShapeBuilder {
                 panic!("Tidehunter currently does not support key space with both compactor and bloom filter enabled");
             }
             ks.key_type
-                .verify_key_size(ks.reduced_key_size() - ks.config.key_offset);
+                .verify_key_size(ks.index_key_size() - ks.config.key_offset);
         }
     }
 }
@@ -206,20 +219,25 @@ impl KeySpaceDesc {
         self.key_type.first_cell()
     }
 
-    pub(crate) fn key_reduction(&self) -> &Option<Range<usize>> {
-        &self.config.key_reduction
+    pub(crate) fn use_key_reduction_iterator(&self) -> bool {
+        match self.config.key_translation {
+            KeyTranslation::None => false,
+            KeyTranslation::Reduction(_) => true,
+        }
+    }
+
+    pub(crate) fn key_translation(&self) -> &KeyTranslation {
+        &self.config.key_translation
     }
 
     pub(crate) fn key_type(&self) -> &KeyType {
         &self.key_type
     }
 
-    pub(crate) fn reduced_key_size(&self) -> usize {
-        if let Some(key_reduction) = &self.config.key_reduction {
-            key_reduction.len()
-        } else {
-            self.key_size
-        }
+    pub(crate) fn index_key_size(&self) -> usize {
+        self.key_translation()
+            .index_key_size()
+            .unwrap_or(self.key_size)
     }
 
     /// Returns u32 prefix
@@ -289,19 +307,11 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> &'a [u8] {
-        if let Some(key_reduction) = &self.config.key_reduction {
-            &key[key_reduction.clone()]
-        } else {
-            key
-        }
+        self.key_translation().reduce_key(key)
     }
 
     pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
-        if let Some(key_reduction) = &self.config.key_reduction {
-            key.slice(key_reduction.clone())
-        } else {
-            key
-        }
+        self.key_translation().reduced_key_bytes(key)
     }
 
     pub(crate) fn compactor(&self) -> Option<&Compactor> {
@@ -369,8 +379,13 @@ impl KeySpaceConfig {
         self
     }
 
-    pub fn with_key_reduction(mut self, key_reduction: Range<usize>) -> Self {
-        self.key_reduction = Some(key_reduction);
+    // todo - remove and only migrate external callsites to with_key_translation
+    pub fn with_key_reduction(self, key_reduction: Range<usize>) -> Self {
+        self.with_key_translation(KeyTranslation::Reduction(key_reduction))
+    }
+
+    pub fn with_key_translation(mut self, key_translation: KeyTranslation) -> Self {
+        self.key_translation = key_translation;
         self
     }
 
@@ -629,6 +644,29 @@ impl Debug for KeyType {
             KeyType::PrefixedUniform(c) => {
                 write!(f, "prefix({}, {})", c.prefix_len_bytes, c.cluster_bits)
             }
+        }
+    }
+}
+
+impl KeyTranslation {
+    pub(crate) fn index_key_size(&self) -> Option<usize> {
+        match self {
+            KeyTranslation::None => None,
+            KeyTranslation::Reduction(range) => Some(range.len()),
+        }
+    }
+
+    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> &'a [u8] {
+        match self {
+            KeyTranslation::None => key,
+            KeyTranslation::Reduction(range) => &key[range.clone()],
+        }
+    }
+
+    pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
+        match self {
+            KeyTranslation::None => key,
+            KeyTranslation::Reduction(range) => key.slice(range.clone()),
         }
     }
 }

@@ -497,7 +497,7 @@ impl Db {
             match ks.key_type() {
                 KeyType::Uniform(config) => {
                     let num_cells = config.num_cells(ks);
-                    let cache_estimate = (ks.reduced_key_size() + WalPosition::SIZE)
+                    let cache_estimate = (ks.index_key_size() + WalPosition::SIZE)
                         * num_cells
                         * self.config.max_dirty_keys;
                     self.metrics
