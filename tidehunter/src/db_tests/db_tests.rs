@@ -4,7 +4,9 @@ use crate::config::Config;
 use crate::crc::CrcFrame;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
-use crate::key_shape::{KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
+use crate::key_shape::{
+    KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyTranslation, KeyType,
+};
 use crate::metrics::Metrics;
 use minibytes::Bytes;
 use rand::rngs::{StdRng, ThreadRng};
@@ -273,22 +275,27 @@ fn test_iterator_gen() {
     ThreadRng::default().fill(&mut random[..]);
     random.sort();
     for reduced in [true, false] {
-        let ks_config = if reduced {
-            KeySpaceConfig::default().with_key_reduction(0..16)
+        let key_translation = if reduced {
+            KeyTranslation::key_reduction(16, 0..16)
         } else {
-            KeySpaceConfig::default()
+            KeyTranslation::none(16)
         };
         println!("Starting sequential test, reduced={reduced}");
-        test_iterator_run(sequential.clone(), ks_config.clone());
+        test_iterator_run(sequential.clone(), key_translation.clone());
         println!("Starting random test, reduced={reduced}");
-        test_iterator_run(random.clone(), ks_config);
+        test_iterator_run(random.clone(), key_translation);
     }
 }
 
-fn test_iterator_run(data: Vec<u128>, ks_config: KeySpaceConfig) {
+fn test_iterator_run(data: Vec<u128>, key_translation: KeyTranslation) {
     let dir = tempdir::TempDir::new("test-iterator").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single_config(16, 4, KeyType::uniform(4), ks_config);
+    let (key_shape, ks) = KeyShape::new_single_config_translation(
+        key_translation,
+        4,
+        KeyType::uniform(4),
+        KeySpaceConfig::default(),
+    );
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -511,8 +518,13 @@ fn test_iterator_bounds_no_reduction() {
 fn test_iterator_bounds_with_reduction() {
     let dir = tempdir::TempDir::new("test-iterator-bounds-with-reduction").unwrap();
     let config = Arc::new(Config::small());
-    let ks_config = KeySpaceConfig::new().with_key_reduction(0..2);
-    let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
+    let key_translation = KeyTranslation::key_reduction(4, 0..2);
+    let (key_shape, ks) = KeyShape::new_single_config_translation(
+        key_translation,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::default(),
+    );
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -998,8 +1010,13 @@ fn test_concurrent_single_value_update_iteration(i: usize) {
 fn test_key_reduction() {
     let dir = tempdir::TempDir::new("test_key_reduction").unwrap();
     let config = Arc::new(Config::small());
-    let ks_config = KeySpaceConfig::new().with_key_reduction(0..2);
-    let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
+    let key_translation = KeyTranslation::key_reduction(4, 0..2);
+    let (key_shape, ks) = KeyShape::new_single_config_translation(
+        key_translation,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::default(),
+    );
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -1090,10 +1107,10 @@ fn test_key_reduction() {
 fn test_key_reduction_lru() {
     let dir = tempdir::TempDir::new("test_key_reduction_lru").unwrap();
     let config = Arc::new(Config::small());
-    let ks_config = KeySpaceConfig::new()
-        .with_key_reduction(0..2)
-        .with_value_cache_size(2);
-    let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
+    let key_translation = KeyTranslation::key_reduction(4, 0..2);
+    let ks_config = KeySpaceConfig::new().with_value_cache_size(2);
+    let (key_shape, ks) =
+        KeyShape::new_single_config_translation(key_translation, 1, KeyType::uniform(1), ks_config);
     let metrics = Metrics::new();
     let db = Db::open(
         dir.path(),

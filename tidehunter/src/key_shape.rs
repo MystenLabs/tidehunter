@@ -39,7 +39,7 @@ pub struct KeySpaceDesc {
 pub struct KeySpaceDescInner {
     id: KeySpace,
     name: String,
-    key_size: usize,
+    key_translation: KeyTranslation,
     mutexes: usize,
     key_type: KeyType,
     config: KeySpaceConfig,
@@ -52,7 +52,6 @@ pub struct KeySpaceConfig {
     disable_unload: bool,
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
-    key_translation: KeyTranslation,
     index_format: IndexFormatType,
     unloaded_iterator: bool,
 }
@@ -63,11 +62,10 @@ pub struct KeySpaceConfig {
 ///
 /// This allows for various use cases such as
 /// * Key reduction (reducing index size by using fewer bytes from the key in the index)
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub enum KeyTranslation {
-    #[default]
-    None,
-    Reduction(Range<usize>),
+    None(usize),
+    Reduction(usize, Range<usize>),
 }
 
 #[derive(Clone, Copy)]
@@ -128,6 +126,23 @@ impl KeyShapeBuilder {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> KeySpace {
+        self.add_key_space_config_translation(
+            name,
+            KeyTranslation::none(key_size),
+            mutexes,
+            key_type,
+            config,
+        )
+    }
+
+    pub fn add_key_space_config_translation(
+        &mut self,
+        name: impl Into<String>,
+        key_translation: KeyTranslation,
+        mutexes: usize,
+        key_type: KeyType,
+        config: KeySpaceConfig,
+    ) -> KeySpace {
         let name = name.into();
         assert!(mutexes > 0, "mutexes should be greater then 0");
         // also see test_prefix_falls_in_range
@@ -141,16 +156,12 @@ impl KeyShapeBuilder {
             "Maximum {} key spaces allowed",
             u8::MAX
         );
-        assert!(
-            key_size <= MAX_KEY_LEN,
-            "Specified key size exceeding max key length"
-        );
 
         let ks = KeySpace(self.key_spaces.len() as u8);
         let key_space = KeySpaceDescInner {
             id: ks,
             name,
-            key_size,
+            key_translation,
             mutexes,
             key_type,
             config,
@@ -182,14 +193,7 @@ impl KeyShapeBuilder {
 
 impl KeySpaceDesc {
     pub(crate) fn check_key(&self, k: &[u8]) {
-        if k.len() != self.key_size {
-            panic!(
-                "Key space {} accepts keys size {}, given {}",
-                self.name,
-                self.key_size,
-                k.len()
-            );
-        }
+        self.key_translation.check_key_size(k.len(), self.name());
     }
 
     /* Nomenclature for the various conversion methods below:
@@ -221,14 +225,14 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn use_key_reduction_iterator(&self) -> bool {
-        match self.config.key_translation {
-            KeyTranslation::None => false,
-            KeyTranslation::Reduction(_) => true,
+        match self.key_translation {
+            KeyTranslation::None(_) => false,
+            KeyTranslation::Reduction(_, _) => true,
         }
     }
 
     pub(crate) fn key_translation(&self) -> &KeyTranslation {
-        &self.config.key_translation
+        &self.key_translation
     }
 
     pub(crate) fn key_type(&self) -> &KeyType {
@@ -236,9 +240,7 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn index_key_size(&self) -> usize {
-        self.key_translation()
-            .index_key_size()
-            .unwrap_or(self.key_size)
+        self.key_translation().index_key_size()
     }
 
     /// Returns u32 prefix
@@ -380,16 +382,6 @@ impl KeySpaceConfig {
         self
     }
 
-    // todo - remove and only migrate external callsites to with_key_translation
-    pub fn with_key_reduction(self, key_reduction: Range<usize>) -> Self {
-        self.with_key_translation(KeyTranslation::Reduction(key_reduction))
-    }
-
-    pub fn with_key_translation(mut self, key_translation: KeyTranslation) -> Self {
-        self.key_translation = key_translation;
-        self
-    }
-
     pub fn with_index_format(mut self, index_format: IndexFormatType) -> Self {
         self.index_format = index_format;
         self
@@ -412,6 +404,20 @@ impl KeyShape {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> (Self, KeySpace) {
+        Self::new_single_config_translation(
+            KeyTranslation::none(key_size),
+            mutexes,
+            key_type,
+            config,
+        )
+    }
+
+    pub fn new_single_config_translation(
+        key_translation: KeyTranslation,
+        mutexes: usize,
+        key_type: KeyType,
+        config: KeySpaceConfig,
+    ) -> (Self, KeySpace) {
         assert!(
             mutexes.is_power_of_two(),
             "mutexes should be power of 2, given {mutexes}"
@@ -419,7 +425,7 @@ impl KeyShape {
         let key_space = KeySpaceDescInner {
             id: KeySpace(0),
             name: "root".into(),
-            key_size,
+            key_translation,
             mutexes,
             key_type,
             config,
@@ -650,24 +656,54 @@ impl Debug for KeyType {
 }
 
 impl KeyTranslation {
-    pub(crate) fn index_key_size(&self) -> Option<usize> {
+    pub fn none(key_length: usize) -> Self {
+        Self::check_configured_key_size(key_length);
+        Self::None(key_length)
+    }
+
+    pub fn key_reduction(key_length: usize, range: Range<usize>) -> Self {
+        Self::check_configured_key_size(key_length);
+        Self::Reduction(key_length, range)
+    }
+
+    fn check_configured_key_size(key_size: usize) {
+        assert!(
+            key_size <= MAX_KEY_LEN,
+            "Specified key size exceeding max key length"
+        );
+    }
+
+    pub(crate) fn index_key_size(&self) -> usize {
         match self {
-            KeyTranslation::None => None,
-            KeyTranslation::Reduction(range) => Some(range.len()),
+            KeyTranslation::None(key_size) => *key_size,
+            KeyTranslation::Reduction(_, range) => range.len(),
+        }
+    }
+
+    pub(crate) fn check_key_size(&self, k: usize, name: &str) {
+        let expected_key_size = match self {
+            KeyTranslation::None(key_size) => *key_size,
+            KeyTranslation::Reduction(key_size, _) => *key_size,
+        };
+        if expected_key_size != k {
+            panic!(
+                "Key space {} accepts keys size {}, given {}",
+                name, expected_key_size, k
+            );
         }
     }
 
     pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
         match self {
-            KeyTranslation::None => Cow::Borrowed(key),
-            KeyTranslation::Reduction(range) => Cow::Borrowed(&key[range.clone()]),
+            KeyTranslation::None(_) => Cow::Borrowed(key),
+            KeyTranslation::Reduction(_, range) => Cow::Borrowed(&key[range.clone()]),
         }
     }
 
     pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
         match self {
-            KeyTranslation::None => key,
-            KeyTranslation::Reduction(range) => key.slice(range.clone()),
+            KeyTranslation::None(_) => key,
+            KeyTranslation::Reduction(_, range) => key.slice(range.clone()),
         }
     }
 }
