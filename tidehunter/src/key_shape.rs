@@ -6,6 +6,7 @@ use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Debug;
@@ -306,7 +307,7 @@ impl KeySpaceDesc {
         }
     }
 
-    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> &'a [u8] {
+    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
         self.key_translation().reduce_key(key)
     }
 
@@ -656,10 +657,10 @@ impl KeyTranslation {
         }
     }
 
-    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> &'a [u8] {
+    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
         match self {
-            KeyTranslation::None => key,
-            KeyTranslation::Reduction(range) => &key[range.clone()],
+            KeyTranslation::None => Cow::Borrowed(key),
+            KeyTranslation::Reduction(range) => Cow::Borrowed(&key[range.clone()]),
         }
     }
 
