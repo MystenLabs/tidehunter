@@ -28,7 +28,7 @@ mod ssh;
 mod testbed;
 
 /// NOTE: Link these types to the correct protocol.
-type Protocol = protocol::target::MysticetiProtocol;
+type Protocol = protocol::target::TargetProtocol;
 type NodeParameters = protocol::target::DbParameters;
 type ClientParameters = protocol::target::StressClientParameters;
 

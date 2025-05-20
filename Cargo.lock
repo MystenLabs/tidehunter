@@ -2284,6 +2284,7 @@ dependencies = [
  "aws-config",
  "aws-runtime",
  "aws-sdk-ec2",
+ "benchmark",
  "clap",
  "color-eyre",
  "crossterm",
