@@ -69,6 +69,7 @@ pub struct KeySpaceConfig {
 pub enum KeyIndexing {
     Fixed(usize),
     Reduction(usize, Range<usize>),
+    Hash,
 }
 
 #[derive(Clone, Copy)]
@@ -231,6 +232,15 @@ impl KeySpaceDesc {
         match self.key_indexing {
             KeyIndexing::Fixed(_) => false,
             KeyIndexing::Reduction(_, _) => true,
+            KeyIndexing::Hash => false,
+        }
+    }
+
+    pub(crate) fn assert_supports_iterator_bound(&self) {
+        match self.key_indexing {
+            KeyIndexing::Fixed(_) => return,
+            KeyIndexing::Reduction(_, _) => return,
+            KeyIndexing::Hash => panic!("Key space {} does not support iterator bounds and reversal because it uses KeyIndexing::Hash", self.name()),
         }
     }
 
@@ -654,6 +664,8 @@ impl Debug for KeyType {
 }
 
 impl KeyIndexing {
+    const HASH_SIZE: usize = 8;
+
     pub fn none(key_length: usize) -> Self {
         Self::check_configured_key_size(key_length);
         Self::Fixed(key_length)
@@ -675,6 +687,7 @@ impl KeyIndexing {
         match self {
             KeyIndexing::Fixed(key_size) => *key_size,
             KeyIndexing::Reduction(_, range) => range.len(),
+            KeyIndexing::Hash => Self::HASH_SIZE,
         }
     }
 
@@ -682,6 +695,15 @@ impl KeyIndexing {
         let expected_key_size = match self {
             KeyIndexing::Fixed(key_size) => *key_size,
             KeyIndexing::Reduction(key_size, _) => *key_size,
+            KeyIndexing::Hash => {
+                if k > MAX_KEY_LEN {
+                    panic!(
+                        "Key space {} accepts maximum keys size {}, given {}",
+                        name, MAX_KEY_LEN, k
+                    );
+                }
+                return;
+            }
         };
         if expected_key_size != k {
             panic!(
@@ -695,6 +717,7 @@ impl KeyIndexing {
         match self {
             KeyIndexing::Fixed(_) => Cow::Borrowed(key),
             KeyIndexing::Reduction(_, range) => Cow::Borrowed(&key[range.clone()]),
+            KeyIndexing::Hash => Cow::Owned(Self::hash_key(key)),
         }
     }
 
@@ -702,7 +725,16 @@ impl KeyIndexing {
         match self {
             KeyIndexing::Fixed(_) => key,
             KeyIndexing::Reduction(_, range) => key.slice(range.clone()),
+            KeyIndexing::Hash => Self::hash_key(&key).into(),
         }
+    }
+
+    fn hash_key(key: &[u8]) -> Vec<u8> {
+        // todo (!) use crypto hash or process hash collision correctly
+        let hash = seahash::hash(key);
+        let mut bytes = [0u8; Self::HASH_SIZE];
+        bytes.copy_from_slice(&hash.to_be_bytes());
+        bytes.to_vec()
     }
 }
 

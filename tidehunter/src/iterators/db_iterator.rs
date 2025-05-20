@@ -39,6 +39,7 @@ impl DbIterator {
     pub fn set_lower_bound(&mut self, lower_bound: impl Into<Bytes>) {
         let full_lower_bound = lower_bound.into();
         let ks = self.db.ks(self.ks);
+        ks.assert_supports_iterator_bound();
         let reduced_lower_bound = ks.reduced_key_bytes(full_lower_bound.clone());
         if self.reverse {
             self.end_cell_exclusive =
@@ -62,6 +63,7 @@ impl DbIterator {
     pub fn set_upper_bound(&mut self, upper_bound: impl Into<Bytes>) {
         let full_upper_bound = upper_bound.into();
         let ks = self.db.ks(self.ks);
+        ks.assert_supports_iterator_bound();
         let reduced_upper_bound = ks.reduced_key_bytes(full_upper_bound.clone());
         if self.reverse {
             let next_key = if self.with_key_reduction {
@@ -88,6 +90,8 @@ impl DbIterator {
     }
 
     pub fn reverse(&mut self) {
+        let ks = self.db.ks(self.ks);
+        ks.assert_supports_iterator_bound();
         self.reverse = !self.reverse;
         if let Some(lower_bound) = self.full_lower_bound.take() {
             self.set_lower_bound(lower_bound);
