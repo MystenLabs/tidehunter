@@ -274,12 +274,21 @@ fn test_iterator_gen() {
     random.sort();
     for reduced in [true, false] {
         let key_indexing = if reduced {
-            KeyIndexing::key_reduction(16, 0..16)
+            // For the sequential test we reduce key to last 8 bytes,
+            // since they are the only ones that are different
+            KeyIndexing::key_reduction(16, 8..16)
         } else {
             KeyIndexing::none(16)
         };
         println!("Starting sequential test, reduced={reduced}");
         test_iterator_run(sequential.clone(), key_indexing.clone());
+
+        let key_indexing = if reduced {
+            // For the random test, we reduce key to first 8 bytes as they are most significant
+            KeyIndexing::key_reduction(16, 0..8)
+        } else {
+            KeyIndexing::none(16)
+        };
         println!("Starting random test, reduced={reduced}");
         test_iterator_run(random.clone(), key_indexing);
     }
@@ -1194,7 +1203,12 @@ pub(super) fn prefix_key_shape() -> (KeyShape, KeySpace) {
 }
 
 pub(super) fn hashed_index_key_shape() -> (KeyShape, KeySpace) {
-    KeyShape::new_single_config_indexing(KeyIndexing::hash(), 16, KeyType::prefix_uniform(2, 0), KeySpaceConfig::default())
+    KeyShape::new_single_config_indexing(
+        KeyIndexing::hash(),
+        16,
+        KeyType::prefix_uniform(2, 0),
+        KeySpaceConfig::default(),
+    )
 }
 
 fn lru_lookups(ks: &str, metrics: &Metrics) -> u64 {
