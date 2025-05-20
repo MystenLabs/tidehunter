@@ -132,7 +132,7 @@ impl KeyShapeBuilder {
     ) -> KeySpace {
         self.add_key_space_config_indexing(
             name,
-            KeyIndexing::none(key_size),
+            KeyIndexing::fixed(key_size),
             mutexes,
             key_type,
             config,
@@ -417,7 +417,7 @@ impl KeyShape {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> (Self, KeySpace) {
-        Self::new_single_config_indexing(KeyIndexing::none(key_size), mutexes, key_type, config)
+        Self::new_single_config_indexing(KeyIndexing::fixed(key_size), mutexes, key_type, config)
     }
 
     pub fn new_single_config_indexing(
@@ -666,7 +666,7 @@ impl Debug for KeyType {
 impl KeyIndexing {
     const HASH_SIZE: usize = 8;
 
-    pub fn none(key_length: usize) -> Self {
+    pub fn fixed(key_length: usize) -> Self {
         Self::check_configured_key_size(key_length);
         Self::Fixed(key_length)
     }

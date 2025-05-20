@@ -278,7 +278,7 @@ fn test_iterator_gen() {
             // since they are the only ones that are different
             KeyIndexing::key_reduction(16, 8..16)
         } else {
-            KeyIndexing::none(16)
+            KeyIndexing::fixed(16)
         };
         println!("Starting sequential test, reduced={reduced}");
         test_iterator_run(sequential.clone(), key_indexing.clone());
@@ -287,7 +287,7 @@ fn test_iterator_gen() {
             // For the random test, we reduce key to first 8 bytes as they are most significant
             KeyIndexing::key_reduction(16, 0..8)
         } else {
-            KeyIndexing::none(16)
+            KeyIndexing::fixed(16)
         };
         println!("Starting random test, reduced={reduced}");
         test_iterator_run(random.clone(), key_indexing);
