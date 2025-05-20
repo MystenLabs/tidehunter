@@ -39,7 +39,7 @@ pub struct KeySpaceDesc {
 pub struct KeySpaceDescInner {
     id: KeySpace,
     name: String,
-    key_translation: KeyTranslation,
+    key_indexing: KeyIndexing,
     mutexes: usize,
     key_type: KeyType,
     config: KeySpaceConfig,
@@ -56,15 +56,18 @@ pub struct KeySpaceConfig {
     unloaded_iterator: bool,
 }
 
-/// Key translation allows using a different key in the index then what user supplies.
-/// In other words, when a user puts a key-value pair (K, V) in the database,
-/// we write (K, V) into wal, but we use Translate(K) in the index, instead of K
+/// This enum allows customizing the key used in the index.
+/// By default, KeyIndexing::Fixed is used putting a key into index as it is.
+///
+/// With other options, when a user puts a key-value pair (K, V) in the database,
+/// we write (K, V) into wal, but we use F(K) in the index, instead of K,
+/// where F(K) depends on the type of key indexing.
 ///
 /// This allows for various use cases such as
 /// * Key reduction (reducing index size by using fewer bytes from the key in the index)
 #[derive(Clone)]
-pub enum KeyTranslation {
-    None(usize),
+pub enum KeyIndexing {
+    Fixed(usize),
     Reduction(usize, Range<usize>),
 }
 
@@ -126,19 +129,19 @@ impl KeyShapeBuilder {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> KeySpace {
-        self.add_key_space_config_translation(
+        self.add_key_space_config_indexing(
             name,
-            KeyTranslation::none(key_size),
+            KeyIndexing::none(key_size),
             mutexes,
             key_type,
             config,
         )
     }
 
-    pub fn add_key_space_config_translation(
+    pub fn add_key_space_config_indexing(
         &mut self,
         name: impl Into<String>,
-        key_translation: KeyTranslation,
+        key_indexing: KeyIndexing,
         mutexes: usize,
         key_type: KeyType,
         config: KeySpaceConfig,
@@ -161,7 +164,7 @@ impl KeyShapeBuilder {
         let key_space = KeySpaceDescInner {
             id: ks,
             name,
-            key_translation,
+            key_indexing,
             mutexes,
             key_type,
             config,
@@ -193,7 +196,7 @@ impl KeyShapeBuilder {
 
 impl KeySpaceDesc {
     pub(crate) fn check_key(&self, k: &[u8]) {
-        self.key_translation.check_key_size(k.len(), self.name());
+        self.key_indexing.check_key_size(k.len(), self.name());
     }
 
     /* Nomenclature for the various conversion methods below:
@@ -225,14 +228,14 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn use_key_reduction_iterator(&self) -> bool {
-        match self.key_translation {
-            KeyTranslation::None(_) => false,
-            KeyTranslation::Reduction(_, _) => true,
+        match self.key_indexing {
+            KeyIndexing::Fixed(_) => false,
+            KeyIndexing::Reduction(_, _) => true,
         }
     }
 
-    pub(crate) fn key_translation(&self) -> &KeyTranslation {
-        &self.key_translation
+    pub(crate) fn key_indexing(&self) -> &KeyIndexing {
+        &self.key_indexing
     }
 
     pub(crate) fn key_type(&self) -> &KeyType {
@@ -240,7 +243,7 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn index_key_size(&self) -> usize {
-        self.key_translation().index_key_size()
+        self.key_indexing().index_key_size()
     }
 
     /// Returns u32 prefix
@@ -310,11 +313,11 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
-        self.key_translation().reduce_key(key)
+        self.key_indexing().reduce_key(key)
     }
 
     pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
-        self.key_translation().reduced_key_bytes(key)
+        self.key_indexing().reduced_key_bytes(key)
     }
 
     pub(crate) fn compactor(&self) -> Option<&Compactor> {
@@ -404,16 +407,11 @@ impl KeyShape {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> (Self, KeySpace) {
-        Self::new_single_config_translation(
-            KeyTranslation::none(key_size),
-            mutexes,
-            key_type,
-            config,
-        )
+        Self::new_single_config_indexing(KeyIndexing::none(key_size), mutexes, key_type, config)
     }
 
-    pub fn new_single_config_translation(
-        key_translation: KeyTranslation,
+    pub fn new_single_config_indexing(
+        key_indexing: KeyIndexing,
         mutexes: usize,
         key_type: KeyType,
         config: KeySpaceConfig,
@@ -425,7 +423,7 @@ impl KeyShape {
         let key_space = KeySpaceDescInner {
             id: KeySpace(0),
             name: "root".into(),
-            key_translation,
+            key_indexing,
             mutexes,
             key_type,
             config,
@@ -655,10 +653,10 @@ impl Debug for KeyType {
     }
 }
 
-impl KeyTranslation {
+impl KeyIndexing {
     pub fn none(key_length: usize) -> Self {
         Self::check_configured_key_size(key_length);
-        Self::None(key_length)
+        Self::Fixed(key_length)
     }
 
     pub fn key_reduction(key_length: usize, range: Range<usize>) -> Self {
@@ -675,15 +673,15 @@ impl KeyTranslation {
 
     pub(crate) fn index_key_size(&self) -> usize {
         match self {
-            KeyTranslation::None(key_size) => *key_size,
-            KeyTranslation::Reduction(_, range) => range.len(),
+            KeyIndexing::Fixed(key_size) => *key_size,
+            KeyIndexing::Reduction(_, range) => range.len(),
         }
     }
 
     pub(crate) fn check_key_size(&self, k: usize, name: &str) {
         let expected_key_size = match self {
-            KeyTranslation::None(key_size) => *key_size,
-            KeyTranslation::Reduction(key_size, _) => *key_size,
+            KeyIndexing::Fixed(key_size) => *key_size,
+            KeyIndexing::Reduction(key_size, _) => *key_size,
         };
         if expected_key_size != k {
             panic!(
@@ -695,15 +693,15 @@ impl KeyTranslation {
 
     pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
         match self {
-            KeyTranslation::None(_) => Cow::Borrowed(key),
-            KeyTranslation::Reduction(_, range) => Cow::Borrowed(&key[range.clone()]),
+            KeyIndexing::Fixed(_) => Cow::Borrowed(key),
+            KeyIndexing::Reduction(_, range) => Cow::Borrowed(&key[range.clone()]),
         }
     }
 
     pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
         match self {
-            KeyTranslation::None(_) => key,
-            KeyTranslation::Reduction(_, range) => key.slice(range.clone()),
+            KeyIndexing::Fixed(_) => key,
+            KeyIndexing::Reduction(_, range) => key.slice(range.clone()),
         }
     }
 }

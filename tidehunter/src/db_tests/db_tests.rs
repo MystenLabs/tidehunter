@@ -4,9 +4,7 @@ use crate::config::Config;
 use crate::crc::CrcFrame;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
-use crate::key_shape::{
-    KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyTranslation, KeyType,
-};
+use crate::key_shape::{KeyIndexing, KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
 use crate::metrics::Metrics;
 use minibytes::Bytes;
 use rand::rngs::{StdRng, ThreadRng};
@@ -275,23 +273,23 @@ fn test_iterator_gen() {
     ThreadRng::default().fill(&mut random[..]);
     random.sort();
     for reduced in [true, false] {
-        let key_translation = if reduced {
-            KeyTranslation::key_reduction(16, 0..16)
+        let key_indexing = if reduced {
+            KeyIndexing::key_reduction(16, 0..16)
         } else {
-            KeyTranslation::none(16)
+            KeyIndexing::none(16)
         };
         println!("Starting sequential test, reduced={reduced}");
-        test_iterator_run(sequential.clone(), key_translation.clone());
+        test_iterator_run(sequential.clone(), key_indexing.clone());
         println!("Starting random test, reduced={reduced}");
-        test_iterator_run(random.clone(), key_translation);
+        test_iterator_run(random.clone(), key_indexing);
     }
 }
 
-fn test_iterator_run(data: Vec<u128>, key_translation: KeyTranslation) {
+fn test_iterator_run(data: Vec<u128>, key_indexing: KeyIndexing) {
     let dir = tempdir::TempDir::new("test-iterator").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single_config_translation(
-        key_translation,
+    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+        key_indexing,
         4,
         KeyType::uniform(4),
         KeySpaceConfig::default(),
@@ -518,9 +516,9 @@ fn test_iterator_bounds_no_reduction() {
 fn test_iterator_bounds_with_reduction() {
     let dir = tempdir::TempDir::new("test-iterator-bounds-with-reduction").unwrap();
     let config = Arc::new(Config::small());
-    let key_translation = KeyTranslation::key_reduction(4, 0..2);
-    let (key_shape, ks) = KeyShape::new_single_config_translation(
-        key_translation,
+    let key_indexing = KeyIndexing::key_reduction(4, 0..2);
+    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+        key_indexing,
         1,
         KeyType::uniform(1),
         KeySpaceConfig::default(),
@@ -1010,9 +1008,9 @@ fn test_concurrent_single_value_update_iteration(i: usize) {
 fn test_key_reduction() {
     let dir = tempdir::TempDir::new("test_key_reduction").unwrap();
     let config = Arc::new(Config::small());
-    let key_translation = KeyTranslation::key_reduction(4, 0..2);
-    let (key_shape, ks) = KeyShape::new_single_config_translation(
-        key_translation,
+    let key_indexing = KeyIndexing::key_reduction(4, 0..2);
+    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+        key_indexing,
         1,
         KeyType::uniform(1),
         KeySpaceConfig::default(),
@@ -1107,10 +1105,10 @@ fn test_key_reduction() {
 fn test_key_reduction_lru() {
     let dir = tempdir::TempDir::new("test_key_reduction_lru").unwrap();
     let config = Arc::new(Config::small());
-    let key_translation = KeyTranslation::key_reduction(4, 0..2);
+    let key_indexing = KeyIndexing::key_reduction(4, 0..2);
     let ks_config = KeySpaceConfig::new().with_value_cache_size(2);
     let (key_shape, ks) =
-        KeyShape::new_single_config_translation(key_translation, 1, KeyType::uniform(1), ks_config);
+        KeyShape::new_single_config_indexing(key_indexing, 1, KeyType::uniform(1), ks_config);
     let metrics = Metrics::new();
     let db = Db::open(
         dir.path(),
