@@ -40,9 +40,7 @@ impl ProtocolParameters for DbParameters {}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(transparent)]
-pub struct StressClientParameters {
-    content: usize,
-}
+pub struct StressClientParameters(usize);
 
 impl Deref for StressClientParameters {
     type Target = usize;
@@ -68,11 +66,19 @@ impl ProtocolParameters for StressClientParameters {}
 
 impl ProtocolParameters for Vec<StressClientParameters> {}
 
+<<<<<<< HEAD
 pub struct MysticetiProtocol {
     working_dir: PathBuf,
 }
 
 impl ProtocolCommands for MysticetiProtocol {
+=======
+pub struct TargetProtocol {
+    working_dir: PathBuf,
+}
+
+impl ProtocolCommands for TargetProtocol {
+>>>>>>> a5ac3ac (feat: initial orchestrator)
     fn protocol_dependencies(&self) -> Vec<&'static str> {
         vec!["sudo apt -y install libfontconfig1-dev"]
     }
@@ -137,7 +143,11 @@ impl ProtocolCommands for MysticetiProtocol {
     }
 }
 
+<<<<<<< HEAD
 impl ProtocolMetrics for MysticetiProtocol {
+=======
+impl ProtocolMetrics for TargetProtocol {
+>>>>>>> a5ac3ac (feat: initial orchestrator)
     const BENCHMARK_DURATION: &'static str = "";
     const TOTAL_TRANSACTIONS: &'static str = "latency_s_count";
     const LATENCY_BUCKETS: &'static str = "latency_s";
@@ -168,8 +178,13 @@ impl ProtocolMetrics for MysticetiProtocol {
     }
 }
 
+<<<<<<< HEAD
 impl MysticetiProtocol {
     /// Make a new instance of the Mysticeti protocol commands generator.
+=======
+impl TargetProtocol {
+    /// Make a new instance of the target protocol commands generator.
+>>>>>>> a5ac3ac (feat: initial orchestrator)
     pub fn new(settings: &Settings) -> Self {
         Self {
             working_dir: settings.working_dir.clone(),
