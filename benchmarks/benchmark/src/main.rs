@@ -4,6 +4,7 @@ use crate::storage::Storage;
 use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
+use configs::{Backend, KeyLayout, ReadMode};
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
@@ -17,9 +18,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 use tidehunter::config::Config;
-use tidehunter::key_shape::KeySpaceConfig;
-use tidehunter::key_shape::{KeyShape, KeyType};
+use tidehunter::key_shape::{KeyShape, KeySpaceConfig, KeyType};
 
+mod configs;
 mod metrics;
 #[allow(dead_code)]
 mod prometheus;
@@ -36,22 +37,45 @@ macro_rules! report {
 
 #[derive(Parser, Debug)]
 struct StressArgs {
-    #[arg(long, help = "Number of read threads")]
+    // This parameter gives the user the chance to call the benchmark using parameters specified in a file.
+    // Even if the user specifies a file, the command line arguments will override the values in the file.
+    #[arg(
+        long,
+        help = "Path to the default parameters file. Any value can be overridden by command line arguments"
+    )]
+    parameters_path: Option<String>,
+    #[arg(long, help = "Number of read threads", default_value = "1")]
     read_threads: usize,
-    #[arg(long, help = "Number of write threads")]
+    #[arg(long, help = "Number of write threads", default_value = "1")]
     write_threads: usize,
-    #[arg(long, short = 'v', help = "Length of the value")]
+    #[arg(
+        long,
+        short = 'v',
+        help = "Length of the value",
+        default_value = "1024"
+    )]
     write_size: usize,
-    #[arg(long, short = 'k', help = "Length of the key")]
+    #[arg(long, short = 'k', help = "Length of the key", default_value = "32")]
     key_len: usize,
-    #[arg(long, short = 'w', help = "Blocks to write per thread")]
+    #[arg(
+        long,
+        short = 'w',
+        help = "Blocks to write per thread",
+        default_value = "1000000"
+    )]
     writes: usize,
-    #[arg(long, short = 'r', help = "Blocks to read per thread")]
+    #[arg(
+        long,
+        short = 'r',
+        help = "Blocks to read per thread",
+        default_value = "1000000"
+    )]
     reads: usize,
     #[arg(
         long,
         short = 'u',
-        help = "Background writes per second during read test"
+        help = "Background writes per second during read test",
+        default_value = "0"
     )]
     background_writes: usize,
     #[arg(
@@ -77,27 +101,8 @@ struct StressArgs {
     reuse: Option<String>,
     #[arg(long, help = "Read mode", default_value = "get")]
     read_mode: ReadMode,
-    #[arg(long, short = 'b', help = "Backend")]
+    #[arg(long, short = 'b', help = "Backend", default_value = "tidehunter")]
     backend: Backend,
-}
-
-#[derive(Debug, Clone)]
-enum KeyLayout {
-    Uniform,
-    SequenceChoice,
-    ChoiceSequence,
-}
-
-#[derive(Debug, Clone)]
-enum ReadMode {
-    Get,
-    Lt(usize),
-}
-
-#[derive(Debug, Clone)]
-enum Backend {
-    Tidehunter,
-    Rocksdb,
 }
 
 pub fn main() {
