@@ -1,10 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    fmt::Display,
-    net::{Ipv4Addr, SocketAddr},
-};
+use std::fmt::Display;
+use std::net::{Ipv4Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
@@ -67,18 +65,6 @@ impl Instance {
     pub fn ssh_address(&self) -> SocketAddr {
         SocketAddr::new(self.main_ip.into(), 22)
     }
-
-    #[cfg(test)]
-    pub fn new_for_test(id: String) -> Self {
-        Self {
-            id,
-            region: Default::default(),
-            main_ip: Ipv4Addr::LOCALHOST,
-            tags: Default::default(),
-            specs: Default::default(),
-            status: InstanceStatus::Active,
-        }
-    }
 }
 
 pub trait ServerProviderClient: Display {
@@ -116,12 +102,14 @@ pub trait ServerProviderClient: Display {
 
 #[cfg(test)]
 pub mod test_client {
-    use std::{fmt::Display, sync::Mutex};
+    use std::fmt::Display;
+    use std::sync::Mutex;
 
     use serde::Serialize;
 
     use super::{Instance, InstanceStatus, ServerProviderClient};
-    use crate::{error::CloudProviderResult, settings::Settings};
+    use crate::error::CloudProviderResult;
+    use crate::settings::Settings;
 
     pub struct TestClient {
         settings: Settings,

@@ -121,18 +121,6 @@ impl ProtocolCommands for TargetProtocol {
     {
         todo!()
     }
-
-    fn client_command<I>(
-        &self,
-        _instances: I,
-        _parameters: &BenchmarkParameters,
-    ) -> Vec<(Instance, String)>
-    where
-        I: IntoIterator<Item = Instance>,
-    {
-        // TODO: Isolate clients from the node (#9).
-        vec![]
-    }
 }
 
 impl ProtocolMetrics for TargetProtocol {
@@ -150,18 +138,6 @@ impl ProtocolMetrics for TargetProtocol {
     where
         I: IntoIterator<Item = Instance>,
     {
-        todo!()
-    }
-
-    fn clients_metrics_path<I>(
-        &self,
-        _instances: I,
-        _parameters: &BenchmarkParameters,
-    ) -> Vec<(Instance, String)>
-    where
-        I: IntoIterator<Item = Instance>,
-    {
-        // NOTE: Hack to avoid clients metrics.
         todo!()
     }
 }

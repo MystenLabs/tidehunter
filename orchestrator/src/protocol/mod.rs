@@ -13,7 +13,7 @@ use crate::client::Instance;
 
 pub mod target;
 
-pub const BINARY_PATH: &str = "target/release";
+// pub const BINARY_PATH: &str = "target/release";
 
 pub trait ProtocolParameters: Default + Clone + Serialize + DeserializeOwned + Debug {
     /// Load the configuration from a YAML file located at the provided path.
@@ -53,16 +53,6 @@ pub trait ProtocolCommands {
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>;
-
-    /// The command to run a client. The function returns a vector of commands along with the
-    /// associated instance on which to run the command.
-    fn client_command<I>(
-        &self,
-        instances: I,
-        parameters: &BenchmarkParameters,
-    ) -> Vec<(Instance, String)>
-    where
-        I: IntoIterator<Item = Instance>;
 }
 
 /// The names of the minimum metrics exposed by the protocol that are required to
@@ -90,15 +80,6 @@ pub trait ProtocolMetrics {
     where
         I: IntoIterator<Item = Instance>;
 
-    /// The network path where the clients expose prometheus metrics.
-    fn clients_metrics_path<I>(
-        &self,
-        instances: I,
-        parameters: &BenchmarkParameters,
-    ) -> Vec<(Instance, String)>
-    where
-        I: IntoIterator<Item = Instance>;
-
     /// The command to retrieve the metrics from the nodes.
     fn nodes_metrics_command<I>(
         &self,
@@ -109,21 +90,6 @@ pub trait ProtocolMetrics {
         I: IntoIterator<Item = Instance>,
     {
         self.nodes_metrics_path(instances, parameters)
-            .into_iter()
-            .map(|(instance, path)| (instance, format!("curl {path}")))
-            .collect()
-    }
-
-    /// The command to retrieve the metrics from the clients.
-    fn clients_metrics_command<I>(
-        &self,
-        instances: I,
-        parameters: &BenchmarkParameters,
-    ) -> Vec<(Instance, String)>
-    where
-        I: IntoIterator<Item = Instance>,
-    {
-        self.clients_metrics_path(instances, parameters)
             .into_iter()
             .map(|(instance, path)| (instance, format!("curl {path}")))
             .collect()
@@ -157,21 +123,6 @@ pub mod test_protocol_metrics {
                 .into_iter()
                 .enumerate()
                 .map(|(i, instance)| (instance, format!("localhost:{}/metrics", 8000 + i as u16)))
-                .collect()
-        }
-
-        fn clients_metrics_path<I>(
-            &self,
-            instances: I,
-            _parameters: &BenchmarkParameters,
-        ) -> Vec<(Instance, String)>
-        where
-            I: IntoIterator<Item = Instance>,
-        {
-            instances
-                .into_iter()
-                .enumerate()
-                .map(|(i, instance)| (instance, format!("localhost:{}/metrics", 9000 + i as u16)))
                 .collect()
         }
     }
