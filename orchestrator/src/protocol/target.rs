@@ -43,22 +43,22 @@ impl ProtocolParameters for DbParameters {}
 pub struct StressClientParameters(benchmark::configs::StressClientParameters);
 
 impl Deref for StressClientParameters {
-    type Target = usize;
+    type Target = benchmark::configs::StressClientParameters;
 
     fn deref(&self) -> &Self::Target {
-        todo!()
+        &self.0
     }
 }
 
 impl Debug for StressClientParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!();
+        write!(f, "{}-{}", self.writes, self.reads)
     }
 }
 
 impl Display for StressClientParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!();
+        write!(f, "{} w - {} r", self.writes, self.reads)
     }
 }
 
@@ -76,7 +76,7 @@ impl ProtocolCommands for TargetProtocol {
     }
 
     fn db_directories(&self) -> Vec<std::path::PathBuf> {
-        vec![self.working_dir.join("storage-*")]
+        vec![]
     }
 
     async fn genesis_command<'a, I>(
