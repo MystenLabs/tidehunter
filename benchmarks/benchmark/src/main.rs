@@ -4,22 +4,22 @@ use crate::storage::Storage;
 use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
+use configs::{Backend, KeyLayout, ReadMode};
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 use tidehunter::config::Config;
-use tidehunter::key_shape::KeySpaceConfig;
-use tidehunter::key_shape::{KeyShape, KeyType};
+use tidehunter::key_shape::{KeyShape, KeySpaceConfig, KeyType};
 
+mod configs;
 mod metrics;
 #[allow(dead_code)]
 mod prometheus;
@@ -36,22 +36,45 @@ macro_rules! report {
 
 #[derive(Parser, Debug)]
 struct StressArgs {
-    #[arg(long, help = "Number of read threads")]
+    // This parameter gives the user the chance to call the benchmark using parameters specified in a file.
+    // Even if the user specifies a file, the command line arguments will override the values in the file.
+    #[arg(
+        long,
+        help = "Path to the default parameters file. Any value can be overridden by command line arguments"
+    )]
+    parameters_path: Option<String>,
+    #[arg(long, help = "Number of read threads", default_value = "1")]
     read_threads: usize,
-    #[arg(long, help = "Number of write threads")]
+    #[arg(long, help = "Number of write threads", default_value = "1")]
     write_threads: usize,
-    #[arg(long, short = 'v', help = "Length of the value")]
+    #[arg(
+        long,
+        short = 'v',
+        help = "Length of the value",
+        default_value = "1024"
+    )]
     write_size: usize,
-    #[arg(long, short = 'k', help = "Length of the key")]
+    #[arg(long, short = 'k', help = "Length of the key", default_value = "32")]
     key_len: usize,
-    #[arg(long, short = 'w', help = "Blocks to write per thread")]
+    #[arg(
+        long,
+        short = 'w',
+        help = "Blocks to write per thread",
+        default_value = "1000000"
+    )]
     writes: usize,
-    #[arg(long, short = 'r', help = "Blocks to read per thread")]
+    #[arg(
+        long,
+        short = 'r',
+        help = "Blocks to read per thread",
+        default_value = "1000000"
+    )]
     reads: usize,
     #[arg(
         long,
         short = 'u',
-        help = "Background writes per second during read test"
+        help = "Background writes per second during read test",
+        default_value = "0"
     )]
     background_writes: usize,
     #[arg(
@@ -77,27 +100,8 @@ struct StressArgs {
     reuse: Option<String>,
     #[arg(long, help = "Read mode", default_value = "get")]
     read_mode: ReadMode,
-    #[arg(long, short = 'b', help = "Backend")]
+    #[arg(long, short = 'b', help = "Backend", default_value = "tidehunter")]
     backend: Backend,
-}
-
-#[derive(Debug, Clone)]
-enum KeyLayout {
-    Uniform,
-    SequenceChoice,
-    ChoiceSequence,
-}
-
-#[derive(Debug, Clone)]
-enum ReadMode {
-    Get,
-    Lt(usize),
-}
-
-#[derive(Debug, Clone)]
-enum Backend {
-    Tidehunter,
-    Rocksdb,
 }
 
 pub fn main() {
@@ -526,57 +530,5 @@ impl StressThread {
         let mut writer = &mut seed[..];
         writer.put_u64(pos);
         StdRng::from_seed(seed)
-    }
-}
-
-impl FromStr for KeyLayout {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "u" {
-            Ok(Self::Uniform)
-        } else if s == "sc" {
-            Ok(Self::SequenceChoice)
-        } else if s == "cs" {
-            Ok(Self::ChoiceSequence)
-        } else {
-            anyhow::bail!(
-                "Only allowed choices for key_layout are 'u'(uniform) or 'sc'(sequence-choice) or 'cs'(choice-sequence)"
-            );
-        }
-    }
-}
-
-impl FromStr for ReadMode {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "get" {
-            Ok(Self::Get)
-        } else if s == "lt" {
-            Ok(Self::Lt(1))
-        } else if s.starts_with("lt:") {
-            Ok(Self::Lt(s[3..].parse().expect("Failed to parse read mode")))
-        } else {
-            anyhow::bail!(
-                "Only allowed choices for read_mode are 'get'(get) or 'lt'(iterator less then)"
-            );
-        }
-    }
-}
-
-impl FromStr for Backend {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "thdb" {
-            Ok(Self::Tidehunter)
-        } else if s == "rocks" {
-            Ok(Self::Rocksdb)
-        } else {
-            anyhow::bail!(
-                "Only allowed choices for backend are 'thdb'(Tidehunter) or 'rocks'(RocksDB)"
-            );
-        }
     }
 }

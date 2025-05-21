@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-rand =  "0.8.5"
+rand = "0.8.5"
 parking_lot = "0.12.3"
 prometheus = "0.13.3"
 bytes = "1.7.1"

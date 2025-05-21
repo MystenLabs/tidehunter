@@ -1,9 +1,10 @@
 use crate::wal::WalLayout;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::cmp;
 
 // todo - remove pub
-#[cfg_attr(test, derive(Clone))] // Look for Config::clone(...) for usages
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     pub frag_size: u64,
     pub max_maps: usize,
