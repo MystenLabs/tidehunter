@@ -6,6 +6,7 @@ use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Debug;
@@ -38,7 +39,7 @@ pub struct KeySpaceDesc {
 pub struct KeySpaceDescInner {
     id: KeySpace,
     name: String,
-    key_size: usize,
+    key_indexing: KeyIndexing,
     mutexes: usize,
     key_type: KeyType,
     config: KeySpaceConfig,
@@ -51,9 +52,24 @@ pub struct KeySpaceConfig {
     disable_unload: bool,
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
-    key_reduction: Option<Range<usize>>,
     index_format: IndexFormatType,
     unloaded_iterator: bool,
+}
+
+/// This enum allows customizing the key used in the index.
+/// By default, KeyIndexing::Fixed is used putting a key into index as it is.
+///
+/// With other options, when a user puts a key-value pair (K, V) in the database,
+/// we write (K, V) into wal, but we use F(K) in the index, instead of K,
+/// where F(K) depends on the type of key indexing.
+///
+/// This allows for various use cases such as
+/// * Key reduction (reducing index size by using fewer bytes from the key in the index)
+#[derive(Clone)]
+pub enum KeyIndexing {
+    Fixed(usize),
+    Reduction(usize, Range<usize>),
+    Hash,
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +130,23 @@ impl KeyShapeBuilder {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> KeySpace {
+        self.add_key_space_config_indexing(
+            name,
+            KeyIndexing::fixed(key_size),
+            mutexes,
+            key_type,
+            config,
+        )
+    }
+
+    pub fn add_key_space_config_indexing(
+        &mut self,
+        name: impl Into<String>,
+        key_indexing: KeyIndexing,
+        mutexes: usize,
+        key_type: KeyType,
+        config: KeySpaceConfig,
+    ) -> KeySpace {
         let name = name.into();
         assert!(mutexes > 0, "mutexes should be greater then 0");
         // also see test_prefix_falls_in_range
@@ -127,16 +160,12 @@ impl KeyShapeBuilder {
             "Maximum {} key spaces allowed",
             u8::MAX
         );
-        assert!(
-            key_size <= MAX_KEY_LEN,
-            "Specified key size exceeding max key length"
-        );
 
         let ks = KeySpace(self.key_spaces.len() as u8);
         let key_space = KeySpaceDescInner {
             id: ks,
             name,
-            key_size,
+            key_indexing,
             mutexes,
             key_type,
             config,
@@ -161,21 +190,14 @@ impl KeyShapeBuilder {
                 panic!("Tidehunter currently does not support key space with both compactor and bloom filter enabled");
             }
             ks.key_type
-                .verify_key_size(ks.reduced_key_size() - ks.config.key_offset);
+                .verify_key_size(ks.index_key_size() - ks.config.key_offset);
         }
     }
 }
 
 impl KeySpaceDesc {
     pub(crate) fn check_key(&self, k: &[u8]) {
-        if k.len() != self.key_size {
-            panic!(
-                "Key space {} accepts keys size {}, given {}",
-                self.name,
-                self.key_size,
-                k.len()
-            );
-        }
+        self.key_indexing.check_key_size(k.len(), self.name());
     }
 
     /* Nomenclature for the various conversion methods below:
@@ -206,20 +228,32 @@ impl KeySpaceDesc {
         self.key_type.first_cell()
     }
 
-    pub(crate) fn key_reduction(&self) -> &Option<Range<usize>> {
-        &self.config.key_reduction
+    pub(crate) fn use_key_reduction_iterator(&self) -> bool {
+        match self.key_indexing {
+            KeyIndexing::Fixed(_) => false,
+            KeyIndexing::Reduction(_, _) => true,
+            KeyIndexing::Hash => false,
+        }
+    }
+
+    pub(crate) fn assert_supports_iterator_bound(&self) {
+        match self.key_indexing {
+            KeyIndexing::Fixed(_) => return,
+            KeyIndexing::Reduction(_, _) => return,
+            KeyIndexing::Hash => panic!("Key space {} does not support iterator bounds and reversal because it uses KeyIndexing::Hash", self.name()),
+        }
+    }
+
+    pub(crate) fn key_indexing(&self) -> &KeyIndexing {
+        &self.key_indexing
     }
 
     pub(crate) fn key_type(&self) -> &KeyType {
         &self.key_type
     }
 
-    pub(crate) fn reduced_key_size(&self) -> usize {
-        if let Some(key_reduction) = &self.config.key_reduction {
-            key_reduction.len()
-        } else {
-            self.key_size
-        }
+    pub(crate) fn index_key_size(&self) -> usize {
+        self.key_indexing().index_key_size()
     }
 
     /// Returns u32 prefix
@@ -288,20 +322,12 @@ impl KeySpaceDesc {
         }
     }
 
-    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> &'a [u8] {
-        if let Some(key_reduction) = &self.config.key_reduction {
-            &key[key_reduction.clone()]
-        } else {
-            key
-        }
+    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
+        self.key_indexing().reduce_key(key)
     }
 
     pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
-        if let Some(key_reduction) = &self.config.key_reduction {
-            key.slice(key_reduction.clone())
-        } else {
-            key
-        }
+        self.key_indexing().reduced_key_bytes(key)
     }
 
     pub(crate) fn compactor(&self) -> Option<&Compactor> {
@@ -369,11 +395,6 @@ impl KeySpaceConfig {
         self
     }
 
-    pub fn with_key_reduction(mut self, key_reduction: Range<usize>) -> Self {
-        self.key_reduction = Some(key_reduction);
-        self
-    }
-
     pub fn with_index_format(mut self, index_format: IndexFormatType) -> Self {
         self.index_format = index_format;
         self
@@ -396,6 +417,15 @@ impl KeyShape {
         key_type: KeyType,
         config: KeySpaceConfig,
     ) -> (Self, KeySpace) {
+        Self::new_single_config_indexing(KeyIndexing::fixed(key_size), mutexes, key_type, config)
+    }
+
+    pub fn new_single_config_indexing(
+        key_indexing: KeyIndexing,
+        mutexes: usize,
+        key_type: KeyType,
+        config: KeySpaceConfig,
+    ) -> (Self, KeySpace) {
         assert!(
             mutexes.is_power_of_two(),
             "mutexes should be power of 2, given {mutexes}"
@@ -403,7 +433,7 @@ impl KeyShape {
         let key_space = KeySpaceDescInner {
             id: KeySpace(0),
             name: "root".into(),
-            key_size,
+            key_indexing,
             mutexes,
             key_type,
             config,
@@ -630,6 +660,85 @@ impl Debug for KeyType {
                 write!(f, "prefix({}, {})", c.prefix_len_bytes, c.cluster_bits)
             }
         }
+    }
+}
+
+impl KeyIndexing {
+    const HASH_SIZE: usize = 8;
+
+    pub fn fixed(key_length: usize) -> Self {
+        Self::check_configured_key_size(key_length);
+        Self::Fixed(key_length)
+    }
+
+    pub fn key_reduction(key_length: usize, range: Range<usize>) -> Self {
+        Self::check_configured_key_size(key_length);
+        Self::Reduction(key_length, range)
+    }
+
+    pub fn hash() -> Self {
+        Self::Hash
+    }
+
+    fn check_configured_key_size(key_size: usize) {
+        assert!(
+            key_size <= MAX_KEY_LEN,
+            "Specified key size exceeding max key length"
+        );
+    }
+
+    pub(crate) fn index_key_size(&self) -> usize {
+        match self {
+            KeyIndexing::Fixed(key_size) => *key_size,
+            KeyIndexing::Reduction(_, range) => range.len(),
+            KeyIndexing::Hash => Self::HASH_SIZE,
+        }
+    }
+
+    pub(crate) fn check_key_size(&self, k: usize, name: &str) {
+        let expected_key_size = match self {
+            KeyIndexing::Fixed(key_size) => *key_size,
+            KeyIndexing::Reduction(key_size, _) => *key_size,
+            KeyIndexing::Hash => {
+                if k > MAX_KEY_LEN {
+                    panic!(
+                        "Key space {} accepts maximum keys size {}, given {}",
+                        name, MAX_KEY_LEN, k
+                    );
+                }
+                return;
+            }
+        };
+        if expected_key_size != k {
+            panic!(
+                "Key space {} accepts keys size {}, given {}",
+                name, expected_key_size, k
+            );
+        }
+    }
+
+    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
+        match self {
+            KeyIndexing::Fixed(_) => Cow::Borrowed(key),
+            KeyIndexing::Reduction(_, range) => Cow::Borrowed(&key[range.clone()]),
+            KeyIndexing::Hash => Cow::Owned(Self::hash_key(key)),
+        }
+    }
+
+    pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
+        match self {
+            KeyIndexing::Fixed(_) => key,
+            KeyIndexing::Reduction(_, range) => key.slice(range.clone()),
+            KeyIndexing::Hash => Self::hash_key(&key).into(),
+        }
+    }
+
+    fn hash_key(key: &[u8]) -> Vec<u8> {
+        // todo (!) use crypto hash or process hash collision correctly
+        let hash = seahash::hash(key);
+        let mut bytes = [0u8; Self::HASH_SIZE];
+        bytes.copy_from_slice(&hash.to_be_bytes());
+        bytes.to_vec()
     }
 }
 

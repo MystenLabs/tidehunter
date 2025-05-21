@@ -15,6 +15,11 @@ fn db_test_uniform() {
 }
 
 #[test]
+fn db_test_hash_indexed() {
+    db_test(hashed_index_key_shape())
+}
+
+#[test]
 fn test_iterator_prefixed() {
     test_iterator(prefix_key_shape())
 }
@@ -32,6 +37,11 @@ fn test_remove_prefixed() {
 #[test]
 fn test_remove_uniform() {
     test_remove(default_key_shape())
+}
+
+#[test]
+fn test_remove_hash_indexed() {
+    test_remove(hashed_index_key_shape())
 }
 
 #[test]

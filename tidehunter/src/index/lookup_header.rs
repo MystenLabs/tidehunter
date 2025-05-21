@@ -171,7 +171,7 @@ impl IndexFormat for LookupHeaderIndex {
         key: &[u8],
         metrics: &Metrics,
     ) -> Option<WalPosition> {
-        let key_size = ks.reduced_key_size();
+        let key_size = ks.index_key_size();
         assert_eq!(key.len(), key_size);
         let micro_cell = Self::key_micro_cell(ks, key);
 
@@ -191,7 +191,7 @@ impl IndexFormat for LookupHeaderIndex {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let key_size = ks.reduced_key_size();
+        let key_size = ks.index_key_size();
         let element_size = index_element_size(ks);
 
         // If no previous key is provided, start from the first or last micro-cell
