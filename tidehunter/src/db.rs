@@ -171,7 +171,7 @@ impl Db {
             .with_label_values(&["get", ks.name()])
             .mcs_timer();
         let reduced_key = ks.reduce_key(k);
-        match self.large_table.get(ks, reduced_key, self)? {
+        match self.large_table.get(ks, reduced_key.as_ref(), self)? {
             GetResult::Value(value) => {
                 // todo check collision ?
                 Ok(Some(value))
@@ -198,7 +198,10 @@ impl Db {
             .mcs_timer();
         // todo check collision ?
         let reduced_key = ks.reduce_key(k);
-        Ok(self.large_table.get(ks, reduced_key, self)?.is_found())
+        Ok(self
+            .large_table
+            .get(ks, reduced_key.as_ref(), self)?
+            .is_found())
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
@@ -497,7 +500,7 @@ impl Db {
             match ks.key_type() {
                 KeyType::Uniform(config) => {
                     let num_cells = config.num_cells(ks);
-                    let cache_estimate = (ks.reduced_key_size() + WalPosition::SIZE)
+                    let cache_estimate = (ks.index_key_size() + WalPosition::SIZE)
                         * num_cells
                         * self.config.max_dirty_keys;
                     self.metrics

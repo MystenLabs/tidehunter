@@ -1,5 +1,15 @@
 def default_variants():
-    return [("prefixed", "prefix_key_shape()"), ("uniform", "default_key_shape()")]
+    return [
+        ("prefixed", "prefix_key_shape()"),
+        ("uniform", "default_key_shape()"),
+    ]
+
+def variants_with_hash_indexed():
+    return [
+        ("prefixed", "prefix_key_shape()"),
+        ("uniform", "default_key_shape()"),
+        ("hash_indexed", "hashed_index_key_shape()"),
+    ]
 
 def two_key_spaces_variants():
     return [
@@ -22,7 +32,7 @@ print("#[path = \"db_tests.rs\"]")
 print("mod db_tests;")
 print("use db_tests::*;")
 print()
-print_test("db_test", default_variants())
+print_test("db_test", variants_with_hash_indexed())
 print_test("test_iterator", default_variants())
-print_test("test_remove", default_variants())
+print_test("test_remove", variants_with_hash_indexed())
 print_test("test_multiple_index_formats", two_key_spaces_variants())

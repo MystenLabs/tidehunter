@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use crate::{key_shape::KeySpaceDesc, wal::WalPosition};
 
 pub fn index_element_size(ks: &KeySpaceDesc) -> usize {
-    ks.reduced_key_size() + WalPosition::LENGTH
+    ks.index_key_size() + WalPosition::LENGTH
 }
 
 /// Writes key-value pairs from IndexTable to a BytesMut buffer
@@ -20,12 +20,12 @@ pub fn index_element_size(ks: &KeySpaceDesc) -> usize {
 pub fn serialize_index_entries(table: &IndexTable, ks: &KeySpaceDesc, out: &mut BytesMut) {
     // Write each key-value pair
     for (key, value) in table.data.iter() {
-        if key.len() != ks.reduced_key_size() {
+        if key.len() != ks.index_key_size() {
             panic!(
                 "Index in ks {} contains key length {} (configured {})",
                 ks.name(),
                 key.len(),
-                ks.reduced_key_size()
+                ks.index_key_size()
             );
         }
         out.put_slice(&key);
@@ -39,7 +39,7 @@ pub fn serialize_index_entries(table: &IndexTable, ks: &KeySpaceDesc, out: &mut 
 /// - b: Source bytes
 /// Returns the deserialized IndexTable
 pub fn deserialize_index_entries(ks: &KeySpaceDesc, data: Bytes) -> IndexTable {
-    let element_size = ks.reduced_key_size() + WalPosition::LENGTH;
+    let element_size = ks.index_key_size() + WalPosition::LENGTH;
     let elements = data.len() / element_size;
     assert_eq!(
         data.len(),
@@ -49,9 +49,9 @@ pub fn deserialize_index_entries(ks: &KeySpaceDesc, data: Bytes) -> IndexTable {
 
     let mut table_data = BTreeMap::new();
     for i in 0..elements {
-        let key = data.slice(i * element_size..(i * element_size + ks.reduced_key_size()));
+        let key = data.slice(i * element_size..(i * element_size + ks.index_key_size()));
         let value = WalPosition::from_slice(
-            &data[(i * element_size + ks.reduced_key_size())..(i * element_size + element_size)],
+            &data[(i * element_size + ks.index_key_size())..(i * element_size + element_size)],
         );
         table_data.insert(key, value);
     }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
+use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters};
 use crate::benchmark::BenchmarkParameters;
 use crate::client::Instance;
 use crate::settings::Settings;
@@ -40,7 +40,7 @@ impl ProtocolParameters for DbParameters {}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(transparent)]
-pub struct StressClientParameters(usize);
+pub struct StressClientParameters(benchmark::configs::StressClientParameters);
 
 impl Deref for StressClientParameters {
     type Target = usize;
@@ -66,19 +66,11 @@ impl ProtocolParameters for StressClientParameters {}
 
 impl ProtocolParameters for Vec<StressClientParameters> {}
 
-<<<<<<< HEAD
-pub struct MysticetiProtocol {
-    working_dir: PathBuf,
-}
-
-impl ProtocolCommands for MysticetiProtocol {
-=======
 pub struct TargetProtocol {
     working_dir: PathBuf,
 }
 
 impl ProtocolCommands for TargetProtocol {
->>>>>>> a5ac3ac (feat: initial orchestrator)
     fn protocol_dependencies(&self) -> Vec<&'static str> {
         vec!["sudo apt -y install libfontconfig1-dev"]
     }
@@ -121,7 +113,7 @@ impl ProtocolCommands for TargetProtocol {
 
     fn node_command<I>(
         &self,
-        instances: I,
+        _instances: I,
         _parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
@@ -143,11 +135,7 @@ impl ProtocolCommands for TargetProtocol {
     }
 }
 
-<<<<<<< HEAD
-impl ProtocolMetrics for MysticetiProtocol {
-=======
 impl ProtocolMetrics for TargetProtocol {
->>>>>>> a5ac3ac (feat: initial orchestrator)
     const BENCHMARK_DURATION: &'static str = "";
     const TOTAL_TRANSACTIONS: &'static str = "latency_s_count";
     const LATENCY_BUCKETS: &'static str = "latency_s";
@@ -156,8 +144,8 @@ impl ProtocolMetrics for TargetProtocol {
 
     fn nodes_metrics_path<I>(
         &self,
-        instances: I,
-        parameters: &BenchmarkParameters,
+        _instances: I,
+        _parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>,
@@ -167,8 +155,8 @@ impl ProtocolMetrics for TargetProtocol {
 
     fn clients_metrics_path<I>(
         &self,
-        instances: I,
-        parameters: &BenchmarkParameters,
+        _instances: I,
+        _parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>,
@@ -178,13 +166,8 @@ impl ProtocolMetrics for TargetProtocol {
     }
 }
 
-<<<<<<< HEAD
-impl MysticetiProtocol {
-    /// Make a new instance of the Mysticeti protocol commands generator.
-=======
 impl TargetProtocol {
     /// Make a new instance of the target protocol commands generator.
->>>>>>> a5ac3ac (feat: initial orchestrator)
     pub fn new(settings: &Settings) -> Self {
         Self {
             working_dir: settings.working_dir.clone(),
