@@ -208,7 +208,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .wait_for_command(active, id, CommandStatus::Terminated)
             .await?;
 
-        display::done();
+        // display::done();
         Ok(())
     }
 
