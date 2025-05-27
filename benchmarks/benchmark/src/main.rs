@@ -129,7 +129,7 @@ pub fn main() {
     let registry = Registry::new();
     let benchmark_metrics = BenchmarkMetrics::new_in(&registry);
     prometheus::start_prometheus_server(
-        format!("127.0.0.1:{METRICS_PORT}").parse().unwrap(),
+        format!("0.0.0.0:{METRICS_PORT}").parse().unwrap(),
         &registry,
     );
     let storage: Arc<dyn Storage> = match args.backend {
