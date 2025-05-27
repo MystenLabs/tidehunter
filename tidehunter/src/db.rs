@@ -135,7 +135,7 @@ impl Db {
         let w = PreparedWalWrite::new(&WalEntry::Record(ks.id(), k.clone(), v.clone()));
         self.metrics
             .wal_written_bytes_type
-            .with_label_values(&["record"])
+            .with_label_values(&["record", ks.name()])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
@@ -156,7 +156,7 @@ impl Db {
         let w = PreparedWalWrite::new(&WalEntry::Remove(ks.id(), k.clone()));
         self.metrics
             .wal_written_bytes_type
-            .with_label_values(&["tombstone"])
+            .with_label_values(&["tombstone", ks.name()])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         let reduced_key = ks.reduced_key_bytes(k);
@@ -209,12 +209,12 @@ impl Db {
         let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
         for w in writes {
+            let ks = self.key_shape.ks(w.ks);
             self.metrics
                 .wal_written_bytes_type
-                .with_label_values(&["record"])
+                .with_label_values(&["record", ks.name()])
                 .inc_by(w.wal_write.len() as u64);
             let position = self.wal_writer.write(&w.wal_write)?;
-            let ks = self.key_shape.ks(w.ks);
             ks.check_key(&w.key);
             let reduced_key = ks.reduced_key_bytes(w.key);
             self.large_table
@@ -223,12 +223,12 @@ impl Db {
         }
 
         for w in deletes {
+            let ks = self.key_shape.ks(w.ks);
             self.metrics
                 .wal_written_bytes_type
-                .with_label_values(&["tombstone"])
+                .with_label_values(&["tombstone", ks.name()])
                 .inc_by(w.wal_write.len() as u64);
             let position = self.wal_writer.write(&w.wal_write)?;
-            let ks = self.key_shape.ks(w.ks);
             ks.check_key(&w.key);
             let reduced_key = ks.reduced_key_bytes(w.key);
             self.large_table.remove(ks, reduced_key, position, self)?;
@@ -470,7 +470,7 @@ impl Db {
         let w = PreparedWalWrite::new(&WalEntry::Index(ks, index));
         self.metrics
             .wal_written_bytes_type
-            .with_label_values(&["index"])
+            .with_label_values(&["index", ksd.name()])
             .inc_by(w.len() as u64);
         Ok(self.wal_writer.write(&w)?)
     }

@@ -94,7 +94,11 @@ impl Metrics {
             index_size: histogram!("index_size", index_size_buckets, registry),
             max_index_size_metric: gauge!("max_index_size", registry),
             wal_written_bytes: gauge!("wal_written_bytes", registry),
-            wal_written_bytes_type: counter_vec!("wal_written_bytes_type", &["type"], registry),
+            wal_written_bytes_type: counter_vec!(
+                "wal_written_bytes_type",
+                &["type", "ks"],
+                registry
+            ),
             unload: counter_vec!("unload", &["kind"], registry),
             entry_state: gauge_vec!("entry_state", &["ks", "state"], registry),
             compacted_keys: counter_vec!("compacted_keys", &["ks"], registry),
