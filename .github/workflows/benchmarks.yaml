@@ -76,7 +76,11 @@ jobs:
         run: |
           echo "## Random Access Speed Test" >> ./results/summary.md
           echo '```' >> ./results/summary.md
-          cargo run --release --manifest-path benchmarks/random_access_speed_test/Cargo.toml | tee ./results/random_access_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          mkdir -p ./tmp_benchmark
+          cd ./tmp_benchmark
+          cargo run --release --manifest-path ../benchmarks/random_access_speed_test/Cargo.toml | tee ../results/random_access_${{ env.TIMESTAMP }}.txt | tee -a ../results/summary.md
+          cd ..
+          rm -rf ./tmp_benchmark
           echo '```' >> ./results/summary.md
 
       # Read Window Test
@@ -94,7 +98,9 @@ jobs:
         run: |
           echo "## Index Benchmark (${{ github.event.inputs.index_benchmark_mode || 'basic' }})" >> ./results/summary.md
           echo '```' >> ./results/summary.md
-          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- --mode ${{ github.event.inputs.index_benchmark_mode || 'basic' }} | tee ./results/index_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml \
+            ${{ github.event.inputs.index_benchmark_mode || 'basic' }} \
+            | tee ./results/index_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
           echo '```' >> ./results/summary.md
 
       # General Benchmark
@@ -103,15 +109,22 @@ jobs:
         run: |
           echo "## General Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
-          cargo run --release --manifest-path benchmarks/benchmark/Cargo.toml | tee ./results/benchmark_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          cargo run --release --manifest-path benchmarks/benchmark/Cargo.toml -- \
+            --threads 4 \
+            --write-size 1024 \
+            --key-len 16 \
+            --writes 1000000 \
+            --reads 1000000 \
+            --background-writes 100000 \
+            | tee ./results/benchmark_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
           echo '```' >> ./results/summary.md
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-${{ env.TIMESTAMP }}
           path: results/
-          retention-days: 90
+          retention-days: 20
 
       # Comment on PR if this is a PR run
       - name: Comment PR with benchmark results
