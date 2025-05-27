@@ -41,7 +41,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.label.name == 'run-benchmarks'
 
     name: Run Benchmarks
-    runs-on: self-hosted
+    runs-on: self-hosted 
 
     steps:
       - uses: actions/checkout@v3
