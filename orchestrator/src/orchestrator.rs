@@ -198,6 +198,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let repo_name = self.settings.repository_name();
         let context = CommandContext::new()
             .run_background(id.into())
+            .with_log_file(format!("~/{id}.log").into())
             .with_execute_from_path(repo_name.into());
         self.ssh_manager
             .execute(active.clone(), command, context)
@@ -317,7 +318,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
     /// Deploy the nodes.
     pub async fn run_nodes(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
-        display::action("\nDeploying validators");
+        display::action("\nDeploying Nodes");
 
         // Select the instances to run.
         let (nodes, _) = self.select_instances()?;

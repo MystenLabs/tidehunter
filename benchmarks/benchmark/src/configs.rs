@@ -2,6 +2,9 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+/// Port for Prometheus metrics
+pub const METRICS_PORT: u16 = 9092;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KeyLayout {
     Uniform,

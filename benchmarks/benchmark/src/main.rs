@@ -1,3 +1,4 @@
+use crate::configs::METRICS_PORT;
 use crate::metrics::BenchmarkMetrics;
 use crate::storage::rocks::RocksStorage;
 use crate::storage::Storage;
@@ -100,7 +101,7 @@ struct StressArgs {
     reuse: Option<String>,
     #[arg(long, help = "Read mode", default_value = "get")]
     read_mode: ReadMode,
-    #[arg(long, short = 'b', help = "Backend", default_value = "tidehunter")]
+    #[arg(long, short = 'b', help = "Backend", default_value = "thdb")]
     backend: Backend,
 }
 
@@ -127,7 +128,10 @@ pub fn main() {
     let print_report = args.report;
     let registry = Registry::new();
     let benchmark_metrics = BenchmarkMetrics::new_in(&registry);
-    prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
+    prometheus::start_prometheus_server(
+        format!("127.0.0.1:{METRICS_PORT}").parse().unwrap(),
+        &registry,
+    );
     let storage: Arc<dyn Storage> = match args.backend {
         Backend::Tidehunter => {
             let mut config = Config::default();

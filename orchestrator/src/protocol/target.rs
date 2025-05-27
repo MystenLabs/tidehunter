@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::{Debug, Display};
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,10 @@ pub struct TargetProtocol {
 
 impl ProtocolCommands for TargetProtocol {
     fn protocol_dependencies(&self) -> Vec<&'static str> {
-        vec!["sudo apt -y install libfontconfig1-dev"]
+        vec![
+            "sudo apt -y install libfontconfig1-dev",
+            "sudo apt-get install -y clang",
+        ]
     }
 
     fn db_directories(&self) -> Vec<std::path::PathBuf> {
@@ -118,13 +122,20 @@ impl ProtocolMetrics for TargetProtocol {
 
     fn nodes_metrics_path<I>(
         &self,
-        _instances: I,
+        instances: I,
         _parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>,
     {
-        todo!()
+        instances
+            .into_iter()
+            .map(|x| {
+                let ip = IpAddr::V4(x.main_ip);
+                let path = format!("{ip}:{}/metrics", benchmark::configs::METRICS_PORT);
+                (x, path)
+            })
+            .collect()
     }
 }
 
