@@ -68,7 +68,7 @@ struct StressArgs {
         long,
         short = 'r',
         help = "Blocks to read per thread",
-        default_value = "1000000"
+        default_value = "1000000000"
     )]
     reads: usize,
     #[arg(
