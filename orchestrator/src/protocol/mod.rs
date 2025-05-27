@@ -13,7 +13,7 @@ use crate::client::Instance;
 
 pub mod target;
 
-// pub const BINARY_PATH: &str = "target/release";
+pub const BINARY_PATH: &str = "target/release";
 
 pub trait ProtocolParameters: Default + Clone + Serialize + DeserializeOwned + Debug {
     /// Load the configuration from a YAML file located at the provided path.

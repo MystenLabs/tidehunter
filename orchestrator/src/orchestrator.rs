@@ -198,6 +198,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let repo_name = self.settings.repository_name();
         let context = CommandContext::new()
             .run_background(id.into())
+            .with_log_file(format!("~/{id}.log").into())
             .with_execute_from_path(repo_name.into());
         self.ssh_manager
             .execute(active.clone(), command, context)
@@ -317,7 +318,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
     /// Deploy the nodes.
     pub async fn run_nodes(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
-        display::action("\nDeploying validators");
+        display::action("\nDeploying Nodes");
 
         // Select the instances to run.
         let (nodes, _) = self.select_instances()?;
@@ -433,9 +434,19 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // Run all benchmarks.
         let mut i = 1;
         let (available_machines, _) = self.select_instances()?;
-        for parameters in all_parameters.split(available_machines.len()) {
+        for (batch_idx, parameters) in all_parameters
+            .split(available_machines.len())
+            .iter()
+            .enumerate()
+        {
             display::header(format!("Starting benchmark batch {i}"));
-            display::config("Node Parameters", &parameters.node_parameters);
+            display::config(
+                "Target Parameters",
+                format!(
+                    "batch {batch_idx} ({} configs)",
+                    &parameters.target_configs.len()
+                ),
+            );
             display::config("Benchmark Parameters", &parameters);
             display::newline();
 

@@ -2,69 +2,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::{Debug, Display};
-use std::ops::Deref;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters};
+use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
 use crate::benchmark::BenchmarkParameters;
 use crate::client::Instance;
 use crate::settings::Settings;
 
+const DB_CONFIG_FILE: &str = "db_configs.yaml";
+const CLIENT_CONFIG_FILE: &str = "client_configs.yaml";
+
 #[derive(Clone, Serialize, Deserialize, Default)]
-#[serde(transparent)]
-pub struct DbParameters(tidehunter::config::Config);
-
-impl Deref for DbParameters {
-    type Target = tidehunter::config::Config;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+pub struct TargetConfigs {
+    pub db_parameters: tidehunter::config::Config,
+    pub stress_client_parameters: benchmark::configs::StressClientParameters,
 }
 
-impl Debug for DbParameters {
+impl Debug for TargetConfigs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.frag_size)
+        write!(f, "{}", self.db_parameters.frag_size)
     }
 }
 
-impl Display for DbParameters {
+impl Display for TargetConfigs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Frag Size {}B", self.0.frag_size)
+        write!(f, "Frag Size {}B", self.db_parameters.frag_size)
     }
 }
 
-impl ProtocolParameters for DbParameters {}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
-#[serde(transparent)]
-pub struct StressClientParameters(benchmark::configs::StressClientParameters);
-
-impl Deref for StressClientParameters {
-    type Target = benchmark::configs::StressClientParameters;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Debug for StressClientParameters {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}-{}", self.writes, self.reads)
-    }
-}
-
-impl Display for StressClientParameters {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} w - {} r", self.writes, self.reads)
-    }
-}
-
-impl ProtocolParameters for StressClientParameters {}
-
-impl ProtocolParameters for Vec<StressClientParameters> {}
+impl ProtocolParameters for TargetConfigs {}
+impl ProtocolParameters for Vec<TargetConfigs> {}
 
 pub struct TargetProtocol {
     working_dir: PathBuf,
@@ -72,7 +42,10 @@ pub struct TargetProtocol {
 
 impl ProtocolCommands for TargetProtocol {
     fn protocol_dependencies(&self) -> Vec<&'static str> {
-        vec!["sudo apt -y install libfontconfig1-dev"]
+        vec![
+            "sudo apt -y install libfontconfig1-dev",
+            "sudo apt-get install -y clang",
+        ]
     }
 
     fn db_directories(&self) -> Vec<std::path::PathBuf> {
@@ -82,44 +55,61 @@ impl ProtocolCommands for TargetProtocol {
     async fn genesis_command<'a, I>(
         &self,
         _instances: I,
-        parameters: &BenchmarkParameters,
+        _parameters: &BenchmarkParameters,
     ) -> String
     where
         I: Iterator<Item = &'a Instance>,
     {
-        let node_parameters = parameters.node_parameters.clone();
-        let node_parameters_string = serde_yaml::to_string(&node_parameters).unwrap();
-        let node_parameters_path = self.working_dir.join("node-parameters.yaml");
-        let upload_node_parameters = format!(
-            "echo -e '{node_parameters_string}' > {}",
-            node_parameters_path.display()
-        );
-
-        let client_parameters = parameters.client_parameters.clone();
-        let client_parameters_string = serde_yaml::to_string(&client_parameters).unwrap();
-        let client_parameters_path = self.working_dir.join("client-parameters.yaml");
-        let upload_client_parameters = format!(
-            "echo -e '{client_parameters_string}' > {}",
-            client_parameters_path.display()
-        );
-
-        [
-            "source $HOME/.cargo/env",
-            &upload_node_parameters,
-            &upload_client_parameters,
-        ]
-        .join(" && ")
+        // No need for genesis
+        String::new()
     }
 
     fn node_command<I>(
         &self,
-        _instances: I,
-        _parameters: &BenchmarkParameters,
+        instances: I,
+        parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>,
     {
-        todo!()
+        instances
+            .into_iter()
+            .zip(parameters.target_configs.iter())
+            .map(|(instance, config)| {
+                // Command to upload the config of the db and the stress client.
+                let db_configs_string = serde_yaml::to_string(&config.db_parameters).unwrap();
+                let db_configs_path = self.working_dir.join(DB_CONFIG_FILE);
+                let upload_db_configs = format!(
+                    "echo -e '{db_configs_string}' > {}",
+                    db_configs_path.display()
+                );
+
+                let client_configs_string =
+                    serde_yaml::to_string(&config.stress_client_parameters).unwrap();
+                let client_configs_path = self.working_dir.join(CLIENT_CONFIG_FILE);
+                let upload_client_configs = format!(
+                    "echo -e '{client_configs_string}' > {}",
+                    client_configs_path.display()
+                );
+
+                // Command to run the benchmark
+                let run = [
+                    format!("./{BINARY_PATH}/benchmark"),
+                    format!("--parameters-path {CLIENT_CONFIG_FILE}"),
+                ]
+                .join(" ");
+
+                // Join the commands to run on the instance.
+                let command = [
+                    "source $HOME/.cargo/env",
+                    &upload_db_configs,
+                    &upload_client_configs,
+                    &run,
+                ]
+                .join(" && ");
+                (instance, command)
+            })
+            .collect()
     }
 }
 
@@ -132,13 +122,20 @@ impl ProtocolMetrics for TargetProtocol {
 
     fn nodes_metrics_path<I>(
         &self,
-        _instances: I,
+        instances: I,
         _parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>,
     {
-        todo!()
+        instances
+            .into_iter()
+            .map(|x| {
+                let ip = IpAddr::V4(x.main_ip);
+                let path = format!("{ip}:{}/metrics", benchmark::configs::METRICS_PORT);
+                (x, path)
+            })
+            .collect()
     }
 }
 

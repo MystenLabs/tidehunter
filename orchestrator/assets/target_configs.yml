@@ -1,0 +1,21 @@
+- db_parameters:
+    frag_size: 134217728
+    max_maps: 16
+    max_dirty_keys: 32
+    snapshot_written_bytes: 134217728
+    snapshot_unload_threshold: 268435456
+    unload_jitter_pct: 10
+    direct_io: false
+  stress_client_parameters:
+    read_threads: 1
+
+- db_parameters:
+    frag_size: 134217728
+    max_maps: 16
+    max_dirty_keys: 32
+    snapshot_written_bytes: 134217728
+    snapshot_unload_threshold: 268435456
+    unload_jitter_pct: 10
+    direct_io: false
+  stress_client_parameters:
+    read_threads: 2

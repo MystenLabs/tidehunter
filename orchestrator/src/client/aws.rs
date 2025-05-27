@@ -1,32 +1,24 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap,
-    fmt::{Debug, Display},
-};
+use std::collections::HashMap;
+use std::fmt::{Debug, Display};
 
 use aws_config::{BehaviorVersion, Region};
 use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
-use aws_sdk_ec2::{
-    error::SdkError,
-    meta::PKG_VERSION,
-    primitives::Blob,
-    types::{
-        builders::{
-            BlockDeviceMappingBuilder, EbsBlockDeviceBuilder, FilterBuilder, TagBuilder,
-            TagSpecificationBuilder,
-        },
-        EphemeralNvmeSupport, Instance as AwsInstance, ResourceType, VolumeType,
-    },
+use aws_sdk_ec2::error::SdkError;
+use aws_sdk_ec2::meta::PKG_VERSION;
+use aws_sdk_ec2::primitives::Blob;
+use aws_sdk_ec2::types::builders::{
+    BlockDeviceMappingBuilder, EbsBlockDeviceBuilder, FilterBuilder, TagBuilder,
+    TagSpecificationBuilder,
 };
+use aws_sdk_ec2::types::{EphemeralNvmeSupport, Instance as AwsInstance, ResourceType, VolumeType};
 use serde::Serialize;
 
 use super::{Instance, ServerProviderClient};
-use crate::{
-    error::{CloudProviderError, CloudProviderResult},
-    settings::Settings,
-};
+use crate::error::{CloudProviderError, CloudProviderResult};
+use crate::settings::Settings;
 
 // Make a request error from an AWS error message.
 impl<T> From<SdkError<T>> for CloudProviderError
@@ -54,7 +46,7 @@ impl Display for AwsClient {
 
 impl AwsClient {
     const OS_IMAGE: &'static str =
-        "Canonical, Ubuntu, 22.04 LTS, amd64 jammy image build on 2023-02-16";
+        "Canonical, Ubuntu, 24.04 LTS, amd64 noble image build on 2024-04-23";
     const DEFAULT_EBS_SIZE_GB: i32 = 500; // Default size of the EBS volume in GB.
 
     /// Make a new AWS client.
@@ -66,7 +58,7 @@ impl AwsClient {
 
         let mut clients = HashMap::new();
         for region in settings.regions.clone() {
-            let sdk_config = aws_config::defaults(BehaviorVersion::v2024_03_28())
+            let sdk_config = aws_config::defaults(BehaviorVersion::v2025_01_17())
                 .region(Region::new(region.clone()))
                 .profile_files(profile_files.clone())
                 .load()

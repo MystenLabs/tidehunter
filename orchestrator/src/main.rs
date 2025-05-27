@@ -29,8 +29,7 @@ mod testbed;
 
 /// NOTE: Link these types to the correct protocol.
 type Protocol = protocol::target::TargetProtocol;
-type NodeParameters = protocol::target::DbParameters;
-type ClientParameters = protocol::target::StressClientParameters;
+type Config = protocol::target::TargetConfigs;
 
 /// The orchestrator command line options.
 #[derive(Parser, Debug)]
@@ -42,7 +41,7 @@ pub struct Opts {
     #[clap(
         long,
         value_name = "FILE",
-        default_value = "crates/orchestrator/assets/settings.yml",
+        default_value = "orchestrator/assets/settings.yml",
         global = true
     )]
     settings_path: String,
@@ -198,20 +197,14 @@ async fn run<C: ServerProviderClient>(
                 .wrap_err("Failed to load testbed setup commands")?;
 
             let protocol_commands = Protocol::new(&settings);
-            let node_parameters = match &settings.node_parameters_path {
+            let target_configs = match &settings.target_configs_path {
                 Some(path) => {
-                    NodeParameters::load(path).wrap_err("Failed to load node's parameters")?
+                    Vec::<Config>::load(path).wrap_err("Failed to load target configs")?
                 }
-                None => NodeParameters::default(),
-            };
-            let client_parameters = match &settings.client_parameters_path {
-                Some(path) => Vec::<ClientParameters>::load(path)
-                    .wrap_err("Failed to load client's parameters")?,
-                None => vec![ClientParameters::default()],
+                None => vec![Config::default()],
             };
 
-            let benchmark_parameters =
-                BenchmarkParameters::new(settings.clone(), node_parameters, client_parameters);
+            let benchmark_parameters = BenchmarkParameters::new(settings.clone(), target_configs);
 
             Orchestrator::new(
                 settings,
