@@ -1,0 +1,9 @@
+- db_parameters:
+    frag_size: 134217728
+  stress_client_parameters:
+    read_threads: 1
+
+- db_parameters:
+    frag_size: 134217728
+  stress_client_parameters:
+    read_threads: 2

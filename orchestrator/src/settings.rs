@@ -84,12 +84,9 @@ pub struct Settings {
     pub specs: String,
     /// The details of the git reposit to deploy.
     pub repository: Repository,
-    /// The path to the node's configuration file. If not specified, the orchestrator uses the
+    /// The path to the target's configuration file. If not specified, the orchestrator uses the
     /// default configurations.
-    pub node_parameters_path: Option<String>,
-    /// The path to the client's configuration file. If not specified, the orchestrator uses the
-    /// default configurations.
-    pub client_parameters_path: Option<String>,
+    pub target_configs_path: Option<String>,
     /// The duration of the benchmark. The orchestrator stops the benchmark after this duration.
     /// If this value is set to zero, the orchestrator runs the benchmark indefinitely.
     #[serde(default = "defaults::default_benchmark_duration")]
@@ -180,7 +177,7 @@ mod defaults {
 }
 
 impl Settings {
-    /// Load the settings from a json file.
+    /// Load the settings from file.
     pub fn load<P>(path: P) -> SettingsResult<Self>
     where
         P: AsRef<Path> + Display + Clone,
