@@ -68,14 +68,14 @@ struct StressArgs {
         long,
         short = 'r',
         help = "Blocks to read per thread",
-        default_value = "1000000000"
+        default_value = "100000000000"
     )]
     reads: usize,
     #[arg(
         long,
         short = 'u',
         help = "Background writes per second during read test",
-        default_value = "0"
+        default_value = "100000000000"
     )]
     background_writes: usize,
     #[arg(
