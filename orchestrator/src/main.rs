@@ -199,7 +199,7 @@ async fn run<C: ServerProviderClient>(
             let protocol_commands = Protocol::new(&settings);
             let target_configs = match &settings.target_configs_path {
                 Some(path) => {
-                    Vec::<Config>::load(path).wrap_err("Failed to load node's parameters")?
+                    Vec::<Config>::load(path).wrap_err("Failed to load target configs")?
                 }
                 None => vec![Config::default()],
             };
