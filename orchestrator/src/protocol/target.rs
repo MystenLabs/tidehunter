@@ -55,7 +55,10 @@ impl ProtocolCommands for TargetProtocol {
     }
 
     fn db_directories(&self) -> Vec<std::path::PathBuf> {
-        vec![]
+        vec![
+            PathBuf::from("/tmp/stress.*"),
+            self.working_dir.join("stress.*"),
+        ]
     }
 
     async fn genesis_command<'a, I>(
@@ -93,7 +96,7 @@ impl ProtocolCommands for TargetProtocol {
                 // Command to run the benchmark
                 let run = [
                     format!("./{BINARY_PATH}/benchmark"),
-                    format!("--parameters-path {TARGET_CONFIG_FILE}"),
+                    format!("--parameters-path {}", target_configs_path.display()),
                 ]
                 .join(" ");
 

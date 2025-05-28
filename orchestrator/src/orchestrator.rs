@@ -304,13 +304,15 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .with_log_file("~/node.log".into())
             .with_execute_from_path(repo.into());
         self.ssh_manager
-            .execute_per_instance(targets, context)
+            .execute_per_instance(targets.clone(), context)
             .await?;
 
         // Wait until all nodes are reachable.
+        let running_instances = targets.iter().map(|(instance, _)| instance.clone());
+
         let commands = self
             .protocol_commands
-            .nodes_metrics_command(instances.clone(), parameters);
+            .nodes_metrics_command(running_instances, parameters);
         self.ssh_manager.wait_for_success(commands).await;
 
         Ok(())
@@ -334,10 +336,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     pub async fn run(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
         let benchmark_duration = parameters.settings.benchmark_duration.as_secs();
         if benchmark_duration == 0 {
-            display::action("Running benchmarks...");
+            display::action("Running benchmarks");
         } else {
             display::action(format!(
-                "Running benchmarks (max duration: {benchmark_duration}s)...",
+                "Running benchmarks (max duration: {benchmark_duration}s)",
             ));
         }
 
