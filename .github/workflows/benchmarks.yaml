@@ -14,13 +14,6 @@ on:
           - index
           - benchmark
         default: "all"
-      index_benchmark_mode:
-        description: "Mode for index benchmark (basic, advanced)"
-        type: choice
-        options:
-          - basic
-          - advanced
-        default: "basic"
 
   # Run benchmarks weekly
   schedule:
@@ -93,13 +86,29 @@ jobs:
           echo '```' >> ./results/summary.md
 
       # Index Benchmark
+      - name: Generate index benchmark files
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'index' || github.event_name != 'workflow_dispatch'
+        run: |
+          mkdir -p data
+          echo "Generating benchmark files..."
+          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- generate \
+            --num-indices 25000 \
+            --entries-per-index 1000000 \
+            --header-file data/bench-header-100GB-100K.dat \
+            --uniform-file data/bench-uniform-file-100GB-100K.dat
+
       - name: Run index_benchmark
         if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'index' || github.event_name != 'workflow_dispatch'
         run: |
-          echo "## Index Benchmark (${{ github.event.inputs.index_benchmark_mode || 'basic' }})" >> ./results/summary.md
+          echo "## Index Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
-          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml \
-            ${{ github.event.inputs.index_benchmark_mode || 'basic' }} \
+          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- run \
+            --num-lookups 1000000 \
+            --num-runs 1 \
+            --batch-size 1000 \
+            --window-size 800 \
+            --header-file data/bench-header-100GB-100K.dat \
+            --uniform-file data/bench-uniform-file-100GB-100K.dat \
             | tee ./results/index_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
           echo '```' >> ./results/summary.md
 
@@ -110,11 +119,12 @@ jobs:
           echo "## General Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
           cargo run --release --manifest-path benchmarks/benchmark/Cargo.toml -- \
-            --threads 4 \
-            --write-size 1024 \
-            --key-len 16 \
-            --writes 1000000 \
             --reads 1000000 \
+            --writes 1000000 \
+            --write-threads 4 \
+            --read-threads 4 \
+            --write-size 1024 \
+            --key-len 32 \
             --background-writes 100000 \
             | tee ./results/benchmark_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
           echo '```' >> ./results/summary.md
