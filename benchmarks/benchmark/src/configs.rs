@@ -1,3 +1,5 @@
+use std::io;
+use std::path::Path;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -215,5 +217,23 @@ pub mod defaults {
 
     pub fn default_backend() -> Backend {
         Backend::Tidehunter
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct StressTestConfigs {
+    pub db_parameters: tidehunter::config::Config,
+    pub stress_client_parameters: StressClientParameters,
+}
+
+impl StressTestConfigs {
+    /// Load the configuration from a YAML file located at the provided path.
+    pub fn from_yml<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
+        let path = path.as_ref();
+        let error_message = format!("Unable to load config from {}", path.display());
+        let reader = std::fs::File::open(path)?;
+        let config = serde_yaml::from_reader(reader)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, error_message))?;
+        Ok(config)
     }
 }

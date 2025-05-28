@@ -28,3 +28,4 @@ rocksdb = { version = "0.21.0", default-features = false, features = [
 anyhow = "1.0.97"
 fs_extra = "1.3.0"
 serde = { version = "1.0.219", features = ["derive"] }
+serde_yaml = "0.9.33"

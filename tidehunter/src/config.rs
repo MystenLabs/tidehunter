@@ -23,12 +23,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            frag_size: 128 * 1024 * 1024,
-            max_maps: 16, // Max 2 Gb mapped space
+            frag_size: 1024 * 1024 * 1024,
+            max_maps: 1000, // Max 2 Gb mapped space
             max_dirty_keys: 16 * 1024,
-            snapshot_written_bytes: 2 * 1024 * 1024 * 1024, // 2 Gb
-            snapshot_unload_threshold: 2 * 2 * 1024 * 1024 * 1024, // 4 Gb
-            unload_jitter_pct: 10,
+            snapshot_written_bytes: 128 * 1024 * 1024 * 1024,
+            snapshot_unload_threshold: 64 * 1024 * 1024 * 1024,
+            unload_jitter_pct: 30,
             direct_io: false,
         }
     }
