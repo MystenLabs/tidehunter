@@ -107,7 +107,7 @@ fn override_default_args(args: StressArgs, mut config: StressTestConfigs) -> Str
         config.stress_client_parameters.no_snapshot = no_snapshot;
     }
     if let Some(direct_io) = args.direct_io {
-        config.stress_client_parameters.direct_io = direct_io;
+        config.db_parameters.direct_io = direct_io;
     }
     if let Some(path) = args.path {
         config.stress_client_parameters.path = Some(path);

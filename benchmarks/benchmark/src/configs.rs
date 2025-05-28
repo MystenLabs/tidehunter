@@ -104,9 +104,6 @@ pub struct StressClientParameters {
     /// Whether to disable periodic snapshots
     #[serde(default = "defaults::default_no_snapshot")]
     pub no_snapshot: bool,
-    /// Whether to use direct IO
-    #[serde(default = "defaults::default_direct_io")]
-    pub direct_io: bool,
     /// Path of the storage temp dir. Will generate a temp file if not specified.
     pub path: Option<String>,
     /// Whether to print the report file
@@ -142,7 +139,6 @@ impl Default for StressClientParameters {
             reads: defaults::default_reads(),
             background_writes: defaults::default_background_writes(),
             no_snapshot: defaults::default_no_snapshot(),
-            direct_io: defaults::default_direct_io(),
             path: None,
             report: defaults::default_report(),
             key_layout: defaults::default_key_layout(),
@@ -188,10 +184,6 @@ pub mod defaults {
     }
 
     pub fn default_no_snapshot() -> bool {
-        false
-    }
-
-    pub fn default_direct_io() -> bool {
         false
     }
 
