@@ -72,3 +72,4 @@
     preserve: false
     read_mode: Get
     backend: Tidehunter
+    path: "/home/ubuntu/working_dir"

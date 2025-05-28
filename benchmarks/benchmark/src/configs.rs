@@ -223,7 +223,8 @@ impl StressTestConfigs {
     pub fn from_yml<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
         let path = path.as_ref();
         let error_message = format!("Unable to load config from {}", path.display());
-        let reader = std::fs::File::open(path)?;
+        let reader = std::fs::File::open(path)
+            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, error_message.clone()))?;
         let config = serde_yaml::from_reader(reader)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, error_message))?;
         Ok(config)
