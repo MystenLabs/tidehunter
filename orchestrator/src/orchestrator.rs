@@ -332,10 +332,16 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
     /// Collect metrics from the load generators.
     pub async fn run(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
-        display::action(format!(
-            "Scraping metrics (at least {}s)",
-            self.settings.benchmark_duration.as_secs()
-        ));
+        let benchmark_duration = parameters.settings.benchmark_duration.as_secs();
+        if benchmark_duration == 0 {
+            display::action("Running benchmarks...");
+        } else {
+            display::action(format!(
+                "Running benchmarks (max duration: {benchmark_duration}s)...",
+            ));
+        }
+
+        let (nodes, _) = self.select_instances()?;
 
         // Regularly scrape the client metrics.
         let mut metrics_interval = time::interval(self.settings.scrape_interval);
@@ -351,10 +357,16 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
                     // TODO: scrape metrics
 
-                    let benchmark_duration = parameters.settings.benchmark_duration.as_secs();
-                    if elapsed > benchmark_duration {
+                    // Kill the benchmark if the duration is reached.
+                    if benchmark_duration != 0 && elapsed > benchmark_duration {
                         break;
                     }
+                },
+
+                // Monitor when the benchmark is terminated.
+                result = self.ssh_manager.wait_for_command(nodes.clone(), "node", CommandStatus::Terminated) => {
+                    result?;
+                    break
                 }
             }
         }
@@ -462,9 +474,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
             // Deploy the validators.
             self.run_nodes(&parameters).await?;
-            if parameters.settings.benchmark_duration.as_secs() == 0 {
-                return Ok(());
-            }
 
             // Wait for the benchmark to terminate.
             self.run(&parameters).await?;
