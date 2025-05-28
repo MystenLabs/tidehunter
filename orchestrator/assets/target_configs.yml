@@ -8,6 +8,20 @@
     direct_io: false
   stress_client_parameters:
     read_threads: 1
+    write_threads: 1
+    write_size: 1024
+    key_len: 32
+    writes: 1000000000000000
+    reads: 1000000000000000
+    background_writes: 0
+    no_snapshot: false
+    direct_io: false
+    report: false
+    key_layout: Uniform
+    tldr: ""
+    preserve: false
+    read_mode: Get
+    backend: Tidehunter
 
 - db_parameters:
     frag_size: 134217728
@@ -18,4 +32,18 @@
     unload_jitter_pct: 10
     direct_io: false
   stress_client_parameters:
-    read_threads: 2
+    read_threads: 1
+    write_threads: 1
+    write_size: 1048576
+    key_len: 32
+    writes: 1000000000000000
+    reads: 1000000000000000
+    background_writes: 0
+    no_snapshot: false
+    direct_io: false
+    report: false
+    key_layout: Uniform
+    tldr: ""
+    preserve: false
+    read_mode: Get
+    backend: Tidehunter
