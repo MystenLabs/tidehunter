@@ -15,7 +15,6 @@
     reads: 20000000
     background_writes: 0
     no_snapshot: false
-    direct_io: false
     report: true
     key_layout: Uniform
     tldr: ""
@@ -40,7 +39,6 @@
     reads: 50000
     background_writes: 0
     no_snapshot: false
-    direct_io: false
     report: true
     key_layout: Uniform
     tldr: ""
@@ -65,7 +63,6 @@
     reads: 20000000
     background_writes: 0
     no_snapshot: false
-    direct_io: false
     report: true
     key_layout: Uniform
     tldr: ""
