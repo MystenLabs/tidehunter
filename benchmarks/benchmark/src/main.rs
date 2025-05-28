@@ -143,6 +143,7 @@ pub fn main() {
 
     let args: StressArgs = StressArgs::parse();
     let default_config = if let Some(parameters_path) = &args.parameters_path {
+        println!("Loading default configs from {}", parameters_path);
         StressTestConfigs::from_yml(parameters_path).unwrap()
     } else {
         StressTestConfigs::default()
