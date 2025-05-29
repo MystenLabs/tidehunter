@@ -5,7 +5,7 @@ use crate::storage::Storage;
 use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
-use configs::{Backend, KeyLayout, ReadMode};
+use configs::{Backend, KeyLayout, ReadMode, StressClientParameters, StressTestConfigs};
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
-use tidehunter::config::Config;
 use tidehunter::key_shape::{KeyShape, KeySpaceConfig, KeyType};
 
 mod configs;
@@ -37,117 +36,155 @@ macro_rules! report {
 
 #[derive(Parser, Debug)]
 struct StressArgs {
-    // This parameter gives the user the chance to call the benchmark using parameters specified in a file.
-    // Even if the user specifies a file, the command line arguments will override the values in the file.
+    // Allows to call the benchmark using parameters specified in a file. Even if the user specifies a file,
+    // the command line arguments will override the values in the file. Defaults apply otherwise.
     #[arg(
         long,
         help = "Path to the default parameters file. Any value can be overridden by command line arguments"
     )]
     parameters_path: Option<String>,
-    #[arg(long, help = "Number of read threads", default_value = "1")]
-    read_threads: usize,
-    #[arg(long, help = "Number of write threads", default_value = "1")]
-    write_threads: usize,
-    #[arg(
-        long,
-        short = 'v',
-        help = "Length of the value",
-        default_value = "1024"
-    )]
-    write_size: usize,
-    #[arg(long, short = 'k', help = "Length of the key", default_value = "32")]
-    key_len: usize,
-    #[arg(
-        long,
-        short = 'w',
-        help = "Blocks to write per thread",
-        default_value = "1000000"
-    )]
-    writes: usize,
-    #[arg(
-        long,
-        short = 'r',
-        help = "Blocks to read per thread",
-        default_value = "100000000000"
-    )]
-    reads: usize,
-    #[arg(
-        long,
-        short = 'u',
-        help = "Background writes per second during read test",
-        default_value = "100000000000"
-    )]
-    background_writes: usize,
-    #[arg(
-        long,
-        short = 'n',
-        help = "Disable periodic snapshot",
-        default_value = "false"
-    )]
-    no_snapshot: bool,
-    #[arg(long, help = "Use direct IO", default_value = "false")]
-    direct_io: bool,
+
+    #[arg(long, help = "Number of read threads")]
+    read_threads: Option<usize>,
+    #[arg(long, help = "Number of write threads")]
+    write_threads: Option<usize>,
+    #[arg(long, short = 'v', help = "Length of the value")]
+    write_size: Option<usize>,
+    #[arg(long, short = 'k', help = "Length of the key")]
+    key_len: Option<usize>,
+    #[arg(long, short = 'w', help = "Blocks to write per thread")]
+    writes: Option<usize>,
+    #[arg(long, short = 'r', help = "Blocks to read per thread")]
+    reads: Option<usize>,
+    #[arg(long, short = 'u', help = "Background writes/s during read test")]
+    background_writes: Option<usize>,
+    #[arg(long, short = 'n', help = "Disable periodic snapshot")]
+    no_snapshot: Option<bool>,
+    #[arg(long, help = "Use direct IO")]
+    direct_io: Option<bool>,
     #[arg(long, short = 'p', help = "Path for storage temp dir")]
     path: Option<String>,
-    #[arg(long, help = "Print report file", default_value = "false")]
-    report: bool,
-    #[arg(long, help = "Key layout", default_value = "u")]
-    key_layout: KeyLayout,
-    #[arg(long, help = "Print tldr report", default_value = "")]
-    tldr: String,
-    #[arg(long, help = "Preserve generated directory", default_value = "false")]
-    preserve: bool,
+    #[arg(long, help = "Print report file")]
+    report: Option<bool>,
+    #[arg(long, help = "Key layout")]
+    key_layout: Option<KeyLayout>,
+    #[arg(long, help = "Print tldr report")]
+    tldr: Option<String>,
+    #[arg(long, help = "Preserve generated directory")]
+    preserve: Option<bool>,
     #[arg(long, help = "Use pre-generated DB")]
     reuse: Option<String>,
-    #[arg(long, help = "Read mode", default_value = "get")]
-    read_mode: ReadMode,
-    #[arg(long, short = 'b', help = "Backend", default_value = "thdb")]
-    backend: Backend,
+    #[arg(long, help = "Read mode")]
+    read_mode: Option<ReadMode>,
+    #[arg(long, short = 'b', help = "Backend")]
+    backend: Option<Backend>,
+}
+
+/// Override default arguments with the ones provided by the user
+fn override_default_args(args: StressArgs, mut config: StressTestConfigs) -> StressTestConfigs {
+    if let Some(read_threads) = args.read_threads {
+        config.stress_client_parameters.read_threads = read_threads;
+    }
+    if let Some(write_threads) = args.write_threads {
+        config.stress_client_parameters.write_threads = write_threads;
+    }
+    if let Some(write_size) = args.write_size {
+        config.stress_client_parameters.write_size = write_size;
+    }
+    if let Some(key_len) = args.key_len {
+        config.stress_client_parameters.key_len = key_len;
+    }
+    if let Some(writes) = args.writes {
+        config.stress_client_parameters.writes = writes;
+    }
+    if let Some(reads) = args.reads {
+        config.stress_client_parameters.reads = reads;
+    }
+    if let Some(background_writes) = args.background_writes {
+        config.stress_client_parameters.background_writes = background_writes;
+    }
+    if let Some(no_snapshot) = args.no_snapshot {
+        config.stress_client_parameters.no_snapshot = no_snapshot;
+    }
+    if let Some(direct_io) = args.direct_io {
+        config.db_parameters.direct_io = direct_io;
+    }
+    if let Some(path) = args.path {
+        config.stress_client_parameters.path = Some(path);
+    }
+    if let Some(report) = args.report {
+        config.stress_client_parameters.report = report;
+    }
+    if let Some(key_layout) = args.key_layout {
+        config.stress_client_parameters.key_layout = key_layout;
+    }
+    if let Some(tldr) = args.tldr {
+        config.stress_client_parameters.tldr = tldr;
+    }
+    if let Some(preserve) = args.preserve {
+        config.stress_client_parameters.preserve = preserve;
+    }
+    if let Some(reuse) = args.reuse {
+        config.stress_client_parameters.reuse = Some(reuse);
+    }
+    if let Some(read_mode) = args.read_mode {
+        config.stress_client_parameters.read_mode = read_mode;
+    }
+    if let Some(backend) = args.backend {
+        config.stress_client_parameters.backend = backend;
+    }
+
+    config
 }
 
 pub fn main() {
     let start_time = SystemTime::now();
     let mut report = Report::default();
+
     let args: StressArgs = StressArgs::parse();
-    let args = Arc::new(args);
-    let temp_dir = if let Some(path) = &args.path {
+    let default_config = if let Some(parameters_path) = &args.parameters_path {
+        StressTestConfigs::from_yml(parameters_path).unwrap()
+    } else {
+        StressTestConfigs::default()
+    };
+    let config = override_default_args(args, default_config);
+
+    let temp_dir = if let Some(path) = &config.stress_client_parameters.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()
     } else {
         tempdir::TempDir::new("stress").unwrap()
     };
 
-    let path = if let Some(reuse) = &args.reuse {
+    let path = if let Some(reuse) = &config.stress_client_parameters.reuse {
         reuse.parse().unwrap()
     } else {
         temp_dir.path().to_path_buf()
     };
 
     println!("Path to storage: {}", path.display());
-    println!("Using {:?} key layout", args.key_layout);
-    println!("Using {:?} read mode", args.read_mode);
-    let print_report = args.report;
+    println!(
+        "Using {:?} key layout",
+        config.stress_client_parameters.key_layout
+    );
+    println!(
+        "Using {:?} read mode",
+        config.stress_client_parameters.read_mode
+    );
+    let print_report = config.stress_client_parameters.report;
     let registry = Registry::new();
     let benchmark_metrics = BenchmarkMetrics::new_in(&registry);
     prometheus::start_prometheus_server(
         format!("0.0.0.0:{METRICS_PORT}").parse().unwrap(),
         &registry,
     );
-    let storage: Arc<dyn Storage> = match args.backend {
+    let storage: Arc<dyn Storage> = match config.stress_client_parameters.backend {
         Backend::Tidehunter => {
-            let mut config = Config::default();
-            config.max_dirty_keys = 1024;
-            config.direct_io = args.direct_io;
-            config.frag_size = 1024 * 1024 * 1024;
-            config.max_maps = 100;
-            config.snapshot_unload_threshold = 128 * 1024 * 1024 * 1024;
-            config.snapshot_written_bytes = 64 * 1024 * 1024 * 1024;
-            config.unload_jitter_pct = 30;
-            if args.direct_io {
+            if config.db_parameters.direct_io {
                 report!(report, "Using **direct IO**");
             }
             use crate::storage::tidehunter::TidehunterStorage;
             let mutexes = 4096 * 32;
-            let (key_shape, ks) = match args.key_layout {
+            let (key_shape, ks) = match config.stress_client_parameters.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     32,
                     mutexes,
@@ -163,8 +200,9 @@ pub fn main() {
                     KeyShape::new_single_config(32, mutexes, key_type, key_space_config())
                 }
             };
-            let storage = TidehunterStorage::open(&registry, config, &path, (key_shape, ks));
-            if !args.no_snapshot {
+            let storage =
+                TidehunterStorage::open(&registry, config.db_parameters, &path, (key_shape, ks));
+            if !config.stress_client_parameters.no_snapshot {
                 report!(report, "Periodic snapshot **enabled**");
                 storage.db.start_periodic_snapshot();
             } else {
@@ -179,19 +217,19 @@ pub fn main() {
     };
     let stress = Stress {
         storage,
-        args,
+        parameters: Arc::new(config.stress_client_parameters),
         benchmark_metrics,
     };
     println!("Starting write test");
     let write_sec;
-    if stress.args.reuse.is_none() {
+    if stress.parameters.reuse.is_none() {
         let elapsed = stress.measure(
-            stress.args.write_threads,
+            stress.parameters.write_threads,
             StressThread::run_writes,
             &mut report,
         );
-        let written = stress.args.writes * stress.args.write_threads;
-        let written_bytes = written * stress.args.write_size;
+        let written = stress.parameters.writes * stress.parameters.write_threads;
+        let written_bytes = written * stress.parameters.write_size;
         let msecs = elapsed.as_millis() as usize;
         write_sec = dec_div(written / msecs * 1000);
         report!(
@@ -213,22 +251,22 @@ pub fn main() {
         );
     }
     println!("Starting read test");
-    let manual_stop = if stress.args.background_writes > 0 {
+    let manual_stop = if stress.parameters.background_writes > 0 {
         stress.background(
-            stress.args.write_threads,
+            stress.parameters.write_threads,
             StressThread::run_background_writes,
         )
     } else {
         Default::default()
     };
     let elapsed = stress.measure(
-        stress.args.read_threads,
+        stress.parameters.read_threads,
         StressThread::run_reads,
         &mut report,
     );
     manual_stop.store(true, Ordering::Relaxed);
-    let read = stress.args.reads * stress.args.read_threads;
-    let read_bytes = read * stress.args.write_size;
+    let read = stress.parameters.reads * stress.parameters.read_threads;
+    let read_bytes = read * stress.parameters.write_size;
     let msecs = elapsed.as_millis() as usize;
     let read_sec = dec_div(read / msecs * 1000);
     report!(
@@ -241,7 +279,7 @@ pub fn main() {
         println!("Writing report file");
         fs::write("report.txt", &report.lines).unwrap();
     }
-    if !stress.args.tldr.is_empty() {
+    if !stress.parameters.tldr.is_empty() {
         let mut file = OpenOptions::new()
             .write(true)
             .append(true)
@@ -260,11 +298,11 @@ pub fn main() {
         writeln!(
             file,
             "{: <15}|{: <15}|{: <24}|{: <8}|{: <8}",
-            start_time, end_time, stress.args.tldr, write_sec, read_sec
+            start_time, end_time, stress.parameters.tldr, write_sec, read_sec
         )
         .unwrap();
     }
-    if stress.args.preserve {
+    if stress.parameters.preserve {
         temp_dir.into_path();
     }
 }
@@ -281,7 +319,7 @@ fn key_space_config() -> KeySpaceConfig {
 
 struct Stress {
     storage: Arc<dyn Storage>,
-    args: Arc<StressArgs>,
+    parameters: Arc<StressClientParameters>,
     benchmark_metrics: Arc<BenchmarkMetrics>,
 }
 
@@ -349,7 +387,7 @@ impl Stress {
             let thread = StressThread {
                 db: self.storage.clone(),
                 start_lock: start_lock.clone(),
-                args: self.args.clone(),
+                parameters: self.parameters.clone(),
                 index: index as u64,
                 manual_stop: manual_stop.clone(),
 
@@ -393,7 +431,7 @@ fn byte_div(n: usize) -> String {
 struct StressThread {
     db: Arc<dyn Storage>,
     start_lock: Arc<RwLock<()>>,
-    args: Arc<StressArgs>,
+    parameters: Arc<StressClientParameters>,
     index: u64,
     manual_stop: Arc<AtomicBool>,
 
@@ -405,7 +443,7 @@ struct StressThread {
 impl StressThread {
     pub fn run_writes(self) {
         let _ = self.start_lock.read();
-        for pos in 0..self.args.writes {
+        for pos in 0..self.parameters.writes {
             let pos = self.global_pos(pos);
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
@@ -420,7 +458,7 @@ impl StressThread {
     }
 
     pub fn run_background_writes(self) {
-        let writes_per_thread = self.args.background_writes / self.args.write_threads;
+        let writes_per_thread = self.parameters.background_writes / self.parameters.write_threads;
         let delay = Duration::from_micros(1_000_000 / writes_per_thread as u64);
         let mut deadline = Instant::now();
         let mut pos = u32::MAX;
@@ -442,10 +480,10 @@ impl StressThread {
         let _ = self.start_lock.read();
         let mut thread_rng = ThreadRng::default();
         let max_pos = self.max_global_pos();
-        for _ in 0..self.args.reads {
+        for _ in 0..self.parameters.reads {
             let pos = thread_rng.gen_range(0..max_pos);
             let timer;
-            match self.args.read_mode {
+            match self.parameters.read_mode {
                 ReadMode::Get => {
                     let (key, value) = self.key_value(pos);
                     timer = Instant::now();
@@ -457,7 +495,7 @@ impl StressThread {
                     );
                 }
                 ReadMode::Lt(iterations) => {
-                    let mut key = vec![0u8; self.args.key_len];
+                    let mut key = vec![0u8; self.parameters.key_len];
                     thread_rng.fill(&mut key[..]);
                     timer = Instant::now();
                     let result = self.db.get_lt(&key, iterations);
@@ -493,9 +531,9 @@ impl StressThread {
 
     fn key_and_rng(&self, pos: u64) -> (Vec<u8>, StdRng) {
         let mut rng = Self::rng_at(pos);
-        let mut key = vec![0u8; self.args.key_len];
+        let mut key = vec![0u8; self.parameters.key_len];
         rng.fill_bytes(&mut key);
-        match self.args.key_layout {
+        match self.parameters.key_layout {
             KeyLayout::Uniform => {}
             KeyLayout::SequenceChoice => {
                 // the first 16 bytes of a key are not random anymore
@@ -515,18 +553,18 @@ impl StressThread {
 
     fn key_value(&self, pos: u64) -> (Vec<u8>, Vec<u8>) {
         let (key, mut rng) = self.key_and_rng(pos);
-        let mut value = vec![0u8; self.args.write_size];
+        let mut value = vec![0u8; self.parameters.write_size];
         rng.fill_bytes(&mut value);
         (key, value)
     }
 
     /// Maps local index into continuous global space
     fn global_pos(&self, pos: usize) -> u64 {
-        (pos * self.args.write_threads) as u64 + self.index
+        (pos * self.parameters.write_threads) as u64 + self.index
     }
 
     fn max_global_pos(&self) -> u64 {
-        (self.args.write_threads * self.args.writes) as u64
+        (self.parameters.write_threads * self.parameters.writes) as u64
     }
 
     fn rng_at(pos: u64) -> StdRng {

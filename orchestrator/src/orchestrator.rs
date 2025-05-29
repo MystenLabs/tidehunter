@@ -466,7 +466,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 return Ok(());
             }
 
-            // Wait for the benchmark to terminate. Then save the results and print a summary.
+            // Wait for the benchmark to terminate.
             self.run(&parameters).await?;
 
             // Kill the nodes and clients (without deleting the log files).

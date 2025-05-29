@@ -1,3 +1,5 @@
+use std::io;
+use std::path::Path;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -102,9 +104,6 @@ pub struct StressClientParameters {
     /// Whether to disable periodic snapshots
     #[serde(default = "defaults::default_no_snapshot")]
     pub no_snapshot: bool,
-    /// Whether to use direct IO
-    #[serde(default = "defaults::default_direct_io")]
-    pub direct_io: bool,
     /// Path of the storage temp dir. Will generate a temp file if not specified.
     pub path: Option<String>,
     /// Whether to print the report file
@@ -140,7 +139,6 @@ impl Default for StressClientParameters {
             reads: defaults::default_reads(),
             background_writes: defaults::default_background_writes(),
             no_snapshot: defaults::default_no_snapshot(),
-            direct_io: defaults::default_direct_io(),
             path: None,
             report: defaults::default_report(),
             key_layout: defaults::default_key_layout(),
@@ -189,10 +187,6 @@ pub mod defaults {
         false
     }
 
-    pub fn default_direct_io() -> bool {
-        false
-    }
-
     pub fn default_report() -> bool {
         false
     }
@@ -215,5 +209,23 @@ pub mod defaults {
 
     pub fn default_backend() -> Backend {
         Backend::Tidehunter
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct StressTestConfigs {
+    pub db_parameters: tidehunter::config::Config,
+    pub stress_client_parameters: StressClientParameters,
+}
+
+impl StressTestConfigs {
+    /// Load the configuration from a YAML file located at the provided path.
+    pub fn from_yml<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
+        let path = path.as_ref();
+        let error_message = format!("Unable to load config from {}", path.display());
+        let reader = std::fs::File::open(path)?;
+        let config = serde_yaml::from_reader(reader)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, error_message))?;
+        Ok(config)
     }
 }
