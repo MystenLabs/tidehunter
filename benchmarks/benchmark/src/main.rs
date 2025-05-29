@@ -5,7 +5,9 @@ use crate::storage::Storage;
 use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
-use configs::{Backend, KeyLayout, ReadMode, StressClientParameters, StressTestConfigs};
+use configs::{
+    Backend, KeyLayout, ReadMode, StressArgs, StressClientParameters, StressTestConfigs,
+};
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
@@ -34,120 +36,18 @@ macro_rules! report {
     };
 }
 
-#[derive(Parser, Debug)]
-struct StressArgs {
-    // Allows to call the benchmark using parameters specified in a file. Even if the user specifies a file,
-    // the command line arguments will override the values in the file. Defaults apply otherwise.
-    #[arg(
-        long,
-        help = "Path to the default parameters file. Any value can be overridden by command line arguments"
-    )]
-    parameters_path: Option<String>,
-
-    #[arg(long, help = "Number of read threads")]
-    read_threads: Option<usize>,
-    #[arg(long, help = "Number of write threads")]
-    write_threads: Option<usize>,
-    #[arg(long, short = 'v', help = "Length of the value")]
-    write_size: Option<usize>,
-    #[arg(long, short = 'k', help = "Length of the key")]
-    key_len: Option<usize>,
-    #[arg(long, short = 'w', help = "Blocks to write per thread")]
-    writes: Option<usize>,
-    #[arg(long, short = 'r', help = "Blocks to read per thread")]
-    reads: Option<usize>,
-    #[arg(long, short = 'u', help = "Background writes/s during read test")]
-    background_writes: Option<usize>,
-    #[arg(long, short = 'n', help = "Disable periodic snapshot")]
-    no_snapshot: Option<bool>,
-    #[arg(long, help = "Use direct IO")]
-    direct_io: Option<bool>,
-    #[arg(long, short = 'p', help = "Path for storage temp dir")]
-    path: Option<String>,
-    #[arg(long, help = "Print report file")]
-    report: Option<bool>,
-    #[arg(long, help = "Key layout")]
-    key_layout: Option<KeyLayout>,
-    #[arg(long, help = "Print tldr report")]
-    tldr: Option<String>,
-    #[arg(long, help = "Preserve generated directory")]
-    preserve: Option<bool>,
-    #[arg(long, help = "Use pre-generated DB")]
-    reuse: Option<String>,
-    #[arg(long, help = "Read mode")]
-    read_mode: Option<ReadMode>,
-    #[arg(long, short = 'b', help = "Backend")]
-    backend: Option<Backend>,
-}
-
-/// Override default arguments with the ones provided by the user
-fn override_default_args(args: StressArgs, mut config: StressTestConfigs) -> StressTestConfigs {
-    if let Some(read_threads) = args.read_threads {
-        config.stress_client_parameters.read_threads = read_threads;
-    }
-    if let Some(write_threads) = args.write_threads {
-        config.stress_client_parameters.write_threads = write_threads;
-    }
-    if let Some(write_size) = args.write_size {
-        config.stress_client_parameters.write_size = write_size;
-    }
-    if let Some(key_len) = args.key_len {
-        config.stress_client_parameters.key_len = key_len;
-    }
-    if let Some(writes) = args.writes {
-        config.stress_client_parameters.writes = writes;
-    }
-    if let Some(reads) = args.reads {
-        config.stress_client_parameters.reads = reads;
-    }
-    if let Some(background_writes) = args.background_writes {
-        config.stress_client_parameters.background_writes = background_writes;
-    }
-    if let Some(no_snapshot) = args.no_snapshot {
-        config.stress_client_parameters.no_snapshot = no_snapshot;
-    }
-    if let Some(direct_io) = args.direct_io {
-        config.db_parameters.direct_io = direct_io;
-    }
-    if let Some(path) = args.path {
-        config.stress_client_parameters.path = Some(path);
-    }
-    if let Some(report) = args.report {
-        config.stress_client_parameters.report = report;
-    }
-    if let Some(key_layout) = args.key_layout {
-        config.stress_client_parameters.key_layout = key_layout;
-    }
-    if let Some(tldr) = args.tldr {
-        config.stress_client_parameters.tldr = tldr;
-    }
-    if let Some(preserve) = args.preserve {
-        config.stress_client_parameters.preserve = preserve;
-    }
-    if let Some(reuse) = args.reuse {
-        config.stress_client_parameters.reuse = Some(reuse);
-    }
-    if let Some(read_mode) = args.read_mode {
-        config.stress_client_parameters.read_mode = read_mode;
-    }
-    if let Some(backend) = args.backend {
-        config.stress_client_parameters.backend = backend;
-    }
-
-    config
-}
-
 pub fn main() {
     let start_time = SystemTime::now();
     let mut report = Report::default();
 
     let args: StressArgs = StressArgs::parse();
     let default_config = if let Some(parameters_path) = &args.parameters_path {
+        println!("Loading default configs from {}", parameters_path);
         StressTestConfigs::from_yml(parameters_path).unwrap()
     } else {
         StressTestConfigs::default()
     };
-    let config = override_default_args(args, default_config);
+    let config = configs::override_default_args(args, default_config);
 
     let temp_dir = if let Some(path) = &config.stress_client_parameters.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()
