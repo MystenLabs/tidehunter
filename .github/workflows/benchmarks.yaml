@@ -60,26 +60,6 @@ jobs:
       - name: Build all benchmarks
         run: cargo build --release --all
 
-      - name: Run random_access_speed_test
-        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'random_access' || github.event_name != 'workflow_dispatch'
-        run: |
-          echo "## Random Access Speed Test" >> ./results/summary.md
-          echo '```' >> ./results/summary.md
-          mkdir -p ./tmp_benchmark
-          cd ./tmp_benchmark
-          cargo run --release --manifest-path ../benchmarks/random_access_speed_test/Cargo.toml | tee ../results/random_access_${{ env.TIMESTAMP }}.txt | tee -a ../results/summary.md
-          cd ..
-          rm -rf ./tmp_benchmark
-          echo '```' >> ./results/summary.md
-
-      - name: Run read_window_test
-        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'read_window' || github.event_name != 'workflow_dispatch'
-        run: |
-          echo "## Read Window Test" >> ./results/summary.md
-          echo '```' >> ./results/summary.md
-          cargo run --release --manifest-path benchmarks/read_window_test/Cargo.toml | tee ./results/read_window_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
-          echo '```' >> ./results/summary.md
-
       - name: Generate index benchmark files
         if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'index' || github.event_name != 'workflow_dispatch'
         run: |
@@ -109,6 +89,8 @@ jobs:
         run: |
           echo "## Index Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
+          echo "Started at: $(date)" >> ./results/summary.md
+          START_TIME=$(date +%s)
           cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- run \
             --num-lookups 1000000 \
             --num-runs 1 \
@@ -117,6 +99,10 @@ jobs:
             --header-file data/bench-header-100GB-100K.dat \
             --uniform-file data/bench-uniform-file-100GB-100K.dat \
             | tee ./results/index_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Total time: $DURATION seconds" >> ./results/summary.md
+          echo "Finished at: $(date)" >> ./results/summary.md
           echo '```' >> ./results/summary.md
 
       - name: Run general benchmark
@@ -124,6 +110,8 @@ jobs:
         run: |
           echo "## General Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
+          echo "Started at: $(date)" >> ./results/summary.md
+          START_TIME=$(date +%s)
           cargo run --release --manifest-path benchmarks/benchmark/Cargo.toml -- \
             --reads 1000000 \
             --writes 1000000 \
@@ -133,6 +121,10 @@ jobs:
             --key-len 32 \
             --background-writes 100000 \
             | tee ./results/benchmark_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Total time: $DURATION seconds" >> ./results/summary.md
+          echo "Finished at: $(date)" >> ./results/summary.md
           echo '```' >> ./results/summary.md
 
       - name: Upload benchmark results
@@ -165,29 +157,18 @@ jobs:
             echo "# Benchmark Summary ($(date +%Y-%m-%d))"
             echo ""
             
-            # Process Random Access results
-            if [ -f "./results/random_access_${{ env.TIMESTAMP }}.txt" ]; then
-              echo "Random Access Test:"
-              grep "Average time per random access:" "./results/random_access_${{ env.TIMESTAMP }}.txt" | head -n 1
-            fi
-            
-            # Process Read Window results
-            if [ -f "./results/read_window_${{ env.TIMESTAMP }}.txt" ]; then
-              echo -e "\nRead Window Test:"
-              grep "1000000 entries: Approx" "./results/read_window_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^[[:space:]]*//'
-              grep "1000000 entries: Exact" "./results/read_window_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^[[:space:]]*//'
-            fi
-            
             # Process Index results
             if [ -f "./results/index_${{ env.TIMESTAMP }}.txt" ]; then
               echo -e "\nIndex Benchmark:"
               grep "End-to-end throughput:" "./results/index_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^[[:space:]]*//'
+              grep "Total time:" "./results/summary.md" | head -n 1
             fi
             
             # Process General benchmark results
             if [ -f "./results/benchmark_${{ env.TIMESTAMP }}.txt" ]; then
               echo -e "\nGeneral Benchmark:"
               grep "Read test done" "./results/benchmark_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^Read test done in.*: //'
+              grep "Total time:" "./results/summary.md" | tail -n 1
             fi
           } > ./results/slack_summary.md
 
