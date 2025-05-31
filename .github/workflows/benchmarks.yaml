@@ -14,13 +14,6 @@ on:
           - index
           - benchmark
         default: "all"
-      index_benchmark_mode:
-        description: "Mode for index benchmark (basic, advanced)"
-        type: choice
-        options:
-          - basic
-          - advanced
-        default: "basic"
 
   # Run benchmarks weekly
   schedule:
@@ -42,6 +35,7 @@ jobs:
 
     name: Run Benchmarks
     runs-on: self-hosted
+    timeout-minutes: 1440 # 24 hours
 
     steps:
       - uses: actions/checkout@v3
@@ -61,62 +55,76 @@ jobs:
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           echo "# Benchmark Results - $(date)" > ./results/summary.md
           echo "## Environment" >> ./results/summary.md
-          echo '```' >> ./results/summary.md
-          echo "Runner: ${{ runner.os }} (${{ runner.arch }})" >> ./results/summary.md
-          cat /proc/cpuinfo | grep "model name" | head -1 >> ./results/summary.md
-          free -h | head -2 >> ./results/summary.md
-          echo '```' >> ./results/summary.md
+          echo "![runner bare metal host metrics](https://metrics.sui.io/goto/D1MxYcBNg?orgId=1)" >> ./results/summary.md
 
       - name: Build all benchmarks
         run: cargo build --release --all
 
-      # Random Access Speed Test
-      - name: Run random_access_speed_test
-        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'random_access' || github.event_name != 'workflow_dispatch'
+      - name: Generate index benchmark files
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'index' || github.event_name != 'workflow_dispatch'
         run: |
-          echo "## Random Access Speed Test" >> ./results/summary.md
-          echo '```' >> ./results/summary.md
-          mkdir -p ./tmp_benchmark
-          cd ./tmp_benchmark
-          cargo run --release --manifest-path ../benchmarks/random_access_speed_test/Cargo.toml | tee ../results/random_access_${{ env.TIMESTAMP }}.txt | tee -a ../results/summary.md
-          cd ..
-          rm -rf ./tmp_benchmark
-          echo '```' >> ./results/summary.md
+          BENCH_DATA_DIR="/opt/sui/db/tidehunter-benchmarks"
+          sudo mkdir -p $BENCH_DATA_DIR
+          sudo chown $USER $BENCH_DATA_DIR
 
-      # Read Window Test
-      - name: Run read_window_test
-        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'read_window' || github.event_name != 'workflow_dispatch'
-        run: |
-          echo "## Read Window Test" >> ./results/summary.md
-          echo '```' >> ./results/summary.md
-          cargo run --release --manifest-path benchmarks/read_window_test/Cargo.toml | tee ./results/read_window_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
-          echo '```' >> ./results/summary.md
+          # Only generate if files don't exist
+          if [ ! -f "$BENCH_DATA_DIR/bench-header-100GB-100K.dat" ] || [ ! -f "$BENCH_DATA_DIR/bench-uniform-file-100GB-100K.dat" ]; then
+            echo "Generating benchmark files..."
+            cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- generate \
+              --num-indices 25000 \
+              --entries-per-index 1000000 \
+              --header-file $BENCH_DATA_DIR/bench-header-100GB-100K.dat \
+              --uniform-file $BENCH_DATA_DIR/bench-uniform-file-100GB-100K.dat
+          else
+            echo "Using existing benchmark files from $BENCH_DATA_DIR"
+          fi
 
-      # Index Benchmark
+          # Create symlinks to the data directory
+          mkdir -p data
+          ln -sf $BENCH_DATA_DIR/bench-header-100GB-100K.dat data/
+          ln -sf $BENCH_DATA_DIR/bench-uniform-file-100GB-100K.dat data/
+
       - name: Run index_benchmark
         if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'index' || github.event_name != 'workflow_dispatch'
         run: |
-          echo "## Index Benchmark (${{ github.event.inputs.index_benchmark_mode || 'basic' }})" >> ./results/summary.md
+          echo "## Index Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
-          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml \
-            ${{ github.event.inputs.index_benchmark_mode || 'basic' }} \
+          echo "Started at: $(date)" >> ./results/summary.md
+          START_TIME=$(date +%s)
+          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- run \
+            --num-lookups 1000000 \
+            --num-runs 1 \
+            --batch-size 1000 \
+            --window-size 800 \
+            --header-file data/bench-header-100GB-100K.dat \
+            --uniform-file data/bench-uniform-file-100GB-100K.dat \
             | tee ./results/index_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Total time: $DURATION seconds" >> ./results/summary.md
+          echo "Finished at: $(date)" >> ./results/summary.md
           echo '```' >> ./results/summary.md
 
-      # General Benchmark
       - name: Run general benchmark
         if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'benchmark' || github.event_name != 'workflow_dispatch'
         run: |
           echo "## General Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
+          echo "Started at: $(date)" >> ./results/summary.md
+          START_TIME=$(date +%s)
           cargo run --release --manifest-path benchmarks/benchmark/Cargo.toml -- \
-            --threads 4 \
-            --write-size 1024 \
-            --key-len 16 \
-            --writes 1000000 \
             --reads 1000000 \
+            --writes 1000000 \
+            --write-threads 4 \
+            --read-threads 4 \
+            --write-size 1024 \
+            --key-len 32 \
             --background-writes 100000 \
             | tee ./results/benchmark_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Total time: $DURATION seconds" >> ./results/summary.md
+          echo "Finished at: $(date)" >> ./results/summary.md
           echo '```' >> ./results/summary.md
 
       - name: Upload benchmark results
@@ -126,7 +134,6 @@ jobs:
           path: results/
           retention-days: 20
 
-      # Comment on PR if this is a PR run
       - name: Comment PR with benchmark results
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v6
@@ -140,3 +147,67 @@ jobs:
               repo: context.repo.repo,
               body: benchmarkSummary
             });
+
+      - name: Create condensed summary for Slack
+        id: condensed_summary
+        if: github.event_name == 'schedule'
+        run: |
+          # Extract just the important numbers and results
+          {
+            echo "# Benchmark Summary ($(date +%Y-%m-%d))"
+            echo ""
+            
+            # Process Index results
+            if [ -f "./results/index_${{ env.TIMESTAMP }}.txt" ]; then
+              echo -e "\nIndex Benchmark:"
+              grep "End-to-end throughput:" "./results/index_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^[[:space:]]*//'
+              grep "Total time:" "./results/summary.md" | head -n 1
+            fi
+            
+            # Process General benchmark results
+            if [ -f "./results/benchmark_${{ env.TIMESTAMP }}.txt" ]; then
+              echo -e "\nGeneral Benchmark:"
+              grep "Read test done" "./results/benchmark_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^Read test done in.*: //'
+              grep "Total time:" "./results/summary.md" | tail -n 1
+            fi
+          } > ./results/slack_summary.md
+
+          CONDENSED_SUMMARY=$(cat ./results/slack_summary.md | jq -aRs .)
+          echo "summary=$CONDENSED_SUMMARY" >> $GITHUB_OUTPUT
+
+      - name: Send to Slack
+        if: github.event_name == 'schedule'
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          channel-id: "tidehunter" # Replace with your channel ID
+          payload: |
+            {
+              "text": "Weekly Benchmark Results",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "📊 Weekly Benchmark Results"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ${{ steps.condensed_summary.outputs.summary }}
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "Run on: ${{ env.TIMESTAMP }} • <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View full results>"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
