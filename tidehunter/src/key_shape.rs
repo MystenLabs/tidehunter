@@ -50,6 +50,7 @@ pub struct KeySpaceConfig {
     key_offset: usize,
     compactor: Option<Arc<Compactor>>,
     disable_unload: bool,
+    max_dirty_keys: Option<usize>,
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
     index_format: IndexFormatType,
@@ -346,6 +347,10 @@ impl KeySpaceDesc {
         self.config.disable_unload
     }
 
+    pub(crate) fn max_dirty_keys(&self) -> Option<usize> {
+        self.config.max_dirty_keys
+    }
+
     pub(crate) fn unloaded_iterator_enabled(&self) -> bool {
         self.config.unloaded_iterator
     }
@@ -382,6 +387,13 @@ impl KeySpaceConfig {
 
     pub fn disable_unload(mut self) -> Self {
         self.disable_unload = true;
+        self
+    }
+
+    /// Overrides Config::max_dirty_keys for this key space
+    // todo this override currently does not work correctly with unload_jitter
+    pub fn with_max_dirty_keys(mut self, max_dirty_keys: usize) -> Self {
+        self.max_dirty_keys = Some(max_dirty_keys);
         self
     }
 

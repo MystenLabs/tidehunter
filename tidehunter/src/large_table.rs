@@ -314,7 +314,8 @@ impl LargeTable {
 
     fn too_many_dirty(&self, entry: &mut LargeTableEntry) -> bool {
         if let Some(dk) = entry.state.dirty_keys() {
-            self.config
+            entry
+                .context
                 .excess_dirty_keys(dk.len().saturating_sub(entry.unload_jitter))
         } else {
             false
@@ -1036,7 +1037,7 @@ impl LargeTableEntry {
             }
             LargeTableEntryState::DirtyLoaded(position, dirty_keys) => {
                 // todo - this position can be invalid
-                if force_clean || config.excess_dirty_keys(dirty_keys.len()) {
+                if force_clean || self.context.excess_dirty_keys(dirty_keys.len()) {
                     self.context
                         .metrics
                         .unload

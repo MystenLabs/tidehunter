@@ -18,4 +18,14 @@ impl KsContext {
     pub fn id(&self) -> KeySpace {
         self.ks_config.id()
     }
+
+    pub fn max_dirty_keys(&self) -> usize {
+        self.ks_config
+            .max_dirty_keys()
+            .unwrap_or(self.config.max_dirty_keys)
+    }
+
+    pub fn excess_dirty_keys(&self, dirty_keys_count: usize) -> bool {
+        dirty_keys_count > self.max_dirty_keys()
+    }
 }

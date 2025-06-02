@@ -8,7 +8,8 @@ use std::cmp;
 pub struct Config {
     pub frag_size: u64,
     pub max_maps: usize,
-    /// Maximum number of dirty keys per LargeTable entry before it's counted as loaded
+    /// The maximum number of dirty keys per LargeTable entry before it's counted as loaded
+    /// This can be overwritten for individual key space via KeySpaceConfig::max_dirty_keys
     pub max_dirty_keys: usize,
     /// How often to take snapshot depending on the number of entries written to the wal
     pub snapshot_written_bytes: u64,
@@ -73,11 +74,6 @@ impl Config {
 
     pub fn snapshot_unload_threshold(&self) -> u64 {
         self.snapshot_unload_threshold
-    }
-
-    #[inline]
-    pub fn excess_dirty_keys(&self, dirty_keys_count: usize) -> bool {
-        dirty_keys_count > self.max_dirty_keys
     }
 
     pub fn direct_io(&self) -> bool {
