@@ -7,12 +7,12 @@
       unload_jitter_pct: 10
       direct_io: false
   stress_client_parameters:
-      read_threads: 1
+      mixed_threads: 1
       write_threads: 1
       write_size: 1024
       key_len: 32
       writes: 20000000
-      reads: 20000000
+      operations: 20000000
       background_writes: 0
       no_snapshot: false
       report: true
@@ -31,12 +31,12 @@
       unload_jitter_pct: 10
       direct_io: false
   stress_client_parameters:
-      read_threads: 1
+      mixed_threads: 1
       write_threads: 1
       write_size: 1048576
       key_len: 32
       writes: 50000
-      reads: 50000
+      operations: 50000
       background_writes: 0
       no_snapshot: false
       report: true
@@ -55,12 +55,12 @@
       unload_jitter_pct: 10
       direct_io: false
   stress_client_parameters:
-      read_threads: 10
+      mixed_threads: 10
       write_threads: 10
       write_size: 10240
       key_len: 32
       writes: 20000000
-      reads: 20000000
+      operations: 20000000
       background_writes: 0
       no_snapshot: false
       report: true

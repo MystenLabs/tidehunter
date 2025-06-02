@@ -111,10 +111,10 @@ jobs:
           echo "Started at: $(date)" >> ./results/summary.md
           START_TIME=$(date +%s)
           cargo run --release --manifest-path benchmarks/benchmark/Cargo.toml -- \
-            --reads 1000000 \
+            --operations 1000000 \
             --writes 1000000 \
             --write-threads 4 \
-            --read-threads 4 \
+            --mixed-threads 4 \
             --write-size 1024 \
             --key-len 32 \
             --background-writes 100000 > ./results/benchmark_${{ env.TIMESTAMP }}.txt
