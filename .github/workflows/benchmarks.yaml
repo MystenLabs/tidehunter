@@ -19,9 +19,8 @@ on:
   schedule:
     - cron: "0 0 * * 0" # Run at midnight on Sundays
 
-  # Optionally run on PRs with a specific label
   pull_request:
-    types: [labeled]
+    types: [opened, synchronize, reopened, labeled]
 
 # Ensure only one benchmark job runs at a time
 concurrency:
@@ -30,8 +29,7 @@ concurrency:
 
 jobs:
   benchmark:
-    # Only run on PRs with the 'run-benchmarks' label
-    if: github.event_name != 'pull_request' || github.event.label.name == 'run-benchmarks'
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
 
     name: Run Benchmarks
     runs-on: self-hosted
