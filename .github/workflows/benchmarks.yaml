@@ -97,8 +97,8 @@ jobs:
             --batch-size 1000 \
             --window-size 800 \
             --header-file data/bench-header-100GB-100K.dat \
-            --uniform-file data/bench-uniform-file-100GB-100K.dat \
-            | tee ./results/index_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+            --uniform-file data/bench-uniform-file-100GB-100K.dat > ./results/index_${{ env.TIMESTAMP }}.txt
+          cat ./results/index_${{ env.TIMESTAMP }}.txt >> ./results/summary.md
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
           echo "Total time: $DURATION seconds" >> ./results/summary.md
@@ -119,8 +119,8 @@ jobs:
             --read-threads 4 \
             --write-size 1024 \
             --key-len 32 \
-            --background-writes 100000 \
-            | tee ./results/benchmark_${{ env.TIMESTAMP }}.txt | tee -a ./results/summary.md
+            --background-writes 100000 > ./results/benchmark_${{ env.TIMESTAMP }}.txt
+          cat ./results/benchmark_${{ env.TIMESTAMP }}.txt >> ./results/summary.md
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
           echo "Total time: $DURATION seconds" >> ./results/summary.md
