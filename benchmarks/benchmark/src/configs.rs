@@ -81,9 +81,9 @@ impl FromStr for Backend {
 /// The benchmark parameters to configure the stress client
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StressClientParameters {
-    /// Number of read threads
-    #[serde(default = "defaults::default_read_threads")]
-    pub read_threads: usize,
+    /// Number of mixed read/write threads
+    #[serde(default = "defaults::default_mixed_threads")]
+    pub mixed_threads: usize,
     /// Number of write threads
     #[serde(default = "defaults::default_write_threads")]
     pub write_threads: usize,
@@ -96,10 +96,10 @@ pub struct StressClientParameters {
     /// The number of blocks to write per thread
     #[serde(default = "defaults::default_writes")]
     pub writes: usize,
-    /// The number of blocks to read per thread
-    #[serde(default = "defaults::default_reads")]
-    pub reads: usize,
-    /// Background writes per second during read test
+    /// The number of operations per thread in the mixed phase
+    #[serde(default = "defaults::default_operations")]
+    pub operations: usize,
+    /// Background writes per second during mixed test
     #[serde(default = "defaults::default_background_writes")]
     pub background_writes: usize,
     /// Whether to disable periodic snapshots
@@ -127,17 +127,20 @@ pub struct StressClientParameters {
     /// The backend DB
     #[serde(default = "defaults::default_backend")]
     pub backend: Backend,
+    /// Percentage of reads in the mixed read/write phase (0-100)
+    #[serde(default = "defaults::default_read_percentage")]
+    pub read_percentage: u8,
 }
 
 impl Default for StressClientParameters {
     fn default() -> Self {
         Self {
-            read_threads: defaults::default_read_threads(),
+            mixed_threads: defaults::default_mixed_threads(),
             write_threads: defaults::default_write_threads(),
             write_size: defaults::default_write_size(),
             key_len: defaults::default_key_len(),
             writes: defaults::default_writes(),
-            reads: defaults::default_reads(),
+            operations: defaults::default_operations(),
             background_writes: defaults::default_background_writes(),
             no_snapshot: defaults::default_no_snapshot(),
             path: None,
@@ -148,6 +151,7 @@ impl Default for StressClientParameters {
             reuse: None,
             read_mode: defaults::default_read_mode(),
             backend: defaults::default_backend(),
+            read_percentage: defaults::default_read_percentage(),
         }
     }
 }
@@ -156,7 +160,7 @@ impl Default for StressClientParameters {
 pub mod defaults {
     use super::{Backend, KeyLayout, ReadMode};
 
-    pub fn default_read_threads() -> usize {
+    pub fn default_mixed_threads() -> usize {
         1
     }
 
@@ -176,7 +180,7 @@ pub mod defaults {
         1_000_000
     }
 
-    pub fn default_reads() -> usize {
+    pub fn default_operations() -> usize {
         1_000_000
     }
 
@@ -211,6 +215,10 @@ pub mod defaults {
     pub fn default_backend() -> Backend {
         Backend::Tidehunter
     }
+
+    pub fn default_read_percentage() -> u8 {
+        80
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -242,8 +250,8 @@ pub struct StressArgs {
     )]
     pub parameters_path: Option<String>,
 
-    #[arg(long, help = "Number of read threads")]
-    read_threads: Option<usize>,
+    #[arg(long, help = "Number of mixed read/write threads")]
+    mixed_threads: Option<usize>,
     #[arg(long, help = "Number of write threads")]
     write_threads: Option<usize>,
     #[arg(long, short = 'v', help = "Length of the value")]
@@ -252,9 +260,9 @@ pub struct StressArgs {
     key_len: Option<usize>,
     #[arg(long, short = 'w', help = "Blocks to write per thread")]
     writes: Option<usize>,
-    #[arg(long, short = 'r', help = "Blocks to read per thread")]
-    reads: Option<usize>,
-    #[arg(long, short = 'u', help = "Background writes/s during read test")]
+    #[arg(long, help = "Operations per thread in mixed phase")]
+    operations: Option<usize>,
+    #[arg(long, short = 'u', help = "Background writes/s during mixed test")]
     background_writes: Option<usize>,
     #[arg(long, short = 'n', help = "Disable periodic snapshot")]
     no_snapshot: Option<bool>,
@@ -276,12 +284,14 @@ pub struct StressArgs {
     read_mode: Option<ReadMode>,
     #[arg(long, short = 'b', help = "Backend")]
     backend: Option<Backend>,
+    #[arg(long, help = "Percentage of reads in mixed phase (0-100)")]
+    read_percentage: Option<u8>,
 }
 
 /// Override default arguments with the ones provided by the user
 pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) -> StressTestConfigs {
-    if let Some(read_threads) = args.read_threads {
-        config.stress_client_parameters.read_threads = read_threads;
+    if let Some(mixed_threads) = args.mixed_threads {
+        config.stress_client_parameters.mixed_threads = mixed_threads;
     }
     if let Some(write_threads) = args.write_threads {
         config.stress_client_parameters.write_threads = write_threads;
@@ -295,8 +305,8 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     if let Some(writes) = args.writes {
         config.stress_client_parameters.writes = writes;
     }
-    if let Some(reads) = args.reads {
-        config.stress_client_parameters.reads = reads;
+    if let Some(operations) = args.operations {
+        config.stress_client_parameters.operations = operations;
     }
     if let Some(background_writes) = args.background_writes {
         config.stress_client_parameters.background_writes = background_writes;
@@ -330,6 +340,9 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     }
     if let Some(backend) = args.backend {
         config.stress_client_parameters.backend = backend;
+    }
+    if let Some(read_percentage) = args.read_percentage {
+        config.stress_client_parameters.read_percentage = read_percentage;
     }
 
     config

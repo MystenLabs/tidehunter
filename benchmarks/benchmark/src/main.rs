@@ -150,7 +150,11 @@ pub fn main() {
             storage_len as f64 / 1024. / 1024. / 1024.
         );
     }
-    println!("Starting read test");
+    println!(
+        "Starting mixed read/write test ({}% reads, {}% writes)",
+        stress.parameters.read_percentage,
+        100 - stress.parameters.read_percentage
+    );
     let manual_stop = if stress.parameters.background_writes > 0 {
         stress.background(
             stress.parameters.write_threads,
@@ -160,20 +164,20 @@ pub fn main() {
         Default::default()
     };
     let elapsed = stress.measure(
-        stress.parameters.read_threads,
-        StressThread::run_reads,
+        stress.parameters.mixed_threads,
+        StressThread::run_mixed_operations,
         &mut report,
     );
     manual_stop.store(true, Ordering::Relaxed);
-    let read = stress.parameters.reads * stress.parameters.read_threads;
-    let read_bytes = read * stress.parameters.write_size;
+    let total_ops = stress.parameters.operations * stress.parameters.mixed_threads;
+    let total_bytes = total_ops * stress.parameters.write_size;
     let msecs = elapsed.as_millis() as usize;
-    let read_sec = dec_div(read / msecs * 1000);
+    let ops_sec = dec_div(total_ops / msecs * 1000);
     report!(
         report,
-        "Read test done in {elapsed:?}: {} reads/s, {}/sec",
-        read_sec,
-        byte_div(read_bytes / msecs * 1000)
+        "Mixed test done in {elapsed:?}: {} ops/s, {}/sec",
+        ops_sec,
+        byte_div(total_bytes / msecs * 1000),
     );
     if print_report {
         println!("Writing report file");
@@ -198,7 +202,7 @@ pub fn main() {
         writeln!(
             file,
             "{: <15}|{: <15}|{: <24}|{: <8}|{: <8}",
-            start_time, end_time, stress.parameters.tldr, write_sec, read_sec
+            start_time, end_time, stress.parameters.tldr, write_sec, ops_sec
         )
         .unwrap();
     }
@@ -376,49 +380,71 @@ impl StressThread {
         }
     }
 
-    pub fn run_reads(self) {
+    pub fn run_mixed_operations(self) {
         let _ = self.start_lock.read();
         let mut thread_rng = ThreadRng::default();
         let max_pos = self.max_global_pos();
-        for _ in 0..self.parameters.reads {
-            let pos = thread_rng.gen_range(0..max_pos);
-            let timer;
-            match self.parameters.read_mode {
-                ReadMode::Get => {
-                    let (key, value) = self.key_value(pos);
-                    timer = Instant::now();
-                    let found_value = self.db.get(&key).expect("Expected value not found");
-                    assert_eq!(
-                        &value[..],
-                        &found_value[..],
-                        "Found value does not match expected value"
-                    );
+        let read_percentage = self.parameters.read_percentage;
+
+        for _ in 0..self.parameters.operations {
+            // Randomly decide whether to read or write based on percentage
+            let do_read = thread_rng.gen_range(0..100) < read_percentage;
+
+            if do_read {
+                // Perform a read operation
+                let pos = thread_rng.gen_range(0..max_pos);
+                let timer;
+                match self.parameters.read_mode {
+                    ReadMode::Get => {
+                        let (key, value) = self.key_value(pos);
+                        timer = Instant::now();
+                        let found_value = self.db.get(&key).expect("Expected value not found");
+                        assert_eq!(
+                            &value[..],
+                            &found_value[..],
+                            "Found value does not match expected value"
+                        );
+                    }
+                    ReadMode::Lt(iterations) => {
+                        let mut key = vec![0u8; self.parameters.key_len];
+                        thread_rng.fill(&mut key[..]);
+                        timer = Instant::now();
+                        let result = self.db.get_lt(&key, iterations);
+                        let result = if result.len() == iterations {
+                            "found"
+                        } else if result.len() == 0 {
+                            "not_found"
+                        } else {
+                            "partial"
+                        };
+                        self.benchmark_metrics
+                            .get_lt_result
+                            .with_label_values(&[result])
+                            .inc();
+                    }
                 }
-                ReadMode::Lt(iterations) => {
-                    let mut key = vec![0u8; self.parameters.key_len];
-                    thread_rng.fill(&mut key[..]);
-                    timer = Instant::now();
-                    let result = self.db.get_lt(&key, iterations);
-                    let result = if result.len() == iterations {
-                        "found"
-                    } else if result.len() == 0 {
-                        "not_found"
-                    } else {
-                        "partial"
-                    };
-                    self.benchmark_metrics
-                        .get_lt_result
-                        .with_label_values(&[result])
-                        .inc();
+                let latency = timer.elapsed().as_micros();
+                self.benchmark_metrics
+                    .bench_reads
+                    .with_label_values(&[self.db.name()])
+                    .observe(latency as f64);
+                if self.latency.increment(latency as u64).is_err() {
+                    self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
-            }
-            let latency = timer.elapsed().as_micros();
-            self.benchmark_metrics
-                .bench_reads
-                .with_label_values(&[self.db.name()])
-                .observe(latency as f64);
-            if self.latency.increment(latency as u64).is_err() {
-                self.latency_errors.fetch_add(1, Ordering::Relaxed);
+            } else {
+                // Perform a write operation to a new key beyond the initial dataset
+                let pos = max_pos + thread_rng.gen_range(0..max_pos);
+                let (key, value) = self.key_value(pos);
+                let timer = Instant::now();
+                self.db.insert(key.into(), value.into());
+                let latency = timer.elapsed().as_micros();
+                self.benchmark_metrics
+                    .bench_writes
+                    .with_label_values(&[self.db.name()])
+                    .observe(latency as f64);
+                if self.latency.increment(latency as u64).is_err() {
+                    self.latency_errors.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
