@@ -217,7 +217,7 @@ pub mod defaults {
     }
 
     pub fn default_read_percentage() -> u8 {
-        80
+        100
     }
 }
 
