@@ -433,7 +433,7 @@ impl StressThread {
                 }
             } else {
                 // Perform a write operation to a new key beyond the initial dataset
-                let pos = max_pos + thread_rng.gen_range(0..max_pos);
+                let pos = thread_rng.gen_range(max_pos..max_pos * 2);
                 let (key, value) = self.key_value(pos);
                 let timer = Instant::now();
                 self.db.insert(key.into(), value.into());
