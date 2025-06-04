@@ -3,7 +3,6 @@ use crate::wal::WalPosition;
 use minibytes::Bytes;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
-use std::ops::RangeInclusive;
 
 #[derive(Default, Clone, Debug)]
 #[doc(hidden)]
@@ -116,21 +115,6 @@ impl IndexTable {
             } else {
                 iterator.next().map(|(key, value)| (key.clone(), *value))
             }
-        }
-    }
-
-    pub fn last_in_range(
-        &self,
-        from_included: &Bytes,
-        to_included: &Bytes,
-    ) -> Option<(Bytes, WalPosition)> {
-        let range = self
-            .data
-            .range::<Bytes, RangeInclusive<&Bytes>>(from_included..=to_included);
-        if let Some((bytes, position)) = range.last() {
-            Some((bytes.clone(), *position))
-        } else {
-            None
         }
     }
 

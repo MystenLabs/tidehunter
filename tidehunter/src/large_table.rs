@@ -647,33 +647,6 @@ impl LargeTable {
         }
     }
 
-    /// See Db::last_in_range for documentation.
-    pub fn last_in_range<L: Loader>(
-        &self,
-        ks: &KeySpaceDesc,
-        cell: &CellId,
-        from_included: &Bytes,
-        to_included: &Bytes,
-        loader: &L,
-    ) -> Result<Option<(Bytes, WalPosition)>, L::Error> {
-        // todo duplicate code with next_entry(...)
-        let row = ks.mutex_for_cell(&cell);
-        let ks_table = self.ks_table(ks);
-        let mut row = ks_table.lock(
-            row,
-            &self
-                .metrics
-                .large_table_contention
-                .with_label_values(&[ks.name()]),
-        );
-        // todo use try_entry_mut
-        let entry = row.entry_mut(cell);
-        // todo read from disk instead of loading
-        entry.maybe_load(loader)?;
-        // todo make sure can't have dirty markers in index in this state
-        Ok(entry.data.last_in_range(from_included, to_included))
-    }
-
     pub fn report_entries_state(&self) {
         let mut states: HashMap<_, i64> = HashMap::new();
         for ks_table in &self.table {
@@ -1005,7 +978,7 @@ impl LargeTableEntry {
     fn unload<L: Loader>(
         &mut self,
         loader: &L,
-        config: &Config,
+        _config: &Config,
         force_clean: bool,
     ) -> Result<(), L::Error> {
         match &self.state {

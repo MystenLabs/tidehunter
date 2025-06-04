@@ -665,43 +665,6 @@ fn test_small_keys() {
 }
 
 #[test]
-fn test_last_in_range() {
-    let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
-    let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
-    let db = Db::open(
-        dir.path(),
-        key_shape.clone(),
-        config.clone(),
-        Metrics::new(),
-    )
-    .unwrap();
-    db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
-    db.insert(ks, vec![1, 2, 3, 4, 5], vec![2]).unwrap();
-    db.insert(ks, vec![1, 2, 3, 4, 10], vec![3]).unwrap();
-    assert_eq!(
-        db.last_in_range(ks, &vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 8].into())
-            .unwrap(),
-        Some((vec![1, 2, 3, 4, 6].into(), vec![1].into()))
-    );
-    assert_eq!(
-        db.last_in_range(ks, &vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 6].into())
-            .unwrap(),
-        Some((vec![1, 2, 3, 4, 6].into(), vec![1].into()))
-    );
-    assert_eq!(
-        db.last_in_range(ks, &vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 5].into())
-            .unwrap(),
-        Some((vec![1, 2, 3, 4, 5].into(), vec![2].into()))
-    );
-    assert_eq!(
-        db.last_in_range(ks, &vec![1, 2, 3, 4, 4].into(), &vec![1, 2, 3, 4, 4].into())
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
 fn test_value_cache() {
     let dir = tempdir::TempDir::new("test-value-cache").unwrap();
     let config = Arc::new(Config::small());
@@ -1042,27 +1005,6 @@ fn test_key_reduction() {
     assert_eq!(db.get(ks, &[1, 5, 3, 4]).unwrap().unwrap().as_ref(), &[3]);
     assert!(db.get(ks, &[1, 6, 3, 4]).unwrap().is_none());
     assert!(db.get(ks, &[1, 5, 4, 4]).unwrap().is_none());
-
-    // Last in range tests
-    let (k, v) = db
-        .last_in_range(
-            ks,
-            &Bytes::from(vec![1, 3, 3, 4]),
-            &Bytes::from(vec![1, 3, 3, 4]),
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(k.as_ref(), &[1, 3, 3, 4]);
-    assert_eq!(v.as_ref(), &[2]);
-
-    let r = db
-        .last_in_range(
-            ks,
-            &Bytes::from(vec![1, 3, 6, 7]),
-            &Bytes::from(vec![1, 3, 6, 7]),
-        )
-        .unwrap();
-    assert_eq!(None, r);
 
     // Iterator test (forward direction)
     let mut iterator = db.iterator(ks);

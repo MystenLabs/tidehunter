@@ -248,42 +248,6 @@ impl Db {
         DbIterator::new(self.clone(), ks)
     }
 
-    /// Returns last key-value pair in the given range, where both ends of the range are included
-    ///
-    /// Both start and end of the range should have the same first 4 bytes,
-    /// otherwise this function panics.
-    pub fn last_in_range(
-        &self,
-        ks: KeySpace,
-        full_from_included: &Bytes,
-        full_to_included: &Bytes,
-    ) -> DbResult<Option<(Bytes, Bytes)>> {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["last_in_range", ks.name()])
-            .mcs_timer();
-        // todo use reduced_key instead of reduced_key_bytes
-        let from_included = ks.reduced_key_bytes(full_from_included.clone());
-        let to_included = ks.reduced_key_bytes(full_to_included.clone());
-        let cell = self
-            .key_shape
-            .range_cell(ks.id(), &from_included, &to_included);
-        let Some((_key, position)) =
-            self.large_table
-                .last_in_range(ks, &cell, &from_included, &to_included, self)?
-        else {
-            return Ok(None);
-        };
-        let (key, value) = self.read_record(position)?;
-        if key <= full_to_included && key >= full_from_included {
-            Ok(Some((key, value)))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Returns true if this storage is empty.
     ///
     /// (warn) Right now it returns true if storage was never inserted true,

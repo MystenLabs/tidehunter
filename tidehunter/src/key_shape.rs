@@ -311,18 +311,6 @@ impl KeySpaceDesc {
         }
     }
 
-    /// Returns the cell containing the range.
-    /// Right now, this only works if the entire range "fits" single cell.
-    pub(crate) fn range_cell(&self, from_included: &[u8], to_included: &[u8]) -> CellId {
-        let start_prefix = self.cell_id(&from_included);
-        let end_prefix = self.cell_id(&to_included);
-        if start_prefix == end_prefix {
-            end_prefix
-        } else {
-            panic!("Can't have ordered iterator over key range that does not fit same large table cell");
-        }
-    }
-
     pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
         self.key_indexing().reduce_key(key)
     }
@@ -464,15 +452,6 @@ impl KeyShape {
 
     pub(crate) fn num_ks(&self) -> usize {
         self.key_spaces.len()
-    }
-
-    pub(crate) fn range_cell(
-        &self,
-        ks: KeySpace,
-        from_included: &[u8],
-        to_included: &[u8],
-    ) -> CellId {
-        self.ks(ks).range_cell(from_included, to_included)
     }
 
     #[doc(hidden)]
