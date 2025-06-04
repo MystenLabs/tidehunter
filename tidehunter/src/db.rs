@@ -50,14 +50,15 @@ impl Db {
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let (flusher_sender, flusher_receiver) = mpsc::channel();
         let flusher = IndexFlusher::new(flusher_sender, metrics.clone());
+        let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
             config.clone(),
             flusher,
             metrics.clone(),
+            wal.as_ref(),
         );
-        let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
         let control_region_store = Mutex::new(control_region_store);

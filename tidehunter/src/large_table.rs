@@ -80,12 +80,13 @@ pub(crate) struct LargeTableSnapshot {
 }
 
 impl LargeTable {
-    pub fn from_unloaded(
+    pub fn from_unloaded<L: Loader>(
         key_shape: &KeyShape,
         snapshot: &LargeTableContainer<WalPosition>,
         config: Arc<Config>,
         flusher: IndexFlusher,
         metrics: Arc<Metrics>,
+        loader: &L,
     ) -> Self {
         assert_eq!(
             snapshot.0.len(),
@@ -105,6 +106,7 @@ impl LargeTable {
                         ks.num_mutexes()
                     );
                 }
+                let mut bloom_filter_restore_time = 0;
                 let rows = ks_snapshot.iter().map(|row_snapshot| {
                     let context = KsContext {
                         ks_config: ks.clone(),
@@ -112,12 +114,27 @@ impl LargeTable {
                         metrics: metrics.clone(),
                     };
                     let entries = row_snapshot.iter().map(|(cell, position)| {
+                        let bloom_filter = context.ks_config.bloom_filter().map(|opts| {
+                            let mut filter = BloomFilter::with_rate(opts.rate, opts.count);
+                            if position.is_valid() {
+                                let now = Instant::now();
+                                let data = loader.load(&context.ks_config, *position).expect(
+                                    "Failed to load an index entry to reconstruct bloom filter",
+                                );
+                                for key in data.data.keys() {
+                                    filter.insert(key);
+                                }
+                                bloom_filter_restore_time += now.elapsed().as_millis();
+                            }
+                            filter
+                        });
                         let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
                         LargeTableEntry::from_snapshot_position(
                             context.clone(),
                             cell.clone(),
                             position,
                             unload_jitter,
+                            bloom_filter,
                         )
                     });
                     let entries = match ks.key_type() {
@@ -136,6 +153,12 @@ impl LargeTable {
                     }
                 });
                 let rows = ShardedMutex::from_iterator(rows);
+                if bloom_filter_restore_time > 0 {
+                    metrics
+                        .bloom_filter_restore
+                        .with_label_values(&[ks.name()])
+                        .inc_by(bloom_filter_restore_time as u64);
+                }
                 KsTable {
                     ks: ks.clone(),
                     rows,
@@ -727,7 +750,7 @@ impl Row {
 }
 
 pub trait Loader {
-    type Error;
+    type Error: std::fmt::Debug;
 
     fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> Result<IndexTable, Self::Error>;
 
@@ -744,17 +767,29 @@ impl LargeTableEntry {
         cell: CellId,
         position: WalPosition,
         unload_jitter: usize,
+        bloom_filter: Option<BloomFilter>,
     ) -> Self {
         Self::new_with_state(
             context,
             cell,
             LargeTableEntryState::Unloaded(position),
             unload_jitter,
+            bloom_filter,
         )
     }
 
     pub fn new_empty(context: KsContext, cell: CellId, unload_jitter: usize) -> Self {
-        Self::new_with_state(context, cell, LargeTableEntryState::Empty, unload_jitter)
+        let bloom_filter = context
+            .ks_config
+            .bloom_filter()
+            .map(|params| BloomFilter::with_rate(params.rate, params.count));
+        Self::new_with_state(
+            context,
+            cell,
+            LargeTableEntryState::Empty,
+            unload_jitter,
+            bloom_filter,
+        )
     }
 
     fn new_with_state(
@@ -762,11 +797,8 @@ impl LargeTableEntry {
         cell: CellId,
         state: LargeTableEntryState,
         unload_jitter: usize,
+        bloom_filter: Option<BloomFilter>,
     ) -> Self {
-        let bloom_filter = context
-            .ks_config
-            .bloom_filter()
-            .map(|params| BloomFilter::with_rate(params.rate, params.count));
         Self {
             context,
             cell,
@@ -784,11 +816,12 @@ impl LargeTableEntry {
         cell: CellId,
         position: &WalPosition,
         unload_jitter: usize,
+        bloom_filter: Option<BloomFilter>,
     ) -> Self {
         if position == &WalPosition::INVALID {
             LargeTableEntry::new_empty(context, cell, unload_jitter)
         } else {
-            LargeTableEntry::new_unloaded(context, cell, *position, unload_jitter)
+            LargeTableEntry::new_unloaded(context, cell, *position, unload_jitter, bloom_filter)
         }
     }
 
@@ -1339,6 +1372,7 @@ impl Entries {
 mod tests {
     use super::*;
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
+    use crate::wal::Wal;
     use std::io;
 
     #[test]
@@ -1349,12 +1383,20 @@ mod tests {
         let b = ks.add_key_space("b", 0, 1, KeyType::uniform(1));
         ks.add_key_space("c", 0, 1, KeyType::uniform(1));
         let ks = ks.build();
+        let tmp_dir = tempdir::TempDir::new("test_ks_allocation").unwrap();
+        let wal = Wal::open(
+            &tmp_dir.path().join("wal"),
+            config.wal_layout(),
+            Metrics::new(),
+        )
+        .unwrap();
         let l = LargeTable::from_unloaded(
             &ks,
             &LargeTableContainer::new_from_key_shape(&ks, WalPosition::INVALID),
             Arc::new(config),
             IndexFlusher::new_unstarted_for_test(),
             Metrics::new(),
+            wal.as_ref(),
         );
         let (mut row, cell) = l.row(ks.ks(a), &[]);
         assert_eq!(row.entry_mut(&cell).context.name(), "a");
@@ -1520,6 +1562,7 @@ mod tests {
                 cell_id.clone(),
                 WalPosition::test_value(42),
                 0,
+                None,
             );
 
             let mut row = Row {
@@ -1624,6 +1667,7 @@ mod tests {
                 cell_id.clone(),
                 WalPosition::test_value(42),
                 0,
+                None,
             );
 
             // Add a new key (in-memory but marked dirty)
