@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::benchmark::BenchmarkParameters;
 use crate::client::Instance;
+use crate::collector::MetricLabel;
 
 pub mod target;
 
@@ -58,18 +59,8 @@ pub trait ProtocolCommands {
 /// The names of the minimum metrics exposed by the protocol that are required to
 /// compute performance.
 pub trait ProtocolMetrics {
-    /// The name of the metric reporting the total duration of the benchmark (in seconds).
-    const BENCHMARK_DURATION: &'static str;
-    /// The name of the metric reporting the total number of finalized transactions.
-    const TOTAL_TRANSACTIONS: &'static str;
-    /// The name of the metric reporting the latency buckets.
-    const LATENCY_BUCKETS: &'static str;
-    /// The name of the metric reporting the sum of the end-to-end latency of all finalized
-    /// transactions.
-    const LATENCY_SUM: &'static str;
-    /// The name of the metric reporting the square of the sum of the end-to-end latency of all
-    /// finalized transactions.
-    const LATENCY_SQUARED_SUM: &'static str;
+    /// The name of the metric that contains the duration of the benchmark.
+    fn bucket_metrics(&self) -> Vec<MetricLabel>;
 
     /// The network path where the nodes expose prometheus metrics.
     fn nodes_metrics_path<I>(
@@ -101,15 +92,17 @@ pub mod test_protocol_metrics {
     use super::ProtocolMetrics;
     use crate::benchmark::BenchmarkParameters;
     use crate::client::Instance;
+    use crate::collector::MetricLabel;
 
     pub struct TestProtocolMetrics;
 
     impl ProtocolMetrics for TestProtocolMetrics {
-        const BENCHMARK_DURATION: &'static str = "benchmark_duration";
-        const TOTAL_TRANSACTIONS: &'static str = "latency_s_count";
-        const LATENCY_BUCKETS: &'static str = "latency_s";
-        const LATENCY_SUM: &'static str = "latency_s_sum";
-        const LATENCY_SQUARED_SUM: &'static str = "latency_squared_s";
+        fn bucket_metrics(&self) -> Vec<MetricLabel> {
+            vec![
+                MetricLabel("benchmark_duration".to_string()),
+                MetricLabel("latency_s".to_string()),
+            ]
+        }
 
         fn nodes_metrics_path<I>(
             &self,

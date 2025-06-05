@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use futures::future::try_join_all;
@@ -36,7 +35,7 @@ impl JobId {
 
 /// A label for a metric, which is a string that identifies the metric in Prometheus.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize)]
-struct MetricLabel(String);
+pub struct MetricLabel(pub String);
 
 impl Display for MetricLabel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -118,11 +117,10 @@ impl MetricsCollector {
     /// Create a new metrics collector with the given parameters, Prometheus address, and metrics to collect.
     pub fn new(
         parameters: BenchmarkParameters,
-        prometheus_address: &SocketAddr,
+        prometheus_address: &str,
         metrics: Vec<MetricLabel>,
     ) -> MonitorResult<Self> {
-        let prometheus_url = format!("http://{prometheus_address}");
-        let client = PrometheusClient::try_from(prometheus_url)?;
+        let client = PrometheusClient::try_from(prometheus_address)?;
         Ok(Self {
             parameters,
             client,

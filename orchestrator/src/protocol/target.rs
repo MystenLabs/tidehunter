@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
 use crate::benchmark::BenchmarkParameters;
 use crate::client::Instance;
+use crate::collector::MetricLabel;
 use crate::settings::Settings;
 
 const TARGET_CONFIG_FILE: &str = "target_configs.yaml";
@@ -110,11 +111,12 @@ impl ProtocolCommands for TargetProtocol {
 }
 
 impl ProtocolMetrics for TargetProtocol {
-    const BENCHMARK_DURATION: &'static str = "";
-    const TOTAL_TRANSACTIONS: &'static str = "latency_s_count";
-    const LATENCY_BUCKETS: &'static str = "latency_s";
-    const LATENCY_SUM: &'static str = "latency_s_sum";
-    const LATENCY_SQUARED_SUM: &'static str = "";
+    fn bucket_metrics(&self) -> Vec<MetricLabel> {
+        vec![
+            MetricLabel("bench_writes_bucket".to_string()),
+            MetricLabel("bench_reads_bucket".to_string()),
+        ]
+    }
 
     fn nodes_metrics_path<I>(
         &self,
