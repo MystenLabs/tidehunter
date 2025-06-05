@@ -17,6 +17,7 @@ use testbed::Testbed;
 
 mod benchmark;
 mod client;
+mod collector;
 mod display;
 mod error;
 mod logs;
