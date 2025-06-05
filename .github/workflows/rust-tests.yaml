@@ -25,6 +25,11 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tidehunter_repo_ref || github.ref }}
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev clang pkg-config
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install rustfmt
