@@ -45,8 +45,7 @@ impl Display for AwsClient {
 }
 
 impl AwsClient {
-    const OS_IMAGE: &'static str =
-        "Canonical, Ubuntu, 24.04 LTS, amd64 noble image build on 2024-04-23";
+    const OS_IMAGE: &'static str = "*ubuntu/*ubuntu-noble-24.04-arm64*";
     const DEFAULT_EBS_SIZE_GB: i32 = 500; // Default size of the EBS volume in GB.
 
     /// Make a new AWS client.
@@ -122,13 +121,22 @@ impl AwsClient {
     /// Query the image id determining the os of the instances.
     /// NOTE: The image id changes depending on the region.
     async fn find_image_id(&self, client: &aws_sdk_ec2::Client) -> CloudProviderResult<String> {
-        // Query all images that match the description.
-        let request = client.describe_images().filters(
-            FilterBuilder::default()
-                .name("description")
-                .values(Self::OS_IMAGE)
-                .build(),
-        );
+        // Query all images that match the description using wildcard pattern and additional filters.
+        let request = client
+            .describe_images()
+            .owners("099720109477") // canonical
+            .filters(
+                FilterBuilder::default()
+                    .name("name")
+                    .values(Self::OS_IMAGE)
+                    .build(),
+            )
+            .filters(
+                FilterBuilder::default()
+                    .name("state")
+                    .values("available")
+                    .build(),
+            );
         let response = request.send().await?;
 
         // Parse the response to select the first returned image id.
@@ -175,13 +183,14 @@ impl AwsClient {
         Ok(())
     }
 
-    /// Return the command to mount the first (standard) NVMe drive.
+    /// Return the command to mount the largest available NVMe drive.
     fn nvme_mount_command(&self) -> Vec<String> {
-        const DRIVE: &str = "nvme1n1";
         let directory = self.settings.working_dir.display();
         vec![
-            format!("(sudo mkfs.ext4 -E nodiscard /dev/{DRIVE} || true)"),
-            format!("(sudo mount /dev/{DRIVE} {directory} || true)"),
+            // Find the largest NVMe device that's not the root device
+            format!("NVME_DRIVE=$(lsblk -d -n -o NAME,SIZE,TYPE | grep nvme | grep -v $(lsblk -n -o NAME,MOUNTPOINT | grep '/$' | cut -d' ' -f1 | sed 's/[0-9]*$//') | sort -k2 -hr | head -n1 | cut -d' ' -f1)"),
+            format!("(sudo mkfs.ext4 -E nodiscard /dev/$NVME_DRIVE || true)"),
+            format!("(sudo mount /dev/$NVME_DRIVE {directory} || true)"),
             format!("sudo chmod 777 -R {directory}"),
         ]
     }
