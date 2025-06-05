@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -16,13 +17,60 @@ use crate::error::{MonitorError, MonitorResult};
 use crate::settings::Settings;
 use crate::Config;
 
-type JobId = String;
-type MetricLabel = String;
-type Le = String;
-type Buckets = HashMap<Le, Vec<Sample>>;
+/// A unique identifier for a job.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
+struct JobId(String);
+
+impl JobId {
+    /// Extract the index from the job id.
+    fn index(&self) -> usize {
+        // The job id is expected to be in the format "instance-node-<index>".
+        self.0
+            .split('-')
+            .last()
+            .expect("Valid job id is hyphenated")
+            .parse::<usize>()
+            .expect("Job id contains the node index")
+    }
+}
+
+/// A label for a metric, which is a string that identifies the metric in Prometheus.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
+struct MetricLabel(String);
+
+impl Display for MetricLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A label for a bucket in a histogram metric, which is a string that identifies the bucket.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
+struct Le(String);
+
+/// A collection of buckets for a metric, where each bucket is keyed by a label.
+#[derive(Serialize)]
+struct Buckets(HashMap<Le, Vec<Sample>>);
+
+impl Buckets {
+    /// Create a new empty collection of buckets.
+    pub fn new() -> Self {
+        Buckets(HashMap::new())
+    }
+
+    /// Insert a sample into the collection of buckets.
+    pub fn insert(&mut self, le: Le, sample: Sample) {
+        self.0.entry(le).or_default().push(sample);
+    }
+
+    /// Extend the collection with another collection of buckets.
+    pub fn extend(&mut self, other: Buckets) {
+        self.0.extend(other.0);
+    }
+}
 
 /// A sample of a metric, containing a timestamp and a value.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Sample {
     /// The timestamp of the sample.
     timestamp: f64,
@@ -61,7 +109,7 @@ pub struct MetricsCollector {
     /// The Prometheus client used to query the metrics.
     client: PrometheusClient,
     /// The metrics to collect from Prometheus.
-    metrics: Vec<String>,
+    metrics: Vec<MetricLabel>,
     /// The collection of metrics, keyed by job id.
     collection: HashMap<JobId, BenchmarkResult>,
 }
@@ -71,7 +119,7 @@ impl MetricsCollector {
     pub fn new(
         parameters: BenchmarkParameters,
         prometheus_address: &SocketAddr,
-        metrics: Vec<String>,
+        metrics: Vec<MetricLabel>,
     ) -> MonitorResult<Self> {
         let prometheus_url = format!("http://{prometheus_address}");
         let client = PrometheusClient::try_from(prometheus_url)?;
@@ -124,9 +172,9 @@ impl MetricsCollector {
             // In case of a bucket metric, we expect the 'le' label to be present.
             if let Some(le) = element.metric().get("le") {
                 collection
-                    .entry(id.to_string())
-                    .or_insert_with(HashMap::new)
-                    .insert(le.to_string(), vec![sample]);
+                    .entry(JobId(id.to_string()))
+                    .or_insert_with(Buckets::new)
+                    .insert(Le(le.to_string()), sample);
             }
         }
 
@@ -148,18 +196,16 @@ impl MetricsCollector {
                 })
                 .results
                 .entry(metric.clone())
-                .or_insert_with(HashMap::new)
+                .or_insert_with(Buckets::new)
                 .extend(buckets);
         }
     }
 
     /// Match the job id with the corresponding target configuration.
-    fn match_config(&self, id: &str) -> &Config {
-        let str = id.split('-').last().expect("Valid job id is hyphenated");
-        let index = str.parse::<usize>().expect("Job id contains the node idx");
+    fn match_config(&self, id: &JobId) -> &Config {
         self.parameters
             .target_configs
-            .get(index)
+            .get(id.index())
             .expect("Each job id should match a target config")
     }
 
@@ -179,7 +225,7 @@ mod test {
     use prometheus_http_query::Client as PrometheusClient;
 
     use crate::benchmark::BenchmarkParameters;
-    use crate::collector::MetricsCollector;
+    use crate::collector::{Buckets, JobId, Le, MetricLabel, MetricsCollector, Sample};
 
     /// Test data for the metrics collector.
     const TEST_VECTOR: &'static str = r#"
@@ -252,6 +298,18 @@ mod test {
 ]
     "#;
 
+    impl From<&str> for Le {
+        fn from(s: &str) -> Self {
+            Le(s.to_string())
+        }
+    }
+
+    impl Buckets {
+        fn get(&self, le: &Le) -> Option<&Vec<Sample>> {
+            self.0.get(le)
+        }
+    }
+
     #[test]
     fn parse_response() {
         let vector: Vec<InstantVector> = serde_json::from_str(TEST_VECTOR).unwrap();
@@ -261,32 +319,34 @@ mod test {
         assert!(!result.is_empty());
 
         // Check results for instance-node-0
-        assert!(result.contains_key("instance-node-0"));
-        let buckets_0 = result.get("instance-node-0").unwrap();
-        let bucket_0_1 = buckets_0.get("13.719999999999997").unwrap();
+        let job_0 = JobId("instance-node-0".to_string());
+        assert!(result.contains_key(&job_0));
+        let buckets_0 = result.get(&job_0).unwrap();
+        let bucket_0_1 = buckets_0.get(&"13.719999999999997".into()).unwrap();
         assert_eq!(bucket_0_1.len(), 1);
         assert_eq!(bucket_0_1[0].value, 0.0);
         assert_eq!(bucket_0_1[0].timestamp, 1749134611.612);
 
         // Check results for instance-node-1
-        assert!(result.contains_key("instance-node-1"));
-        let buckets_1 = result.get("instance-node-1").unwrap();
-        let bucket_1_0 = buckets_1.get("+Inf").unwrap();
+        let job_1 = JobId("instance-node-1".to_string());
+        assert!(result.contains_key(&job_1));
+        let buckets_1 = result.get(&job_1).unwrap();
+        let bucket_1_0 = buckets_1.get(&"+Inf".into()).unwrap();
         assert_eq!(bucket_1_0.len(), 1);
         assert_eq!(bucket_1_0[0].value, 19890.0);
         assert_eq!(bucket_1_0[0].timestamp, 1749134611.612);
 
-        let bucket_1_1 = buckets_1.get("103.30523391999995").unwrap();
+        let bucket_1_1 = buckets_1.get(&"103.30523391999995".into()).unwrap();
         assert_eq!(bucket_1_1.len(), 1);
         assert_eq!(bucket_1_1[0].value, 0.0);
         assert_eq!(bucket_1_1[0].timestamp, 1749134611.612);
 
-        let bucket_1_2 = buckets_1.get("1088.9766689046844").unwrap();
+        let bucket_1_2 = buckets_1.get(&"1088.9766689046844".into()).unwrap();
         assert_eq!(bucket_1_2.len(), 1);
         assert_eq!(bucket_1_2[0].value, 19780.0);
         assert_eq!(bucket_1_2[0].timestamp, 1749134611.612);
 
-        let bucket_1_3 = buckets_1.get("11479.28464434906").unwrap();
+        let bucket_1_3 = buckets_1.get(&"11479.28464434906".into()).unwrap();
         assert_eq!(bucket_1_3.len(), 1);
         assert_eq!(bucket_1_3[0].value, 19879.0);
         assert_eq!(bucket_1_3[0].timestamp, 1749134611.612);
@@ -294,7 +354,7 @@ mod test {
 
     #[test]
     fn update_collector() {
-        let metric_label = "bench_writes_bucket".to_string();
+        let metric_label = MetricLabel("bench_writes_bucket".to_string());
         let mut collector = MetricsCollector {
             parameters: BenchmarkParameters::new_for_test(),
             client: PrometheusClient::default(),
@@ -310,45 +370,47 @@ mod test {
         assert_eq!(collector.collection.len(), 2);
 
         // Check the results for instance-node-0
-        assert!(collector.collection.contains_key("instance-node-0"));
+        let job_0 = JobId("instance-node-0".to_string());
+        assert!(collector.collection.contains_key(&job_0));
         let result_0 = collector
             .collection
-            .get("instance-node-0")
+            .get(&job_0)
             .unwrap()
             .results
             .get(&metric_label)
             .unwrap();
 
-        let buckets_0 = result_0.get("13.719999999999997").unwrap();
+        let buckets_0 = result_0.get(&"13.719999999999997".into()).unwrap();
         assert_eq!(buckets_0.len(), 1);
         assert_eq!(buckets_0[0].value, 0.0);
         assert_eq!(buckets_0[0].timestamp, 1749134611.612);
 
         // Check the results for instance-node-1
-        assert!(collector.collection.contains_key("instance-node-1"));
+        let job_1 = JobId("instance-node-1".to_string());
+        assert!(collector.collection.contains_key(&job_1));
         let result_1 = collector
             .collection
-            .get("instance-node-1")
+            .get(&job_1)
             .unwrap()
             .results
             .get(&metric_label)
             .unwrap();
-        let buckets_1 = result_1.get("+Inf").unwrap();
+        let buckets_1 = result_1.get(&"+Inf".into()).unwrap();
         assert_eq!(buckets_1.len(), 1);
         assert_eq!(buckets_1[0].value, 19890.0);
         assert_eq!(buckets_1[0].timestamp, 1749134611.612);
 
-        let bucket_1_1 = result_1.get("103.30523391999995").unwrap();
+        let bucket_1_1 = result_1.get(&"103.30523391999995".into()).unwrap();
         assert_eq!(bucket_1_1.len(), 1);
         assert_eq!(bucket_1_1[0].value, 0.0);
         assert_eq!(bucket_1_1[0].timestamp, 1749134611.612);
 
-        let bucket_1_2 = result_1.get("1088.9766689046844").unwrap();
+        let bucket_1_2 = result_1.get(&"1088.9766689046844".into()).unwrap();
         assert_eq!(bucket_1_2.len(), 1);
         assert_eq!(bucket_1_2[0].value, 19780.0);
         assert_eq!(bucket_1_2[0].timestamp, 1749134611.612);
 
-        let bucket_1_3 = result_1.get("11479.28464434906").unwrap();
+        let bucket_1_3 = result_1.get(&"11479.28464434906".into()).unwrap();
         assert_eq!(bucket_1_3.len(), 1);
         assert_eq!(bucket_1_3[0].value, 19879.0);
         assert_eq!(bucket_1_3[0].timestamp, 1749134611.612);
