@@ -76,6 +76,9 @@ pub enum MonitorError {
 
     #[error("Failed to start Grafana: {0}")]
     GrafanaError(String),
+
+    #[error(transparent)]
+    PrometheusError(#[from] prometheus_http_query::Error),
 }
 
 pub type TestbedResult<T> = Result<T, TestbedError>;
