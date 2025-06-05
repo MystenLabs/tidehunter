@@ -45,9 +45,8 @@ impl Display for AwsClient {
 }
 
 impl AwsClient {
-    const OS_IMAGE: &'static str =
-        "Canonical, Ubuntu, 24.04 LTS, amd64 noble image build on 2024-04-23";
-    const DEFAULT_EBS_SIZE_GB: i32 = 500; // Default size of the EBS volume in GB.
+    const OS_IMAGE: &'static str = "Canonical, Ubuntu, 24.04, arm64 noble image";
+    const DEFAULT_EBS_SIZE_GB: i32 = 100; // Size of the EBS volume in GB.
 
     /// Make a new AWS client.
     pub async fn new(settings: Settings) -> Self {
@@ -134,7 +133,9 @@ impl AwsClient {
         // Parse the response to select the first returned image id.
         response
             .images()
-            .first()
+            .into_iter()
+            .find(|x| x.image_id().unwrap().contains("ami-0a1b37d39fbc96e30")) // HACK: WORKS ONLY FOR US-EAST-1
+            // .first()
             .ok_or_else(|| CloudProviderError::RequestError("Cannot find image id".into()))?
             .image_id
             .clone()
@@ -222,6 +223,34 @@ impl AwsClient {
             }
         }
         Ok(false)
+    }
+
+    #[allow(dead_code)]
+    /// Simple utility to print all available OS images in the AWS account.
+    pub async fn print_os_images(&self, client: &aws_sdk_ec2::Client) -> CloudProviderResult<()> {
+        const ARCHITECTURE: &str = "arm64"; // i386 | x86_64 | arm64 | x86_64_mac | arm64_mac
+        const DESCRIPTION_FILTERS: [&str; 3] = ["Canonical", "Ubuntu", "24.04"];
+
+        // Query all images that match the description.
+        let request = client.describe_images().filters(
+            FilterBuilder::default()
+                .name("architecture")
+                .values(ARCHITECTURE)
+                .build(),
+        );
+        let response = request.send().await?;
+
+        println!("Found {} {ARCHITECTURE} images:", response.images().len());
+        for image in response.images().iter().filter_map(|x| x.description()) {
+            if DESCRIPTION_FILTERS
+                .iter()
+                .all(|f| image.to_lowercase().contains(&f.to_lowercase()))
+            {
+                println!("{image:?}");
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -322,7 +351,7 @@ impl ServerProviderClient for AwsClient {
                 EbsBlockDeviceBuilder::default()
                     .delete_on_termination(true)
                     .volume_size(Self::DEFAULT_EBS_SIZE_GB)
-                    .volume_type(VolumeType::Gp2)
+                    .volume_type(VolumeType::Gp3)
                     .build(),
             )
             .build();
