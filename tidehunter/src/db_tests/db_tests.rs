@@ -1682,3 +1682,58 @@ fn test_state_snapshot_empty() {
     db.insert(ks, vec![1, 2, 3, 4], vec![6]).unwrap();
     assert_eq!(Some(vec![6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
 }
+
+#[test]
+fn test_bloom_filter_restore() {
+    let dir = tempdir::TempDir::new("test_bloom_filter_restore").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
+    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            force_unload_config(&config),
+            metrics.clone(),
+        )
+        .unwrap();
+        for i in 0..10u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), vec![0, 1, 2])
+                .unwrap();
+        }
+        db.rebuild_control_region().unwrap();
+        assert!(db.large_table.is_all_clean());
+    }
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        metrics.clone(),
+    )
+    .unwrap();
+    for key in 0..10u64 {
+        assert!(db.exists(ks, &key.to_be_bytes()).unwrap());
+    }
+    for key in 10..20u64 {
+        assert!(!db.exists(ks, &key.to_be_bytes()).unwrap());
+    }
+    let found = metrics
+        .lookup_result
+        .with_label_values(&["k", "found", "cache"])
+        .get()
+        + metrics
+            .lookup_result
+            .with_label_values(&["k", "found", "lookup"])
+            .get();
+    let not_found_bloom = metrics
+        .lookup_result
+        .with_label_values(&["k", "not_found", "bloom"])
+        .get();
+    assert_eq!(found, 10);
+    if not_found_bloom < 9 {
+        panic!("Bloom filter efficiency less then 90%");
+    }
+}

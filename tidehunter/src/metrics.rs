@@ -39,6 +39,7 @@ pub struct Metrics {
     pub snapshot_force_unload: IntCounterVec,
     pub snapshot_written_bytes: IntCounter,
     pub rebuild_control_region_time_mcs: Histogram,
+    pub bloom_filter_restore_time_mcs: IntCounterVec,
 
     pub flush_time_mcs: IntCounter,
     pub flush_count: IntCounterVec,
@@ -88,6 +89,7 @@ impl Metrics {
         let db_op_buckets = exponential_buckets(5., 1.4, 25).unwrap();
         let lock_buckets = exponential_buckets(1., 1.5, 12).unwrap();
         let lookup_iterations_buckets = linear_buckets(1., 1.0, 10).unwrap();
+
         let this = Metrics {
             replayed_wal_records: counter!("replayed_wal_records", registry),
             max_index_size: AtomicUsize::new(0),
@@ -140,6 +142,11 @@ impl Metrics {
             rebuild_control_region_time_mcs: histogram!(
                 "rebuild_control_region_time_mcs",
                 rebuild_buckets,
+                registry
+            ),
+            bloom_filter_restore_time_mcs: counter_vec!(
+                "bloom_filter_restore_time_mcs",
+                &["ks"],
                 registry
             ),
 

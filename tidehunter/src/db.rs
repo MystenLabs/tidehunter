@@ -50,14 +50,15 @@ impl Db {
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let (flusher_sender, flusher_receiver) = mpsc::channel();
         let flusher = IndexFlusher::new(flusher_sender, metrics.clone());
+        let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
             config.clone(),
             flusher,
             metrics.clone(),
+            wal.as_ref(),
         );
-        let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
         let control_region_store = Mutex::new(control_region_store);
@@ -205,6 +206,11 @@ impl Db {
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["write_batch", ""])
+            .mcs_timer();
         // todo implement atomic durability
         let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
@@ -308,6 +314,11 @@ impl Db {
         cell: &CellId,
         reverse: bool,
     ) -> Option<CellId> {
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["next_cell", ks.name()])
+            .mcs_timer();
         self.large_table.next_cell(ks, cell, reverse)
     }
 
@@ -319,6 +330,11 @@ impl Db {
         position: WalPosition,
     ) {
         let ks = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["update_flushed_index", ks.name()])
+            .mcs_timer();
         self.large_table
             .update_flushed_index(ks, &cell, original_index, position)
     }
