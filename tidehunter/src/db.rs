@@ -314,6 +314,11 @@ impl Db {
         cell: &CellId,
         reverse: bool,
     ) -> Option<CellId> {
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["next_cell", ks.name()])
+            .mcs_timer();
         self.large_table.next_cell(ks, cell, reverse)
     }
 
@@ -325,6 +330,11 @@ impl Db {
         position: WalPosition,
     ) {
         let ks = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["update_flushed_index", ks.name()])
+            .mcs_timer();
         self.large_table
             .update_flushed_index(ks, &cell, original_index, position)
     }
