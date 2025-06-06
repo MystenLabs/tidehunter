@@ -206,6 +206,11 @@ impl Db {
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["write_batch", ""])
+            .mcs_timer();
         // todo implement atomic durability
         let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
