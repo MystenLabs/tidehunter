@@ -10,7 +10,7 @@ from os.path import join
 
 def load_data():
     data = []
-    directory = "../../results/"
+    directory = "results/"
     for filename in glob.glob(join(directory, "measurements*.json")):
         with open(filename, "r") as f:
             data += [json.load(f)]
