@@ -124,7 +124,7 @@ impl LargeTable {
                                 for key in data.data.keys() {
                                     filter.insert(key);
                                 }
-                                bloom_filter_restore_time += now.elapsed().as_millis();
+                                bloom_filter_restore_time += now.elapsed().as_micros();
                             }
                             filter
                         });
@@ -155,7 +155,7 @@ impl LargeTable {
                 let rows = ShardedMutex::from_iterator(rows);
                 if bloom_filter_restore_time > 0 {
                     metrics
-                        .bloom_filter_restore
+                        .bloom_filter_restore_time_mcs
                         .with_label_values(&[ks.name()])
                         .inc_by(bloom_filter_restore_time as u64);
                 }
