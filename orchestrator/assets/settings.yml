@@ -2,11 +2,11 @@
 testbed_id: "${USER}-tidehunter"
 cloud_provider: aws
 token_file: "/Users/${USER}/.aws/credentials"
-ssh_private_key_file: "/Users/${USER}/.ssh/id_rsa"
+ssh_private_key_file: "/Users/${USER}/.ssh/aws"
 regions:
   - us-east-1
 specs: i8g.4xlarge
 repository:
   url: https://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@github.com/mystenlabs/tidehunter.git
-  commit: main
+  commit: collector
 target_configs_path: "./orchestrator/assets/target_configs.yml"

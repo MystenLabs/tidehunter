@@ -459,14 +459,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
 
         // Run all benchmarks.
-        let mut i = 1;
         let (available_machines, _) = self.select_instances()?;
         for (batch_idx, parameters) in all_parameters
             .split(available_machines.len())
             .iter()
             .enumerate()
         {
-            display::header(format!("Starting benchmark batch {i}"));
+            display::header(format!("Starting benchmark batch {batch_idx}"));
             display::config(
                 "Target Parameters",
                 format!(
@@ -486,6 +485,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             let mut collector = if let Some(m) = monitor {
                 Some(MetricsCollector::new(
                     parameters.clone(),
+                    batch_idx,
                     &m.prometheus_address(),
                     self.protocol_commands.bucket_metrics(),
                 )?)
@@ -512,8 +512,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 let error_counter = self.download_logs(&parameters).await?;
                 error_counter.print_summary();
             }
-
-            i += 1;
         }
 
         display::header("Benchmark completed");

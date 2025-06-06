@@ -11,7 +11,7 @@
       write_threads: 16
       write_size: 512
       key_len: 32
-      writes: 100000
+      writes: 10000000
       operations: 300000
       background_writes: 0
       no_snapshot: false
@@ -37,7 +37,7 @@
       write_threads: 16
       write_size: 512
       key_len: 32
-      writes: 100000
+      writes: 10000000
       operations: 300000
       background_writes: 0
       no_snapshot: false
@@ -49,4 +49,3 @@
       backend: Rocksdb
       path: "/home/ubuntu/working_dir"
       read_percentage: 100
-

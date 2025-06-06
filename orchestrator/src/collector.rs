@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,12 @@ use crate::Config;
 /// A unique identifier for a job.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize)]
 struct JobId(String);
+
+impl Debug for JobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl JobId {
     /// Extract the index from the job id.
@@ -47,6 +53,13 @@ impl Display for MetricLabel {
 #[derive(Clone, PartialEq, Eq, Hash, Serialize)]
 struct Le(String);
 
+#[cfg(test)]
+impl From<&str> for Le {
+    fn from(s: &str) -> Self {
+        Le(s.to_string())
+    }
+}
+
 /// A collection of buckets for a metric, where each bucket is keyed by a label.
 #[derive(Serialize)]
 struct Buckets(HashMap<Le, Vec<Sample>>);
@@ -64,7 +77,15 @@ impl Buckets {
 
     /// Extend the collection with another collection of buckets.
     pub fn extend(&mut self, other: Buckets) {
-        self.0.extend(other.0);
+        for (le, samples) in other.0 {
+            self.0.entry(le).or_default().extend(samples);
+        }
+    }
+
+    /// Get the samples for a specific label.
+    #[cfg(test)]
+    fn get(&self, le: &Le) -> Option<&Vec<Sample>> {
+        self.0.get(le)
     }
 }
 
@@ -80,12 +101,12 @@ struct Sample {
 /// The result of a benchmark run.
 #[derive(Serialize)]
 pub struct BenchmarkResult {
+    /// Unique identifier for the benchmark run.
+    uid: String,
     /// The settings used for the benchmark.
     settings: Settings,
     /// The configuration used for the benchmark.
     config: Config,
-    /// Id of the collector job that collected the metrics.
-    collector: JobId,
     /// The results of the benchmark, keyed by metric label.
     results: HashMap<MetricLabel, Buckets>,
 }
@@ -95,7 +116,7 @@ impl BenchmarkResult {
     pub fn save<P: AsRef<Path>>(&self, path: P) {
         let json = serde_json::to_string_pretty(self).expect("Cannot serialize metrics");
         let mut file = PathBuf::from(path.as_ref());
-        file.push(format!("measurements-{:?}.json", self.config));
+        file.push(format!("measurements-{}.json", self.uid));
         fs::write(file, json).unwrap();
     }
 }
@@ -105,6 +126,8 @@ impl BenchmarkResult {
 pub struct MetricsCollector {
     /// The benchmark parameters for the run.
     parameters: BenchmarkParameters,
+    /// The unique identifier for this collector instance.
+    collector_id: usize,
     /// The Prometheus client used to query the metrics.
     client: PrometheusClient,
     /// The metrics to collect from Prometheus.
@@ -117,12 +140,14 @@ impl MetricsCollector {
     /// Create a new metrics collector with the given parameters, Prometheus address, and metrics to collect.
     pub fn new(
         parameters: BenchmarkParameters,
+        collector_id: usize,
         prometheus_address: &str,
         metrics: Vec<MetricLabel>,
     ) -> MonitorResult<Self> {
         let client = PrometheusClient::try_from(prometheus_address)?;
         Ok(Self {
             parameters,
+            collector_id,
             client,
             metrics,
             collection: HashMap::new(),
@@ -181,15 +206,15 @@ impl MetricsCollector {
 
     /// Update the collector with the new metric data.
     fn update_collector(&mut self, metric: MetricLabel, collection: HashMap<JobId, Buckets>) {
-        for (id, buckets) in collection {
+        for (job_id, buckets) in collection {
             let settings = self.parameters.settings.clone();
-            let config = self.match_config(&id).clone();
+            let config = self.match_config(&job_id).clone();
             self.collection
-                .entry(id.clone())
+                .entry(job_id.clone())
                 .or_insert_with(|| BenchmarkResult {
+                    uid: format!("{}-{:?}", self.collector_id, &job_id),
                     settings,
                     config,
-                    collector: id.clone(),
                     results: HashMap::new(),
                 })
                 .results
@@ -223,7 +248,7 @@ mod test {
     use prometheus_http_query::Client as PrometheusClient;
 
     use crate::benchmark::BenchmarkParameters;
-    use crate::collector::{Buckets, JobId, Le, MetricLabel, MetricsCollector, Sample};
+    use crate::collector::{JobId, MetricLabel, MetricsCollector};
 
     /// Test data for the metrics collector.
     const TEST_VECTOR: &'static str = r#"
@@ -296,18 +321,6 @@ mod test {
 ]
     "#;
 
-    impl From<&str> for Le {
-        fn from(s: &str) -> Self {
-            Le(s.to_string())
-        }
-    }
-
-    impl Buckets {
-        fn get(&self, le: &Le) -> Option<&Vec<Sample>> {
-            self.0.get(le)
-        }
-    }
-
     #[test]
     fn parse_response() {
         let vector: Vec<InstantVector> = serde_json::from_str(TEST_VECTOR).unwrap();
@@ -355,6 +368,7 @@ mod test {
         let metric_label = MetricLabel("bench_writes_bucket".to_string());
         let mut collector = MetricsCollector {
             parameters: BenchmarkParameters::new_for_test(),
+            collector_id: 1,
             client: PrometheusClient::default(),
             metrics: vec![metric_label.clone()],
             collection: HashMap::new(),
