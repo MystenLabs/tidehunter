@@ -49,7 +49,7 @@ pub fn main() {
     };
     let config = configs::override_default_args(args, default_config);
 
-    print_stress_parameters(&config.stress_client_parameters);
+    println!("{:#?}", &config.stress_client_parameters);
 
     let temp_dir = if let Some(path) = &config.stress_client_parameters.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()
@@ -332,55 +332,6 @@ fn byte_div(n: usize) -> String {
     } else {
         format!("{n}")
     }
-}
-
-fn print_stress_parameters(params: &StressClientParameters) {
-    println!("{}", "=".repeat(60));
-    println!("         BENCHMARK CONFIGURATION");
-    println!("{}", "=".repeat(60));
-    println!("Backend:                {:?}", params.backend);
-    println!("Key Layout:             {:?}", params.key_layout);
-    println!("Read Mode:              {:?}", params.read_mode);
-    println!();
-    println!("Thread Configuration:");
-    println!("  Mixed Threads:        {}", params.mixed_threads);
-    println!("  Write Threads:        {}", params.write_threads);
-    println!("  Background Writes/s:  {}", params.background_writes);
-    println!();
-    println!("Data Configuration:");
-    println!("  Key Length:           {} bytes", params.key_len);
-    println!("  Value Size:           {} bytes", params.write_size);
-    println!("  Writes per Thread:    {}", dec_div(params.writes));
-    println!("  Operations per Thread: {}", dec_div(params.operations));
-    println!();
-    println!("Test Configuration:");
-    println!("  Read Percentage:      {}%", params.read_percentage);
-    println!("  Write Percentage:     {}%", 100 - params.read_percentage);
-    println!(
-        "  Periodic Snapshot:    {}",
-        if params.no_snapshot {
-            "Disabled"
-        } else {
-            "Enabled"
-        }
-    );
-    println!();
-    println!("Storage Configuration:");
-    if let Some(path) = &params.path {
-        println!("  Storage Path:         {}", path);
-    } else {
-        println!("  Storage Path:         <temporary>");
-    }
-    if let Some(reuse) = &params.reuse {
-        println!("  Reuse Database:       {}", reuse);
-    }
-    println!(
-        "  Preserve Data:        {}",
-        if params.preserve { "Yes" } else { "No" }
-    );
-    println!();
-    println!("{}", "=".repeat(60));
-    println!();
 }
 
 struct StressThread {
