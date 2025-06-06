@@ -79,6 +79,9 @@ pub enum MonitorError {
 
     #[error(transparent)]
     PrometheusError(#[from] prometheus_http_query::Error),
+
+    #[error("Received unexpected response from Prometheus: {0:?}")]
+    UnexpectedPrometheusResponse(prometheus_http_query::response::Data),
 }
 
 pub type TestbedResult<T> = Result<T, TestbedError>;

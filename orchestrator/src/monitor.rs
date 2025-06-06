@@ -73,6 +73,15 @@ impl Monitor {
     pub fn grafana_address(&self) -> String {
         format!("http://{}:{}", self.instance.main_ip, Grafana::DEFAULT_PORT)
     }
+
+    /// The public address of the prometheus instance.
+    pub fn prometheus_address(&self) -> String {
+        format!(
+            "http://{}:{}",
+            self.instance.main_ip,
+            Prometheus::DEFAULT_PORT
+        )
+    }
 }
 
 /// Generate the commands to setup prometheus on the given instances.
