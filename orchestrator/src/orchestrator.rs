@@ -38,6 +38,8 @@ pub struct Orchestrator<P> {
     /// Skip the testbed configuration. Setting this value to true is dangerous and may
     /// lead to unexpected behavior.
     skip_testbed_configuration: bool,
+    /// Timestamp for the current orchestrator run, shared across all operations.
+    run_timestamp: Option<String>,
 }
 
 impl<P> Orchestrator<P> {
@@ -57,6 +59,7 @@ impl<P> Orchestrator<P> {
             ssh_manager,
             skip_testbed_update: false,
             skip_testbed_configuration: false,
+            run_timestamp: None,
         }
     }
 
@@ -407,13 +410,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         // Create a log sub-directory for this run.
         let commit = &self.settings.repository.commit;
-        let path: PathBuf = [
-            &self.settings.logs_dir,
-            &format!("logs-{commit}").into(),
-            // &format!("logs-{parameters:?}").into(),
-        ]
-        .iter()
-        .collect();
+        let path: PathBuf = [&self.settings.logs_dir, &format!("logs-{commit}").into()]
+            .iter()
+            .collect();
         fs::create_dir_all(&path).expect("Failed to create log directory");
 
         // NOTE: Our ssh library does not seem to be able to transfers files in parallel reliably.
@@ -426,7 +425,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             let connection = self.ssh_manager.connect(instance.ssh_address()).await?;
             let node_log_content = connection.download("node.log")?;
 
-            let timestamp = Utc::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+            let timestamp = self
+                .run_timestamp
+                .as_ref()
+                .expect("Run timestamp should be initialized");
             let node_log_file = [path.clone(), format!("node-{timestamp}-{i}.log").into()]
                 .iter()
                 .collect::<PathBuf>();
@@ -449,6 +451,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         &mut self,
         all_parameters: BenchmarkParameters,
     ) -> TestbedResult<()> {
+        // Initialize the run timestamp for this orchestrator session
+        self.run_timestamp = Some(Utc::now().format("%Y-%m-%d-%H-%M-%S").to_string());
+
         display::header("Preparing testbed");
         display::config("Commit", format!("'{}'", &self.settings.repository.commit));
         display::newline();
@@ -487,9 +492,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
             // Initialize the metrics collector.
             let mut collector = if let Some(m) = monitor {
+                let timestamp = self
+                    .run_timestamp
+                    .as_ref()
+                    .expect("Run timestamp should be initialized");
                 Some(MetricsCollector::new(
                     parameters.clone(),
-                    batch_idx,
+                    timestamp.clone(),
                     &m.prometheus_address(),
                     self.protocol_commands.bucket_metrics(),
                 )?)

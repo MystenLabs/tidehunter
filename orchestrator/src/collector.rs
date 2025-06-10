@@ -126,8 +126,8 @@ impl BenchmarkResult {
 pub struct MetricsCollector {
     /// The benchmark parameters for the run.
     parameters: BenchmarkParameters,
-    /// The unique identifier for this collector instance.
-    collector_id: usize,
+    /// The timestamp for this orchestrator run.
+    run_timestamp: String,
     /// The Prometheus client used to query the metrics.
     client: PrometheusClient,
     /// The metrics to collect from Prometheus.
@@ -140,14 +140,14 @@ impl MetricsCollector {
     /// Create a new metrics collector with the given parameters, Prometheus address, and metrics to collect.
     pub fn new(
         parameters: BenchmarkParameters,
-        collector_id: usize,
+        run_timestamp: String,
         prometheus_address: &str,
         metrics: Vec<MetricLabel>,
     ) -> MonitorResult<Self> {
         let client = PrometheusClient::try_from(prometheus_address)?;
         Ok(Self {
             parameters,
-            collector_id,
+            run_timestamp,
             client,
             metrics,
             collection: HashMap::new(),
@@ -212,7 +212,7 @@ impl MetricsCollector {
             self.collection
                 .entry(job_id.clone())
                 .or_insert_with(|| BenchmarkResult {
-                    uid: format!("{}-{:?}", self.collector_id, &job_id),
+                    uid: format!("{}-{:?}", self.run_timestamp, &job_id),
                     settings,
                     config,
                     results: HashMap::new(),
@@ -368,7 +368,7 @@ mod test {
         let metric_label = MetricLabel("bench_writes_bucket".to_string());
         let mut collector = MetricsCollector {
             parameters: BenchmarkParameters::new_for_test(),
-            collector_id: 1,
+            run_timestamp: "test_timestamp".to_string(),
             client: PrometheusClient::default(),
             metrics: vec![metric_label.clone()],
             collection: HashMap::new(),
