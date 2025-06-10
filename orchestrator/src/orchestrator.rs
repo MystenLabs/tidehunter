@@ -5,6 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
+use chrono::Utc;
 use tokio::time::{self, Instant};
 
 use crate::benchmark::BenchmarkParameters;
@@ -397,7 +398,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     /// Download the log files from the nodes and clients.
     pub async fn download_logs(
         &self,
-        parameters: &BenchmarkParameters,
+        _parameters: &BenchmarkParameters,
     ) -> TestbedResult<LogsAnalyzer> {
         // Select the instances to run.
         let (nodes, _) = self.select_instances()?;
@@ -407,7 +408,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let path: PathBuf = [
             &self.settings.logs_dir,
             &format!("logs-{commit}").into(),
-            &format!("logs-{parameters:?}").into(),
+            // &format!("logs-{parameters:?}").into(),
         ]
         .iter()
         .collect();
@@ -423,7 +424,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             let connection = self.ssh_manager.connect(instance.ssh_address()).await?;
             let node_log_content = connection.download("node.log")?;
 
-            let node_log_file = [path.clone(), format!("node-{i}.log").into()]
+            let timestamp = Utc::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+            let node_log_file = [path.clone(), format!("node-{timestamp}-{i}.log").into()]
                 .iter()
                 .collect::<PathBuf>();
             fs::write(&node_log_file, node_log_content.as_bytes()).expect("Cannot write log file");
