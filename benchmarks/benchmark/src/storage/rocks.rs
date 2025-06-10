@@ -49,6 +49,14 @@ impl RocksStorage {
 
         // Increase level 1 target size to 256MiB * 6 ~ 1.5GiB.
         opt.set_max_bytes_for_level_base((write_buffer_size * max_level_zero_file_num) as u64);
+
+        // One common issue is that the default ulimit is too low,
+        // leading to I/O errors such as "Too many open files". Raising fdlimit to bypass it.
+        if let Some(limit) = fdlimit::raise_fd_limit() {
+            println!("Raised fdlimit to {}", limit);
+            // on windows raise_fd_limit return None
+            opt.set_max_open_files((limit / 8) as i32);
+        }
     }
 
     fn update_opts(opt: &mut Options) {
