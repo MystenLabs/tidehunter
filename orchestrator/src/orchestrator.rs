@@ -188,7 +188,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let commit = &self.settings.repository.commit;
         let command = [
             &format!("git fetch origin {commit}"),
-            &format!("(git checkout {commit} || git checkout -f origin/{commit})"),
+            &format!(
+                "git checkout -B {commit} origin/{commit} 2>/dev/null || git checkout {commit}"
+            ),
             "source $HOME/.cargo/env",
             "RUSTFLAGS=-Ctarget-cpu=native cargo build --release",
         ]
