@@ -54,6 +54,14 @@ impl<N: ProtocolParameters> BenchmarkParametersGeneric<N> {
             })
             .collect()
     }
+
+    #[cfg(test)]
+    pub fn new_for_test() -> Self {
+        Self {
+            settings: Settings::new_for_test(),
+            target_configs: vec![N::default(); 2],
+        }
+    }
 }
 
 #[cfg(test)]

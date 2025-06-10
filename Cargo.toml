@@ -5,7 +5,6 @@ members = [
     "benchmarks/benchmark",
     "benchmarks/read_window_test",
     "benchmarks/index_benchmark",
-    "orchestrator"
 ]
 resolver = "2"
 
