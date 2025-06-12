@@ -49,7 +49,11 @@ pub fn main() {
     };
     let config = configs::override_default_args(args, default_config);
 
-    println!("{:#?}", &config.stress_client_parameters);
+    println!("DB parameters: {:#?}", &config.db_parameters);
+    println!(
+        "Stress client parameters: {:#?}",
+        &config.stress_client_parameters
+    );
 
     let temp_dir = if let Some(path) = &config.stress_client_parameters.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()

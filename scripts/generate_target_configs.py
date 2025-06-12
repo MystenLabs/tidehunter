@@ -17,13 +17,13 @@ def get_base_config():
     """Returns the base configuration template."""
     return {
         'db_parameters': {
-            'frag_size': 134217728,
-            'max_maps': 16,
-            'max_dirty_keys': 32,
-            'snapshot_written_bytes': 134217728,
-            'snapshot_unload_threshold': 268435456,
-            'unload_jitter_pct': 10,
-            'direct_io': False  # This will be overridden
+            'frag_size': 1024 * 1024 * 1024,
+            'max_maps': 80,
+            'max_dirty_keys': 1024,
+            'snapshot_written_bytes': 64 * 1024 * 1024 * 1024,
+            'snapshot_unload_threshold': 128 * 1024 * 1024 * 1024,
+            'unload_jitter_pct': 30,
+            'direct_io': False 
         },
         'stress_client_parameters': {
             'mixed_threads': 16,
@@ -130,9 +130,9 @@ def main():
     # Define parameter combinations
     # You can easily modify this dictionary to add more parameters
     parameter_combinations = {
-        'direct_io': [False, True],  # off and on
-        'read_percentage': [100, 80, 60, 40, 20],
-        'backend': ['Tidehunter', 'Rocksdb']
+        'direct_io': [False], 
+        'read_percentage': [0, 50, 100],
+        'backend': ['Tidehunter'],
     }
     
     print("Generating configurations with the following parameter combinations:")
