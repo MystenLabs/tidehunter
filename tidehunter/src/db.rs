@@ -206,14 +206,24 @@ impl Db {
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
+        let WriteBatch {
+            writes,
+            deletes,
+            tag,
+        } = batch;
         let _timer = self
             .metrics
             .db_op_mcs
-            .with_label_values(&["write_batch", ""])
+            .with_label_values(&["write_batch", &tag])
             .mcs_timer();
         // todo implement atomic durability
-        let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
+        let mut update_writes = Vec::with_capacity(writes.len());
+        let _write_timer = self
+            .metrics
+            .write_batch_times
+            .with_label_values(&[&tag, "write"])
+            .mcs_timer();
         for w in writes {
             let ks = self.key_shape.ks(w.ks);
             self.metrics
@@ -221,13 +231,10 @@ impl Db {
                 .with_label_values(&["record", ks.name()])
                 .inc_by(w.wal_write.len() as u64);
             let position = self.wal_writer.write(&w.wal_write)?;
-            ks.check_key(&w.key);
-            let reduced_key = ks.reduced_key_bytes(w.key);
-            self.large_table
-                .insert(ks, reduced_key, position, &w.value, self);
-            last_position = position;
+            update_writes.push((w, position));
         }
 
+        let mut update_deletes = Vec::with_capacity(deletes.len());
         for w in deletes {
             let ks = self.key_shape.ks(w.ks);
             self.metrics
@@ -235,6 +242,25 @@ impl Db {
                 .with_label_values(&["tombstone", ks.name()])
                 .inc_by(w.wal_write.len() as u64);
             let position = self.wal_writer.write(&w.wal_write)?;
+            update_deletes.push((w, position));
+        }
+        drop(_write_timer);
+        let _update_timer = self
+            .metrics
+            .write_batch_times
+            .with_label_values(&[&tag, "update"])
+            .mcs_timer();
+
+        for (w, position) in update_writes {
+            let ks = self.key_shape.ks(w.ks);
+            ks.check_key(&w.key);
+            let reduced_key = ks.reduced_key_bytes(w.key);
+            self.large_table
+                .insert(ks, reduced_key, position, &w.value, self);
+            last_position = position;
+        }
+        for (w, position) in update_deletes {
+            let ks = self.key_shape.ks(w.ks);
             ks.check_key(&w.key);
             let reduced_key = ks.reduced_key_bytes(w.key);
             self.large_table.remove(ks, reduced_key, position, self)?;

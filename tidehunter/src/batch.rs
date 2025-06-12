@@ -6,6 +6,7 @@ use minibytes::Bytes;
 pub struct WriteBatch {
     pub(crate) writes: Vec<PreparedWrite>,
     pub(crate) deletes: Vec<PreparedDelete>,
+    pub(crate) tag: String,
 }
 
 impl WriteBatch {
@@ -13,7 +14,12 @@ impl WriteBatch {
         WriteBatch {
             writes: Default::default(),
             deletes: Default::default(),
+            tag: Default::default(),
         }
+    }
+
+    pub fn set_tag(&mut self, tag: String) {
+        self.tag = tag;
     }
 
     pub fn write(&mut self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) {

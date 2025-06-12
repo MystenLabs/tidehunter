@@ -34,6 +34,7 @@ pub struct Metrics {
     pub db_op_mcs: HistogramVec,
     pub map_time_mcs: Histogram,
     pub wal_mapper_time_mcs: IntCounter,
+    pub write_batch_times: IntCounterVec,
 
     pub snapshot_lock_time_mcs: Histogram,
     pub snapshot_force_unload: IntCounterVec,
@@ -131,6 +132,7 @@ impl Metrics {
             db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry),
             map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry),
             wal_mapper_time_mcs: counter!("wal_mapper_time_mcs", registry),
+            write_batch_times: counter_vec!("write_batch_times", &["tag", "kind"], registry),
 
             snapshot_lock_time_mcs: histogram!(
                 "snapshot_lock_time_mcs",
@@ -168,24 +170,44 @@ pub trait TimerExt {
     fn mcs_timer(self) -> impl Drop;
 }
 
-pub struct McsTimer {
+pub struct McsHistogramTimer {
     histogram: Histogram,
+    start: Instant,
+}
+
+pub struct McsCounterTimer {
+    counter: IntCounter,
     start: Instant,
 }
 
 impl TimerExt for Histogram {
     fn mcs_timer(self) -> impl Drop {
-        McsTimer {
+        McsHistogramTimer {
             histogram: self,
             start: Instant::now(),
         }
     }
 }
 
-impl Drop for McsTimer {
+impl Drop for McsHistogramTimer {
     fn drop(&mut self) {
         self.histogram
             .observe(self.start.elapsed().as_micros() as f64)
+    }
+}
+
+impl TimerExt for IntCounter {
+    fn mcs_timer(self) -> impl Drop {
+        McsCounterTimer {
+            counter: self,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for McsCounterTimer {
+    fn drop(&mut self) {
+        self.counter.inc_by(self.start.elapsed().as_micros() as u64)
     }
 }
 
