@@ -245,6 +245,14 @@ impl Db {
             update_deletes.push((w, position));
         }
         drop(_write_timer);
+        self.metrics
+            .write_batch_operations
+            .with_label_values(&[&tag, "put"])
+            .inc_by(update_writes.len() as u64);
+        self.metrics
+            .write_batch_operations
+            .with_label_values(&[&tag, "delete"])
+            .inc_by(update_deletes.len() as u64);
         let _update_timer = self
             .metrics
             .write_batch_times

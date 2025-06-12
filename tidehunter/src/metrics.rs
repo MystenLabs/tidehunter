@@ -35,6 +35,7 @@ pub struct Metrics {
     pub map_time_mcs: Histogram,
     pub wal_mapper_time_mcs: IntCounter,
     pub write_batch_times: IntCounterVec,
+    pub write_batch_operations: IntCounterVec,
 
     pub snapshot_lock_time_mcs: Histogram,
     pub snapshot_force_unload: IntCounterVec,
@@ -133,6 +134,11 @@ impl Metrics {
             map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry),
             wal_mapper_time_mcs: counter!("wal_mapper_time_mcs", registry),
             write_batch_times: counter_vec!("write_batch_times", &["tag", "kind"], registry),
+            write_batch_operations: counter_vec!(
+                "write_batch_operations",
+                &["tag", "kind"],
+                registry
+            ),
 
             snapshot_lock_time_mcs: histogram!(
                 "snapshot_lock_time_mcs",
