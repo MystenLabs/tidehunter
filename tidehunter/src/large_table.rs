@@ -182,6 +182,13 @@ impl LargeTable {
         loader: &L,
     ) {
         let (mut row, cell) = self.row(ks, &k);
+
+        if row.entry_mut(&cell).is_flush_pending() {
+            drop(row);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            row = self.row(ks, &k).0;
+        }
+
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
             let previous = value_lru.push(k.clone(), value.clone());
@@ -963,13 +970,17 @@ impl LargeTableEntry {
         if self.context.ks_config.unloading_disabled() {
             return;
         }
-        if !self.flush_pending {
-            self.flush_pending = true;
-            let flush_kind = self
-                .flush_kind()
-                .expect("unload_if_ks_enabled is called in clean state");
-            flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
+        if self.flush_pending {
+            return;
         }
+        if let Some(flush_kind) = self.flush_kind() {
+            self.flush_pending = true;
+            flusher.request_flush(self.context.ks_config.id(), self.cell.clone(), flush_kind);
+        }
+    }
+
+    pub fn is_flush_pending(&self) -> bool {
+        self.flush_pending
     }
 
     pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
