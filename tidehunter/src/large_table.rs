@@ -1,7 +1,7 @@
 use crate::cell::{CellId, CellIdBytesContainer};
 use crate::config::Config;
 use crate::context::KsContext;
-use crate::flusher::{FlushKind, IndexFlusher};
+use crate::flusher::FlushKind;
 use crate::index::index_format::Direction;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
@@ -29,7 +29,6 @@ use std::{cmp, mem};
 pub struct LargeTable {
     table: Vec<KsTable>,
     config: Arc<Config>,
-    pub(crate) flusher: IndexFlusher,
     metrics: Arc<Metrics>,
 }
 
@@ -42,6 +41,7 @@ pub struct LargeTableEntry {
     bloom_filter: Option<BloomFilter>,
     unload_jitter: usize,
     flush_pending: bool,
+    flush_mutex: Arc<parking_lot::Mutex<()>>,
 }
 
 enum LargeTableEntryState {
@@ -84,7 +84,6 @@ impl LargeTable {
         key_shape: &KeyShape,
         snapshot: &LargeTableContainer<WalPosition>,
         config: Arc<Config>,
-        flusher: IndexFlusher,
         metrics: Arc<Metrics>,
         loader: &L,
     ) -> Self {
@@ -168,7 +167,6 @@ impl LargeTable {
         Self {
             table,
             config,
-            flusher,
             metrics,
         }
     }
@@ -191,9 +189,16 @@ impl LargeTable {
         let entry = row.entry_mut(&cell);
         entry.insert(k, v);
         let index_size = entry.data.len();
+
+        // Try to flush if the cell has too many dirty keys
         if loader.flush_supported() && self.too_many_dirty(entry) {
-            entry.unload_if_ks_enabled(&self.flusher);
+            // Try to flush - if it fails, log but don't fail the insert
+            if let Err(e) = entry.flush_if_needed(loader) {
+                // TODO: Consider how to handle flush errors - for now just log
+                eprintln!("Warning: Failed to flush cell during insert: {:?}", e);
+            }
         }
+
         self.metrics
             .max_index_size
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
@@ -691,26 +696,6 @@ impl LargeTable {
         }
     }
 
-    pub fn update_flushed_index(
-        &self,
-        ks: &KeySpaceDesc,
-        cell: &CellId,
-        original_index: Arc<IndexTable>,
-        position: WalPosition,
-    ) {
-        let row = ks.mutex_for_cell(&cell);
-        let ks_table = self.ks_table(ks);
-        let mut row = ks_table.lock(
-            row,
-            &self
-                .metrics
-                .large_table_contention
-                .with_label_values(&[ks.name()]),
-        );
-        let entry = row.entry_mut(cell);
-        entry.update_flushed_index(original_index, position);
-    }
-
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn each_entry(&self, f: impl Fn(&mut LargeTableEntry)) {
@@ -809,6 +794,7 @@ impl LargeTableEntry {
             bloom_filter,
             unload_jitter,
             flush_pending: false,
+            flush_mutex: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 
@@ -960,55 +946,6 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    pub fn unload_if_ks_enabled(&mut self, flusher: &IndexFlusher) {
-        if self.context.ks_config.unloading_disabled() {
-            return;
-        }
-        if self.flush_pending {
-            return;
-        }
-        if let Some(flush_kind) = self.flush_kind() {
-            self.flush_pending = true;
-            flusher.request_flush(self.context.ks_config.id(), self.cell.clone(), flush_kind);
-        }
-    }
-
-    pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
-        assert!(
-            self.flush_pending,
-            "update_merged_index called while flush_pending is not set"
-        );
-        match self.state {
-            LargeTableEntryState::DirtyUnloaded(_, _) => {}
-            LargeTableEntryState::DirtyLoaded(_, _) => {}
-            LargeTableEntryState::Empty => panic!("update_merged_index in Empty state"),
-            LargeTableEntryState::Unloaded(_) => panic!("update_merged_index in Unloaded state"),
-            LargeTableEntryState::Loaded(_) => panic!("update_merged_index in Loaded state"),
-        }
-        self.flush_pending = false;
-        if self.data.same_shared(&original_index) {
-            self.report_loaded_keys_delta(-(self.data.len() as i64));
-            self.data = Default::default();
-            self.state = LargeTableEntryState::Unloaded(position);
-            self.context
-                .metrics
-                .flush_update
-                .with_label_values(&["clear"])
-                .inc();
-        } else {
-            let delta = self.data.make_mut().unmerge_flushed(&original_index);
-            self.report_loaded_keys_delta(delta);
-            // todo remove dirty_keys from DirtyUnloaded
-            let dirty_keys = self.data.data.keys().cloned().collect();
-            self.state = LargeTableEntryState::DirtyUnloaded(position, dirty_keys);
-            self.context
-                .metrics
-                .flush_update
-                .with_label_values(&["unmerge"])
-                .inc();
-        }
-    }
-
     fn unload<L: Loader>(
         &mut self,
         loader: &L,
@@ -1118,6 +1055,141 @@ impl LargeTableEntry {
             LargeTableEntryState::DirtyLoaded(_, _) => {
                 Some(FlushKind::FlushLoaded(self.data.clone_shared()))
             }
+        }
+    }
+
+    /// Flush the cell if needed, with per-cell locking to ensure only one thread flushes at a time.
+    /// Returns Ok(true) if flush was performed, Ok(false) if no flush was needed, or Err on failure.
+    pub fn flush_if_needed<L: Loader>(&mut self, loader: &L) -> Result<bool, L::Error> {
+        // Quick check without lock - if no flush needed, return early
+        if !self.context.ks_config.unloading_disabled() && !self.flush_pending {
+            if let Some(dirty_keys) = self.state.dirty_keys() {
+                if !self
+                    .context
+                    .excess_dirty_keys(dirty_keys.len().saturating_sub(self.unload_jitter))
+                {
+                    return Ok(false);
+                }
+            } else {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        }
+
+        // Try to acquire flush lock (non-blocking)
+        let flush_lock = match self.flush_mutex.try_lock() {
+            Some(lock) => lock,
+            None => return Ok(false), // Another thread is already flushing this cell
+        };
+
+        // Double-check after acquiring lock
+        if self.context.ks_config.unloading_disabled() || self.flush_pending {
+            return Ok(false);
+        }
+
+        let dirty_keys_count = match self.state.dirty_keys() {
+            Some(dirty_keys) => dirty_keys.len(),
+            None => return Ok(false),
+        };
+
+        if !self
+            .context
+            .excess_dirty_keys(dirty_keys_count.saturating_sub(self.unload_jitter))
+        {
+            return Ok(false);
+        }
+
+        // Perform the flush
+        self.flush_pending = true;
+        drop(flush_lock); // Release the lock before doing I/O
+
+        let flush_result = self.perform_flush(loader);
+
+        // Clear flush_pending regardless of success/failure
+        self.flush_pending = false;
+
+        flush_result.map(|_| true)
+    }
+
+    fn perform_flush<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
+        let now = std::time::Instant::now();
+
+        let (original_index, mut merged_index) = match self.state {
+            LargeTableEntryState::DirtyUnloaded(position, _) => {
+                self.context
+                    .metrics
+                    .unload
+                    .with_label_values(&["merge_flush"])
+                    .inc();
+
+                let mut disk_index = loader.load(&self.context.ks_config, position)?;
+                disk_index.merge_dirty(&self.data);
+                (self.data.clone_shared(), disk_index)
+            }
+            LargeTableEntryState::DirtyLoaded(_, _) => {
+                self.context
+                    .metrics
+                    .unload
+                    .with_label_values(&["flush"])
+                    .inc();
+
+                let index_copy = IndexTable::clone(&self.data);
+                (self.data.clone_shared(), index_copy)
+            }
+            _ => return Ok(()), // Nothing to flush
+        };
+
+        // Run compactor
+        self.run_compactor_on_index(&mut merged_index);
+
+        // Flush to disk
+        let position = loader.flush(self.context.id(), &merged_index)?;
+
+        // Update state after successful flush
+        self.update_after_flush(original_index, position);
+
+        self.context
+            .metrics
+            .flush_time_mcs
+            .inc_by(now.elapsed().as_micros() as u64);
+
+        Ok(())
+    }
+
+    fn run_compactor_on_index(&self, index: &mut IndexTable) {
+        if let Some(compactor) = self.context.ks_config.compactor() {
+            let pre_compact_len = index.len();
+            compactor(&mut index.data);
+            let compacted = pre_compact_len.saturating_sub(index.len());
+            self.context
+                .metrics
+                .compacted_keys
+                .with_label_values(&[self.context.name()])
+                .inc_by(compacted as u64);
+        }
+    }
+
+    fn update_after_flush(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
+        if self.data.same_shared(&original_index) {
+            self.report_loaded_keys_delta(-(self.data.len() as i64));
+            self.data = Default::default();
+            self.state = LargeTableEntryState::Unloaded(position);
+            self.context
+                .metrics
+                .flush_update
+                .with_label_values(&["clear"])
+                .inc();
+        } else {
+            let delta = self.data.make_mut().unmerge_flushed(&original_index);
+            self.report_loaded_keys_delta(delta);
+            let dirty_keys = self.data.data.keys().cloned().collect();
+            self.state = LargeTableEntryState::DirtyUnloaded(position, dirty_keys);
+            self.context
+                .metrics
+                .flush_update
+                .with_label_values(&["unmerge"])
+                .inc();
         }
     }
 }
@@ -1395,7 +1467,6 @@ mod tests {
             &ks,
             &LargeTableContainer::new_from_key_shape(&ks, WalPosition::INVALID),
             Arc::new(config),
-            IndexFlusher::new_unstarted_for_test(),
             Metrics::new(),
             wal.as_ref(),
         );
@@ -1481,7 +1552,6 @@ mod tests {
         let table = LargeTable {
             table: Vec::new(), // Not used in this test
             config: context.config.clone(),
-            flusher: IndexFlusher::new_unstarted_for_test(),
             metrics: metrics.clone(),
         };
 

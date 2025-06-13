@@ -3,7 +3,6 @@ use crate::cell::CellId;
 use crate::config::Config;
 use crate::control::{ControlRegion, ControlRegionStore};
 use crate::crc::IntoBytesFixed;
-use crate::flusher::IndexFlusher;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
 use crate::iterators::db_iterator::DbIterator;
@@ -20,7 +19,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::{io, thread};
 
@@ -62,7 +61,6 @@ impl Db {
             &key_shape,
             control_region.snapshot(),
             config.clone(),
-            flusher,
             metrics.clone(),
             wal.as_ref(),
         );
@@ -366,23 +364,6 @@ impl Db {
             .with_label_values(&["next_cell", ks.name()])
             .mcs_timer();
         self.large_table.next_cell(ks, cell, reverse)
-    }
-
-    pub(crate) fn update_flushed_index(
-        &self,
-        ks: KeySpace,
-        cell: CellId,
-        original_index: Arc<IndexTable>,
-        position: WalPosition,
-    ) {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["update_flushed_index", ks.name()])
-            .mcs_timer();
-        self.large_table
-            .update_flushed_index(ks, &cell, original_index, position)
     }
 
     pub(crate) fn load_index(&self, ks: KeySpace, position: WalPosition) -> DbResult<IndexTable> {
