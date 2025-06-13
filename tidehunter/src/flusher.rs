@@ -158,8 +158,7 @@ impl IndexFlusherThread {
             let position = db
                 .flush(command.ks, &merged_index)
                 .expect("Failed to flush index");
-            // Note: update_flushed_index is no longer needed with the new writer-does-flushing approach
-            // db.update_flushed_index(command.ks, command.cell, original_index, position);
+            db.update_flushed_index(command.ks, command.cell, original_index, position);
             self.metrics
                 .flush_time_mcs
                 .with_label_values(&[&self.thread_id.to_string()])
