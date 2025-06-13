@@ -89,7 +89,7 @@ pub fn main() {
                 report!(report, "Using **direct IO**");
             }
             use crate::storage::tidehunter::TidehunterStorage;
-            let mutexes = 4096 * 32;
+            let mutexes = 4096;
             let (key_shape, ks) = match config.stress_client_parameters.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     32,
