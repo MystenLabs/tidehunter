@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 pub struct IndexFlusher {
-    sender: mpsc::Sender<FlusherCommand>,
+    senders: Vec<mpsc::Sender<FlusherCommand>>,
     metrics: Arc<Metrics>,
 }
 
@@ -37,43 +37,52 @@ pub enum FlushKind {
 }
 
 impl IndexFlusher {
-    pub fn new(sender: mpsc::Sender<FlusherCommand>, metrics: Arc<Metrics>) -> Self {
-        Self { sender, metrics }
+    pub fn new(senders: Vec<mpsc::Sender<FlusherCommand>>, metrics: Arc<Metrics>) -> Self {
+        assert!(!senders.is_empty(), "Must have at least one flusher thread");
+        Self { senders, metrics }
     }
 
-    pub fn start_thread(
-        receiver: mpsc::Receiver<FlusherCommand>,
+    /// Start flusher threads with the given receivers and database reference
+    pub fn start_threads(
+        receivers: Vec<mpsc::Receiver<FlusherCommand>>,
         db: Weak<Db>,
         metrics: Arc<Metrics>,
-    ) -> JoinHandle<()> {
-        let flusher_thread = IndexFlusherThread {
-            db,
-            receiver,
-            metrics,
-        };
-        let jh = thread::Builder::new()
-            .name("flusher".to_string())
-            .spawn(move || flusher_thread.run())
-            .unwrap();
-        jh
+    ) -> Vec<JoinHandle<()>> {
+        receivers
+            .into_iter()
+            .enumerate()
+            .map(|(thread_id, receiver)| {
+                let flusher_thread = IndexFlusherThread::new(db.clone(), receiver, metrics.clone());
+
+                thread::Builder::new()
+                    .name(format!("flusher-{}", thread_id))
+                    .spawn(move || flusher_thread.run())
+                    .unwrap()
+            })
+            .collect()
     }
 
     pub fn request_flush(&self, ks: KeySpace, cell: CellId, flush_kind: FlushKind) {
+        let thread_index = self.get_thread_for_cell(&cell);
         let command = FlusherCommand {
             ks,
             cell,
             flush_kind,
         };
         self.metrics.flush_pending.add(1);
-        self.sender
+        self.senders[thread_index]
             .send(command)
             .expect("Flusher has stopped unexpectedly")
+    }
+
+    fn get_thread_for_cell(&self, cell: &CellId) -> usize {
+        cell.mutex_seed() % self.senders.len()
     }
 
     #[cfg(test)]
     pub fn new_unstarted_for_test() -> Self {
         let (sender, _receiver) = mpsc::channel();
-        Self::new(sender, Metrics::new())
+        Self::new(vec![sender], Metrics::new())
     }
 
     /// Wait until all messages that are currently queued for flusher are processed
@@ -81,19 +90,37 @@ impl IndexFlusher {
     pub fn barrier(&self) {
         use parking_lot::Mutex;
         let mutex = Arc::new(Mutex::new(()));
-        let lock = mutex.lock_arc();
-        let command = FlusherCommand {
-            ks: KeySpace::new_test(0),
-            cell: CellId::Integer(0),
-            flush_kind: FlushKind::Barrier(SendGuard(lock)),
-        };
-        self.metrics.flush_pending.add(1);
-        self.sender.send(command).unwrap();
+
+        // Send a barrier command to each thread
+        for (thread_id, sender) in self.senders.iter().enumerate() {
+            let lock = mutex.lock_arc();
+            let command = FlusherCommand {
+                ks: KeySpace::new_test(0),
+                cell: CellId::Integer(thread_id), // Use thread_id to ensure it goes to the right thread
+                flush_kind: FlushKind::Barrier(SendGuard(lock)),
+            };
+            self.metrics.flush_pending.add(1);
+            sender.send(command).unwrap();
+        }
+
+        // Wait for all threads to process their barriers
         let _ = mutex.lock();
     }
 }
 
 impl IndexFlusherThread {
+    pub fn new(
+        db: Weak<Db>,
+        receiver: mpsc::Receiver<FlusherCommand>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            db,
+            receiver,
+            metrics,
+        }
+    }
+
     pub fn run(self) {
         while let Ok(command) = self.receiver.recv() {
             self.metrics.flush_pending.add(-1);

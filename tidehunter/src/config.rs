@@ -19,6 +19,8 @@ pub struct Config {
     pub unload_jitter_pct: usize,
     /// Use O_DIRECT when working with wal
     pub direct_io: bool,
+    /// Number of background flusher threads for handling index flushes
+    pub num_flusher_threads: usize,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
             snapshot_unload_threshold: 64 * 1024 * 1024 * 1024,
             unload_jitter_pct: 30,
             direct_io: false,
+            num_flusher_threads: 1,
         }
     }
 }
@@ -45,6 +48,7 @@ impl Config {
             snapshot_unload_threshold: 2 * 128 * 1024 * 1024, // 256 Mb
             unload_jitter_pct: 10,
             direct_io: false,
+            num_flusher_threads: 1,
         }
     }
 

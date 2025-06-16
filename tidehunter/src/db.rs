@@ -46,11 +46,23 @@ impl Db {
         config: Arc<Config>,
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
+        let path = path.canonicalize()?;
+        let wal_path = Self::wal_path(&path);
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
-        let (flusher_sender, flusher_receiver) = mpsc::channel();
-        let flusher = IndexFlusher::new(flusher_sender, metrics.clone());
-        let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
+        let wal = Wal::open(&wal_path, config.wal_layout(), metrics.clone())?;
+
+        // Create channels for flusher threads first
+        let mut flusher_senders = Vec::with_capacity(config.num_flusher_threads);
+        let mut flusher_receivers = Vec::with_capacity(config.num_flusher_threads);
+
+        for _ in 0..config.num_flusher_threads {
+            let (sender, receiver) = mpsc::channel();
+            flusher_senders.push(sender);
+            flusher_receivers.push(receiver);
+        }
+
+        let flusher = IndexFlusher::new(flusher_senders, metrics.clone());
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
@@ -73,8 +85,13 @@ impl Db {
         };
         this.report_memory_estimates();
         let this = Arc::new(this);
-        // todo wait for jh on Db drop
-        let _jh = IndexFlusher::start_thread(flusher_receiver, Arc::downgrade(&this), metrics);
+
+        // Now start the flusher threads with the weak reference
+        let weak_db = Arc::downgrade(&this);
+        let _handles = IndexFlusher::start_threads(flusher_receivers, weak_db, metrics);
+
+        // todo: store handles and wait for them on Db drop
+
         Ok(this)
     }
 
@@ -706,3 +723,44 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 #[path = "db_tests/generated.rs"]
 mod tests;
+
+#[cfg(test)]
+mod multi_flusher_tests {
+    use super::*;
+    use crate::key_shape::{KeyShapeBuilder, KeyType};
+    use tempdir::TempDir;
+
+    #[test]
+    fn test_multi_flusher_threads() {
+        let dir = TempDir::new("test_multi_flusher").unwrap();
+
+        // Test with different numbers of flusher threads
+        for num_threads in [1, 2, 4, 8] {
+            let mut config = Config::small();
+            config.num_flusher_threads = num_threads;
+
+            let mut builder = KeyShapeBuilder::new();
+            builder.add_key_space("test", 8, 16, KeyType::uniform(16));
+            let key_shape = builder.build();
+
+            let db = Db::open(dir.path(), key_shape, Arc::new(config), Metrics::new()).unwrap();
+
+            // Perform some operations to ensure the DB works
+            for i in 0..100 {
+                let key = format!("key{:05}", i);
+                let value = format!("value{}", i);
+                db.insert(KeySpace(0), key, value).unwrap();
+            }
+
+            // Verify we can read back the data
+            for i in 0..100 {
+                let key = format!("key{:05}", i);
+                let value = db.get(KeySpace(0), key.as_bytes()).unwrap();
+                assert!(value.is_some());
+                assert_eq!(value.unwrap().as_ref(), format!("value{}", i).as_bytes());
+            }
+
+            drop(db);
+        }
+    }
+}
