@@ -857,9 +857,9 @@ impl LargeTableEntry {
     fn report_loaded_keys_delta(&self, delta: i64) {
         self.context
             .metrics
-            .loaded_keys
+            .loaded_key_bytes
             .with_label_values(&[self.context.name()])
-            .add(delta);
+            .add(delta * (self.context.index_key_size() as i64));
     }
 
     fn insert_bloom_filter(&mut self, key: &[u8]) {

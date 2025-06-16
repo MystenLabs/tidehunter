@@ -18,7 +18,7 @@ pub struct Metrics {
     pub compacted_keys: IntCounterVec,
     pub read: IntCounterVec,
     pub read_bytes: IntCounterVec,
-    pub loaded_keys: IntGaugeVec,
+    pub loaded_key_bytes: IntGaugeVec,
     pub index_distance_from_tail: IntGaugeVec,
 
     pub lookup_mcs: HistogramVec,
@@ -108,7 +108,7 @@ impl Metrics {
             compacted_keys: counter_vec!("compacted_keys", &["ks"], registry),
             read: counter_vec!("read", &["ks", "kind", "type"], registry),
             read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
-            loaded_keys: gauge_vec!("loaded_keys", &["ks"], registry),
+            loaded_key_bytes: gauge_vec!("loaded_key_bytes", &["ks"], registry),
             index_distance_from_tail: gauge_vec!("index_distance_from_tail", &["ks"], registry),
 
             lookup_mcs: histogram_vec!(

@@ -28,4 +28,8 @@ impl KsContext {
     pub fn excess_dirty_keys(&self, dirty_keys_count: usize) -> bool {
         dirty_keys_count > self.max_dirty_keys()
     }
+
+    pub fn index_key_size(&self) -> usize {
+        self.ks_config.index_key_size()
+    }
 }
