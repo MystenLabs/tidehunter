@@ -21,6 +21,7 @@ struct IndexFlusherThread {
     db: Weak<Db>,
     receiver: mpsc::Receiver<FlusherCommand>,
     metrics: Arc<Metrics>,
+    thread_id: usize,
 }
 
 pub struct FlusherCommand {
@@ -52,7 +53,8 @@ impl IndexFlusher {
             .into_iter()
             .enumerate()
             .map(|(thread_id, receiver)| {
-                let flusher_thread = IndexFlusherThread::new(db.clone(), receiver, metrics.clone());
+                let flusher_thread =
+                    IndexFlusherThread::new(db.clone(), receiver, metrics.clone(), thread_id);
 
                 thread::Builder::new()
                     .name(format!("flusher-{}", thread_id))
@@ -113,11 +115,13 @@ impl IndexFlusherThread {
         db: Weak<Db>,
         receiver: mpsc::Receiver<FlusherCommand>,
         metrics: Arc<Metrics>,
+        thread_id: usize,
     ) -> Self {
         Self {
             db,
             receiver,
             metrics,
+            thread_id,
         }
     }
 
@@ -157,6 +161,7 @@ impl IndexFlusherThread {
             db.update_flushed_index(command.ks, command.cell, original_index, position);
             self.metrics
                 .flush_time_mcs
+                .with_label_values(&[&self.thread_id.to_string()])
                 .inc_by(now.elapsed().as_micros() as u64);
         }
     }

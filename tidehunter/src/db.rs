@@ -53,14 +53,9 @@ impl Db {
         let wal = Wal::open(&wal_path, config.wal_layout(), metrics.clone())?;
 
         // Create channels for flusher threads first
-        let mut flusher_senders = Vec::with_capacity(config.num_flusher_threads);
-        let mut flusher_receivers = Vec::with_capacity(config.num_flusher_threads);
-
-        for _ in 0..config.num_flusher_threads {
-            let (sender, receiver) = mpsc::channel();
-            flusher_senders.push(sender);
-            flusher_receivers.push(receiver);
-        }
+        let (flusher_senders, flusher_receivers) = (0..config.num_flusher_threads)
+            .map(|_| mpsc::channel())
+            .unzip();
 
         let flusher = IndexFlusher::new(flusher_senders, metrics.clone());
         let large_table = LargeTable::from_unloaded(
@@ -751,6 +746,9 @@ mod multi_flusher_tests {
                 let value = format!("value{}", i);
                 db.insert(KeySpace(0), key, value).unwrap();
             }
+
+            // Wait for all flusher threads to finish
+            db.large_table.flusher.barrier();
 
             // Verify we can read back the data
             for i in 0..100 {
