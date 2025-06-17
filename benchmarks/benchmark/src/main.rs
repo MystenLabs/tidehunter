@@ -89,7 +89,7 @@ pub fn main() {
                 report!(report, "Using **direct IO**");
             }
             use crate::storage::tidehunter::TidehunterStorage;
-            let mutexes = 4096;
+            let mutexes = 4096 * 32;
             let (key_shape, ks) = match config.stress_client_parameters.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     32,
@@ -389,8 +389,8 @@ impl StressThread {
     pub fn run_mixed_operations(self) {
         let _ = self.start_lock.read();
         let mut thread_rng = ThreadRng::default();
+        let max_pos = self.max_global_pos();
         let read_percentage = self.parameters.read_percentage;
-        let mut pos = self.parameters.writes;
 
         for _ in 0..self.parameters.operations {
             // Randomly decide whether to read or write based on percentage
@@ -398,12 +398,11 @@ impl StressThread {
 
             if do_read {
                 // Perform a read operation
-                let pos = thread_rng.gen_range(pos - 100..pos);
-                let g_pos = self.global_pos(pos);
+                let pos = thread_rng.gen_range(0..max_pos);
                 let timer;
                 match self.parameters.read_mode {
                     ReadMode::Get => {
-                        let (key, value) = self.key_value(g_pos);
+                        let (key, value) = self.key_value(pos);
                         timer = Instant::now();
                         let found_value = self.db.get(&key).expect("Expected value not found");
                         assert_eq!(
@@ -440,9 +439,8 @@ impl StressThread {
                 }
             } else {
                 // Perform a write operation to a new key beyond the initial dataset
-                let g_pos = self.global_pos(pos);
-                pos += 1;
-                let (key, value) = self.key_value(g_pos);
+                let pos = thread_rng.gen_range(max_pos..u64::MAX);
+                let (key, value) = self.key_value(pos);
                 let timer = Instant::now();
                 self.db.insert(key.into(), value.into());
                 let latency = timer.elapsed().as_micros();

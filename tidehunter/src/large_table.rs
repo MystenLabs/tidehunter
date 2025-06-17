@@ -964,12 +964,12 @@ impl LargeTableEntry {
         if self.context.ks_config.unloading_disabled() {
             return;
         }
-        if self.flush_pending {
-            return;
-        }
-        if let Some(flush_kind) = self.flush_kind() {
+        if !self.flush_pending {
             self.flush_pending = true;
-            flusher.request_flush(self.context.ks_config.id(), self.cell.clone(), flush_kind);
+            let flush_kind = self
+                .flush_kind()
+                .expect("unload_if_ks_enabled is called in clean state");
+            flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
         }
     }
 
