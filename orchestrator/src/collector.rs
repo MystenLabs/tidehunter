@@ -126,7 +126,7 @@ impl BenchmarkResult {
 pub struct MetricsCollector {
     /// The benchmark parameters for the run.
     parameters: BenchmarkParameters,
-    /// The timestamp for this orchestrator run.
+    /// The timestamp for this batch run.
     run_timestamp: String,
     /// The Prometheus client used to query the metrics.
     client: PrometheusClient,
