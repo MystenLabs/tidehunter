@@ -138,6 +138,7 @@ def main():
         'backend': ['Tidehunter'],
         'direct_io': [False, True], 
         'read_percentage': [0, 50, 80, 100],
+        'zipf_exponent': [0.8],
     }
     
     print("Generating configurations with the following parameter combinations:")

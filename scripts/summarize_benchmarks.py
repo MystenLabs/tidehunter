@@ -20,9 +20,9 @@ from typing import Dict, Tuple, Optional
 
 # Regex patterns for parsing log files
 BACKEND_PATTERN = re.compile(r'backend:\s+(Tidehunter|Rocksdb)')
-READ_MODE_PATTERN = re.compile(r'read_mode:\s+(Get|Lt\(\d+\))')
+READ_MODE_PATTERN = re.compile(r'read_mode:\s+(Get|Lt\(\s*\d+\s*,?\s*\))', re.DOTALL)
 READ_PERCENTAGE_PATTERN = re.compile(r'read_percentage:\s+(\d+)')
-DIRECT_IO_PATTERN = re.compile(r'Using \*\*direct IO\*\*')
+DIRECT_IO_PATTERN = re.compile(r'direct_io:\s+(true|false)')
 MIXED_TEST_PATTERN = re.compile(r'Mixed test done in [^:]+:\s+([\d.]+[MK]?)\s+ops/s')
 
 def parse_ops_value(ops_str: str) -> float:
@@ -45,12 +45,24 @@ def parse_log_file(filepath: Path) -> Optional[Dict]:
         read_percentage_match = READ_PERCENTAGE_PATTERN.search(content)
         mixed_test_match = MIXED_TEST_PATTERN.search(content)
         
-        if not all([backend_match, read_mode_match, read_percentage_match, mixed_test_match]):
-            print(f"Warning: Could not parse all required fields from {filepath}")
+        # Check which fields are missing
+        missing_fields = []
+        if not backend_match:
+            missing_fields.append("backend")
+        if not read_mode_match:
+            missing_fields.append("read_mode")
+        if not read_percentage_match:
+            missing_fields.append("read_percentage")
+        if not mixed_test_match:
+            missing_fields.append("mixed_test_result")
+        
+        if missing_fields:
+            print(f"Warning: Could not parse fields {missing_fields} from {filepath}")
             return None
             
         # Check for direct IO
-        direct_io = bool(DIRECT_IO_PATTERN.search(content))
+        direct_io_match = DIRECT_IO_PATTERN.search(content)
+        direct_io = direct_io_match and direct_io_match.group(1) == 'true' if direct_io_match else False
         
         # Simplify read mode (Get or Lt)
         read_mode = read_mode_match.group(1)
@@ -98,7 +110,7 @@ def create_summary_table(results: list, direct_io: bool, read_mode: str) -> str:
     lines.append(f"{'='*60}")
     
     # Header
-    header = f"{'Read %':>10} |"
+    header = f"{'Read %':>11} |"
     for backend in backends:
         header += f" {backend:>15} |"
     lines.append(header)
