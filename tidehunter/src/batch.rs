@@ -3,6 +3,8 @@ use crate::key_shape::KeySpace;
 use crate::wal::PreparedWalWrite;
 use minibytes::Bytes;
 
+pub type BatchId = u16;
+
 pub struct WriteBatch {
     pub(crate) writes: Vec<PreparedWrite>,
     pub(crate) deletes: Vec<PreparedDelete>,
@@ -40,20 +42,22 @@ impl WriteBatch {
         let key = key.into();
         let value = value.into();
         assert!(key.len() <= MAX_KEY_LEN, "Key exceeding max key length");
-        let wal_write = PreparedWalWrite::new(&WalEntry::Record(ks, key.clone(), value.clone()));
-        PreparedWrite {
-            ks,
-            key,
-            value,
-            wal_write,
-        }
+        PreparedWrite { ks, key, value }
     }
 
     pub fn prepare_delete(ks: KeySpace, key: impl Into<Bytes>) -> PreparedDelete {
         let key = key.into();
         assert!(key.len() <= MAX_KEY_LEN, "Key exceeding max key length");
-        let wal_write = PreparedWalWrite::new(&WalEntry::Remove(ks, key.clone()));
-        PreparedDelete { ks, key, wal_write }
+        PreparedDelete { ks, key }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.writes.is_empty() && self.deletes.is_empty()
+    }
+
+    pub fn get_wal_write(&self, batch_id: BatchId) -> PreparedWalWrite {
+        let count = (self.writes.len() + self.deletes.len()) as u16;
+        PreparedWalWrite::new(&WalEntry::BatchStart(batch_id, count))
     }
 }
 
@@ -61,11 +65,26 @@ pub struct PreparedWrite {
     pub(crate) ks: KeySpace,
     pub(crate) key: Bytes,
     pub(crate) value: Bytes,
-    pub(crate) wal_write: PreparedWalWrite,
+}
+
+impl PreparedWrite {
+    pub fn get_wal_write(&self, batch_id: BatchId) -> PreparedWalWrite {
+        PreparedWalWrite::new(&WalEntry::BatchRecord(
+            batch_id,
+            self.ks,
+            self.key.clone(),
+            self.value.clone(),
+        ))
+    }
 }
 
 pub struct PreparedDelete {
     pub(crate) ks: KeySpace,
     pub(crate) key: Bytes,
-    pub(crate) wal_write: PreparedWalWrite,
+}
+
+impl PreparedDelete {
+    pub fn get_wal_write(&self, batch_id: BatchId) -> PreparedWalWrite {
+        PreparedWalWrite::new(&WalEntry::BatchRemove(batch_id, self.ks, self.key.clone()))
+    }
 }

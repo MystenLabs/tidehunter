@@ -1,4 +1,4 @@
-use crate::batch::WriteBatch;
+use crate::batch::{BatchId, WriteBatch};
 use crate::cell::CellId;
 use crate::config::Config;
 use crate::control::{ControlRegion, ControlRegionStore};
@@ -19,6 +19,7 @@ use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
+use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Weak};
 use std::time::Duration;
@@ -206,21 +207,26 @@ impl Db {
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let batch_id = self.wal_writer.gen_batch_id();
         let _timer = self
             .metrics
             .db_op_mcs
             .with_label_values(&["write_batch", ""])
             .mcs_timer();
-        // todo implement atomic durability
+        let wal_write = batch.get_wal_write(batch_id);
         let WriteBatch { writes, deletes } = batch;
-        let mut last_position = WalPosition::INVALID;
+        let mut last_position = self.wal_writer.write(&wal_write)?;
         for w in writes {
             let ks = self.key_shape.ks(w.ks);
+            let wal_write = w.get_wal_write(batch_id);
             self.metrics
                 .wal_written_bytes_type
                 .with_label_values(&["record", ks.name()])
-                .inc_by(w.wal_write.len() as u64);
-            let position = self.wal_writer.write(&w.wal_write)?;
+                .inc_by(wal_write.len() as u64);
+            let position = self.wal_writer.write(&wal_write)?;
             ks.check_key(&w.key);
             let reduced_key = ks.reduced_key_bytes(w.key);
             self.large_table
@@ -230,11 +236,12 @@ impl Db {
 
         for w in deletes {
             let ks = self.key_shape.ks(w.ks);
+            let wal_write = w.get_wal_write(batch_id);
             self.metrics
                 .wal_written_bytes_type
                 .with_label_values(&["tombstone", ks.name()])
-                .inc_by(w.wal_write.len() as u64);
-            let position = self.wal_writer.write(&w.wal_write)?;
+                .inc_by(wal_write.len() as u64);
+            let position = self.wal_writer.write(&wal_write)?;
             ks.check_key(&w.key);
             let reduced_key = ks.reduced_key_bytes(w.key);
             self.large_table.remove(ks, reduced_key, position, self)?;
@@ -356,10 +363,9 @@ impl Db {
 
     fn read_record(&self, position: WalPosition) -> DbResult<(Bytes, Bytes)> {
         let entry = self.read_report_entry(position)?;
-        if let WalEntry::Record(KeySpace(_), k, v) = entry {
-            Ok((k, v))
-        } else {
-            panic!("Unexpected wal entry where expected record");
+        match entry {
+            WalEntry::Record(_, k, v) | WalEntry::BatchRecord(.., k, v) => Ok((k, v)),
+            _ => panic!("Unexpected wal entry where expected record"),
         }
     }
 
@@ -368,6 +374,9 @@ impl Db {
             WalEntry::Record(ks, _, _) => ("record", self.key_shape.ks(*ks).name()),
             WalEntry::Index(ks, _) => ("index", self.key_shape.ks(*ks).name()),
             WalEntry::Remove(ks, _) => ("tombstone", self.key_shape.ks(*ks).name()),
+            WalEntry::BatchRecord(_, ks, _, _) => ("batch_record", self.key_shape.ks(*ks).name()),
+            WalEntry::BatchRemove(_, ks, _) => ("batch_remove", self.key_shape.ks(*ks).name()),
+            WalEntry::BatchStart(..) => return,
         };
         let mapped = if mapped { "mapped" } else { "unmapped" };
         self.metrics
@@ -386,10 +395,12 @@ impl Db {
         mut wal_iterator: WalIterator,
         metrics: &Metrics,
     ) -> DbResult<WalWriter> {
+        let mut batches = HashMap::new();
+        let mut next_batch_id = 0;
         loop {
             let entry = wal_iterator.next();
             if matches!(entry, Err(WalError::Crc(_))) {
-                break Ok(wal_iterator.into_writer());
+                break Ok(wal_iterator.into_writer(next_batch_id));
             }
             let (position, entry) = entry?;
             let entry = WalEntry::from_bytes(entry);
@@ -408,6 +419,45 @@ impl Db {
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
                     large_table.remove(ks, reduced_key, position, wal_iterator.wal())?;
+                }
+                WalEntry::BatchStart(batch_id, count) => {
+                    next_batch_id = std::cmp::max(batch_id + 1, next_batch_id);
+                    batches.insert(batch_id, (vec![], count));
+                }
+                WalEntry::BatchRecord(batch_id, ..) | WalEntry::BatchRemove(batch_id, ..) => {
+                    match batches.entry(batch_id) {
+                        HashMapEntry::Occupied(mut batch_entry) => {
+                            let (batch, remaining) = batch_entry.get_mut();
+                            batch.push((entry, position));
+                            *remaining -= 1;
+                            if *remaining == 0 {
+                                metrics
+                                    .replayed_wal_records
+                                    .inc_by((batch.len() + 1) as u64);
+                                for (entry, pos) in batch {
+                                    match entry {
+                                        WalEntry::BatchRecord(_, ks, k, v) => {
+                                            let ks = key_shape.ks(*ks);
+                                            let key = ks.reduced_key_bytes(k.clone());
+                                            let loader = wal_iterator.wal();
+                                            large_table.insert(ks, key, *pos, v, loader);
+                                        }
+                                        WalEntry::BatchRemove(_, ks, k) => {
+                                            let ks = key_shape.ks(*ks);
+                                            let key = ks.reduced_key_bytes(k.clone());
+                                            let loader = wal_iterator.wal();
+                                            large_table.remove(ks, key, *pos, loader)?;
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                                batch_entry.remove();
+                            }
+                        }
+                        HashMapEntry::Vacant(_) => {
+                            panic!("Batch start not found for batch {}", batch_id)
+                        }
+                    }
                 }
             }
         }
@@ -577,6 +627,9 @@ pub(crate) enum WalEntry {
     Record(KeySpace, Bytes, Bytes),
     Index(KeySpace, Bytes),
     Remove(KeySpace, Bytes),
+    BatchStart(BatchId, u16),
+    BatchRecord(BatchId, KeySpace, Bytes, Bytes),
+    BatchRemove(BatchId, KeySpace, Bytes),
 }
 
 #[derive(Debug)]
@@ -591,6 +644,9 @@ impl WalEntry {
     const WAL_ENTRY_RECORD: u8 = 1;
     const WAL_ENTRY_INDEX: u8 = 2;
     const WAL_ENTRY_REMOVE: u8 = 3;
+    const WAL_ENTRY_BATCH_START: u8 = 4;
+    const WAL_ENTRY_BATCH_RECORD: u8 = 5;
+    const WAL_ENTRY_BATCH_REMOVE: u8 = 6;
     pub const INDEX_PREFIX_SIZE: usize = 2;
 
     pub fn from_bytes(bytes: Bytes) -> Self {
@@ -612,6 +668,24 @@ impl WalEntry {
                 let ks = KeySpace(b.get_u8());
                 WalEntry::Remove(ks, bytes.slice(2..))
             }
+            WalEntry::WAL_ENTRY_BATCH_START => {
+                let batch_id = b.get_u16();
+                let count = b.get_u16();
+                WalEntry::BatchStart(batch_id, count)
+            }
+            WalEntry::WAL_ENTRY_BATCH_RECORD => {
+                let batch_id = b.get_u16();
+                let ks = KeySpace(b.get_u8());
+                let key_len = b.get_u16() as usize;
+                let key = bytes.slice(6..6 + key_len);
+                let value = bytes.slice(6 + key_len..);
+                WalEntry::BatchRecord(batch_id, ks, key, value)
+            }
+            WalEntry::WAL_ENTRY_BATCH_REMOVE => {
+                let batch_id = b.get_u16();
+                let ks = KeySpace(b.get_u8());
+                WalEntry::BatchRemove(batch_id, ks, bytes.slice(4..))
+            }
             _ => panic!("Unknown wal entry type {entry_type}"),
         }
     }
@@ -623,6 +697,9 @@ impl IntoBytesFixed for WalEntry {
             WalEntry::Record(KeySpace(_), k, v) => 1 + 1 + 2 + k.len() + v.len(),
             WalEntry::Index(KeySpace(_), index) => 1 + 1 + index.len(),
             WalEntry::Remove(KeySpace(_), k) => 1 + 1 + k.len(),
+            WalEntry::BatchStart(_, _) => 1 + 2 + 2,
+            WalEntry::BatchRecord(_, _, k, v) => 1 + 2 + 1 + 2 + k.len() + v.len(),
+            WalEntry::BatchRemove(_, _, k) => 1 + 2 + 1 + k.len(),
         }
     }
 
@@ -646,6 +723,25 @@ impl IntoBytesFixed for WalEntry {
                 buf.put_u8(Self::WAL_ENTRY_REMOVE);
                 buf.put_u8(ks.0);
                 buf.put_slice(&k)
+            }
+            WalEntry::BatchStart(batch_id, count) => {
+                buf.put_u8(Self::WAL_ENTRY_BATCH_START);
+                buf.put_u16(*batch_id);
+                buf.put_u16(*count);
+            }
+            WalEntry::BatchRecord(batch_id, ks, k, v) => {
+                buf.put_u8(Self::WAL_ENTRY_BATCH_RECORD);
+                buf.put_u16(*batch_id);
+                buf.put_u8(ks.0);
+                buf.put_u16(k.len() as u16);
+                buf.put_slice(k);
+                buf.put_slice(v);
+            }
+            WalEntry::BatchRemove(batch_id, ks, k) => {
+                buf.put_u8(Self::WAL_ENTRY_BATCH_REMOVE);
+                buf.put_u16(*batch_id);
+                buf.put_u8(ks.0);
+                buf.put_slice(k)
             }
         }
     }
