@@ -1,3 +1,4 @@
+use crate::batch::BatchId;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::file_reader::{align_size, set_direct_options, FileReader};
 use crate::lookup::{FileRange, RandomRead};
@@ -13,6 +14,7 @@ use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -22,6 +24,7 @@ pub struct WalWriter {
     wal: Arc<Wal>,
     position_and_map: Mutex<(IncrementalWalPosition, Map)>,
     mapper: WalMapper,
+    batch_id: AtomicU16,
 }
 
 pub struct Wal {
@@ -123,6 +126,10 @@ impl WalWriter {
     /// not to be used as WalPosition, only as a metric to see how many bytes were written
     pub fn position(&self) -> u64 {
         self.position_and_map.lock().0.position
+    }
+
+    pub fn gen_batch_id(&self) -> BatchId {
+        self.batch_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -557,7 +564,7 @@ impl WalIterator {
         Ok(CrcFrame::read_from_bytes(&self.map.data, offset as usize)?)
     }
 
-    pub fn into_writer(self) -> WalWriter {
+    pub fn into_writer(self, batch_id: BatchId) -> WalWriter {
         let position = IncrementalWalPosition {
             position: self.position,
             layout: self.wal.layout.clone(),
@@ -575,6 +582,7 @@ impl WalIterator {
             wal: self.wal,
             position_and_map,
             mapper,
+            batch_id: AtomicU16::new(batch_id),
         }
     }
 
@@ -726,7 +734,7 @@ mod tests {
             let writer = wal
                 .wal_iterator(WalPosition::INVALID)
                 .unwrap()
-                .into_writer();
+                .into_writer(0);
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap();
@@ -747,7 +755,7 @@ mod tests {
             assert_bytes(&[], wal_iterator.next());
             assert_bytes(&large, wal_iterator.next());
             wal_iterator.next().expect_err("Error expected");
-            let writer = wal_iterator.into_writer();
+            let writer = wal_iterator.into_writer(0);
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![91, 92, 93]))
                 .unwrap();
@@ -813,7 +821,7 @@ mod tests {
         let wal_writer = wal
             .wal_iterator(WalPosition::INVALID)
             .unwrap()
-            .into_writer();
+            .into_writer(0);
         let wal_writer = Arc::new(wal_writer);
         let threads = 8u64;
         let writes_per_thread = 256u64;
@@ -884,7 +892,7 @@ mod tests {
             let writer = wal
                 .wal_iterator(WalPosition::INVALID)
                 .unwrap()
-                .into_writer();
+                .into_writer(0);
             writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap()
