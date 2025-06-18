@@ -4,6 +4,7 @@
 //! Orchestrator entry point.
 
 use benchmark::BenchmarkParameters;
+use chrono::Utc;
 use clap::Parser;
 use client::aws::AwsClient;
 use client::vultr::VultrClient;
@@ -110,6 +111,9 @@ pub enum TestbedAction {
 
     /// Destroy the testbed and terminate all instances.
     Destroy,
+
+    /// Download logs from all active nodes in the testbed.
+    FetchLogs,
 }
 
 #[tokio::main]
@@ -176,6 +180,50 @@ async fn run<C: ServerProviderClient>(
                 .destroy()
                 .await
                 .wrap_err("Failed to destroy testbed")?,
+
+            // Download logs from all active nodes.
+            TestbedAction::FetchLogs => {
+                // Create a new orchestrator to access the log download functionality.
+                let username = testbed.username();
+                let private_key_file = settings.ssh_private_key_file.clone();
+                let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
+                    .with_timeout(settings.ssh_timeout)
+                    .with_retries(settings.ssh_retries);
+
+                let instances = testbed.instances();
+                let setup_commands = vec![];
+
+                let protocol_commands = Protocol::new(&settings);
+                let target_configs = match &settings.target_configs_path {
+                    Some(path) => {
+                        Vec::<Config>::load(path).wrap_err("Failed to load target configs")?
+                    }
+                    None => vec![Config::default()],
+                };
+
+                let benchmark_parameters =
+                    BenchmarkParameters::new(settings.clone(), target_configs);
+
+                let orchestrator = Orchestrator::new(
+                    settings.clone(),
+                    instances,
+                    setup_commands,
+                    protocol_commands,
+                    ssh_manager,
+                );
+
+                // Generate timestamp for this log download
+                let timestamp = Utc::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+
+                // Download the logs
+                let log_analyzer = orchestrator
+                    .download_logs(&benchmark_parameters, &timestamp)
+                    .await
+                    .wrap_err("Failed to download logs")?;
+
+                // Print summary of log analysis
+                log_analyzer.print_summary();
+            }
         },
 
         // Run benchmarks.
