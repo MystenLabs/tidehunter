@@ -458,7 +458,7 @@ impl StressThread {
                         let exists = self.db.exists(&key);
                         // For exists mode, we expect the key to exist if pos < self.parameters.writes
                         // since those were written in the initial write phase
-                        if pos < self.global_pos(self.parameters.writes) {
+                        if pos < self.global_pos(self.parameters.writes - 1) {
                             assert!(exists, "Key should exist but was not found");
                         }
                         // Keys beyond initial writes may or may not exist depending on
