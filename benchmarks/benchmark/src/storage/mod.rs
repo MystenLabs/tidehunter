@@ -10,5 +10,7 @@ pub trait Storage: Sync + Send + 'static {
 
     fn get_lt(&self, k: &[u8], iterations: usize) -> Vec<Bytes>;
 
+    fn exists(&self, k: &[u8]) -> bool;
+
     fn name(&self) -> &'static str;
 }

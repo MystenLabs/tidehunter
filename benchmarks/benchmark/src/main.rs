@@ -452,6 +452,18 @@ impl StressThread {
                             .with_label_values(&[result])
                             .inc();
                     }
+                    ReadMode::Exists => {
+                        let (key, _) = self.key_value(pos);
+                        timer = Instant::now();
+                        let exists = self.db.exists(&key);
+                        // For exists mode, we expect the key to exist if pos < self.parameters.writes
+                        // since those were written in the initial write phase
+                        if pos < self.global_pos(self.parameters.writes) {
+                            assert!(exists, "Key should exist but was not found");
+                        }
+                        // Keys beyond initial writes may or may not exist depending on
+                        // whether they were written during the mixed phase
+                    }
                 }
                 let latency = timer.elapsed().as_micros();
                 self.benchmark_metrics

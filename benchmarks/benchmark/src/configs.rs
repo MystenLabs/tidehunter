@@ -37,6 +37,7 @@ impl FromStr for KeyLayout {
 pub enum ReadMode {
     Get,
     Lt(usize),
+    Exists,
 }
 
 impl FromStr for ReadMode {
@@ -49,9 +50,11 @@ impl FromStr for ReadMode {
             Ok(Self::Lt(1))
         } else if s.starts_with("lt:") {
             Ok(Self::Lt(s[3..].parse().expect("Failed to parse read mode")))
+        } else if s == "exists" {
+            Ok(Self::Exists)
         } else {
             anyhow::bail!(
-                "Only allowed choices for read_mode are 'get'(get) or 'lt'(iterator less then)"
+                "Only allowed choices for read_mode are 'get'(get), 'lt'(iterator less then), or 'exists'(exists check)"
             );
         }
     }

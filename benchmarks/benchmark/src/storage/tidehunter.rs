@@ -37,6 +37,10 @@ impl Storage for Arc<TidehunterStorage> {
         result
     }
 
+    fn exists(&self, k: &[u8]) -> bool {
+        self.db.exists(self.ks, k).unwrap()
+    }
+
     fn name(&self) -> &'static str {
         "tidehunter"
     }

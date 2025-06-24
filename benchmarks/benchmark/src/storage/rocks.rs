@@ -118,6 +118,11 @@ impl Storage for Arc<RocksStorage> {
         result
     }
 
+    fn exists(&self, k: &[u8]) -> bool {
+        // RocksDB doesn't have a native exists method, so we use get and check if it's Some
+        self.db.get(k).unwrap().is_some()
+    }
+
     fn name(&self) -> &'static str {
         "rocksdb"
     }
