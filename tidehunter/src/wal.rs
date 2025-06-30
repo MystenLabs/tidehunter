@@ -638,7 +638,6 @@ impl WalPosition {
         offset: u64::MAX,
         len: u32::MAX,
     };
-    pub const SIZE: usize = 8;
     pub const INVALID: WalPosition = Self::MAX;
     pub const LENGTH: usize = 12;
     #[cfg(test)]
