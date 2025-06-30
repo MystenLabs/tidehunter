@@ -120,7 +120,7 @@ impl Db {
                 // Treat WalPosition::INVALID as 0 for accounting purpose
                 position = snapshot_position
                     .valid()
-                    .map(|p| p.as_u64())
+                    .map(|p| p.offset())
                     .unwrap_or_default();
             }
         }
@@ -151,7 +151,7 @@ impl Db {
             .with_label_values(&["record", ks.name()])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
-        self.metrics.wal_written_bytes.set(position.as_u64() as i64);
+        self.metrics.wal_written_bytes.set(position.offset() as i64);
         let reduced_key = ks.reduced_key_bytes(k);
         self.large_table.insert(ks, reduced_key, position, &v, self);
         Ok(())
@@ -289,7 +289,7 @@ impl Db {
         if last_position != WalPosition::INVALID {
             self.metrics
                 .wal_written_bytes
-                .set(last_position.as_u64() as i64);
+                .set(last_position.offset() as i64);
         }
 
         Ok(())

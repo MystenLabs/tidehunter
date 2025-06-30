@@ -485,7 +485,7 @@ impl LargeTable {
             Some(position) => {
                 // This can go below 0 because tail_position is not synchronized
                 // and index position can be higher than the tail_position in rare cases
-                metric.set(tail_position.saturating_sub(position.as_u64()) as i64)
+                metric.set(tail_position.saturating_sub(position.offset()) as i64)
             }
         }
         Ok((ks_data, replay_from, max_wal_position))
@@ -945,7 +945,7 @@ impl LargeTableEntry {
         }
         let position = self.state.wal_position();
         // position can actually be great then tail_position due to concurrency
-        let distance = tail_position.saturating_sub(position.as_u64());
+        let distance = tail_position.saturating_sub(position.offset());
         if distance >= config.snapshot_unload_threshold {
             self.context
                 .metrics

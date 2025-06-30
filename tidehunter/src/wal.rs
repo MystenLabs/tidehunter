@@ -60,7 +60,10 @@ pub(crate) struct Map {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct WalPosition(u64, u32);
+pub struct WalPosition {
+    offset: u64,
+    len: u32,
+}
 
 pub enum WalRandomRead<'a> {
     Mapped(Bytes),
@@ -116,7 +119,7 @@ impl WalWriter {
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
-        Ok(WalPosition(pos, len as u32))
+        Ok(WalPosition::new(pos, len as u32))
     }
 
     /// Current un-initialized position,
@@ -232,7 +235,7 @@ impl Wal {
             WalPosition::INVALID,
             "Trying to read invalid wal position"
         );
-        let (map, offset) = self.layout.locate(pos.0);
+        let (map, offset) = self.layout.locate(pos.offset);
         let map = self.map(map, false)?;
         // todo avoid clone, introduce Bytes::slice_in_place
         Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
@@ -250,7 +253,7 @@ impl Wal {
             WalPosition::INVALID,
             "Trying to read invalid wal position"
         );
-        let (map, offset) = self.layout.locate(pos.0);
+        let (map, offset) = self.layout.locate(pos.offset);
         if let Some(map) = self.get_map(map) {
             // using CrcFrame::read_from_slice to avoid holding the larger byte array
             Ok((
@@ -266,7 +269,7 @@ impl Wal {
                 pos.len()
             };
             let mut buf = self.file_reader().io_buffer_bytes(buffer_size);
-            self.file.read_exact_at(&mut buf, pos.0)?;
+            self.file.read_exact_at(&mut buf, pos.offset)?;
             let mut bytes = Bytes::from(bytes::Bytes::from(buf));
             if self.layout.direct_io && bytes.len() > pos.len() {
                 // Direct IO buffer can be larger then needed
@@ -286,7 +289,7 @@ impl Wal {
             WalPosition::INVALID,
             "Trying to read invalid wal position"
         );
-        let (map, offset) = self.layout.locate(pos.0);
+        let (map, offset) = self.layout.locate(pos.offset);
         if let Some(map) = self.get_map(map) {
             let offset = offset as usize;
             let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
@@ -295,7 +298,7 @@ impl Wal {
                 .slice(header_end + inner_offset..header_end + pos.len());
             Ok(WalRandomRead::Mapped(data))
         } else {
-            let header_end = pos.0 + CrcFrame::CRC_HEADER_LENGTH as u64;
+            let header_end = pos.offset + CrcFrame::CRC_HEADER_LENGTH as u64;
             let range = (header_end + inner_offset as u64)..(header_end + pos.len() as u64);
             Ok(WalRandomRead::File(FileRange::new(
                 self.file_reader(),
@@ -420,7 +423,7 @@ impl Wal {
         let (skip_one, position) = if position == WalPosition::INVALID {
             (false, 0)
         } else {
-            (true, position.0)
+            (true, position.offset)
         };
         let (map_id, _) = self.layout.locate(position);
         Self::extend_to_map(&self.layout, &self.file, map_id)?;
@@ -539,7 +542,7 @@ impl WalIterator {
         } else {
             frame?
         };
-        let position = WalPosition(self.position, frame.len() as u32);
+        let position = WalPosition::new(self.position, frame.len() as u32);
         self.position += self
             .wal
             .layout
@@ -631,16 +634,23 @@ impl PreparedWalWrite {
 }
 
 impl WalPosition {
-    pub const MAX: WalPosition = WalPosition(u64::MAX, u32::MAX);
+    pub const MAX: WalPosition = WalPosition {
+        offset: u64::MAX,
+        len: u32::MAX,
+    };
     pub const SIZE: usize = 8;
     pub const INVALID: WalPosition = Self::MAX;
     pub const LENGTH: usize = 12;
     #[cfg(test)]
-    pub const TEST: WalPosition = WalPosition(3311, 12);
+    pub const TEST: WalPosition = WalPosition::new(3311, 12);
+
+    const fn new(offset: u64, len: u32) -> Self {
+        Self { offset, len }
+    }
 
     pub fn write_to_buf(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.0);
-        buf.put_u32(self.1);
+        buf.put_u64(self.offset);
+        buf.put_u32(self.len);
     }
 
     pub fn to_vec(&self) -> Vec<u8> {
@@ -650,7 +660,7 @@ impl WalPosition {
     }
 
     pub fn read_from_buf(buf: &mut impl Buf) -> Self {
-        Self(buf.get_u64(), buf.get_u32())
+        Self::new(buf.get_u64(), buf.get_u32())
     }
 
     pub fn from_slice(mut slice: &[u8]) -> Self {
@@ -660,7 +670,7 @@ impl WalPosition {
     }
 
     pub fn len(&self) -> usize {
-        self.1 as usize
+        self.len as usize
     }
 
     pub fn valid(self) -> Option<Self> {
@@ -671,8 +681,8 @@ impl WalPosition {
         }
     }
 
-    pub fn as_u64(&self) -> u64 {
-        self.0
+    pub fn offset(&self) -> u64 {
+        self.offset
     }
 
     pub fn is_valid(self) -> bool {
@@ -681,7 +691,7 @@ impl WalPosition {
 
     #[allow(dead_code)]
     pub fn test_value(v: u64) -> Self {
-        Self(v, 0)
+        Self::new(v, 0)
     }
 }
 
@@ -751,7 +761,7 @@ mod tests {
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![91, 92, 93]))
                 .unwrap();
-            assert_eq!(pos.0, 1024); // assert we skipped over to next frag
+            assert_eq!(pos.offset, 1024); // assert we skipped over to next frag
             let data = wal.read(pos).unwrap();
             assert_eq!(&[91, 92, 93], data.as_ref());
         }
