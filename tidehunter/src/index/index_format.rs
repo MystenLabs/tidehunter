@@ -15,8 +15,8 @@ pub const HEADER_SIZE: usize = HEADER_ELEMENTS * HEADER_ELEMENT_SIZE;
 pub const PREFIX_LENGTH: usize = 8; // prefix of key used to estimate position in file, in bytes
 
 pub trait IndexFormat {
-    fn to_bytes(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes;
-    fn from_bytes(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable;
+    fn serialize_index(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes;
+    fn deserialize_index(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable;
     fn lookup_unloaded(
         &self,
         ks: &KeySpaceDesc,
@@ -45,17 +45,17 @@ pub enum IndexFormatType {
 }
 
 impl IndexFormat for IndexFormatType {
-    fn to_bytes(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
+    fn serialize_index(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
         match self {
-            IndexFormatType::Header => LookupHeaderIndex.to_bytes(table, ks),
-            IndexFormatType::Uniform(index) => index.to_bytes(table, ks),
+            IndexFormatType::Header => LookupHeaderIndex.serialize_index(table, ks),
+            IndexFormatType::Uniform(index) => index.serialize_index(table, ks),
         }
     }
 
-    fn from_bytes(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
+    fn deserialize_index(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
         match self {
-            IndexFormatType::Header => LookupHeaderIndex.from_bytes(ks, b),
-            IndexFormatType::Uniform(index) => index.from_bytes(ks, b),
+            IndexFormatType::Header => LookupHeaderIndex.deserialize_index(ks, b),
+            IndexFormatType::Uniform(index) => index.deserialize_index(ks, b),
         }
     }
 
@@ -253,7 +253,7 @@ pub mod test {
         index.insert(k128(1), w(5));
         index.insert(k128(5), w(10));
 
-        let bytes = pi.to_bytes(&index, ks);
+        let bytes = pi.serialize_index(&index, ks);
         assert_eq!(None, pi.lookup_unloaded(ks, &bytes, &k128(0), &metrics));
         assert_eq!(
             Some(w(5)),
@@ -267,7 +267,7 @@ pub mod test {
         let mut index = IndexTable::default();
         index.insert(k128(u128::MAX), w(15));
         index.insert(k128(u128::MAX - 5), w(25));
-        let bytes = pi.to_bytes(&index, ks);
+        let bytes = pi.serialize_index(&index, ks);
         assert_eq!(
             Some(w(15)),
             pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX), &metrics)
@@ -305,7 +305,7 @@ pub mod test {
             let pos = rng.next_u64();
             index.insert(k32(key), w(pos));
         }
-        let bytes = pi.to_bytes(&index, ks);
+        let bytes = pi.serialize_index(&index, ks);
         for (key, expected_value) in &index.data {
             let value = pi.lookup_unloaded(ks, &bytes, key, &metrics);
             assert_eq!(Some(*expected_value), value);
@@ -425,7 +425,7 @@ pub mod test {
 
         // Keys: [10, 20, 30, 40, 50]
         // Convert the table to bytes
-        let serialized = index_format.to_bytes(&table, ks);
+        let serialized = index_format.serialize_index(&table, ks);
         let reader = MockRandomRead::new(serialized);
 
         // Test forward iteration with no previous key (should return first entry)
@@ -533,7 +533,7 @@ pub mod test {
         let table = IndexTable::default();
 
         // Convert the table to bytes
-        let serialized = index_format.to_bytes(&table, ks);
+        let serialized = index_format.serialize_index(&table, ks);
         let reader = MockRandomRead::new(serialized);
 
         // Test with empty index should return None

@@ -192,7 +192,6 @@ pub fn main() {
     }
     if !stress.parameters.tldr.is_empty() {
         let mut file = OpenOptions::new()
-            .write(true)
             .append(true)
             .create(true)
             .open("tldr.txt")
@@ -353,6 +352,7 @@ struct StressThread {
 
 impl StressThread {
     pub fn run_writes(self) {
+        #[allow(clippy::let_underscore_lock)] // RWLock here acts as a barrier
         let _ = self.start_lock.read();
         for pos in 0..self.parameters.writes {
             let pos = self.global_pos(pos);
@@ -374,7 +374,7 @@ impl StressThread {
         let mut deadline = Instant::now();
         let mut pos = u32::MAX;
         while !self.manual_stop.load(Ordering::Relaxed) {
-            deadline = deadline + delay;
+            deadline += delay;
             pos -= 1;
             let pos = self.global_pos(pos as usize);
             let (key, value) = self.key_value(pos);
@@ -388,6 +388,7 @@ impl StressThread {
     }
 
     pub fn run_mixed_operations(self) {
+        #[allow(clippy::let_underscore_lock)] // RWLock here acts as a barrier
         let _ = self.start_lock.read();
         let mut thread_rng = ThreadRng::default();
         let read_percentage = self.parameters.read_percentage;
@@ -445,7 +446,7 @@ impl StressThread {
                         let result = self.db.get_lt(&key, iterations);
                         let result = if result.len() == iterations {
                             "found"
-                        } else if result.len() == 0 {
+                        } else if result.is_empty() {
                             "not_found"
                         } else {
                             "partial"

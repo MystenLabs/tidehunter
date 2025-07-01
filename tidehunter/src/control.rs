@@ -41,7 +41,7 @@ impl ControlRegion {
                 if err.kind() == ErrorKind::NotFound {
                     return ControlRegion::new_empty(key_shape);
                 } else {
-                    Err(err).expect("Failed to read control region file")
+                    panic!("{1}: {:?}", err, "Failed to read control region file")
                 }
             }
             Ok(bytes) => {

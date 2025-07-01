@@ -173,7 +173,7 @@ impl Db {
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         let reduced_key = ks.reduced_key_bytes(k);
-        Ok(self.large_table.remove(ks, reduced_key, position, self)?)
+        self.large_table.remove(ks, reduced_key, position, self)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -488,7 +488,7 @@ impl Db {
             .flushed_keys
             .with_label_values(&[ksd.name()])
             .inc_by(index.len() as u64);
-        let index = ksd.index_format().to_bytes(&index, ksd);
+        let index = ksd.index_format().serialize_index(index, ksd);
         self.metrics
             .flushed_bytes
             .with_label_values(&[ksd.name()])
@@ -514,7 +514,7 @@ impl Db {
 
     fn read_index(ks: &KeySpaceDesc, entry: WalEntry) -> DbResult<IndexTable> {
         if let WalEntry::Index(_, bytes) = entry {
-            let entry = ks.index_format().from_bytes(ks, bytes);
+            let entry = ks.index_format().deserialize_index(ks, bytes);
             Ok(entry)
         } else {
             panic!("Unexpected wal entry where expected record");
@@ -680,18 +680,18 @@ impl IntoBytesFixed for WalEntry {
                 buf.put_u8(ks.0);
                 // todo use key len from ks instead
                 buf.put_u16(k.len() as u16);
-                buf.put_slice(&k);
-                buf.put_slice(&v);
+                buf.put_slice(k);
+                buf.put_slice(v);
             }
             WalEntry::Index(ks, bytes) => {
                 buf.put_u8(Self::WAL_ENTRY_INDEX);
                 buf.put_u8(ks.0);
-                buf.put_slice(&bytes);
+                buf.put_slice(bytes);
             }
             WalEntry::Remove(ks, k) => {
                 buf.put_u8(Self::WAL_ENTRY_REMOVE);
                 buf.put_u8(ks.0);
-                buf.put_slice(&k)
+                buf.put_slice(k)
             }
         }
     }

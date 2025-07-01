@@ -117,6 +117,7 @@ impl RandomAccessSpeedTest {
         let secs = 60;
         thread::sleep(Duration::from_secs(secs));
         stop.store(true, Ordering::Relaxed);
+        #[allow(clippy::let_underscore_lock)] // RWLock used as barrier here
         let _ = rwl.write();
         let ops = ops.load(Ordering::Relaxed);
         println!(

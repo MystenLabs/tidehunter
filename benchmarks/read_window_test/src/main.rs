@@ -184,11 +184,7 @@ fn compute_hit_rate_exact(test_keys: &[(u64, usize)], n: usize) -> (f64, f64) {
         let lower_idx = (lp * (n as f64)).floor().max(0.0) as usize;
         let upper_idx = (up * (n as f64)).ceil().min(n as f64) as usize;
 
-        let window_sz = if upper_idx > lower_idx {
-            upper_idx - lower_idx
-        } else {
-            0
-        };
+        let window_sz = upper_idx.saturating_sub(lower_idx);
         sum_window += window_sz;
 
         if actual_idx >= lower_idx && actual_idx < upper_idx {

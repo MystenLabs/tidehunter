@@ -28,3 +28,6 @@ hex = "0.4.3"
 
 [features]
 tokio = ["dep:tokio"]
+
+[lints.clippy]
+len_without_is_empty = "allow"

@@ -72,14 +72,10 @@ impl DbIterator {
                 reduced_upper_bound
             };
             self.cell = Some(ks.cell_id(&next_key));
-            self.prev_key = if !self.with_key_reduction {
+            self.prev_key = if !self.with_key_reduction || is_nonmax(&next_key) {
                 Some(next_key)
             } else {
-                if is_nonmax(&next_key) {
-                    Some(next_key)
-                } else {
-                    None
-                }
+                None
             };
         } else {
             self.end_cell_exclusive =
@@ -111,7 +107,7 @@ impl DbIterator {
             // This can be be used as is with key reduction
             // because next_key is a reduced key
             if !self.with_key_reduction {
-                self.check_bounds(&prev_key)?;
+                self.check_bounds(prev_key)?;
             }
         }
         match self.db.next_entry(
@@ -162,12 +158,10 @@ impl DbIterator {
             } else {
                 false
             }
+        } else if let Some(upper_bound) = &self.full_upper_bound {
+            key >= upper_bound
         } else {
-            if let Some(upper_bound) = &self.full_upper_bound {
-                key >= upper_bound
-            } else {
-                false
-            }
+            false
         }
     }
 }

@@ -108,6 +108,12 @@ pub(crate) struct BloomFilterParams {
 pub type Compactor = Box<dyn Fn(&mut BTreeMap<Bytes, WalPosition>) + Sync + Send>;
 
 #[allow(dead_code)]
+impl Default for KeyShapeBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyShapeBuilder {
     pub fn new() -> Self {
         Self { key_spaces: vec![] }
@@ -239,8 +245,8 @@ impl KeySpaceDesc {
 
     pub(crate) fn assert_supports_iterator_bound(&self) {
         match self.key_indexing {
-            KeyIndexing::Fixed(_) => return,
-            KeyIndexing::Reduction(_, _) => return,
+            KeyIndexing::Fixed(_) => (),
+            KeyIndexing::Reduction(_, _) => (),
             KeyIndexing::Hash => panic!("Key space {} does not support iterator bounds and reversal because it uses KeyIndexing::Hash", self.name()),
         }
     }

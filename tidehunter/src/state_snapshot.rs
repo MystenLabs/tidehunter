@@ -31,8 +31,8 @@ pub fn create(
 
     // Save the WAL pointer
     fs::write(
-        &wal_position_path(destination_path),
-        &bincode::serialize(wal_position).expect("Wal position should be serializable"),
+        wal_position_path(destination_path),
+        bincode::serialize(wal_position).expect("Wal position should be serializable"),
     )?;
 
     Ok(())

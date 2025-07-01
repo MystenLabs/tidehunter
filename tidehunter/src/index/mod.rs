@@ -28,7 +28,7 @@ pub fn serialize_index_entries(table: &IndexTable, ks: &KeySpaceDesc, out: &mut 
                 ks.index_key_size()
             );
         }
-        out.put_slice(&key);
+        out.put_slice(key);
         value.write_to_buf(out);
     }
 }
@@ -37,7 +37,7 @@ pub fn serialize_index_entries(table: &IndexTable, ks: &KeySpaceDesc, out: &mut 
 /// - data_offset: Where actual data begins (after any headers)
 /// - ks: KeySpaceDesc to determine element sizes
 /// - b: Source bytes
-/// Returns the deserialized IndexTable
+///   Returns the deserialized IndexTable
 pub fn deserialize_index_entries(ks: &KeySpaceDesc, data: Bytes) -> IndexTable {
     let element_size = ks.index_key_size() + WalPosition::LENGTH;
     let elements = data.len() / element_size;

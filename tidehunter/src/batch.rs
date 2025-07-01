@@ -9,6 +9,12 @@ pub struct WriteBatch {
     pub(crate) tag: String,
 }
 
+impl Default for WriteBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch {

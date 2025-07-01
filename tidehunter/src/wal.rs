@@ -549,6 +549,7 @@ impl WalMapperThread {
 }
 
 impl WalIterator {
+    #[allow(clippy::should_implement_trait)] // todo better name
     pub fn next(&mut self) -> Result<(WalPosition, Bytes), WalError> {
         let frame = self.read_one();
         let frame = if matches!(frame, Err(WalError::Crc(CrcReadError::SkipMarker))) {
@@ -628,6 +629,7 @@ impl RandomRead for WalRandomRead<'_> {
     }
 }
 
+#[allow(clippy::mut_from_ref)] // todo look more into it?
 fn write_buf_at(data: &Bytes, offset: usize, len: usize) -> &mut [u8] {
     unsafe {
         let ptr = data.as_ptr().add(offset) as *mut u8;
