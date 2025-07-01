@@ -16,6 +16,6 @@ monitoring: true
 # Grafana Cloud configuration (optional)
 # Set use_grafana_cloud to true to send metrics to Grafana Cloud instead of local Grafana
 use_grafana_cloud: false
-# grafana_cloud_url: "https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push"
+# grafana_cloud_url: "https://gateway-2.mimir.sui.io/api/v1/push"
 # grafana_cloud_username: "your-username"
 # grafana_cloud_password_file: "/path/to/password/file"

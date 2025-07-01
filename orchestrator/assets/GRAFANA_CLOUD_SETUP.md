@@ -27,8 +27,8 @@ Add the following configuration to your `settings.yml` file:
 # Enable Grafana Cloud mode
 use_grafana_cloud: true
 
-# Grafana Cloud Mimir endpoint (get this from your PE team)
-grafana_cloud_url: "https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push"
+# Grafana Cloud Mimir endpoint
+grafana_cloud_url: "https://gateway-2.mimir.sui.io/api/v1/push"
 
 # Grafana Cloud credentials
 grafana_cloud_username: "your-username"
@@ -48,7 +48,7 @@ chmod 600 /path/to/password/file
 
 You'll need to obtain the following from your Platform Engineering team:
 
-- **Mimir endpoint URL**: The complete URL for pushing metrics (e.g., `https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push`)
+- **Mimir endpoint URL**: The complete URL for pushing metrics (e.g., `"https://gateway-2.mimir.sui.io/api/v1/push"`)
 - **Username**: Your Grafana Cloud username for metric ingestion
 - **Password**: The corresponding password (store this securely in a file)
 
@@ -87,7 +87,7 @@ monitoring: true
 use_grafana_cloud: true
 
 # Grafana Cloud settings
-grafana_cloud_url: "https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push"
+grafana_cloud_url: "https://gateway-2.mimir.sui.io/api/v1/push"
 grafana_cloud_username: "incoming_metrics"
 grafana_cloud_password_file: "/home/myuser/.grafana_cloud_password"
 ```
@@ -125,7 +125,7 @@ prometheus.remote_write "grafana_cloud" {
 
     endpoint {
         name = "grafana-cloud"
-        url  = "https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push"
+        url  = "https://gateway-2.mimir.sui.io/api/v1/push"
         
         basic_auth {
             username = "incoming_metrics"
