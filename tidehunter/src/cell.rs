@@ -15,7 +15,7 @@ impl CellId {
     pub fn mutex_seed(&self) -> usize {
         match self {
             CellId::Integer(p) => *p,
-            CellId::Bytes(bytes) => starting_u32(&bytes) as usize,
+            CellId::Bytes(bytes) => starting_u32(bytes) as usize,
         }
     }
 
@@ -29,16 +29,7 @@ impl CellId {
 
 impl PartialOrd for CellId {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
-            (CellId::Integer(this), CellId::Integer(other)) => this.partial_cmp(other),
-            (CellId::Bytes(this), CellId::Bytes(other)) => this.partial_cmp(other),
-            (CellId::Integer(_), CellId::Bytes(_)) => {
-                panic!("Not comparable cell ids: left integer, right bytes")
-            }
-            (CellId::Bytes(_), CellId::Integer(_)) => {
-                panic!("Not comparable cell ids: left bytes, right integer")
-            }
-        }
+        Some(self.cmp(other))
     }
 }
 

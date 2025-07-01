@@ -19,6 +19,12 @@ pub struct UniformLookupIndex {
     window_sizes: Vec<Vec<usize>>,
 }
 
+impl Default for UniformLookupIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UniformLookupIndex {
     pub fn new() -> Self {
         let mut matrix = Vec::with_capacity(NUM_WINDOW_SIZES);
@@ -44,6 +50,7 @@ impl UniformLookupIndex {
         }
     }
 
+    #[allow(clippy::assertions_on_constants)] // todo use static assertion
     fn probable_key_offset_and_window_size(
         &self,
         ks: &KeySpaceDesc,
@@ -53,15 +60,15 @@ impl UniformLookupIndex {
     ) -> (usize, usize) {
         let long_prefix_range_start = cell_prefix_range
             .start
-            .saturating_mul(1 << (PREFIX_LENGTH - CELL_PREFIX_LENGTH) * 8);
+            .saturating_mul(1 << ((PREFIX_LENGTH - CELL_PREFIX_LENGTH) * 8));
         let long_prefix_range_end = cell_prefix_range
             .end
-            .saturating_mul(1 << (PREFIX_LENGTH - CELL_PREFIX_LENGTH) * 8);
+            .saturating_mul(1 << ((PREFIX_LENGTH - CELL_PREFIX_LENGTH) * 8));
         let cell_width = long_prefix_range_end.saturating_sub(long_prefix_range_start);
 
         assert!(PREFIX_LENGTH >= CELL_PREFIX_LENGTH);
         assert!(PREFIX_LENGTH <= 8); // we want the prefix to fit in u64
-        let prefix = ks.index_prefix_u64(&key);
+        let prefix = ks.index_prefix_u64(key);
         if long_prefix_range_start > prefix || prefix > long_prefix_range_end {
             panic!("Key prefix out of range: key prefix={prefix}, long_prefix_range={long_prefix_range_start}..{long_prefix_range_end}");
         }
@@ -172,7 +179,7 @@ impl UniformLookupIndex {
 }
 
 impl IndexFormat for UniformLookupIndex {
-    fn to_bytes(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
+    fn serialize_index(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
         let element_size = index_element_size(ks);
         let capacity = element_size * table.data.len();
         let mut out = BytesMut::with_capacity(capacity);
@@ -180,7 +187,7 @@ impl IndexFormat for UniformLookupIndex {
         out.to_vec().into()
     }
 
-    fn from_bytes(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
+    fn deserialize_index(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
         deserialize_index_entries(ks, b)
     }
 
@@ -453,7 +460,7 @@ mod test {
 
         // 3) Convert the table to bytes using SingleHopIndex
         let index_format = UniformLookupIndex::new();
-        let serialized = index_format.to_bytes(&table, ks);
+        let serialized = index_format.serialize_index(&table, ks);
 
         // 4) We'll build our mock "window" that intentionally ends
         //    at the last entry being the search key.
@@ -534,7 +541,7 @@ mod test {
 
         // 3) Convert to bytes using SingleHopIndex
         let index_format = UniformLookupIndex::new();
-        let data = index_format.to_bytes(&index, ks);
+        let data = index_format.serialize_index(&index, ks);
 
         // 4) Wrap it in our MockRandomRead
         let reader = MockRandomRead::new(data);
@@ -657,7 +664,7 @@ mod test {
 
         // 3) Convert to bytes with SingleHopIndex
         let single_hop = UniformLookupIndex::new();
-        let data = single_hop.to_bytes(&index, ks);
+        let data = single_hop.serialize_index(&index, ks);
 
         // 4) Mock a simple in‐memory reader
 
@@ -698,7 +705,7 @@ mod test {
         table.insert(key2.clone(), WalPosition::test_value(200));
 
         // 4) Convert the table to bytes
-        let bytes = index_impl.to_bytes(&table, ks);
+        let bytes = index_impl.serialize_index(&table, ks);
 
         // 5) Write those bytes to a temp file
         let tmp_dir = tempdir::TempDir::new("test-wal").unwrap();
@@ -753,7 +760,7 @@ mod test {
 
         // 2) Write it to bytes
         let pi = UniformLookupIndex::new();
-        let bytes = pi.to_bytes(&index, ks);
+        let bytes = pi.serialize_index(&index, ks);
         assert!(!bytes.is_empty());
 
         // 3) Make sure we can find that exact key
@@ -790,10 +797,10 @@ mod test {
         original_index.insert(key3.clone(), WalPosition::test_value(300));
 
         // 4) Convert to bytes
-        let serialized = single_hop.to_bytes(&original_index, ks);
+        let serialized = single_hop.serialize_index(&original_index, ks);
 
         // 5) From those bytes, build a new IndexTable
-        let roundtrip_index = single_hop.from_bytes(ks, serialized);
+        let roundtrip_index = single_hop.deserialize_index(ks, serialized);
 
         // 6) Confirm the new table has the same entries
         //    For example, check that each key still maps to the same WalPosition
@@ -861,7 +868,7 @@ mod test {
 
         // Convert the table to bytes
         let index_format = UniformLookupIndex::new();
-        let serialized = index_format.to_bytes(&table, ks);
+        let serialized = index_format.serialize_index(&table, ks);
         let reader = MockRandomRead::new(serialized);
 
         // Test the newly extracted function directly

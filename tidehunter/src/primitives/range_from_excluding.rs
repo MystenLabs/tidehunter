@@ -6,7 +6,7 @@ pub struct RangeFromExcluding<'a, T> {
     pub(crate) from: &'a T,
 }
 
-impl<'a, T> RangeBounds<T> for RangeFromExcluding<'a, T> {
+impl<T> RangeBounds<T> for RangeFromExcluding<'_, T> {
     fn start_bound(&self) -> Bound<&T> {
         Bound::Excluded(self.from)
     }

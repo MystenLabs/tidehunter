@@ -32,15 +32,17 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Install rustfmt
-        run: rustup component add rustfmt
+
+      - name: Install rustfmt and clippy
+        run: |
+          rustup component add rustfmt
+          rustup component add clippy
 
       - name: Check formatting
         run: cargo fmt --check
 
-      # TODO: enable linting
-      #   - name: Check linting
-      #     run: cargo clippy -- -D warnings
+      - name: Check linting
+        run: cargo clippy -- -D warnings
 
       - name: Build
         run: cargo build

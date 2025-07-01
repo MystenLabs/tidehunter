@@ -94,8 +94,7 @@ impl IndexTable {
                 let range = self.data.range(..prev);
                 range
                     .into_iter()
-                    .rev()
-                    .next()
+                    .next_back()
                     .map(|(key, value)| (key.clone(), *value))
             } else {
                 let range = RangeFromExcluding { from: &prev };
@@ -109,8 +108,7 @@ impl IndexTable {
             let mut iterator = self.data.iter();
             if reverse {
                 iterator
-                    .rev()
-                    .next()
+                    .next_back()
                     .map(|(key, value)| (key.clone(), *value))
             } else {
                 iterator.next().map(|(key, value)| (key.clone(), *value))
@@ -120,6 +118,10 @@ impl IndexTable {
 
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 }
 

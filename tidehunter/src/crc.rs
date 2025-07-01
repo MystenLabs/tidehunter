@@ -30,12 +30,12 @@ impl CrcFrame {
     }
 
     pub fn read_from_slice(b: &[u8], pos: usize) -> Result<&[u8], CrcReadError> {
-        let len = Self::checked_read(&b, pos)?;
+        let len = Self::checked_read(b, pos)?;
         Ok(&b[Self::data_range(pos, len)])
     }
 
     pub fn read_from_bytes(b: &Bytes, pos: usize) -> Result<Bytes, CrcReadError> {
-        let len = Self::checked_read(&b, pos)?;
+        let len = Self::checked_read(b, pos)?;
         let data = b.slice(Self::data_range(pos, len));
         Ok(data)
     }
@@ -57,7 +57,7 @@ impl CrcFrame {
         }
 
         let data = &b[Self::data_range(pos, len)];
-        let actual_crc = Self::crc(&data);
+        let actual_crc = Self::crc(data);
         if actual_crc != crc {
             return Err(CrcReadError::CrcMismatch);
         }
@@ -69,7 +69,7 @@ impl CrcFrame {
     }
 
     fn crc(b: &[u8]) -> u32 {
-        if b.len() == 0 {
+        if b.is_empty() {
             u32::MAX
         } else {
             crc32fast::hash(b)

@@ -71,6 +71,7 @@ impl LookupHeaderIndex {
     }
 
     /// Process a single micro-cell to find the next entry
+    #[allow(clippy::too_many_arguments)] // todo fix
     fn process_micro_cell(
         &self,
         reader: &impl RandomRead,
@@ -137,7 +138,7 @@ impl LookupHeaderIndex {
 }
 
 impl IndexFormat for LookupHeaderIndex {
-    fn to_bytes(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
+    fn serialize_index(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
         let element_size = index_element_size(ks);
         let capacity = element_size * table.data.len() + HEADER_SIZE;
         let mut out = BytesMut::with_capacity(capacity);
@@ -160,7 +161,7 @@ impl IndexFormat for LookupHeaderIndex {
         out.to_vec().into()
     }
 
-    fn from_bytes(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
+    fn deserialize_index(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
         deserialize_index_entries(ks, b.slice(HEADER_SIZE..))
     }
 
@@ -242,7 +243,7 @@ impl<'a> IndexTableHeaderBuilder<'a> {
 
     pub fn add_key(&mut self, key: &[u8], offset: usize) {
         let offset = Self::check_offset(offset);
-        let micro_cell = LookupHeaderIndex::key_micro_cell(&self.ks, key);
+        let micro_cell = LookupHeaderIndex::key_micro_cell(self.ks, key);
         if let Some(last_micro_cell) = self.last_micro_cell {
             if last_micro_cell == micro_cell {
                 return;
@@ -324,7 +325,7 @@ mod tests {
 
         // Convert the table to bytes
         let index_format = LookupHeaderIndex;
-        let serialized = index_format.to_bytes(&table, ks);
+        let serialized = index_format.serialize_index(&table, ks);
 
         // Use the MockRandomRead from the test module in index_format.rs
         let reader = MockRandomRead::new(serialized);

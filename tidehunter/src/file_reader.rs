@@ -17,6 +17,7 @@ impl<'a> FileReader<'a> {
     }
 
     /// Returns new un-initialized buffer of a given size
+    #[allow(clippy::uninit_vec)] // todo look more into it?
     pub fn io_buffer(&self, size: usize) -> Vec<u8> {
         if self.direct_io {
             unsafe {

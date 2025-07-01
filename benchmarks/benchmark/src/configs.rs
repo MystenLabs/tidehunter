@@ -48,8 +48,10 @@ impl FromStr for ReadMode {
             Ok(Self::Get)
         } else if s == "lt" {
             Ok(Self::Lt(1))
-        } else if s.starts_with("lt:") {
-            Ok(Self::Lt(s[3..].parse().expect("Failed to parse read mode")))
+        } else if let Some(stripped) = s.strip_prefix("lt:") {
+            Ok(Self::Lt(
+                stripped.parse().expect("Failed to parse read mode"),
+            ))
         } else if s == "exists" {
             Ok(Self::Exists)
         } else {

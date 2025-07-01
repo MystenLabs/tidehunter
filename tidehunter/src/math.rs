@@ -42,12 +42,10 @@ pub fn starting_u64(slice: &[u8]) -> u64 {
 pub fn next_bounded(n: usize, max_excluded: usize, reverse: bool) -> Option<usize> {
     if reverse {
         n.checked_sub(1)
+    } else if n >= max_excluded - 1 {
+        None
     } else {
-        if n >= max_excluded - 1 {
-            None
-        } else {
-            Some(n + 1)
-        }
+        Some(n + 1)
     }
 }
 

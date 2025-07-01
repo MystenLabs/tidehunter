@@ -122,7 +122,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                     }
 
                     // Serialize the index
-                    let bytes = index_format_clone.to_bytes(&index, &ks_desc_clone);
+                    let bytes = index_format_clone.serialize_index(&index, &ks_desc_clone);
 
                     // Send the serialized index through the channel
                     let result = tx_clone
@@ -185,11 +185,8 @@ impl<'a> IndexBenchmark<'a> {
     fn load_from_file(file: &'a File, file_length: u64, direct_io: bool) -> std::io::Result<Self> {
         let reader = FileReader::new(file, direct_io);
         // get index count (first 8 bytes of file)
-        let index_count;
-        match reader.read_exact_at(0, 8) {
-            Ok(buf) => {
-                index_count = u64::from_be_bytes(buf.as_ref().try_into().unwrap());
-            }
+        let index_count = match reader.read_exact_at(0, 8) {
+            Ok(buf) => u64::from_be_bytes(buf.as_ref().try_into().unwrap()),
             Err(_) => {
                 panic!("Failed to read index count");
             }
@@ -203,10 +200,10 @@ impl<'a> IndexBenchmark<'a> {
 
         let mut readers = Vec::new();
 
-        for i in 0..index_count as u64 {
+        for i in 0..index_count {
             let range = Range {
                 start: 8 + i * index_size,
-                end: 8 + (i + 1) * index_size as u64,
+                end: 8 + (i + 1) * index_size,
             };
             readers.push(FileRange::new(FileReader::new(file, direct_io), range));
         }

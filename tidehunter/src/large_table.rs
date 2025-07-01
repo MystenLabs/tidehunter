@@ -252,7 +252,7 @@ impl LargeTable {
         }
         self.metrics
             .value_cache_size
-            .with_label_values(&[&ks.name()])
+            .with_label_values(&[ks.name()])
             .add(delta);
     }
 
@@ -439,6 +439,7 @@ impl LargeTable {
     ///   then the database is empty at the time of a snapshot, and the replay_position
     ///   for snapshot is set to WalPosition::INVALID to indicate wal needs to be replayed
     ///   from the beginning.
+    #[allow(clippy::type_complexity)] // todo fix
     fn ks_snapshot<L: Loader>(
         &self,
         ks_table: &KsTable,
@@ -478,7 +479,7 @@ impl LargeTable {
         let metric = self
             .metrics
             .index_distance_from_tail
-            .with_label_values(&[&ks_table.ks.name()]);
+            .with_label_values(&[ks_table.ks.name()]);
         match replay_from {
             None => metric.set(0),
             Some(WalPosition::INVALID) => metric.set(-1),
@@ -514,7 +515,7 @@ impl LargeTable {
                         .large_table_contention
                         .with_label_values(&[ks.name()]),
                 );
-                self.next_in_cell(loader, &mut row, &cell, prev_key, reverse)?
+                Self::next_in_cell(loader, &mut row, &cell, prev_key, reverse)?
                 // drop row mutex as required by Self::next_cell called below
             };
             if let Some((key, value)) = next_in_cell {
@@ -533,10 +534,8 @@ impl LargeTable {
                         if &next_cell <= end_cell_exclusive {
                             return Ok(None);
                         }
-                    } else {
-                        if &next_cell >= end_cell_exclusive {
-                            return Ok(None);
-                        }
+                    } else if &next_cell >= end_cell_exclusive {
+                        return Ok(None);
                     }
                 }
                 cell = next_cell;
@@ -545,7 +544,6 @@ impl LargeTable {
     }
 
     fn next_in_cell<L: Loader>(
-        &self,
         loader: &L,
         row: &mut Row,
         cell: &CellId,
@@ -631,7 +629,7 @@ impl LargeTable {
                     NextEntryResult::Found(key, val) => Some((key, val)),
                     NextEntryResult::SkipDeleted(skip_key) => {
                         // todo remove recursion
-                        return self.next_in_cell(loader, row, cell, Some(skip_key), reverse);
+                        return Self::next_in_cell(loader, row, cell, Some(skip_key), reverse);
                     }
                 };
 
@@ -648,16 +646,14 @@ impl LargeTable {
                 config.next_cell(ks, *cell, reverse)
             }
             (KeyType::PrefixedUniform(_), CellId::Bytes(bytes)) => {
-                let mut mutex = ks.mutex_for_cell(&cell);
+                let mut mutex = ks.mutex_for_cell(cell);
                 loop {
                     let row = self.row_by_mutex(ks, mutex);
                     if let Some(next) = row.entries.next_tree_cell(bytes, reverse) {
                         return Some(CellId::Bytes(next.clone()));
                     };
                     // todo we can optimize this by keeping hints to a next non-empty mutex in the row
-                    let Some(next_mutex) = ks.next_mutex(mutex, reverse) else {
-                        return None;
-                    };
+                    let next_mutex = ks.next_mutex(mutex, reverse)?;
                     mutex = next_mutex;
                 }
             }
@@ -697,7 +693,7 @@ impl LargeTable {
         original_index: Arc<IndexTable>,
         position: WalPosition,
     ) {
-        let row = ks.mutex_for_cell(&cell);
+        let row = ks.mutex_for_cell(cell);
         let ks_table = self.ks_table(ks);
         let mut row = ks_table.lock(
             row,
@@ -1337,7 +1333,7 @@ impl Entries {
         let Entries::Tree(tree) = self else {
             panic!("next_cell_id can only be called on tree entries");
         };
-        range_from_excluding::next_key_in_tree(&tree, cell, reverse)
+        range_from_excluding::next_key_in_tree(tree, cell, reverse)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1469,19 +1465,11 @@ mod tests {
 
         // Serialize the disk index for our mock reader
         let format = ks.index_format();
-        let serialized_data = format.to_bytes(&disk_index, ks);
+        let serialized_data = format.serialize_index(&disk_index, ks);
 
         let loader = MockLoader {
             disk_index: disk_index.clone(),
             serialized_data,
-        };
-
-        // Create a large table for testing
-        let table = LargeTable {
-            table: Vec::new(), // Not used in this test
-            config: context.config.clone(),
-            flusher: IndexFlusher::new_unstarted_for_test(),
-            metrics: metrics.clone(),
         };
 
         // TEST CASE 1: Empty state
@@ -1501,9 +1489,8 @@ mod tests {
             };
 
             // Test next_in_cell with empty state
-            let result = table
-                .next_in_cell(&loader, &mut row, &cell_id, None, false)
-                .unwrap();
+            let result =
+                LargeTable::next_in_cell(&loader, &mut row, &cell_id, None, false).unwrap();
             assert!(result.is_none(), "Empty state should return None");
         }
 
@@ -1521,33 +1508,29 @@ mod tests {
             };
 
             // Test forward iteration with loaded state
-            let result = table
-                .next_in_cell(&loader, &mut row, &cell_id, None, false)
-                .unwrap();
+            let result =
+                LargeTable::next_in_cell(&loader, &mut row, &cell_id, None, false).unwrap();
             assert!(result.is_some(), "Loaded state should return first entry");
             let (key, pos) = result.unwrap();
             assert_eq!(key.as_ref(), 10_u64.to_be_bytes());
             assert_eq!(pos, WalPosition::test_value(1));
 
             // Test forward iteration from a key
-            let result = table
-                .next_in_cell(
-                    &loader,
-                    &mut row,
-                    &cell_id,
-                    Some(Bytes::from(20_u64.to_be_bytes().to_vec())),
-                    false,
-                )
-                .unwrap();
+            let result = LargeTable::next_in_cell(
+                &loader,
+                &mut row,
+                &cell_id,
+                Some(Bytes::from(20_u64.to_be_bytes().to_vec())),
+                false,
+            )
+            .unwrap();
             assert!(result.is_some());
             let (key, pos) = result.unwrap();
             assert_eq!(key.as_ref(), 30_u64.to_be_bytes());
             assert_eq!(pos, WalPosition::test_value(3));
 
             // Test backward iteration
-            let result = table
-                .next_in_cell(&loader, &mut row, &cell_id, None, true)
-                .unwrap();
+            let result = LargeTable::next_in_cell(&loader, &mut row, &cell_id, None, true).unwrap();
             assert!(result.is_some());
             let (key, pos) = result.unwrap();
             assert_eq!(key.as_ref(), 50_u64.to_be_bytes());
@@ -1572,9 +1555,8 @@ mod tests {
             };
 
             // Test forward iteration with unloaded state
-            let result = table
-                .next_in_cell(&loader, &mut row, &cell_id, None, false)
-                .unwrap();
+            let result =
+                LargeTable::next_in_cell(&loader, &mut row, &cell_id, None, false).unwrap();
             assert!(
                 result.is_some(),
                 "Unloaded state should return first entry from disk"
@@ -1584,15 +1566,14 @@ mod tests {
             assert_eq!(pos, WalPosition::test_value(1));
 
             // Test forward iteration from a key
-            let result = table
-                .next_in_cell(
-                    &loader,
-                    &mut row,
-                    &cell_id,
-                    Some(Bytes::from(20_u64.to_be_bytes().to_vec())),
-                    false,
-                )
-                .unwrap();
+            let result = LargeTable::next_in_cell(
+                &loader,
+                &mut row,
+                &cell_id,
+                Some(Bytes::from(20_u64.to_be_bytes().to_vec())),
+                false,
+            )
+            .unwrap();
             assert!(result.is_some());
             let (key, pos) = result.unwrap();
             assert_eq!(key.as_ref(), 30_u64.to_be_bytes());
@@ -1629,30 +1610,28 @@ mod tests {
             };
 
             // Test iteration with deleted key
-            let result = table
-                .next_in_cell(
-                    &loader,
-                    &mut row,
-                    &cell_id,
-                    Some(Bytes::from(30_u64.to_be_bytes().to_vec())),
-                    false,
-                )
-                .unwrap();
+            let result = LargeTable::next_in_cell(
+                &loader,
+                &mut row,
+                &cell_id,
+                Some(Bytes::from(30_u64.to_be_bytes().to_vec())),
+                false,
+            )
+            .unwrap();
             assert!(result.is_some());
             let (key, pos) = result.unwrap();
             assert_eq!(key.as_ref(), 50_u64.to_be_bytes()); // Should skip over the deleted 40
             assert_eq!(pos, WalPosition::test_value(5));
 
             // Test finding the new key
-            let result = table
-                .next_in_cell(
-                    &loader,
-                    &mut row,
-                    &cell_id,
-                    Some(Bytes::from(10_u64.to_be_bytes().to_vec())),
-                    false,
-                )
-                .unwrap();
+            let result = LargeTable::next_in_cell(
+                &loader,
+                &mut row,
+                &cell_id,
+                Some(Bytes::from(10_u64.to_be_bytes().to_vec())),
+                false,
+            )
+            .unwrap();
             assert!(result.is_some());
             let (key, pos) = result.unwrap();
             assert_eq!(key.as_ref(), 15_u64.to_be_bytes()); // Should find our new key
@@ -1695,30 +1674,28 @@ mod tests {
             };
 
             // Test finding the in-memory added key
-            let result = table
-                .next_in_cell(
-                    &loader,
-                    &mut row,
-                    &cell_id,
-                    Some(Bytes::from(10_u64.to_be_bytes().to_vec())),
-                    false,
-                )
-                .unwrap();
+            let result = LargeTable::next_in_cell(
+                &loader,
+                &mut row,
+                &cell_id,
+                Some(Bytes::from(10_u64.to_be_bytes().to_vec())),
+                false,
+            )
+            .unwrap();
             assert!(result.is_some());
             let (key, pos) = result.unwrap();
             assert_eq!(key.as_ref(), 15_u64.to_be_bytes());
             assert_eq!(pos, WalPosition::test_value(15));
 
             // Test skipping the in-memory deleted key and finding the next on-disk key
-            let result = table
-                .next_in_cell(
-                    &loader,
-                    &mut row,
-                    &cell_id,
-                    Some(Bytes::from(30_u64.to_be_bytes().to_vec())),
-                    false,
-                )
-                .unwrap();
+            let result = LargeTable::next_in_cell(
+                &loader,
+                &mut row,
+                &cell_id,
+                Some(Bytes::from(30_u64.to_be_bytes().to_vec())),
+                false,
+            )
+            .unwrap();
             assert!(result.is_some());
             let (key, pos) = result.unwrap();
             assert_eq!(key.as_ref(), 50_u64.to_be_bytes()); // Should skip over the deleted 40

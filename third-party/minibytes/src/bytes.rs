@@ -155,10 +155,7 @@ where
     ///
     /// Returns None if the type mismatches.
     pub fn downcast_ref<A: Any>(&self) -> Option<&A> {
-        let arc_owner = match self.owner.as_ref() {
-            None => return None,
-            Some(owner) => owner,
-        };
+        let arc_owner = self.owner.as_ref()?;
         let any = arc_owner.as_any();
         any.downcast_ref()
     }
@@ -176,14 +173,8 @@ where
     ///
     /// Returns None if the internal reference count is not 0.
     pub fn downcast_any(&mut self) -> Option<&mut dyn Any> {
-        let arc_owner = match self.owner.as_mut() {
-            None => return None,
-            Some(owner) => owner,
-        };
-        let owner = match Arc::get_mut(arc_owner) {
-            None => return None,
-            Some(owner) => owner,
-        };
+        let arc_owner = self.owner.as_mut()?;
+        let owner = Arc::get_mut(arc_owner)?;
         Some(owner.as_any_mut())
     }
 }
