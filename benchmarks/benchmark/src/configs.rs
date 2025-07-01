@@ -37,6 +37,7 @@ impl FromStr for KeyLayout {
 pub enum ReadMode {
     Get,
     Lt(usize),
+    Exists,
 }
 
 impl FromStr for ReadMode {
@@ -49,9 +50,11 @@ impl FromStr for ReadMode {
             Ok(Self::Lt(1))
         } else if s.starts_with("lt:") {
             Ok(Self::Lt(s[3..].parse().expect("Failed to parse read mode")))
+        } else if s == "exists" {
+            Ok(Self::Exists)
         } else {
             anyhow::bail!(
-                "Only allowed choices for read_mode are 'get'(get) or 'lt'(iterator less then)"
+                "Only allowed choices for read_mode are 'get'(get), 'lt'(iterator less then), or 'exists'(exists check)"
             );
         }
     }
@@ -130,6 +133,9 @@ pub struct StressClientParameters {
     /// Percentage of reads in the mixed read/write phase (0-100)
     #[serde(default = "defaults::default_read_percentage")]
     pub read_percentage: u8,
+    /// The zipf exponent for reader position selection. 0 means uniform.
+    #[serde(default = "defaults::default_zipf_exponent")]
+    pub zipf_exponent: f64,
 }
 
 impl Default for StressClientParameters {
@@ -152,6 +158,7 @@ impl Default for StressClientParameters {
             read_mode: defaults::default_read_mode(),
             backend: defaults::default_backend(),
             read_percentage: defaults::default_read_percentage(),
+            zipf_exponent: defaults::default_zipf_exponent(),
         }
     }
 }
@@ -218,6 +225,10 @@ pub mod defaults {
 
     pub fn default_read_percentage() -> u8 {
         100
+    }
+
+    pub fn default_zipf_exponent() -> f64 {
+        0.0
     }
 }
 
@@ -286,6 +297,11 @@ pub struct StressArgs {
     backend: Option<Backend>,
     #[arg(long, help = "Percentage of reads in mixed phase (0-100)")]
     read_percentage: Option<u8>,
+    #[arg(
+        long,
+        help = "The zipf exponent for reader position selection. 0 means uniform."
+    )]
+    zipf_exponent: Option<f64>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -343,6 +359,9 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     }
     if let Some(read_percentage) = args.read_percentage {
         config.stress_client_parameters.read_percentage = read_percentage;
+    }
+    if let Some(zipf_exponent) = args.zipf_exponent {
+        config.stress_client_parameters.zipf_exponent = zipf_exponent;
     }
 
     config

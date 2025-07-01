@@ -12,6 +12,7 @@ use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
+use rand_distr::{Distribution, Zipf};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -49,7 +50,11 @@ pub fn main() {
     };
     let config = configs::override_default_args(args, default_config);
 
-    println!("{:#?}", &config.stress_client_parameters);
+    println!("DB parameters: {:#?}", &config.db_parameters);
+    println!(
+        "Stress client parameters: {:#?}",
+        &config.stress_client_parameters
+    );
 
     let temp_dir = if let Some(path) = &config.stress_client_parameters.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()
@@ -385,27 +390,53 @@ impl StressThread {
     pub fn run_mixed_operations(self) {
         let _ = self.start_lock.read();
         let mut thread_rng = ThreadRng::default();
-        let max_pos = self.max_global_pos();
         let read_percentage = self.parameters.read_percentage;
+
+        // Start writing new keys just after the ones written in the initial phase.
+        let mut local_write_pos_counter = self.parameters.writes;
 
         for _ in 0..self.parameters.operations {
             // Randomly decide whether to read or write based on percentage
             let do_read = thread_rng.gen_range(0..100) < read_percentage;
 
             if do_read {
-                // Perform a read operation
-                let pos = thread_rng.gen_range(0..max_pos);
+                // Perform a read operation.
+                // Read from the whole keyspace, which expands as writes are made. The highest
+                // key position this thread can read is determined by the latest key it has written.
+                let highest_local_pos = local_write_pos_counter.saturating_sub(1);
+                let read_pos_upper_bound = self.global_pos(highest_local_pos) + 1;
+
+                let pos = if self.parameters.zipf_exponent != 0.0 && read_pos_upper_bound > 1 {
+                    let zipf =
+                        Zipf::new(read_pos_upper_bound, self.parameters.zipf_exponent).unwrap();
+                    let sample = zipf.sample(&mut thread_rng) as u64;
+
+                    // The Zipf distribution generates number from 1 to N, where lower numbers are
+                    // more likely. We want to read higher positions more often, so we subtract
+                    // the sample from the upper bound.
+                    read_pos_upper_bound - sample
+                } else if read_pos_upper_bound > 0 {
+                    thread_rng.gen_range(0..read_pos_upper_bound)
+                } else {
+                    0
+                };
+
                 let timer;
                 match self.parameters.read_mode {
                     ReadMode::Get => {
                         let (key, value) = self.key_value(pos);
                         timer = Instant::now();
-                        let found_value = self.db.get(&key).expect("Expected value not found");
-                        assert_eq!(
-                            &value[..],
-                            &found_value[..],
-                            "Found value does not match expected value"
-                        );
+                        if let Some(found_value) = self.db.get(&key) {
+                            assert_eq!(
+                                &value[..],
+                                &found_value[..],
+                                "Found value does not match expected value"
+                            );
+                        }
+                        // If the key is not found, we do nothing as it may not have been written yet.
+                        // This can happen because we select pos between 0 and global_pos(highest_local_pos)
+                        // This range includes global positions that are owned by other threads,
+                        // who may not have used those positions yet.
                     }
                     ReadMode::Lt(iterations) => {
                         let mut key = vec![0u8; self.parameters.key_len];
@@ -424,6 +455,19 @@ impl StressThread {
                             .with_label_values(&[result])
                             .inc();
                     }
+                    ReadMode::Exists => {
+                        let (key, _) = self.key_value(pos);
+                        timer = Instant::now();
+                        let exists = self.db.exists(&key);
+                        // For exists mode, we expect the key to exist if pos < self.parameters.writes
+                        // since those were written in the initial write phase
+                        if pos < self.global_pos(self.parameters.writes - 1) {
+                            assert!(exists, "Key should exist but was not found");
+                        }
+                        // Keys beyond initial writes may or may not exist depending on
+                        // whether they were written during the mixed phase. For more details,
+                        // see comment above for get mode.
+                    }
                 }
                 let latency = timer.elapsed().as_micros();
                 self.benchmark_metrics
@@ -434,8 +478,10 @@ impl StressThread {
                     self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
-                // Perform a write operation to a new key beyond the initial dataset
-                let pos = thread_rng.gen_range(max_pos..max_pos * 2);
+                // Perform a write operation to a new key beyond the initial dataset.
+                let pos = self.global_pos(local_write_pos_counter);
+                local_write_pos_counter += 1;
+
                 let (key, value) = self.key_value(pos);
                 let timer = Instant::now();
                 self.db.insert(key.into(), value.into());
@@ -489,10 +535,6 @@ impl StressThread {
     /// Maps local index into continuous global space
     fn global_pos(&self, pos: usize) -> u64 {
         (pos * self.parameters.write_threads) as u64 + self.index
-    }
-
-    fn max_global_pos(&self) -> u64 {
-        (self.parameters.write_threads * self.parameters.writes) as u64
     }
 
     fn rng_at(pos: u64) -> StdRng {

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp;
 
 // todo - remove pub
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Config {
     pub frag_size: u64,
     pub max_maps: usize,

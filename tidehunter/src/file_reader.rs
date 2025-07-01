@@ -96,14 +96,23 @@ pub fn set_direct_options(options: &mut OpenOptions, direct_io: bool) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn set_o_direct(options: &mut OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(0x4000 /*O_DIRECT*/);
+    {
+        // O_DIRECT values are architecture-specific on Linux
+        #[cfg(target_arch = "x86_64")]
+        const O_DIRECT: i32 = 0x4000;
+
+        #[cfg(target_arch = "aarch64")]
+        const O_DIRECT: i32 = 0x10000;
+
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(O_DIRECT);
+    }
 }
 
 #[cfg(not(unix))]
-fn set_o_direct(options: &mut OpenOptions) {
+fn set_o_direct(_options: &mut OpenOptions) {
     unimplemented!("set_o_direct not implemented non-unix systems");
 }
 

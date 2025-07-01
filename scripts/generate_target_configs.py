@@ -17,20 +17,21 @@ def get_base_config():
     """Returns the base configuration template."""
     return {
         'db_parameters': {
-            'frag_size': 134217728,
-            'max_maps': 16,
-            'max_dirty_keys': 32,
-            'snapshot_written_bytes': 134217728,
-            'snapshot_unload_threshold': 268435456,
-            'unload_jitter_pct': 10,
-            'direct_io': False  # This will be overridden
+            'frag_size': 1024 * 1024 * 1024,
+            'max_maps': 64,
+            'max_dirty_keys': 1024,
+            'snapshot_written_bytes': 64 * 1024 * 1024 * 1024,
+            'snapshot_unload_threshold': 128 * 1024 * 1024 * 1024,
+            'unload_jitter_pct': 30,
+            'direct_io': False,
+            'num_flusher_threads': 4
         },
         'stress_client_parameters': {
-            'mixed_threads': 16,
-            'write_threads': 16,
+            'mixed_threads': 12,
+            'write_threads': 12,
             'write_size': 512,
             'key_len': 32,
-            'writes': 10000000,
+            'writes': 133000000,
             'operations': 30000000,
             'background_writes': 0,
             'no_snapshot': False,
@@ -38,10 +39,11 @@ def get_base_config():
             'key_layout': 'Uniform',
             'tldr': '',
             'preserve': False,
-            'read_mode': 'Get',
-            'backend': 'Tidehunter',  # This will be overridden
+            'read_mode': 'Get',  #'!Lt 1',
+            'backend': 'Tidehunter', 
             'path': '/home/ubuntu/working_dir',
-            'read_percentage': 100  # This will be overridden
+            'read_percentage': 100,
+            'zipf_exponent': 0.0
         }
     }
 
@@ -51,6 +53,9 @@ def format_yaml_value(value):
     if isinstance(value, bool):
         return 'true' if value else 'false'
     elif isinstance(value, str):
+        # Do not quote YAML tags.
+        if value.startswith('!'):
+            return value
         # Quote strings that might need quoting
         if value == '' or ' ' in value or value.startswith('/'):
             return f'"{value}"'
@@ -130,9 +135,10 @@ def main():
     # Define parameter combinations
     # You can easily modify this dictionary to add more parameters
     parameter_combinations = {
-        'direct_io': [False, True],  # off and on
-        'read_percentage': [100, 80, 60, 40, 20],
-        'backend': ['Tidehunter', 'Rocksdb']
+        'backend': ['Tidehunter'],
+        'direct_io': [False, True], 
+        'read_percentage': [0, 50, 80, 100],
+        'zipf_exponent': [0.8],
     }
     
     print("Generating configurations with the following parameter combinations:")
@@ -150,12 +156,6 @@ def main():
     # Write to YAML file
     output_path = Path('orchestrator/assets/target_configs.yml')
     
-    # Create a backup of existing file if it exists
-    if output_path.exists():
-        backup_path = output_path.with_suffix('.yml.backup')
-        output_path.rename(backup_path)
-        print(f"Backed up existing file to: {backup_path}")
-    
     write_yaml_file(configs, output_path)
     
     print(f"Generated {len(configs)} configurations in: {output_path}")
@@ -167,6 +167,7 @@ def main():
         print(f"  Backend: {config['stress_client_parameters']['backend']}")
         print(f"  Direct I/O: {config['db_parameters']['direct_io']}")
         print(f"  Read Percentage: {config['stress_client_parameters']['read_percentage']}%")
+        print(f"  Zipf Exponent: {config['stress_client_parameters']['zipf_exponent']}")
 
 
 if __name__ == '__main__':
