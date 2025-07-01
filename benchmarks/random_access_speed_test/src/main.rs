@@ -33,7 +33,7 @@ pub fn main() {
 
 impl RandomAccessSpeedTest {
     pub(crate) fn run(self: Arc<Self>) {
-        let path: PathBuf = "/opt/sui/thdb/ras".into();
+        let path: PathBuf = "/opt/tidehunter/thdb/ras".into();
         // let len = 10 * 1024 * 1024 * 1024; // 10 Gb
         let len = 2 * 1024 * 1024 * 1024 * 1024; // 2 Tb
         {
@@ -58,6 +58,23 @@ impl RandomAccessSpeedTest {
             options.custom_flags(0x4000 /*O_DIRECT*/);
         }
         let file = options.open(&path).unwrap();
+        if !self.direct_io {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::fd::AsRawFd;
+                unsafe {
+                    assert_eq!(
+                        0,
+                        libc::posix_fadvise(
+                            file.as_raw_fd(),
+                            0, /*offset*/
+                            0, /*len*/
+                            libc::POSIX_FADV_RANDOM
+                        )
+                    );
+                }
+            }
+        }
         let file = Arc::new(file);
         for buf in [1, 4, 16, 32, 64, 128, 256, 512, 1024] {
             self.test_buf(file.clone(), buf * 1024, len);

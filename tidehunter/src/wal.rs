@@ -216,6 +216,22 @@ impl Wal {
 
     fn from_file(file: File, layout: WalLayout, metrics: Arc<Metrics>) -> Arc<Self> {
         let wal_syncer = WalSyncer::start(metrics.clone());
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            unsafe {
+                assert_eq!(
+                    0,
+                    libc::posix_fadvise(
+                        file.as_raw_fd(),
+                        0, /*offset*/
+                        0, /*len*/
+                        libc::POSIX_FADV_RANDOM,
+                    ),
+                    "fadvise failed"
+                );
+            }
+        }
         let reader = Wal {
             file,
             layout,
@@ -223,6 +239,7 @@ impl Wal {
             wal_syncer,
             metrics,
         };
+
         Arc::new(reader)
     }
 
