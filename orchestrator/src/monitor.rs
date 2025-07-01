@@ -325,9 +325,9 @@ impl Alloy {
             .unwrap_or_else(|_| "unknown".to_string());
             
         let labels = vec![
-            format!("        host    = \"{}\"", escape_hcl_string(&hostname)),
-            format!("        system  = \"tidehunter\""),
-            format!("        commit  = \"{}\"", escape_hcl_string(&settings.repository.commit)),
+            format!("        host    = \"{}\",", escape_hcl_string(&hostname)),
+            format!("        system  = \"tidehunter\","),
+            format!("        commit  = \"{}\",", escape_hcl_string(&settings.repository.commit)),
         ];
 
         let external_labels = labels.join("\n");
