@@ -32,10 +32,18 @@ impl Monitor {
     }
 
     /// Dependencies to install.
-    pub fn dependencies() -> Vec<String> {
+    pub fn dependencies(use_grafana_cloud: bool) -> Vec<String> {
         let mut commands: Vec<String> = Vec::new();
-        commands.extend(Prometheus::install_commands().into_iter().map(String::from));
-        commands.extend(Grafana::install_commands().into_iter().map(String::from));
+        
+        if use_grafana_cloud {
+            // When using Grafana Cloud, install Alloy instead of Prometheus/Grafana
+            commands.extend(Alloy::install_commands().into_iter().map(String::from));
+        } else {
+            // Traditional setup with Prometheus and Grafana
+            commands.extend(Prometheus::install_commands().into_iter().map(String::from));
+            commands.extend(Grafana::install_commands().into_iter().map(String::from));
+        }
+        
         commands.extend(NodeExporter::install_commands());
         commands
     }
@@ -46,10 +54,31 @@ impl Monitor {
         protocol_commands: &P,
         parameters: &BenchmarkParameters,
     ) -> MonitorResult<()> {
-        // Configure and reload prometheus.
+        if parameters.settings.use_grafana_cloud {
+            // Use Alloy to forward metrics to Grafana Cloud
+            self.start_alloy(protocol_commands, parameters).await?;
+        } else {
+            // Configure and reload prometheus.
+            let instance = [self.instance.clone()];
+            let commands =
+                Prometheus::setup_commands(self.nodes.clone(), protocol_commands, parameters);
+            self.ssh_manager
+                .execute(instance, commands, CommandContext::default())
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Start Alloy on the dedicated monitoring machine to forward metrics to Grafana Cloud.
+    pub async fn start_alloy<P: ProtocolMetrics>(
+        &self,
+        protocol_commands: &P,
+        parameters: &BenchmarkParameters,
+    ) -> MonitorResult<()> {
+        // Configure and start alloy.
         let instance = [self.instance.clone()];
-        let commands =
-            Prometheus::setup_commands(self.nodes.clone(), protocol_commands, parameters);
+        let commands = Alloy::setup_commands(self.nodes.clone(), protocol_commands, parameters);
         self.ssh_manager
             .execute(instance, commands, CommandContext::default())
             .await?;
@@ -58,13 +87,16 @@ impl Monitor {
     }
 
     /// Start grafana on the dedicated motoring machine.
-    pub async fn start_grafana(&self) -> MonitorResult<()> {
-        // Configure and reload grafana.
-        let instance = std::iter::once(self.instance.clone());
-        let commands = Grafana::setup_commands();
-        self.ssh_manager
-            .execute(instance, commands, CommandContext::default())
-            .await?;
+    pub async fn start_grafana(&self, parameters: &BenchmarkParameters) -> MonitorResult<()> {
+        if !parameters.settings.use_grafana_cloud {
+            // Configure and reload grafana.
+            let instance = std::iter::once(self.instance.clone());
+            let commands = Grafana::setup_commands();
+            self.ssh_manager
+                .execute(instance, commands, CommandContext::default())
+                .await?;
+        }
+        // If using Grafana Cloud, we don't need to start local Grafana
 
         Ok(())
     }
@@ -218,6 +250,113 @@ impl Grafana {
             "    uid: Fixed-UID-testbed",
         ]
         .join("\n")
+    }
+}
+
+pub struct Alloy;
+
+impl Alloy {
+
+    /// The commands to install grafana alloy.
+    pub fn install_commands() -> Vec<&'static str> {
+        vec![
+            "curl -fsSL https://apt.grafana.com/gpg.key | sudo apt-key add -",
+            "echo \"deb https://apt.grafana.com stable main\" | sudo tee -a /etc/apt/sources.list.d/grafana.list",
+            "sudo apt-get update",
+            "sudo apt-get install -y alloy",
+            "sudo mkdir -p /etc/alloy",
+            "sudo chmod 777 -R /etc/alloy/",
+        ]
+    }
+
+    /// Generate the commands to setup alloy configuration and start the service.
+    pub fn setup_commands<I, P>(
+        nodes: I,
+        protocol: &P,
+        parameters: &BenchmarkParameters,
+    ) -> String
+    where
+        I: IntoIterator<Item = Instance>,
+        P: ProtocolMetrics,
+    {
+        let nodes_metrics_paths = protocol
+            .nodes_metrics_path(nodes, parameters)
+            .into_iter()
+            .map(|(_, path)| {
+                // Extract just the port from the path (format is "ip:port/path")
+                let parts: Vec<_> = path.split('/').collect();
+                let address = parts[0].parse::<SocketAddr>().unwrap();
+                format!("{}:{}", address.ip(), address.port())
+            })
+            .collect::<Vec<_>>();
+
+        let config = Self::generate_config(&nodes_metrics_paths, parameters);
+
+        [
+            &format!("sudo echo '{}' > /etc/alloy/config.alloy", config.replace("'", "\\'")),
+            "sudo systemctl enable alloy",
+            "sudo systemctl restart alloy",
+        ]
+        .join(" && ")
+    }
+
+    /// Generate the alloy configuration file content.
+    fn generate_config(nodes_metrics_paths: &[String], parameters: &BenchmarkParameters) -> String {
+        let settings = &parameters.settings;
+        
+        // Build external labels with the specific ones requested
+        let labels = vec![
+            format!("        host    = \"{}\"", hostname::get().unwrap_or_default().to_string_lossy()),
+            format!("        system  = \"tidehunter\""),
+            format!("        commit  = \"{}\"", settings.repository.commit),
+        ];
+
+        let external_labels = labels.join(",\n");
+
+        // Generate basic auth section if credentials are provided
+        let auth_section = if let (Some(username), Some(_url)) = (&settings.grafana_cloud_username, &settings.grafana_cloud_url) {
+            let password = settings.load_grafana_cloud_password()
+                .unwrap_or_default()
+                .unwrap_or_else(|| "".to_string());
+            
+            format!(r#"
+        basic_auth {{
+            username = "{}"
+            password = "{}"
+        }}"#, username, password)
+        } else {
+            "".to_string()
+        };
+
+        let default_url = "https://gateway-2.mimir.sui.io/api/v1/push".to_string();
+        let endpoint_url = settings.grafana_cloud_url.as_ref()
+            .unwrap_or(&default_url);
+
+        // Format targets for multiple addresses
+        let targets = nodes_metrics_paths
+            .iter()
+            .map(|addr| format!("        {{__address__ = \"{}\"}},", addr))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(r#"prometheus.scrape "tidehunter_benchmark" {{
+    targets = [
+{}
+    ]
+    forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+    job_name   = "tidehunter_benchmark"
+}}
+
+prometheus.remote_write "grafana_cloud" {{
+    external_labels = {{
+{}
+    }}
+
+    endpoint {{
+        name = "grafana-cloud"
+        url  = "{}"{}
+    }}
+}}"#, targets, external_labels, endpoint_url, auth_section)
     }
 }
 

@@ -156,7 +156,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         let command = [
             &basic_commands[..],
-            &Monitor::dependencies()
+            &Monitor::dependencies(self.settings.use_grafana_cloud)
                 .iter()
                 .map(|x| x.as_str())
                 .collect::<Vec<_>>()[..],
@@ -287,7 +287,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             let monitor = Monitor::new(instance, nodes, self.ssh_manager.clone());
             let commands = &self.protocol_commands;
             monitor.start_prometheus(commands, parameters).await?;
-            monitor.start_grafana().await?;
+            monitor.start_grafana(parameters).await?;
 
             display::done();
             display::config("Grafana address", monitor.grafana_address());

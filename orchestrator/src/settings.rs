@@ -118,6 +118,15 @@ pub struct Settings {
     /// Whether to start a grafana and prometheus instance on a dedicate machine.
     #[serde(default = "defaults::default_monitoring")]
     pub monitoring: bool,
+    /// Whether to use Grafana Cloud instead of local Grafana
+    #[serde(default = "defaults::default_use_grafana_cloud")]
+    pub use_grafana_cloud: bool,
+    /// Grafana Cloud Mimir endpoint URL
+    pub grafana_cloud_url: Option<String>,
+    /// Grafana Cloud username
+    pub grafana_cloud_username: Option<String>,
+    /// Path to file containing Grafana Cloud password
+    pub grafana_cloud_password_file: Option<PathBuf>,
     /// The timeout duration for ssh commands (in seconds).
     #[serde(default = "defaults::default_ssh_timeout")]
     #[serde_as(as = "DurationSeconds")]
@@ -165,6 +174,10 @@ mod defaults {
 
     pub fn default_monitoring() -> bool {
         true
+    }
+
+    pub fn default_use_grafana_cloud() -> bool {
+        false
     }
 
     pub fn default_ssh_timeout() -> Duration {
@@ -254,6 +267,23 @@ impl Settings {
                 file: ssh_public_key_file.display().to_string(),
                 message: e.to_string(),
             }),
+        }
+    }
+
+    /// Load the Grafana Cloud password from file.
+    pub fn load_grafana_cloud_password(&self) -> SettingsResult<Option<String>> {
+        match &self.grafana_cloud_password_file {
+            Some(path) => {
+                let password = std::fs::read_to_string(path)
+                    .map_err(|e| SettingsError::TokenFileError {
+                        file: path.display().to_string(),
+                        message: e.to_string(),
+                    })?
+                    .trim()
+                    .to_string();
+                Ok(Some(password))
+            }
+            None => Ok(None),
         }
     }
 

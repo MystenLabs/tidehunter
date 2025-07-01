@@ -1,13 +1,20 @@
 ---
 testbed_id: "${USER}-tidehunter"
 cloud_provider: aws
-token_file: "/Users/${USER}/.aws/credentials"
-ssh_private_key_file: "/Users/${USER}/.ssh/aws"
+token_file: "${HOME}/.aws/credentials"
+ssh_private_key_file: "/${HOME}/.ssh/aws"
 regions:
   - us-east-1
 specs: i8g.4xlarge
 repository:
   url: https://@github.com/mystenlabs/tidehunter.git
-  commit: collector
+  commit: grafana-cloud
 target_configs_path: "./orchestrator/assets/target_configs.yml"
 log_processing: true
+
+# Grafana Cloud configuration (optional)
+# Set use_grafana_cloud to true to send metrics to Grafana Cloud instead of local Grafana
+use_grafana_cloud: true
+grafana_cloud_url: "https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push"
+grafana_cloud_username: "incoming_metrics"
+grafana_cloud_password_file: "${HOME}/.aws/grafana"

@@ -1,5 +1,5 @@
 ---
-testbed_id: "${USER}-mysticeti"
+testbed_id: "${USER}-tidehunter"
 cloud_provider: aws
 token_file: "/Users/${USER}/.aws/credentials"
 ssh_private_key_file: "/Users/${USER}/.ssh/aws"
@@ -7,5 +7,15 @@ regions:
   - us-west-1
 specs: m5d.8xlarge
 repository:
-  url: https://github.com/asonnino/mysticeti.git
+  url: https://github.com/MystenLabs/tidehunter.git
   commit: main
+
+# Monitoring configuration
+monitoring: true
+
+# Grafana Cloud configuration (optional)
+# Set use_grafana_cloud to true to send metrics to Grafana Cloud instead of local Grafana
+use_grafana_cloud: false
+# grafana_cloud_url: "https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push"
+# grafana_cloud_username: "your-username"
+# grafana_cloud_password_file: "/path/to/password/file"
