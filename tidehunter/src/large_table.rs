@@ -182,7 +182,6 @@ impl LargeTable {
         loader: &L,
     ) {
         let (mut row, cell) = self.row(ks, &k);
-
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
             let previous = value_lru.push(k.clone(), value.clone());

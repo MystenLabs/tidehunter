@@ -434,6 +434,9 @@ impl StressThread {
                             );
                         }
                         // If the key is not found, we do nothing as it may not have been written yet.
+                        // This can happen because we select pos between 0 and global_pos(highest_local_pos)
+                        // This range includes global positions that are owned by other threads,
+                        // who may not have used those positions yet.
                     }
                     ReadMode::Lt(iterations) => {
                         let mut key = vec![0u8; self.parameters.key_len];
@@ -462,7 +465,8 @@ impl StressThread {
                             assert!(exists, "Key should exist but was not found");
                         }
                         // Keys beyond initial writes may or may not exist depending on
-                        // whether they were written during the mixed phase
+                        // whether they were written during the mixed phase. For more details,
+                        // see comment above for get mode.
                     }
                 }
                 let latency = timer.elapsed().as_micros();
