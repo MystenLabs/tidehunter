@@ -286,11 +286,19 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
             let monitor = Monitor::new(instance, nodes, self.ssh_manager.clone());
             let commands = &self.protocol_commands;
-            monitor.start_prometheus(commands, parameters).await?;
-            monitor.start_grafana(parameters).await?;
+            
+            if parameters.settings.use_grafana_cloud {
+                // Use Alloy to forward metrics to Grafana Cloud
+                monitor.start_alloy(commands, parameters).await?;
+                display::config("Grafana Cloud", "Metrics forwarded via Alloy");
+            } else {
+                // Use local Prometheus and Grafana
+                monitor.start_prometheus(commands, parameters).await?;
+                monitor.start_grafana(parameters).await?;
+                display::config("Grafana address", monitor.grafana_address());
+            }
 
             display::done();
-            display::config("Grafana address", monitor.grafana_address());
             display::newline();
             return Ok(Some(monitor));
         }
@@ -484,14 +492,22 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             let monitor = self.start_monitoring(&parameters).await?;
 
             // Initialize the metrics collector.
+            // When using Grafana Cloud, metrics are forwarded directly by Alloy,
+            // so we don't need a local MetricsCollector.
             let batch_timestamp = Utc::now().format("%Y-%m-%d-%H-%M-%S").to_string();
             let mut collector = if let Some(m) = monitor {
-                Some(MetricsCollector::new(
-                    parameters.clone(),
-                    batch_timestamp.clone(),
-                    &m.prometheus_address(),
-                    self.protocol_commands.bucket_metrics(),
-                )?)
+                if parameters.settings.use_grafana_cloud {
+                    // Skip metrics collection when using Grafana Cloud
+                    // as metrics are forwarded directly by Alloy
+                    None
+                } else {
+                    Some(MetricsCollector::new(
+                        parameters.clone(),
+                        batch_timestamp.clone(),
+                        &m.prometheus_address(),
+                        self.protocol_commands.bucket_metrics(),
+                    )?)
+                }
             } else {
                 None
             };

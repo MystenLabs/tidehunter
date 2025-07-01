@@ -100,6 +100,7 @@ When `use_grafana_cloud: true` is set:
 2. **Configuration Generation**: Alloy is configured to scrape metrics from benchmark nodes
 3. **Metric Forwarding**: Alloy forwards all metrics to your Grafana Cloud Mimir endpoint
 4. **Label Enhancement**: All metrics are enhanced with the configured labels
+5. **Local Metrics Collection**: The orchestrator disables local metrics collection since all metrics are forwarded directly to Grafana Cloud
 
 ### Generated Alloy Configuration
 
@@ -138,9 +139,25 @@ prometheus.remote_write "grafana_cloud" {
 
 ### Common Issues
 
-1. **Authentication Errors**: Verify your username and password file
-2. **Network Connectivity**: Ensure the monitoring instance can reach the Grafana Cloud endpoint
-3. **Missing Metrics**: Check Alloy logs: `sudo journalctl -u alloy -f`
+1. **"could not perform the initial load successfully"**: This indicates a configuration syntax error
+   - Run `sudo alloy validate /etc/alloy/config.alloy` to check syntax
+   - Check if password file contains special characters that need escaping
+   - Ensure all required fields (username, password, URL) are properly set
+
+2. **Authentication Errors**: Verify your username and password file
+   - Check that the password file exists and is readable
+   - Verify credentials with your PE team
+
+3. **Network Connectivity**: Ensure the monitoring instance can reach the Grafana Cloud endpoint
+   - Test with: `curl -v "https://your-endpoint.com/api/prom/push"`
+
+4. **Missing Metrics**: Check Alloy logs: `sudo journalctl -u alloy -f`
+   - Look for scraping errors or authentication failures
+   - Verify benchmark nodes are running and exposing metrics
+
+5. **Service Restart Loops**: If Alloy keeps restarting
+   - Check configuration syntax with `sudo alloy validate /etc/alloy/config.alloy`
+   - Look for empty credentials or malformed URLs
 
 ### Validation
 
@@ -148,7 +165,33 @@ To verify the setup is working:
 
 1. Check Alloy status: `sudo systemctl status alloy`
 2. View Alloy logs: `sudo journalctl -u alloy -f`
-3. Check your Grafana Cloud dashboard for incoming metrics
+3. Validate the configuration: `sudo alloy validate /etc/alloy/config.alloy`
+4. Check the generated configuration: `sudo cat /etc/alloy/config.alloy`
+5. Check your Grafana Cloud dashboard for incoming metrics
+
+### Configuration Debugging
+
+If Alloy fails to start, check the following:
+
+1. **Configuration Syntax**: Validate the configuration file
+   ```bash
+   sudo alloy validate /etc/alloy/config.alloy
+   ```
+
+2. **View Generated Config**: Check what was actually generated
+   ```bash
+   sudo cat /etc/alloy/config.alloy
+   ```
+
+3. **Check Credentials**: Ensure your password file is readable and contains valid credentials
+   ```bash
+   cat /path/to/password/file  # Should show your password
+   ```
+
+4. **Network Connectivity**: Test connection to Grafana Cloud
+   ```bash
+   curl -v "https://your-grafana-cloud-endpoint.com/api/prom/push"
+   ```
 
 ### Switching Back to Local Mode
 

@@ -294,8 +294,14 @@ impl Alloy {
 
         [
             &format!("sudo echo '{}' > /etc/alloy/config.alloy", config.replace("'", "\\'")),
+            "echo 'Generated Alloy config:'",
+            "sudo cat /etc/alloy/config.alloy",
+            "echo 'Validating Alloy config...'",
+            "sudo alloy validate /etc/alloy/config.alloy || (echo 'Config validation failed!' && cat /etc/alloy/config.alloy && exit 1)",
             "sudo systemctl enable alloy",
             "sudo systemctl restart alloy",
+            "sleep 5",
+            "sudo systemctl status alloy --no-pager",
         ]
         .join(" && ")
     }
@@ -304,11 +310,24 @@ impl Alloy {
     fn generate_config(nodes_metrics_paths: &[String], parameters: &BenchmarkParameters) -> String {
         let settings = &parameters.settings;
         
+        // Safely escape strings for HCL
+        fn escape_hcl_string(s: &str) -> String {
+            s.replace("\\", "\\\\")
+             .replace("\"", "\\\"")
+             .replace("\n", "\\n")
+             .replace("\r", "\\r")
+             .replace("\t", "\\t")
+        }
+        
         // Build external labels with the specific ones requested
+        let hostname = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+            
         let labels = vec![
-            format!("        host    = \"{}\"", hostname::get().unwrap_or_default().to_string_lossy()),
+            format!("        host    = \"{}\"", escape_hcl_string(&hostname)),
             format!("        system  = \"tidehunter\""),
-            format!("        commit  = \"{}\"", settings.repository.commit),
+            format!("        commit  = \"{}\"", escape_hcl_string(&settings.repository.commit)),
         ];
 
         let external_labels = labels.join(",\n");
@@ -319,11 +338,15 @@ impl Alloy {
                 .unwrap_or_default()
                 .unwrap_or_else(|| "".to_string());
             
-            format!(r#"
+            if !username.is_empty() && !password.is_empty() {
+                format!(r#"
         basic_auth {{
             username = "{}"
             password = "{}"
-        }}"#, username, password)
+        }}"#, escape_hcl_string(username), escape_hcl_string(&password))
+            } else {
+                "".to_string()
+            }
         } else {
             "".to_string()
         };
@@ -333,11 +356,15 @@ impl Alloy {
             .unwrap_or(&default_url);
 
         // Format targets for multiple addresses
-        let targets = nodes_metrics_paths
-            .iter()
-            .map(|addr| format!("        {{__address__ = \"{}\"}},", addr))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let targets = if nodes_metrics_paths.is_empty() {
+            "        // No targets configured yet".to_string()
+        } else {
+            nodes_metrics_paths
+                .iter()
+                .map(|addr| format!("        {{__address__ = \"{}\"}},", escape_hcl_string(addr)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
 
         format!(r#"prometheus.scrape "tidehunter_benchmark" {{
     targets = [
@@ -356,7 +383,7 @@ prometheus.remote_write "grafana_cloud" {{
         name = "grafana-cloud"
         url  = "{}"{}
     }}
-}}"#, targets, external_labels, endpoint_url, auth_section)
+}}"#, targets, external_labels, escape_hcl_string(endpoint_url), auth_section)
     }
 }
 
