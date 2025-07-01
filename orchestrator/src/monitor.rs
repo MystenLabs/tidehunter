@@ -330,7 +330,7 @@ impl Alloy {
             format!("        commit  = \"{}\"", escape_hcl_string(&settings.repository.commit)),
         ];
 
-        let external_labels = labels.join(",\n");
+        let external_labels = labels.join("\n");
 
         // Generate basic auth section if credentials are provided
         let auth_section = if let (Some(username), Some(_url)) = (&settings.grafana_cloud_username, &settings.grafana_cloud_url) {
