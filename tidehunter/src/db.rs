@@ -1,4 +1,4 @@
-use crate::batch::WriteBatch;
+use crate::batch::{Update, WriteBatch};
 use crate::cell::CellId;
 use crate::config::Config;
 use crate::control::{ControlRegion, ControlRegionStore};
@@ -19,6 +19,7 @@ use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Weak};
 use std::time::Duration;
@@ -219,71 +220,76 @@ impl Db {
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
         let WriteBatch {
-            writes,
-            deletes,
+            updates,
+            prepared_writes,
             tag,
         } = batch;
+        if updates.is_empty() {
+            return Ok(());
+        }
         let _timer = self
             .metrics
             .db_op_mcs
             .with_label_values(&["write_batch", &tag])
             .mcs_timer();
-        // todo implement atomic durability
         let mut last_position = WalPosition::INVALID;
-        let mut update_writes = Vec::with_capacity(writes.len());
+        let mut update_writes = Vec::with_capacity(updates.len());
         let _write_timer = self
             .metrics
             .write_batch_times
             .with_label_values(&[&tag, "write"])
             .mcs_timer();
-        for w in writes {
-            let ks = self.key_shape.ks(w.ks);
-            self.metrics
-                .wal_written_bytes_type
-                .with_label_values(&["record", ks.name()])
-                .inc_by(w.wal_write.len() as u64);
-            let position = self.wal_writer.write(&w.wal_write)?;
-            update_writes.push((w, position));
-        }
 
-        let mut update_deletes = Vec::with_capacity(deletes.len());
-        for w in deletes {
-            let ks = self.key_shape.ks(w.ks);
+        let batch_start_entry = PreparedWalWrite::new(&WalEntry::BatchStart(updates.len() as u16));
+        let positions = self
+            .wal_writer
+            .multi_write(std::iter::once(&batch_start_entry).chain(&prepared_writes))?;
+
+        let mut num_inserts = 0;
+        let mut num_deletes = 0;
+        for (idx, update) in updates.iter().enumerate() {
+            let ks = update.ks();
+            let label = match update {
+                Update::Record(..) => {
+                    num_inserts += 1;
+                    "record"
+                }
+                Update::Remove(..) => {
+                    num_deletes += 1;
+                    "tombstone"
+                }
+            };
             self.metrics
                 .wal_written_bytes_type
-                .with_label_values(&["tombstone", ks.name()])
-                .inc_by(w.wal_write.len() as u64);
-            let position = self.wal_writer.write(&w.wal_write)?;
-            update_deletes.push((w, position));
+                .with_label_values(&[label, self.key_shape.ks(ks).name()])
+                .inc_by(prepared_writes[idx].len() as u64);
+            update_writes.push((update, positions[idx + 1]));
         }
         drop(_write_timer);
         self.metrics
             .write_batch_operations
             .with_label_values(&[&tag, "put"])
-            .inc_by(update_writes.len() as u64);
+            .inc_by(num_inserts as u64);
         self.metrics
             .write_batch_operations
             .with_label_values(&[&tag, "delete"])
-            .inc_by(update_deletes.len() as u64);
+            .inc_by(num_deletes as u64);
         let _update_timer = self
             .metrics
             .write_batch_times
             .with_label_values(&[&tag, "update"])
             .mcs_timer();
 
-        for (w, position) in update_writes {
-            let ks = self.key_shape.ks(w.ks);
-            ks.check_key(&w.key);
-            let reduced_key = ks.reduced_key_bytes(w.key);
-            self.large_table
-                .insert(ks, reduced_key, position, &w.value, self);
-            last_position = position;
-        }
-        for (w, position) in update_deletes {
-            let ks = self.key_shape.ks(w.ks);
-            ks.check_key(&w.key);
-            let reduced_key = ks.reduced_key_bytes(w.key);
-            self.large_table.remove(ks, reduced_key, position, self)?;
+        for (update, position) in update_writes {
+            let ks = self.key_shape.ks(update.ks());
+            let reduced_key = update.reduced_key(ks);
+            match update {
+                Update::Record(_, _, value) => {
+                    self.large_table
+                        .insert(ks, reduced_key, position, value, self)
+                }
+                Update::Remove(..) => self.large_table.remove(ks, reduced_key, position, self)?,
+            }
             last_position = position;
         }
         if last_position != WalPosition::INVALID {
@@ -414,6 +420,7 @@ impl Db {
             WalEntry::Record(ks, _, _) => ("record", self.key_shape.ks(*ks).name()),
             WalEntry::Index(ks, _) => ("index", self.key_shape.ks(*ks).name()),
             WalEntry::Remove(ks, _) => ("tombstone", self.key_shape.ks(*ks).name()),
+            WalEntry::BatchStart(_) => return,
         };
         let mapped = if mapped { "mapped" } else { "unmapped" };
         self.metrics
@@ -432,13 +439,29 @@ impl Db {
         mut wal_iterator: WalIterator,
         metrics: &Metrics,
     ) -> DbResult<WalWriter> {
+        let mut batch = VecDeque::new();
+        let mut batch_remaining = 0;
         loop {
-            let entry = wal_iterator.next();
-            if matches!(entry, Err(WalError::Crc(_))) {
-                break Ok(wal_iterator.into_writer());
+            let (position, entry) = if batch_remaining == 0 && !batch.is_empty() {
+                batch.pop_front().expect("invariant checked")
+            } else {
+                let entry = wal_iterator.next();
+                if matches!(entry, Err(WalError::Crc(_))) {
+                    break Ok(wal_iterator.into_writer());
+                }
+                let (position, raw_entry) = entry?;
+                let entry = WalEntry::from_bytes(raw_entry);
+                (position, entry)
+            };
+            if batch_remaining > 0 {
+                assert!(
+                    matches!(entry, WalEntry::Record(..) | WalEntry::Remove(..)),
+                    "encountered entry {entry:?} at position {position:?} during replay, while expected record or tombstone"
+                );
+                batch_remaining -= 1;
+                batch.push_back((position, entry));
+                continue;
             }
-            let (position, entry) = entry?;
-            let entry = WalEntry::from_bytes(entry);
             match entry {
                 WalEntry::Record(ks, k, v) => {
                     metrics.replayed_wal_records.inc();
@@ -454,6 +477,10 @@ impl Db {
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
                     large_table.remove(ks, reduced_key, position, wal_iterator.wal())?;
+                }
+                WalEntry::BatchStart(size) => {
+                    batch = VecDeque::with_capacity(size as usize);
+                    batch_remaining = size;
                 }
             }
         }
@@ -619,10 +646,12 @@ impl Loader for Db {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum WalEntry {
     Record(KeySpace, Bytes, Bytes),
     Index(KeySpace, Bytes),
     Remove(KeySpace, Bytes),
+    BatchStart(u16),
 }
 
 #[derive(Debug)]
@@ -637,6 +666,7 @@ impl WalEntry {
     const WAL_ENTRY_RECORD: u8 = 1;
     const WAL_ENTRY_INDEX: u8 = 2;
     const WAL_ENTRY_REMOVE: u8 = 3;
+    const WAL_ENTRY_BATCH_START: u8 = 4;
     pub const INDEX_PREFIX_SIZE: usize = 2;
 
     pub fn from_bytes(bytes: Bytes) -> Self {
@@ -658,6 +688,7 @@ impl WalEntry {
                 let ks = KeySpace(b.get_u8());
                 WalEntry::Remove(ks, bytes.slice(2..))
             }
+            WalEntry::WAL_ENTRY_BATCH_START => WalEntry::BatchStart(b.get_u16()),
             _ => panic!("Unknown wal entry type {entry_type}"),
         }
     }
@@ -669,6 +700,7 @@ impl IntoBytesFixed for WalEntry {
             WalEntry::Record(KeySpace(_), k, v) => 1 + 1 + 2 + k.len() + v.len(),
             WalEntry::Index(KeySpace(_), index) => 1 + 1 + index.len(),
             WalEntry::Remove(KeySpace(_), k) => 1 + 1 + k.len(),
+            WalEntry::BatchStart(_) => 1 + 2,
         }
     }
 
@@ -692,6 +724,10 @@ impl IntoBytesFixed for WalEntry {
                 buf.put_u8(Self::WAL_ENTRY_REMOVE);
                 buf.put_u8(ks.0);
                 buf.put_slice(k)
+            }
+            WalEntry::BatchStart(size) => {
+                buf.put_u8(Self::WAL_ENTRY_BATCH_START);
+                buf.put_u16(*size);
             }
         }
     }

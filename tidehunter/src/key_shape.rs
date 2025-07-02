@@ -26,7 +26,7 @@ pub struct KeyShapeBuilder {
     key_spaces: Vec<KeySpaceDesc>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct KeySpace(pub(crate) u8);
 
 #[doc(hidden)]
