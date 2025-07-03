@@ -310,8 +310,14 @@ pub mod test {
         for _ in 0..ITERATIONS {
             let key = rng.gen_range(target_range.clone());
             let pos = rng.next_u64();
+            if let Some(existing) = index.get(&k32(key)) {
+                if existing > w(pos) {
+                    continue;
+                }
+            }
             index.insert(k32(key), w(pos));
         }
+
         let bytes = pi.clean_serialize_index(&mut index, ks);
         let data = index.into_data();
         for (key, expected_value) in &data {

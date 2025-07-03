@@ -50,9 +50,11 @@ impl IndexTable {
             }
             Entry::Occupied(mut oc) => {
                 let previous = *oc.get();
-                if previous.offset < v.offset {
-                    oc.insert(v);
-                }
+                assert!(
+                    previous.offset < v.offset,
+                    "Index WAL position must be increasing"
+                );
+                oc.insert(v);
                 Some(previous.into_wal_position())
             }
         }
@@ -115,6 +117,11 @@ impl IndexTable {
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
         self.data.get(k).map(|p| p.into_wal_position())
+    }
+
+    /// similar to `get`, but returns the position of the modification operation for both deletes and inserts
+    pub fn get_update_position(&self, k: &[u8]) -> Option<WalPosition> {
+        self.data.get(k).map(|p| p.into_update_position())
     }
 
     /// If prev is None returns first entry.
@@ -276,6 +283,10 @@ impl IndexWalPosition {
             }
             IndexEntryKind::Removed => WalPosition::INVALID,
         }
+    }
+
+    fn into_update_position(self) -> WalPosition {
+        WalPosition::new(self.offset, self.len)
     }
 
     fn ensure_clean_wal_position(self) -> WalPosition {

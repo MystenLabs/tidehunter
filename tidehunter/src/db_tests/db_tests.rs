@@ -210,8 +210,13 @@ fn test_corrupted_batch_replay() {
 fn test_concurrent_batch() {
     let dir = tempdir::TempDir::new("test_concurrent_batch").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(1, 16, KeyType::uniform(16));
+    let ksc = KeySpaceConfig::new().with_value_cache_size(10);
+    let (key_shape, ks) = KeyShape::new_single_config(1, 16, KeyType::uniform(16), ksc);
     let (key_a, key_b, key_c) = (vec![15], vec![16], vec![17]);
+    let get_value = |db: &Arc<Db>, key: _| {
+        let bytes = db.get(ks, key).unwrap().unwrap();
+        usize::from_be_bytes(bytes.as_ref().try_into().unwrap())
+    };
     {
         let db = Db::open(
             dir.path(),
@@ -220,7 +225,7 @@ fn test_concurrent_batch() {
             Metrics::new(),
         )
         .unwrap();
-        let num_threads = 32;
+        let num_threads = 1000;
         let mut handles = Vec::with_capacity(num_threads);
         for thread_id in 0..num_threads {
             let db = db.clone();
@@ -238,13 +243,20 @@ fn test_concurrent_batch() {
         for handle in handles {
             handle.join().unwrap();
         }
+        let (a, b, c) = (
+            get_value(&db, &key_a),
+            get_value(&db, &key_b),
+            get_value(&db, &key_c),
+        );
+        assert_eq!(a + b, c);
     }
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
-    let get_value = |key| {
-        let bytes = db.get(ks, key).unwrap().unwrap();
-        usize::from_be_bytes(bytes.as_ref().try_into().unwrap())
-    };
-    let (a, b, c) = (get_value(&key_a), get_value(&key_b), get_value(&key_c));
+
+    let (a, b, c) = (
+        get_value(&db, &key_a),
+        get_value(&db, &key_b),
+        get_value(&db, &key_c),
+    );
     // verify that no matter which batch is last, the state remains consistent
     assert_eq!(a + b, c);
 }
@@ -1030,14 +1042,12 @@ fn test_concurrent_single_value_update_remove() {
 }
 
 #[test]
-#[ignore] // todo fix this test
 fn test_concurrent_single_value_update_lru() {
     let ks_config = KeySpaceConfig::default().with_value_cache_size(1000);
     test_concurrent_single_value_update_impl(0, ks_config);
 }
 
 #[test]
-#[ignore] // todo fix this test
 fn test_concurrent_single_value_update_remove_lru() {
     let ks_config = KeySpaceConfig::default().with_value_cache_size(1000);
     test_concurrent_single_value_update_impl(70, ks_config);
