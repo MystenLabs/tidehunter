@@ -57,6 +57,8 @@ pub enum CloudProvider {
     Aws,
     #[serde(alias = "vultr")]
     Vultr,
+    #[serde(alias = "raw")]
+    Raw,
 }
 
 /// The testbed settings. Those are topically specified in a file.
@@ -125,6 +127,9 @@ pub struct Settings {
     /// The number of times the orchestrator should retry an ssh command.
     #[serde(default = "defaults::default_ssh_retries")]
     pub ssh_retries: usize,
+    /// List of raw machines (only used when cloud_provider is Raw).
+    #[serde(default)]
+    pub raw_machines: Vec<crate::client::raw::RawMachine>,
 }
 
 mod defaults {

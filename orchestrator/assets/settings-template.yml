@@ -1,6 +1,6 @@
 ---
 testbed_id: "${USER}-mysticeti"
-cloud_provider: aws
+cloud_provider: raw
 token_file: "/Users/${USER}/.aws/credentials"
 ssh_private_key_file: "/Users/${USER}/.ssh/aws"
 regions:
@@ -9,3 +9,32 @@ specs: m5d.8xlarge
 repository:
   url: https://github.com/asonnino/mysticeti.git
   commit: main
+
+# Example settings file for raw mode
+testbed_id: "my-raw-testbed"
+cloud_provider: "raw"
+
+# Default specs description
+specs: "default"
+
+# Raw machines configuration
+raw_machines:
+  - host: "192.168.1.10"
+    region: "datacenter-1"
+    ssh_port: 22
+    specs: "4-core-8gb"
+  
+  - host: "192.168.1.11"
+    region: "datacenter-1"
+    ssh_port: 22
+    specs: "8-core-16gb"
+  
+  - host: "worker-01.example.com"
+    region: "office-network"
+    ssh_port: 2222
+    specs: "16-core-32gb"
+  
+  - host: "worker-02.example.com"
+    region: "office-network"
+    # ssh_port defaults to 22
+    # specs defaults to the global "specs" value

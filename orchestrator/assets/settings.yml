@@ -1,13 +1,30 @@
 ---
 testbed_id: "${USER}-tidehunter"
-cloud_provider: aws
+cloud_provider: raw
 token_file: "/Users/${USER}/.aws/credentials"
-ssh_private_key_file: "/Users/${USER}/.ssh/aws"
+ssh_private_key_file: "/Users/${USER}/.ssh/mysten_baremetal_shared"
 regions:
-  - us-east-1
-specs: i8g.4xlarge
+  - default
+specs: default
 repository:
   url: https://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@github.com/mystenlabs/tidehunter.git
-  commit: collector
+  commit: orchestrator-raw
 target_configs_path: "./orchestrator/assets/target_configs.yml"
 log_processing: true
+
+# Raw machines configuration
+raw_machines:
+  - host: http://benchmark-00.testing.sui.io/
+    region: default
+  
+  - host: http://benchmark-01.testing.sui.io/
+    region: default
+  
+  - host: http://benchmark-02.testing.sui.io/
+    region: default
+  
+  - host: http://benchmark-03.testing.sui.io/
+    region: default
+
+  - host: http://benchmark-04.testing.sui.io/
+    region: default
