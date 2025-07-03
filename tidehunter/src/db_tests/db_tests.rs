@@ -11,7 +11,7 @@ use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
-use std::thread;
+use std::{thread, usize};
 
 // see generate.py
 pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
@@ -138,6 +138,114 @@ fn test_batch() {
     db.write_batch(batch).unwrap();
     assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
     assert_eq!(Some(vec![17].into()), db.get(ks, &[6, 7, 8, 9]).unwrap());
+}
+
+#[test]
+fn test_batch_replay() {
+    let dir = tempdir::TempDir::new("test_batch_replay").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let mut batch = WriteBatch::new();
+        batch.write(ks, vec![5, 6, 7, 8], vec![15]);
+        batch.write(ks, vec![6, 7, 8, 9], vec![17]);
+        db.write_batch(batch).unwrap();
+    }
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
+    assert_eq!(Some(vec![17].into()), db.get(ks, &[6, 7, 8, 9]).unwrap());
+}
+
+#[test]
+fn test_corrupted_batch_replay() {
+    let dir = tempdir::TempDir::new("test_corrupted_batch_replay").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_a, key_b) = (vec![5, 6, 7, 8], vec![6, 7, 8, 9]);
+    let (value_a, value_b) = (vec![15], vec![17]);
+
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let (position, file) = {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let mut batch = WriteBatch::new();
+        batch.write(ks, key_a.clone(), value_a.clone());
+        batch.write(ks, key_b.clone(), value_b.clone());
+        db.write_batch(batch).unwrap();
+        let mut batch = WriteBatch::new();
+        batch.write(ks, key_a.clone(), vec![20]);
+        batch.write(ks, key_b.clone(), vec![23]);
+        db.write_batch(batch).unwrap();
+
+        let position = db.wal_writer.position();
+        let record_length = CrcFrame::CRC_HEADER_LENGTH as u64 + 4 + 1 + 4;
+        let offset = config.wal_layout().align(record_length) - record_length;
+        let file = db.wal.file().try_clone().unwrap();
+        (position - offset - 1, file)
+    };
+    // Corrupt the last byte of the final entry in the last batch
+    let mut data = [0u8; 1];
+    file.read_exact_at(&mut data, position).unwrap();
+    data[0] = !data[0];
+    file.write_all_at(&mut data, position).unwrap();
+
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    assert_eq!(Some(value_a.into()), db.get(ks, &key_a).unwrap());
+    assert_eq!(Some(value_b.into()), db.get(ks, &key_b).unwrap());
+}
+
+#[test]
+fn test_concurrent_batch() {
+    let dir = tempdir::TempDir::new("test_concurrent_batch").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(1, 16, KeyType::uniform(16));
+    let (key_a, key_b, key_c) = (vec![15], vec![16], vec![17]);
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let num_threads = 32;
+        let mut handles = Vec::with_capacity(num_threads);
+        for thread_id in 0..num_threads {
+            let db = db.clone();
+            let (key_a, key_b, key_c) = (key_a.clone(), key_b.clone(), key_c.clone());
+            let handle = thread::spawn(move || {
+                let mut batch = WriteBatch::new();
+                let (a, b) = (thread_id, thread_id * 2);
+                batch.write(ks, key_a, thread_id.to_be_bytes().to_vec());
+                batch.write(ks, key_b, (thread_id * 2).to_be_bytes().to_vec());
+                batch.write(ks, key_c, (a + b).to_be_bytes().to_vec());
+                db.write_batch(batch).unwrap();
+            });
+            handles.push(handle);
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let get_value = |key| {
+        let bytes = db.get(ks, key).unwrap().unwrap();
+        usize::from_be_bytes(bytes.as_ref().try_into().unwrap())
+    };
+    let (a, b, c) = (get_value(&key_a), get_value(&key_b), get_value(&key_c));
+    // verify that no matter which batch is last, the state remains consistent
+    assert_eq!(a + b, c);
 }
 
 // see generate.py

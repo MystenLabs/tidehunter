@@ -72,12 +72,22 @@ pub enum WalRandomRead<'a> {
 
 impl WalWriter {
     pub fn write(&self, w: &PreparedWalWrite) -> Result<WalPosition, WalError> {
-        let len = w.frame.len_with_header() as u64;
-        let len_aligned = self.wal.layout.align(len);
+        Ok(self.multi_write(std::iter::once(w))?[0])
+    }
+
+    pub fn multi_write<'a>(
+        &self,
+        writes: impl IntoIterator<Item = &'a PreparedWalWrite> + Clone,
+    ) -> Result<Vec<WalPosition>, WalError> {
+        let len_aligned = writes
+            .clone()
+            .into_iter()
+            .map(|w| self.wal.layout.align(w.len() as u64))
+            .sum();
         let mut current_map_and_position = self.position_and_map.lock();
-        let (pos, prev_block_end) = current_map_and_position.0.allocate_position(len_aligned);
+        let (mut pos, prev_block_end) = current_map_and_position.0.allocate_position(len_aligned);
         // todo duplicated code
-        let (map_id, offset) = self.wal.layout.locate(pos);
+        let (map_id, mut offset) = self.wal.layout.locate(pos);
         // todo - decide whether map is covered by mutex or we want concurrent writes
         if current_map_and_position.1.id != map_id {
             if pos != prev_block_end {
@@ -115,11 +125,20 @@ impl WalWriter {
         let data = current_map_and_position.1.data.clone();
         // Dropping lock to allow data copy to be done in parallel
         drop(current_map_and_position);
-        let buf = write_buf_at(&data, offset as usize, len as usize);
-        buf.copy_from_slice(w.frame.as_ref());
-        // conversion to u32 is safe - pos is less than self.frag_size,
-        // and self.frag_size is asserted less than u32::MAX
-        Ok(WalPosition::new(pos, len as u32))
+
+        let mut positions = vec![];
+        for w in writes {
+            let frame_size = w.len();
+            let aligned_frame_size = self.wal.layout.align(frame_size as u64);
+            let buf = write_buf_at(&data, offset as usize, frame_size);
+            buf.copy_from_slice(w.frame.as_ref());
+            // conversion to u32 is safe - pos is less than self.frag_size,
+            // and self.frag_size is asserted less than u32::MAX
+            positions.push(WalPosition::new(pos, frame_size as u32));
+            pos += aligned_frame_size;
+            offset += aligned_frame_size;
+        }
+        Ok(positions)
     }
 
     /// Current un-initialized position,
@@ -194,7 +213,7 @@ impl WalLayout {
         start..end
     }
 
-    fn align(&self, v: u64) -> u64 {
+    pub fn align(&self, v: u64) -> u64 {
         align_size(v, self.direct_io)
     }
 }
