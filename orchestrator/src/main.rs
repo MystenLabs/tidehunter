@@ -150,13 +150,6 @@ async fn main() -> eyre::Result<()> {
             // Execute the command.
             run(settings, client, opts).await
         }
-        CloudProvider::Raw => {
-            // Create the client for raw machines.
-            let client = RawClient::new(settings.clone(), settings.raw_machines.clone());
-
-            // Execute the command.
-            run(settings, client, opts).await
-        }
     }
 }
 

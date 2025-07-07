@@ -130,19 +130,19 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let working_dir = self.settings.working_dir.display();
         let url = &self.settings.repository.url;
         let basic_commands = [
-            "sudo apt-get update",
-            "sudo apt-get -y upgrade",
-            "sudo apt-get -y autoremove",
+            "(sudo apt-get update || true)",
+            "(sudo apt-get -y upgrade || true)",
+            "(sudo apt-get -y autoremove || true)",
             // Disable "pending kernel upgrade" message.
-            "sudo apt-get -y remove needrestart",
+            "(sudo apt-get -y remove needrestart || true)",
             // The following dependencies
             // * build-essential: prevent the error: [error: linker `cc` not found].
             // * sysstat - for getting disk stats
             // * iftop - for getting network stats
             // * libssl-dev - Required to compile the orchestrator
             // TODO: Remove libssl-dev dependency #7
-            "sudo apt-get -y install build-essential sysstat iftop libssl-dev",
-            "sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config",
+            "(sudo apt-get -y install build-essential clang libclang-dev llvm-dev cmake sysstat iftop libssl-dev || true)",
+            "(sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config || true)",
             // Install rust (non-interactive).
             "curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
             "echo \"source $HOME/.cargo/env\" | tee -a ~/.bashrc",
@@ -150,7 +150,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             "rustup default stable",
             // Create the working directory.
             &format!("mkdir -p {working_dir}"),
-            // Clone the repo.
+            // Ensure proper ownership of the working directory
+            &format!("(sudo chown -R $USER:$USER {working_dir} || true)"),
+            // Clone the repo
             &format!("(git clone {url} || true)"),
         ];
 
@@ -169,6 +171,17 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         ]
         .concat()
         .join(" && ");
+
+        // UGLY HACK: In raw machines, the commands above lead to some weird errors due to dpkg and grub
+        // This forces the command to always succeed regardless of dpkg issues
+        let command = if matches!(
+            self.settings.cloud_provider,
+            crate::settings::CloudProvider::Raw
+        ) {
+            format!("{}; true", command)
+        } else {
+            command
+        };
 
         let active = self.instances.iter().filter(|x| x.is_active()).cloned();
         let context = CommandContext::default();
