@@ -141,7 +141,7 @@ impl IndexFlusherThread {
                     let mut disk_index = db
                         .load_index(command.ks, position)
                         .expect("Failed to load index in flusher thread");
-                    disk_index.merge_dirty(&dirty_index);
+                    disk_index.merge_dirty_and_clean(&dirty_index);
                     (dirty_index, disk_index)
                 }
                 FlushKind::FlushLoaded(index) => {

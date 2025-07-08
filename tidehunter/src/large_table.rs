@@ -20,7 +20,7 @@ use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use rand::rngs::ThreadRng;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
@@ -49,8 +49,8 @@ enum LargeTableEntryState {
     Empty,
     Unloaded(WalPosition),
     Loaded(WalPosition),
-    DirtyUnloaded(WalPosition, HashSet<Bytes>),
-    DirtyLoaded(WalPosition, HashSet<Bytes>),
+    DirtyUnloaded(WalPosition),
+    DirtyLoaded(WalPosition),
 }
 
 struct KsTable {
@@ -288,14 +288,14 @@ impl LargeTable {
             LargeTableEntryState::Loaded(_) => {
                 return Ok(self.report_lookup_result(ks, entry.get(k), "cache"))
             }
-            LargeTableEntryState::DirtyLoaded(_, _) => {
+            LargeTableEntryState::DirtyLoaded(_) => {
                 return Ok(self.report_lookup_result(
                     ks,
                     entry.get(k).and_then(WalPosition::valid),
                     "cache",
                 ))
             }
-            LargeTableEntryState::DirtyUnloaded(position, _) => {
+            LargeTableEntryState::DirtyUnloaded(position) => {
                 // optimization: in dirty unloaded state we might not need to load entry
                 if let Some(found) = entry.get(k) {
                     return Ok(self.report_lookup_result(ks, found.valid(), "cache"));
@@ -344,10 +344,15 @@ impl LargeTable {
     }
 
     fn too_many_dirty(&self, entry: &mut LargeTableEntry) -> bool {
-        if let Some(dk) = entry.state.dirty_keys() {
+        if entry.state.is_dirty() {
+            // todo - we no longer have a counter for number of dirty keys for DirtyLoaded state.
+            // This means in DirtyLoaded state inserting single dirty key can trigger flush,
+            // if many clean keys are present.
+            // Ideally instead we should just unload DirtyLoaded->DirtyUnloaded instead.
+            let dirty_count = entry.data.len();
             entry
                 .context
-                .excess_dirty_keys(dk.len().saturating_sub(entry.unload_jitter))
+                .excess_dirty_keys(dirty_count.saturating_sub(entry.unload_jitter))
         } else {
             false
         }
@@ -569,7 +574,7 @@ impl LargeTable {
 
         match &entry.state {
             // If already loaded, just use what's in memory
-            LargeTableEntryState::Loaded(_) | LargeTableEntryState::DirtyLoaded(_, _) => {
+            LargeTableEntryState::Loaded(_) | LargeTableEntryState::DirtyLoaded(_) => {
                 let mut prev_key = prev_key;
                 // Skip entries marked as invalid (deleted)
                 while let Some((key, pos)) = entry.next_entry(prev_key.take(), reverse) {
@@ -609,7 +614,7 @@ impl LargeTable {
             }
 
             // For dirty unloaded, combine in-memory and on-disk entries
-            LargeTableEntryState::DirtyUnloaded(position, _) => {
+            LargeTableEntryState::DirtyUnloaded(position) => {
                 // Check in-memory part first (dirty keys)
                 let in_memory_next = entry.next_entry(prev_key.clone(), reverse);
 
@@ -733,7 +738,7 @@ impl LargeTable {
             for mutex in ks_table.rows.mutexes() {
                 let mut lock = mutex.lock();
                 for (_, entry) in lock.entries.iter_mut() {
-                    if entry.state.as_dirty_state().is_some() {
+                    if entry.state.is_dirty() {
                         return false;
                     }
                 }
@@ -830,8 +835,7 @@ impl LargeTableEntry {
     }
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
-        let dirty_state = self.state.mark_dirty();
-        dirty_state.into_dirty_keys().insert(k.clone());
+        self.state.mark_dirty();
         self.insert_bloom_filter(&k);
         let previous = self.data.make_mut().insert(k, v);
         self.report_loaded_keys_change(previous, Some(v));
@@ -839,15 +843,7 @@ impl LargeTableEntry {
     }
 
     pub fn remove(&mut self, k: Bytes, v: WalPosition) {
-        let dirty_state = self.state.mark_dirty();
-        match dirty_state {
-            DirtyState::Loaded(dirty_keys) => {
-                dirty_keys.insert(k.clone());
-            }
-            DirtyState::Unloaded(dirty_keys) => {
-                dirty_keys.insert(k.clone());
-            }
-        };
+        self.state.mark_dirty();
         let previous = self.data.make_mut().remove(k, v);
         self.report_loaded_keys_change(previous, Some(v));
         self.last_added_position = Some(v);
@@ -912,17 +908,20 @@ impl LargeTableEntry {
             return Ok(());
         };
         let mut data = loader.load(&self.context.ks_config, position)?;
-        let dirty_keys = match state {
-            UnloadedState::Dirty(dirty_keys) => {
-                data.merge_dirty(&self.data);
-                Some(mem::take(dirty_keys))
+        let is_dirty = match state {
+            UnloadedState::Dirty => {
+                data.merge_dirty_no_clean(&self.data);
+                true
             }
-            UnloadedState::Clean => None,
+            UnloadedState::Clean => {
+                assert!(self.data.is_empty());
+                false
+            }
         };
         self.report_loaded_keys_delta(data.len() as i64 - self.data.len() as i64);
         self.data = ArcCow::new_owned(data);
-        if let Some(dirty_keys) = dirty_keys {
-            self.state = LargeTableEntryState::DirtyLoaded(position, dirty_keys);
+        if is_dirty {
+            self.state = LargeTableEntryState::DirtyLoaded(position);
         } else {
             self.state = LargeTableEntryState::Loaded(position);
         }
@@ -977,8 +976,8 @@ impl LargeTableEntry {
             "update_merged_index called while flush_pending is not set"
         );
         match self.state {
-            LargeTableEntryState::DirtyUnloaded(_, _) => {}
-            LargeTableEntryState::DirtyLoaded(_, _) => {}
+            LargeTableEntryState::DirtyUnloaded(_) => {}
+            LargeTableEntryState::DirtyLoaded(_) => {}
             LargeTableEntryState::Empty => panic!("update_merged_index in Empty state"),
             LargeTableEntryState::Unloaded(_) => panic!("update_merged_index in Unloaded state"),
             LargeTableEntryState::Loaded(_) => panic!("update_merged_index in Loaded state"),
@@ -996,9 +995,7 @@ impl LargeTableEntry {
         } else {
             let delta = self.data.make_mut().unmerge_flushed(&original_index);
             self.report_loaded_keys_delta(delta);
-            // todo remove dirty_keys from DirtyUnloaded
-            let dirty_keys = self.data.keys().cloned().collect();
-            self.state = LargeTableEntryState::DirtyUnloaded(position, dirty_keys);
+            self.state = LargeTableEntryState::DirtyUnloaded(position);
             self.context
                 .metrics
                 .flush_update
@@ -1026,7 +1023,7 @@ impl LargeTableEntry {
                 self.report_loaded_keys_delta(-(self.data.len() as i64));
                 self.data = Default::default();
             }
-            LargeTableEntryState::DirtyUnloaded(_pos, _dirty_keys) => {
+            LargeTableEntryState::DirtyUnloaded(_pos) => {
                 // load, merge, flush and unload -> Unloaded(..)
                 self.context
                     .metrics
@@ -1034,15 +1031,13 @@ impl LargeTableEntry {
                     .with_label_values(&["merge_flush"])
                     .inc();
                 self.maybe_load(loader)?;
-                assert!(matches!(
-                    self.state,
-                    LargeTableEntryState::DirtyLoaded(_, _)
-                ));
+                assert!(matches!(self.state, LargeTableEntryState::DirtyLoaded(_)));
                 self.unload_dirty_loaded(loader)?;
             }
-            LargeTableEntryState::DirtyLoaded(position, dirty_keys) => {
-                // todo - this position can be invalid
-                if force_clean || self.context.excess_dirty_keys(dirty_keys.len()) {
+            LargeTableEntryState::DirtyLoaded(position) => {
+                // IndexTable::count_dirty is expensive,
+                // but this operation should not happen very often.
+                if force_clean || self.context.excess_dirty_keys(self.data.count_dirty()) {
                     self.context
                         .metrics
                         .unload
@@ -1060,8 +1055,7 @@ impl LargeTableEntry {
                     // or (b) unmerge and unload -> DirtyUnloaded(..)
                     let delta = self.data.make_mut().retain_dirty();
                     self.report_loaded_keys_delta(delta);
-                    /*todo - avoid cloning dirty_keys*/
-                    self.state = LargeTableEntryState::DirtyUnloaded(*position, dirty_keys.clone());
+                    self.state = LargeTableEntryState::DirtyUnloaded(*position);
                 }
             }
         }
@@ -1115,10 +1109,10 @@ impl LargeTableEntry {
             LargeTableEntryState::Empty => None,
             LargeTableEntryState::Unloaded(_) => None,
             LargeTableEntryState::Loaded(_) => None,
-            LargeTableEntryState::DirtyUnloaded(position, _) => {
+            LargeTableEntryState::DirtyUnloaded(position) => {
                 Some(FlushKind::MergeUnloaded(position, self.data.clone_shared()))
             }
-            LargeTableEntryState::DirtyLoaded(_, _) => {
+            LargeTableEntryState::DirtyLoaded(_) => {
                 Some(FlushKind::FlushLoaded(self.data.clone_shared()))
             }
         }
@@ -1126,35 +1120,19 @@ impl LargeTableEntry {
 }
 
 impl LargeTableEntryState {
-    pub fn mark_dirty(&mut self) -> DirtyState {
+    pub fn mark_dirty(&mut self) {
         match self {
             LargeTableEntryState::Empty => {
-                *self = LargeTableEntryState::DirtyLoaded(WalPosition::INVALID, Default::default())
+                *self = LargeTableEntryState::DirtyLoaded(WalPosition::INVALID)
             }
             LargeTableEntryState::Loaded(position) => {
-                *self = LargeTableEntryState::DirtyLoaded(*position, Default::default())
+                *self = LargeTableEntryState::DirtyLoaded(*position)
             }
-            LargeTableEntryState::DirtyLoaded(_, _) => {}
+            LargeTableEntryState::DirtyLoaded(_) => {}
             LargeTableEntryState::Unloaded(pos) => {
-                *self = LargeTableEntryState::DirtyUnloaded(*pos, HashSet::default())
+                *self = LargeTableEntryState::DirtyUnloaded(*pos)
             }
-            LargeTableEntryState::DirtyUnloaded(_, _) => {}
-        }
-        self.as_dirty_state()
-            .expect("mark_dirty sets state to one of dirty states")
-    }
-
-    pub fn as_dirty_state(&mut self) -> Option<DirtyState> {
-        match self {
-            LargeTableEntryState::Empty => None,
-            LargeTableEntryState::Unloaded(_) => None,
-            LargeTableEntryState::Loaded(_) => None,
-            LargeTableEntryState::DirtyUnloaded(_, dirty_keys) => {
-                Some(DirtyState::Unloaded(dirty_keys))
-            }
-            LargeTableEntryState::DirtyLoaded(_, dirty_keys) => {
-                Some(DirtyState::Loaded(dirty_keys))
-            }
+            LargeTableEntryState::DirtyUnloaded(_) => {}
         }
     }
 
@@ -1163,15 +1141,9 @@ impl LargeTableEntryState {
             LargeTableEntryState::Empty => None,
             LargeTableEntryState::Unloaded(pos) => Some((UnloadedState::Clean, *pos)),
             LargeTableEntryState::Loaded(_) => None,
-            LargeTableEntryState::DirtyUnloaded(pos, dirty_keys) => {
-                Some((UnloadedState::Dirty(dirty_keys), *pos))
-            }
-            LargeTableEntryState::DirtyLoaded(_, _) => None,
+            LargeTableEntryState::DirtyUnloaded(pos) => Some((UnloadedState::Dirty, *pos)),
+            LargeTableEntryState::DirtyLoaded(_) => None,
         }
-    }
-
-    pub fn dirty_keys(&mut self) -> Option<&mut HashSet<Bytes>> {
-        Some(self.as_dirty_state()?.into_dirty_keys())
     }
 
     /// Wal position of the persisted index entry.
@@ -1180,8 +1152,8 @@ impl LargeTableEntryState {
             LargeTableEntryState::Empty => WalPosition::INVALID,
             LargeTableEntryState::Unloaded(w) => *w,
             LargeTableEntryState::Loaded(w) => *w,
-            LargeTableEntryState::DirtyUnloaded(w, _) => *w,
-            LargeTableEntryState::DirtyLoaded(w, _) => *w,
+            LargeTableEntryState::DirtyUnloaded(w) => *w,
+            LargeTableEntryState::DirtyLoaded(w) => *w,
         }
     }
 
@@ -1194,8 +1166,8 @@ impl LargeTableEntryState {
             LargeTableEntryState::Empty => false,
             LargeTableEntryState::Unloaded(_) => false,
             LargeTableEntryState::Loaded(_) => false,
-            LargeTableEntryState::DirtyUnloaded(_, _) => true,
-            LargeTableEntryState::DirtyLoaded(_, _) => true,
+            LargeTableEntryState::DirtyUnloaded(_) => true,
+            LargeTableEntryState::DirtyLoaded(_) => true,
         }
     }
 
@@ -1205,8 +1177,8 @@ impl LargeTableEntryState {
             LargeTableEntryState::Empty => "empty",
             LargeTableEntryState::Unloaded(_) => "unloaded",
             LargeTableEntryState::Loaded(_) => "loaded",
-            LargeTableEntryState::DirtyUnloaded(_, _) => "dirty_unloaded",
-            LargeTableEntryState::DirtyLoaded(_, _) => "dirty_loaded",
+            LargeTableEntryState::DirtyUnloaded(_) => "dirty_unloaded",
+            LargeTableEntryState::DirtyLoaded(_) => "dirty_loaded",
         }
     }
 }
@@ -1227,22 +1199,8 @@ impl GetResult {
     }
 }
 
-impl<'a> DirtyState<'a> {
-    pub fn into_dirty_keys(self) -> &'a mut HashSet<Bytes> {
-        match self {
-            DirtyState::Loaded(dirty_keys) => dirty_keys,
-            DirtyState::Unloaded(dirty_keys) => dirty_keys,
-        }
-    }
-}
-
-enum DirtyState<'a> {
-    Loaded(&'a mut HashSet<Bytes>),
-    Unloaded(&'a mut HashSet<Bytes>),
-}
-
-enum UnloadedState<'a> {
-    Dirty(&'a mut HashSet<Bytes>),
+enum UnloadedState {
+    Dirty,
     Clean,
 }
 
@@ -1636,12 +1594,7 @@ mod tests {
                 WalPosition::test_value(18),
             ); // Deleted key
 
-            let mut dirty_keys = HashSet::new();
-            dirty_keys.insert(Bytes::from(15_u64.to_be_bytes().to_vec()));
-            dirty_keys.insert(Bytes::from(40_u64.to_be_bytes().to_vec()));
-
-            entry.state =
-                LargeTableEntryState::DirtyLoaded(WalPosition::test_value(42), dirty_keys);
+            entry.state = LargeTableEntryState::DirtyLoaded(WalPosition::test_value(42));
 
             let mut row = Row {
                 value_lru: None,
@@ -1700,12 +1653,7 @@ mod tests {
                 WalPosition::test_value(16),
             );
 
-            let mut dirty_keys = HashSet::new();
-            dirty_keys.insert(Bytes::from(15_u64.to_be_bytes().to_vec()));
-            dirty_keys.insert(Bytes::from(40_u64.to_be_bytes().to_vec()));
-
-            entry.state =
-                LargeTableEntryState::DirtyUnloaded(WalPosition::test_value(42), dirty_keys);
+            entry.state = LargeTableEntryState::DirtyUnloaded(WalPosition::test_value(42));
 
             let mut row = Row {
                 value_lru: None,

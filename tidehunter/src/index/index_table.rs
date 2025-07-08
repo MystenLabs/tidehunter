@@ -59,7 +59,7 @@ impl IndexTable {
     }
 
     /// Merges dirty IndexTable into a loaded IndexTable, producing **clean** index table
-    pub fn merge_dirty(&mut self, dirty: &Self) {
+    pub fn merge_dirty_and_clean(&mut self, dirty: &Self) {
         // todo implement this efficiently taking into account both self and dirty are sorted
         for (k, v) in dirty.data.iter() {
             if v.is_removed() {
@@ -67,6 +67,14 @@ impl IndexTable {
             } else {
                 self.data.insert(k.clone(), v.as_clean_modified());
             }
+        }
+    }
+
+    /// Merges dirty IndexTable into a loaded IndexTable, preserving dirty states
+    pub fn merge_dirty_no_clean(&mut self, dirty: &Self) {
+        // todo implement this efficiently taking into account both self and dirty are sorted
+        for (k, v) in dirty.data.iter() {
+            self.data.insert(k.clone(), *v);
         }
     }
 
