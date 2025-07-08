@@ -25,5 +25,5 @@ mod wal_syncer;
 // todo remove re-export
 pub use minibytes;
 
-pub use wal::WalPosition;
 pub use index::index_table::IndexWalPosition;
+pub use wal::WalPosition;
