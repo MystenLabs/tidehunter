@@ -1068,9 +1068,9 @@ fn test_concurrent_single_value_update_iteration(i: usize, remove_chance_pct: u3
         )
         .unwrap();
         db.large_table.fp.0.write().fp_insert_before_lock =
-            FailPoint::sleep(Duration::ZERO..Duration::from_millis(10));
+            FailPoint::sleep(Duration::ZERO..Duration::from_millis(1));
         db.large_table.fp.0.write().fp_remove_before_lock =
-            FailPoint::sleep(Duration::ZERO..Duration::from_millis(10));
+            FailPoint::sleep(Duration::ZERO..Duration::from_millis(1));
         let num_threads = 16;
         let mut threads = Vec::with_capacity(num_threads);
         for _ in 0..num_threads {
