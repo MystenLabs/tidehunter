@@ -2,6 +2,7 @@ use super::super::*;
 use crate::batch::WriteBatch;
 use crate::config::Config;
 use crate::crc::CrcFrame;
+use crate::failpoints::FailPoint;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{KeyIndexing, KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
@@ -1012,11 +1013,6 @@ fn test_value_cache_update_remove() {
     assert_eq!(3, lru_lookups("k", &metrics));
 }
 
-// This test is disabled as it takes a long time, but it should be run if logic around
-// IndexTable::insert is changed.
-// todo we can also rewrite this test more efficiently if we introduce
-// random sleep between wal write and large_table insert during the test.
-#[ignore]
 #[test]
 // This test verifies that the last value written into the large table
 // cache matches the last value written to wal.
@@ -1027,7 +1023,7 @@ fn test_concurrent_single_value_update() {
     let mut threads = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
         let jh = thread::spawn(move || {
-            for _ in 0..256 {
+            for _ in 0..16 {
                 test_concurrent_single_value_update_iteration(i, 0)
             }
         });
@@ -1038,15 +1034,15 @@ fn test_concurrent_single_value_update() {
     }
 }
 
-// see comment for the previous test
-#[ignore]
 #[test]
+// Same as test_concurrent_single_value_update but also randomly removes value.
+// Makes sure that removal treated same way as update with regard to concurrency/ordering.
 fn test_concurrent_single_value_update_remove() {
     let num_threads = 8;
     let mut threads = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
         let jh = thread::spawn(move || {
-            for _ in 0..256 {
+            for _ in 0..16 {
                 test_concurrent_single_value_update_iteration(i, 70)
             }
         });
@@ -1071,6 +1067,10 @@ fn test_concurrent_single_value_update_iteration(i: usize, remove_chance_pct: u3
             Metrics::new(),
         )
         .unwrap();
+        db.large_table.fp.0.write().fp_insert_before_lock =
+            FailPoint::sleep(Duration::ZERO..Duration::from_millis(10));
+        db.large_table.fp.0.write().fp_remove_before_lock =
+            FailPoint::sleep(Duration::ZERO..Duration::from_millis(10));
         let num_threads = 16;
         let mut threads = Vec::with_capacity(num_threads);
         for _ in 0..num_threads {
@@ -1078,7 +1078,7 @@ fn test_concurrent_single_value_update_iteration(i: usize, remove_chance_pct: u3
             let jh = thread::spawn(move || {
                 let mut rng = ThreadRng::default();
                 let key = Bytes::from(15u32.to_be_bytes().to_vec());
-                for _ in 0..1024 {
+                for _ in 0..16 {
                     if rng.gen_range(0..100u32) < remove_chance_pct {
                         db.remove(ks, key.clone()).unwrap()
                     } else {

@@ -31,6 +31,7 @@ pub struct LargeTable {
     config: Arc<Config>,
     pub(crate) flusher: IndexFlusher,
     metrics: Arc<Metrics>,
+    pub(crate) fp: LargeTableFailPoints,
 }
 
 pub struct LargeTableEntry {
@@ -170,6 +171,7 @@ impl LargeTable {
             config,
             flusher,
             metrics,
+            fp: Default::default(),
         }
     }
 
@@ -181,6 +183,7 @@ impl LargeTable {
         value: &Bytes,
         loader: &L,
     ) {
+        self.fp.fp_insert_before_lock();
         let (mut row, cell) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
@@ -218,6 +221,7 @@ impl LargeTable {
         v: WalPosition,
         _loader: &L,
     ) -> Result<(), L::Error> {
+        self.fp.fp_remove_before_lock();
         let (mut row, cell) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
             let previous = value_lru.pop(&k);
@@ -1365,6 +1369,38 @@ impl Entries {
             Entries::Array(_, arr) => Box::new(arr.iter()),
             Entries::Tree(tree) => Box::new(tree.values()),
         }
+    }
+}
+
+#[cfg(not(test))]
+#[derive(Default)]
+pub(crate) struct LargeTableFailPoints;
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct LargeTableFailPoints(pub(crate) parking_lot::RwLock<LargeTableFailPointsInner>);
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct LargeTableFailPointsInner {
+    pub fp_insert_before_lock: crate::failpoints::FailPoint,
+    pub fp_remove_before_lock: crate::failpoints::FailPoint,
+}
+
+#[cfg(not(test))]
+impl LargeTableFailPoints {
+    pub fn fp_insert_before_lock(&self) {}
+    pub fn fp_remove_before_lock(&self) {}
+}
+
+#[cfg(test)]
+impl LargeTableFailPoints {
+    pub fn fp_insert_before_lock(&self) {
+        self.0.read().fp_insert_before_lock.fp();
+    }
+
+    pub fn fp_remove_before_lock(&self) {
+        self.0.read().fp_insert_before_lock.fp();
     }
 }
 

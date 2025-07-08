@@ -5,6 +5,8 @@ mod context;
 mod control;
 mod crc;
 pub mod db;
+#[cfg(test)]
+mod failpoints;
 pub mod file_reader;
 mod flusher;
 pub mod index;
