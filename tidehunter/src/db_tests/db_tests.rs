@@ -1019,31 +1019,42 @@ fn test_value_cache_update_remove() {
 // Because wal write and write into large table are not done under single mutex,
 // there can be race condition unless special measures are taken.
 fn test_concurrent_single_value_update() {
-    let num_threads = 8;
-    let mut threads = Vec::with_capacity(num_threads);
-    for i in 0..num_threads {
-        let jh = thread::spawn(move || {
-            for _ in 0..16 {
-                test_concurrent_single_value_update_iteration(i, 0)
-            }
-        });
-        threads.push(jh);
-    }
-    for jh in threads {
-        jh.join().unwrap();
-    }
+    test_concurrent_single_value_update_impl(0, Default::default());
 }
 
 #[test]
 // Same as test_concurrent_single_value_update but also randomly removes value.
 // Makes sure that removal treated same way as update with regard to concurrency/ordering.
 fn test_concurrent_single_value_update_remove() {
+    test_concurrent_single_value_update_impl(70, Default::default());
+}
+
+#[test]
+#[ignore] // todo fix this test
+fn test_concurrent_single_value_update_lru() {
+    let ks_config = KeySpaceConfig::default().with_value_cache_size(1000);
+    test_concurrent_single_value_update_impl(70, ks_config);
+}
+
+#[test]
+#[ignore] // todo fix this test
+fn test_concurrent_single_value_update_remove_lru() {
+    let ks_config = KeySpaceConfig::default().with_value_cache_size(1000);
+    test_concurrent_single_value_update_impl(70, ks_config);
+}
+
+fn test_concurrent_single_value_update_impl(remove_chance_pct: u32, ks_config: KeySpaceConfig) {
     let num_threads = 8;
     let mut threads = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
+        let ks_config = ks_config.clone();
         let jh = thread::spawn(move || {
             for _ in 0..16 {
-                test_concurrent_single_value_update_iteration(i, 70)
+                test_concurrent_single_value_update_iteration(
+                    i,
+                    remove_chance_pct,
+                    ks_config.clone(),
+                )
             }
         });
         threads.push(jh);
@@ -1052,11 +1063,14 @@ fn test_concurrent_single_value_update_remove() {
         jh.join().unwrap();
     }
 }
-
-fn test_concurrent_single_value_update_iteration(i: usize, remove_chance_pct: u32) {
+fn test_concurrent_single_value_update_iteration(
+    i: usize,
+    remove_chance_pct: u32,
+    ks_config: KeySpaceConfig,
+) {
     let dir = tempdir::TempDir::new(&format!("test-concurrent-single-value-update-{i}")).unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 1, KeyType::uniform(1));
+    let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
     let cached_value;
     let key = Bytes::from(15u32.to_be_bytes().to_vec());
     {
