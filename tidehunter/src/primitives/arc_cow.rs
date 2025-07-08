@@ -64,6 +64,13 @@ impl<T: Clone + Default> ArcCow<T> {
         // owned_mut
     }
 
+    pub fn into_owned(self) -> T {
+        match self {
+            ArcCow::Owned(t) => t,
+            ArcCow::Shared(t) => T::clone(&t),
+        }
+    }
+
     #[allow(dead_code)]
     pub fn borrow(&self) -> &T {
         match self {

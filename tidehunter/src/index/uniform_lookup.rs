@@ -4,7 +4,6 @@ use std::ops::Range;
 use std::time::Instant;
 
 use super::index_format::{Direction, IndexFormat};
-use super::{deserialize_index_entries, index_element_size, serialize_index_entries};
 use crate::index::index_format::{binary_search, PREFIX_LENGTH};
 use crate::key_shape::CELL_PREFIX_LENGTH;
 use crate::metrics::Metrics;
@@ -132,7 +131,7 @@ impl UniformLookupIndex {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let element_size = index_element_size(ks);
+        let element_size = ks.index_element_size();
         let key_size = ks.index_key_size();
         let file_length = reader.len();
 
@@ -180,15 +179,15 @@ impl UniformLookupIndex {
 
 impl IndexFormat for UniformLookupIndex {
     fn serialize_index(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = index_element_size(ks);
-        let capacity = element_size * table.data.len();
+        let element_size = ks.index_element_size();
+        let capacity = element_size * table.len();
         let mut out = BytesMut::with_capacity(capacity);
-        serialize_index_entries(table, ks, &mut out);
+        table.serialize_index_entries(ks, &mut out);
         out.to_vec().into()
     }
 
     fn deserialize_index(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
-        deserialize_index_entries(ks, b)
+        IndexTable::deserialize_index_entries(ks, b)
     }
 
     fn lookup_unloaded(
@@ -200,7 +199,7 @@ impl IndexFormat for UniformLookupIndex {
     ) -> Option<WalPosition> {
         // todo simplify this function
         // compute cell and prefix
-        let element_size = index_element_size(ks);
+        let element_size = ks.index_element_size();
         let key_size = ks.index_key_size();
         assert_eq!(key.len(), key_size);
         let cell = ks.cell_id(key);
@@ -273,7 +272,7 @@ impl IndexFormat for UniformLookupIndex {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let element_size = index_element_size(ks);
+        let element_size = ks.index_element_size();
         let key_size = ks.index_key_size();
         let file_length = reader.len();
 
@@ -460,7 +459,7 @@ mod test {
 
         // 3) Convert the table to bytes using SingleHopIndex
         let index_format = UniformLookupIndex::new();
-        let serialized = index_format.serialize_index(&table, ks);
+        let serialized = index_format.clean_serialize_index(&mut table, ks);
 
         // 4) We'll build our mock "window" that intentionally ends
         //    at the last entry being the search key.
@@ -541,7 +540,7 @@ mod test {
 
         // 3) Convert to bytes using SingleHopIndex
         let index_format = UniformLookupIndex::new();
-        let data = index_format.serialize_index(&index, ks);
+        let data = index_format.clean_serialize_index(&mut index, ks);
 
         // 4) Wrap it in our MockRandomRead
         let reader = MockRandomRead::new(data);
@@ -664,7 +663,7 @@ mod test {
 
         // 3) Convert to bytes with SingleHopIndex
         let single_hop = UniformLookupIndex::new();
-        let data = single_hop.serialize_index(&index, ks);
+        let data = single_hop.clean_serialize_index(&mut index, ks);
 
         // 4) Mock a simple in‐memory reader
 
@@ -705,7 +704,7 @@ mod test {
         table.insert(key2.clone(), WalPosition::test_value(200));
 
         // 4) Convert the table to bytes
-        let bytes = index_impl.serialize_index(&table, ks);
+        let bytes = index_impl.clean_serialize_index(&mut table, ks);
 
         // 5) Write those bytes to a temp file
         let tmp_dir = tempdir::TempDir::new("test-wal").unwrap();
@@ -760,7 +759,7 @@ mod test {
 
         // 2) Write it to bytes
         let pi = UniformLookupIndex::new();
-        let bytes = pi.serialize_index(&index, ks);
+        let bytes = pi.clean_serialize_index(&mut index, ks);
         assert!(!bytes.is_empty());
 
         // 3) Make sure we can find that exact key
@@ -797,7 +796,7 @@ mod test {
         original_index.insert(key3.clone(), WalPosition::test_value(300));
 
         // 4) Convert to bytes
-        let serialized = single_hop.serialize_index(&original_index, ks);
+        let serialized = single_hop.clean_serialize_index(&mut original_index, ks);
 
         // 5) From those bytes, build a new IndexTable
         let roundtrip_index = single_hop.deserialize_index(ks, serialized);
@@ -825,12 +824,12 @@ mod test {
         // Also iterate over roundtrip_index.data
         // and confirm it matches original_index.data exactly.
         assert_eq!(
-            original_index.data.len(),
-            roundtrip_index.data.len(),
+            original_index.len(),
+            roundtrip_index.len(),
             "IndexTable size mismatch"
         );
 
-        for (k, pos) in &original_index.data {
+        for (k, pos) in &original_index.into_data() {
             let rt_pos = roundtrip_index
                 .get(k)
                 .expect("Missing key in round-trip index");
@@ -868,7 +867,7 @@ mod test {
 
         // Convert the table to bytes
         let index_format = UniformLookupIndex::new();
-        let serialized = index_format.serialize_index(&table, ks);
+        let serialized = index_format.clean_serialize_index(&mut table, ks);
         let reader = MockRandomRead::new(serialized);
 
         // Test the newly extracted function directly

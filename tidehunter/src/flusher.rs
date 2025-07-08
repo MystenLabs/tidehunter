@@ -147,7 +147,8 @@ impl IndexFlusherThread {
                 FlushKind::FlushLoaded(index) => {
                     self.metrics.unload.with_label_values(&["flush"]).inc();
                     // todo - no need to make copy if there is no compactor
-                    let index_copy = IndexTable::clone(&index);
+                    let mut index_copy = IndexTable::clone(&index);
+                    index_copy.clean_self();
                     (index, index_copy)
                 }
                 #[cfg(test)]
@@ -171,7 +172,7 @@ impl IndexFlusherThread {
     fn run_compactor(&self, ks: &KeySpaceDesc, index: &mut IndexTable) {
         if let Some(compactor) = ks.compactor() {
             let pre_compact_len = index.len();
-            compactor(&mut index.data);
+            compactor(index.data_for_compaction());
             let compacted = pre_compact_len.saturating_sub(index.len());
             self.metrics
                 .compacted_keys

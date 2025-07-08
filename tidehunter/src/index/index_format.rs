@@ -35,6 +35,13 @@ pub trait IndexFormat {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)>;
+
+    #[cfg(test)]
+    /// Test method that cleans index before serializing.
+    fn clean_serialize_index(&self, table: &mut IndexTable, ks: &KeySpaceDesc) -> Bytes {
+        table.clean_self();
+        self.serialize_index(table, ks)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -253,7 +260,7 @@ pub mod test {
         index.insert(k128(1), w(5));
         index.insert(k128(5), w(10));
 
-        let bytes = pi.serialize_index(&index, ks);
+        let bytes = pi.clean_serialize_index(&mut index, ks);
         assert_eq!(None, pi.lookup_unloaded(ks, &bytes, &k128(0), &metrics));
         assert_eq!(
             Some(w(5)),
@@ -267,7 +274,7 @@ pub mod test {
         let mut index = IndexTable::default();
         index.insert(k128(u128::MAX), w(15));
         index.insert(k128(u128::MAX - 5), w(25));
-        let bytes = pi.serialize_index(&index, ks);
+        let bytes = pi.clean_serialize_index(&mut index, ks);
         assert_eq!(
             Some(w(15)),
             pi.lookup_unloaded(ks, &bytes, &k128(u128::MAX), &metrics)
@@ -305,14 +312,15 @@ pub mod test {
             let pos = rng.next_u64();
             index.insert(k32(key), w(pos));
         }
-        let bytes = pi.serialize_index(&index, ks);
-        for (key, expected_value) in &index.data {
+        let bytes = pi.clean_serialize_index(&mut index, ks);
+        let data = index.into_data();
+        for (key, expected_value) in &data {
             let value = pi.lookup_unloaded(ks, &bytes, key, &metrics);
             assert_eq!(Some(*expected_value), value);
         }
         for _ in 0..ITERATIONS {
             let key = rng.gen_range(target_range.clone());
-            if index.data.contains_key(&k32(key)) {
+            if data.contains_key(&k32(key)) {
                 continue; // skip keys that are in the index
             }
             let value = pi.lookup_unloaded(ks, &bytes, &k32(key), &metrics);
@@ -425,7 +433,7 @@ pub mod test {
 
         // Keys: [10, 20, 30, 40, 50]
         // Convert the table to bytes
-        let serialized = index_format.serialize_index(&table, ks);
+        let serialized = index_format.clean_serialize_index(&mut table, ks);
         let reader = MockRandomRead::new(serialized);
 
         // Test forward iteration with no previous key (should return first entry)

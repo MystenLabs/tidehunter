@@ -283,6 +283,7 @@ pub(super) fn test_remove((key_shape, ks): (KeyShape, KeySpace)) {
         assert_eq!(Some(vec![9, 10].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
         db.rebuild_control_region().unwrap();
         db.remove(ks, vec![1, 2, 3, 4]).unwrap();
+        assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
     }
     {
         let metrics = Metrics::new();

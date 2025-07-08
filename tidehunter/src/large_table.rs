@@ -121,7 +121,7 @@ impl LargeTable {
                                 let data = loader.load(&context.ks_config, *position).expect(
                                     "Failed to load an index entry to reconstruct bloom filter",
                                 );
-                                for key in data.data.keys() {
+                                for key in data.keys() {
                                     filter.insert(key);
                                 }
                                 bloom_filter_restore_time += now.elapsed().as_micros();
@@ -285,7 +285,11 @@ impl LargeTable {
                 return Ok(self.report_lookup_result(ks, entry.get(k), "cache"))
             }
             LargeTableEntryState::DirtyLoaded(_, _) => {
-                return Ok(self.report_lookup_result(ks, entry.get(k), "cache"))
+                return Ok(self.report_lookup_result(
+                    ks,
+                    entry.get(k).and_then(WalPosition::valid),
+                    "cache",
+                ))
             }
             LargeTableEntryState::DirtyUnloaded(position, _) => {
                 // optimization: in dirty unloaded state we might not need to load entry
@@ -832,21 +836,16 @@ impl LargeTableEntry {
 
     pub fn remove(&mut self, k: Bytes, v: WalPosition) {
         let dirty_state = self.state.mark_dirty();
-        let (previous, new) = match dirty_state {
+        match dirty_state {
             DirtyState::Loaded(dirty_keys) => {
-                let previous = self.data.make_mut().remove(&k);
-                dirty_keys.insert(k);
-                (previous, None)
+                dirty_keys.insert(k.clone());
             }
             DirtyState::Unloaded(dirty_keys) => {
-                // We could just use dirty_keys and not use WalPosition::INVALID as a marker.
-                // In that case, however, we would need to clone and pass dirty_keys to a snapshot.
-                let previous = self.data.make_mut().insert(k.clone(), WalPosition::INVALID);
-                dirty_keys.insert(k);
-                (previous, Some(WalPosition::INVALID))
+                dirty_keys.insert(k.clone());
             }
         };
-        self.report_loaded_keys_change(previous, new);
+        let previous = self.data.make_mut().remove(k, v);
+        self.report_loaded_keys_change(previous, Some(v));
         self.last_added_position = Some(v);
     }
 
@@ -994,7 +993,7 @@ impl LargeTableEntry {
             let delta = self.data.make_mut().unmerge_flushed(&original_index);
             self.report_loaded_keys_delta(delta);
             // todo remove dirty_keys from DirtyUnloaded
-            let dirty_keys = self.data.data.keys().cloned().collect();
+            let dirty_keys = self.data.keys().cloned().collect();
             self.state = LargeTableEntryState::DirtyUnloaded(position, dirty_keys);
             self.context
                 .metrics
@@ -1055,9 +1054,9 @@ impl LargeTableEntry {
                         .with_label_values(&["unmerge"])
                         .inc();
                     // or (b) unmerge and unload -> DirtyUnloaded(..)
-                    /*todo - avoid cloning dirty_keys, especially twice*/
-                    let delta = self.data.make_mut().make_dirty(dirty_keys.clone());
+                    let delta = self.data.make_mut().retain_dirty();
                     self.report_loaded_keys_delta(delta);
+                    /*todo - avoid cloning dirty_keys*/
                     self.state = LargeTableEntryState::DirtyUnloaded(*position, dirty_keys.clone());
                 }
             }
@@ -1076,10 +1075,15 @@ impl LargeTableEntry {
 
     fn unload_dirty_loaded<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
         self.run_compactor();
-        let position = loader.flush(self.context.id(), &self.data)?;
+        let num_unloaded = self.data.len();
+        let mut data = Default::default();
+        mem::swap(&mut data, &mut self.data);
+        let mut data = data.into_owned();
+        data.clean_self();
+        // todo - if this line returns error, self.data will be in the inconsistent state
+        let position = loader.flush(self.context.id(), &data)?;
         self.state = LargeTableEntryState::Unloaded(position);
-        self.report_loaded_keys_delta(-(self.data.len() as i64));
-        self.data = Default::default();
+        self.report_loaded_keys_delta(-(num_unloaded as i64));
         Ok(())
     }
 
@@ -1087,7 +1091,7 @@ impl LargeTableEntry {
         if let Some(compactor) = self.context.ks_config.compactor() {
             let index = self.data.make_mut();
             let pre_compact_len = index.len();
-            compactor(&mut index.data);
+            compactor(index.data_for_compaction());
             let compacted = pre_compact_len.saturating_sub(index.len());
             self.context
                 .metrics
@@ -1465,7 +1469,7 @@ mod tests {
 
         // Serialize the disk index for our mock reader
         let format = ks.index_format();
-        let serialized_data = format.serialize_index(&disk_index, ks);
+        let serialized_data = format.clean_serialize_index(&mut disk_index, ks);
 
         let loader = MockLoader {
             disk_index: disk_index.clone(),
@@ -1591,9 +1595,9 @@ mod tests {
                 Bytes::from(15_u64.to_be_bytes().to_vec()),
                 WalPosition::test_value(15),
             );
-            entry.data.make_mut().insert(
+            entry.data.make_mut().remove(
                 Bytes::from(40_u64.to_be_bytes().to_vec()),
-                WalPosition::INVALID,
+                WalPosition::test_value(18),
             ); // Deleted key
 
             let mut dirty_keys = HashSet::new();
@@ -1655,9 +1659,9 @@ mod tests {
                 WalPosition::test_value(15),
             );
             // Add a deleted key (in-memory but marked as deleted)
-            entry.data.make_mut().insert(
+            entry.data.make_mut().remove(
                 Bytes::from(40_u64.to_be_bytes().to_vec()),
-                WalPosition::INVALID,
+                WalPosition::test_value(16),
             );
 
             let mut dirty_keys = HashSet::new();

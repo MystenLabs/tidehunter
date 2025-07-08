@@ -11,7 +11,6 @@ use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::Ran
 use super::index_format::{
     binary_search, Direction, IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE,
 };
-use super::{deserialize_index_entries, index_element_size, serialize_index_entries};
 
 #[derive(Clone)]
 pub struct LookupHeaderIndex;
@@ -139,19 +138,19 @@ impl LookupHeaderIndex {
 
 impl IndexFormat for LookupHeaderIndex {
     fn serialize_index(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = index_element_size(ks);
-        let capacity = element_size * table.data.len() + HEADER_SIZE;
+        let element_size = ks.index_element_size();
+        let capacity = element_size * table.len() + HEADER_SIZE;
         let mut out = BytesMut::with_capacity(capacity);
         out.put_bytes(0, HEADER_SIZE);
 
         // Use the common function to serialize entries
-        serialize_index_entries(table, ks, &mut out);
+        table.serialize_index_entries(ks, &mut out);
 
         // Build header
         let mut header = IndexTableHeaderBuilder::new(ks);
         let mut current_offset = HEADER_SIZE;
 
-        for (key, _) in table.data.iter() {
+        for key in table.keys() {
             header.add_key(key, current_offset);
             current_offset += element_size;
         }
@@ -162,7 +161,7 @@ impl IndexFormat for LookupHeaderIndex {
     }
 
     fn deserialize_index(&self, ks: &KeySpaceDesc, b: Bytes) -> IndexTable {
-        deserialize_index_entries(ks, b.slice(HEADER_SIZE..))
+        IndexTable::deserialize_index_entries(ks, b.slice(HEADER_SIZE..))
     }
 
     fn lookup_unloaded(
@@ -177,7 +176,7 @@ impl IndexFormat for LookupHeaderIndex {
         let micro_cell = Self::key_micro_cell(ks, key);
 
         let (buffer, _, _) = self.read_micro_cell_section(reader, micro_cell, metrics)?;
-        let element_size = index_element_size(ks);
+        let element_size = ks.index_element_size();
 
         // Use binary search instead of linear search
         let (_, _, pos) = binary_search(&buffer, key, element_size, key_size, Some(metrics));
@@ -193,7 +192,7 @@ impl IndexFormat for LookupHeaderIndex {
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
         let key_size = ks.index_key_size();
-        let element_size = index_element_size(ks);
+        let element_size = ks.index_element_size();
 
         // If no previous key is provided, start from the first or last micro-cell
         // depending on the direction
@@ -325,7 +324,7 @@ mod tests {
 
         // Convert the table to bytes
         let index_format = LookupHeaderIndex;
-        let serialized = index_format.serialize_index(&table, ks);
+        let serialized = index_format.clean_serialize_index(&mut table, ks);
 
         // Use the MockRandomRead from the test module in index_format.rs
         let reader = MockRandomRead::new(serialized);

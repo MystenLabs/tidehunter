@@ -681,7 +681,9 @@ impl WalPosition {
     #[cfg(test)]
     pub const TEST: WalPosition = WalPosition::new(3311, 12);
 
-    const fn new(offset: u64, len: u32) -> Self {
+    // Creates new wal position.
+    // This should only be called from wal.rs or from conversion IndexWalPosition<->WalPosition
+    pub(crate) const fn new(offset: u64, len: u32) -> Self {
         Self { offset, len }
     }
 
@@ -708,6 +710,10 @@ impl WalPosition {
 
     pub fn len(&self) -> usize {
         self.len as usize
+    }
+
+    pub fn len_u32(&self) -> u32 {
+        self.len
     }
 
     pub fn valid(self) -> Option<Self> {

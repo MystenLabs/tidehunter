@@ -1,6 +1,7 @@
 use crate::cell::CellId;
 use crate::db::MAX_KEY_LEN;
 use crate::index::index_format::IndexFormatType;
+use crate::index::index_table::IndexWalPosition;
 use crate::math;
 use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::wal::WalPosition;
@@ -105,7 +106,7 @@ pub(crate) struct BloomFilterParams {
 
 // todo - we want better compactor API that does not expose too much internal details
 // todo - make mod wal private
-pub type Compactor = Box<dyn Fn(&mut BTreeMap<Bytes, WalPosition>) + Sync + Send>;
+pub type Compactor = Box<dyn Fn(&mut BTreeMap<Bytes, IndexWalPosition>) + Sync + Send>;
 
 #[allow(dead_code)]
 impl Default for KeyShapeBuilder {
@@ -261,6 +262,10 @@ impl KeySpaceDesc {
 
     pub(crate) fn index_key_size(&self) -> usize {
         self.key_indexing().index_key_size()
+    }
+
+    pub(crate) fn index_element_size(&self) -> usize {
+        self.index_key_size() + WalPosition::LENGTH
     }
 
     /// Returns u32 prefix
