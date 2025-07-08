@@ -148,7 +148,6 @@ jobs:
 
       - name: Create condensed summary for Slack
         id: condensed_summary
-        if: github.event_name == 'schedule'
         run: |
           # Extract just the important numbers and results
           {
@@ -175,6 +174,8 @@ jobs:
 
           CONDENSED_SUMMARY=$(cat ./results/slack_summary.md | jq -aRs .)
           echo "summary=$CONDENSED_SUMMARY" >> $GITHUB_OUTPUT
+          echo "--------------------------------"
+          echo $CONDENSED_SUMMARY
 
       - name: Send to Slack
         if: github.event_name == 'schedule'
