@@ -1028,7 +1028,7 @@ fn test_concurrent_single_value_update() {
     for i in 0..num_threads {
         let jh = thread::spawn(move || {
             for _ in 0..256 {
-                test_concurrent_single_value_update_iteration(i)
+                test_concurrent_single_value_update_iteration(i, 0)
             }
         });
         threads.push(jh);
@@ -1038,7 +1038,26 @@ fn test_concurrent_single_value_update() {
     }
 }
 
-fn test_concurrent_single_value_update_iteration(i: usize) {
+// see comment for the previous test
+#[ignore]
+#[test]
+fn test_concurrent_single_value_update_remove() {
+    let num_threads = 8;
+    let mut threads = Vec::with_capacity(num_threads);
+    for i in 0..num_threads {
+        let jh = thread::spawn(move || {
+            for _ in 0..256 {
+                test_concurrent_single_value_update_iteration(i, 70)
+            }
+        });
+        threads.push(jh);
+    }
+    for jh in threads {
+        jh.join().unwrap();
+    }
+}
+
+fn test_concurrent_single_value_update_iteration(i: usize, remove_chance_pct: u32) {
     let dir = tempdir::TempDir::new(&format!("test-concurrent-single-value-update-{i}")).unwrap();
     let config = Arc::new(Config::small());
     let (key_shape, ks) = KeyShape::new_single(4, 1, KeyType::uniform(1));
@@ -1058,11 +1077,15 @@ fn test_concurrent_single_value_update_iteration(i: usize) {
             let db = db.clone();
             let jh = thread::spawn(move || {
                 let mut rng = ThreadRng::default();
+                let key = Bytes::from(15u32.to_be_bytes().to_vec());
                 for _ in 0..1024 {
-                    let key = Bytes::from(15u32.to_be_bytes().to_vec());
-                    let value: u32 = rng.gen();
-                    db.insert(ks, key.clone(), value.to_be_bytes().to_vec())
-                        .unwrap();
+                    if rng.gen_range(0..100u32) < remove_chance_pct {
+                        db.remove(ks, key.clone()).unwrap()
+                    } else {
+                        let value: u32 = rng.gen();
+                        db.insert(ks, key.clone(), value.to_be_bytes().to_vec())
+                            .unwrap();
+                    }
                 }
             });
             threads.push(jh);
@@ -1070,7 +1093,10 @@ fn test_concurrent_single_value_update_iteration(i: usize) {
         for jh in threads {
             jh.join().unwrap();
         }
-        cached_value = db.get(ks, &key).unwrap().unwrap();
+        cached_value = db.get(ks, &key).unwrap();
+        if remove_chance_pct == 0 {
+            assert!(cached_value.is_some());
+        }
     }
     {
         let db = Db::open(
@@ -1080,7 +1106,7 @@ fn test_concurrent_single_value_update_iteration(i: usize) {
             Metrics::new(),
         )
         .unwrap();
-        let replay_value = db.get(ks, &key).unwrap().unwrap();
+        let replay_value = db.get(ks, &key).unwrap();
         assert_eq!(replay_value, cached_value);
     }
 }
