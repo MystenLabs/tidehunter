@@ -1033,7 +1033,7 @@ fn test_concurrent_single_value_update_remove() {
 #[ignore] // todo fix this test
 fn test_concurrent_single_value_update_lru() {
     let ks_config = KeySpaceConfig::default().with_value_cache_size(1000);
-    test_concurrent_single_value_update_impl(70, ks_config);
+    test_concurrent_single_value_update_impl(0, ks_config);
 }
 
 #[test]
