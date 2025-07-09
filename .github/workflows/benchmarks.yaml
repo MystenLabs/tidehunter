@@ -148,7 +148,6 @@ jobs:
 
       - name: Create condensed summary for Slack
         id: condensed_summary
-        if: github.event_name == 'schedule'
         run: |
           # Extract just the important numbers and results
           {
@@ -165,6 +164,9 @@ jobs:
             # Process General benchmark results
             if [ -f "./results/benchmark_${{ env.TIMESTAMP }}.txt" ]; then
               echo -e "\nGeneral Benchmark:"
+              grep "Write test done" "./results/benchmark_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^Write test done in.*: //'
+              grep "Mixed test done" "./results/benchmark_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^Mixed test done in.*: //'
+              grep "Latency(mcs): p50:" "./results/benchmark_${{ env.TIMESTAMP }}.txt" | tail -n 1
               grep "Read test done" "./results/benchmark_${{ env.TIMESTAMP }}.txt" | head -n 1 | sed 's/^Read test done in.*: //'
               grep "Total time:" "./results/summary.md" | tail -n 1
             fi
@@ -172,6 +174,8 @@ jobs:
 
           CONDENSED_SUMMARY=$(cat ./results/slack_summary.md | jq -aRs .)
           echo "summary=$CONDENSED_SUMMARY" >> $GITHUB_OUTPUT
+          echo "--------------------------------"
+          echo $CONDENSED_SUMMARY
 
       - name: Send to Slack
         if: github.event_name == 'schedule'
