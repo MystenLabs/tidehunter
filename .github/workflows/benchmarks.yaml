@@ -90,7 +90,7 @@ jobs:
           echo "Started at: $(date)" >> ./results/summary.md
           START_TIME=$(date +%s)
           cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- run \
-            --num-lookups 1000000 \
+            --num-lookups 100000 \
             --num-runs 1 \
             --batch-size 1000 \
             --window-size 800 \
@@ -110,14 +110,13 @@ jobs:
           echo '```' >> ./results/summary.md
           echo "Started at: $(date)" >> ./results/summary.md
           START_TIME=$(date +%s)
-          cargo run --release --manifest-path benchmarks/benchmark/Cargo.toml -- \
-            --operations 1000000 \
-            --writes 1000000 \
-            --write-threads 4 \
-            --mixed-threads 4 \
-            --write-size 1024 \
-            --key-len 32 \
-            --background-writes 100000 > ./results/benchmark_${{ env.TIMESTAMP }}.txt
+          cargo run --release -p benchmark -- \
+            --operations 2000000 \
+            --writes 2000000 \
+            --write-threads 72 \
+            --mixed-threads 72 \
+            --write-size 512 \
+            --key-len 32 > ./results/benchmark_${{ env.TIMESTAMP }}.txt
           cat ./results/benchmark_${{ env.TIMESTAMP }}.txt >> ./results/summary.md
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
