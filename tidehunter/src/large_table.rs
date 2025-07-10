@@ -182,19 +182,26 @@ impl LargeTable {
         v: WalPosition,
         value: &Bytes,
         loader: &L,
-    ) {
+    ) -> Result<(), L::Error> {
         self.fp.fp_insert_before_lock();
         let (mut row, cell) = self.row(ks, &k);
-        if let Some(value_lru) = &mut row.value_lru {
-            let delta: i64 = (k.len() + value.len()) as i64;
-            let previous = value_lru.push(k.clone(), value.clone());
-            self.update_lru_metric(ks, previous, delta);
-        }
         let entry = row.entry_mut(&cell);
-        entry.insert(k, v);
+        if self.skip_stale_update(ks, entry, &k, v, loader)? {
+            self.metrics
+                .skip_stale_update
+                .with_label_values(&[ks.name(), "insert"])
+                .inc();
+            return Ok(());
+        }
+        entry.insert(k.clone(), v);
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
             entry.unload_if_ks_enabled(&self.flusher);
+        }
+        if let Some(value_lru) = &mut row.value_lru {
+            let delta: i64 = (k.len() + value.len()) as i64;
+            let previous = value_lru.push(k, value.clone());
+            self.update_lru_metric(ks, previous, delta);
         }
         self.metrics
             .max_index_size
@@ -212,6 +219,7 @@ impl LargeTable {
             .max_index_size_metric
             .set(max_index_size as i64);
         self.metrics.index_size.observe(index_size as f64);
+        Ok(())
     }
 
     pub fn remove<L: Loader>(
@@ -219,16 +227,23 @@ impl LargeTable {
         ks: &KeySpaceDesc,
         k: Bytes,
         v: WalPosition,
-        _loader: &L,
+        loader: &L,
     ) -> Result<(), L::Error> {
         self.fp.fp_remove_before_lock();
         let (mut row, cell) = self.row(ks, &k);
+        let entry = row.entry_mut(&cell);
+        if self.skip_stale_update(ks, entry, &k, v, loader)? {
+            self.metrics
+                .skip_stale_update
+                .with_label_values(&[ks.name(), "remove"])
+                .inc();
+            return Ok(());
+        }
+        entry.remove(k.clone(), v);
         if let Some(value_lru) = &mut row.value_lru {
             let previous = value_lru.pop(&k);
-            self.update_lru_metric(ks, previous.map(|v| (k.clone(), v)), 0);
+            self.update_lru_metric(ks, previous.map(|v| (k, v)), 0);
         }
-        let entry = row.entry_mut(&cell);
-        entry.remove(k, v);
         Ok(())
     }
 
@@ -318,6 +333,45 @@ impl LargeTable {
             .with_label_values(&[index_reader.kind_str(), ks.name()])
             .observe(now.elapsed().as_micros() as f64);
         Ok(self.report_lookup_result(ks, result, "lookup"))
+    }
+
+    /// Checks if the update is potentially stale and the operation needs to be canceled.
+    /// This can happen if there are multiple concurrent updates for the same key.
+    /// Returns true if the update is outdated and should be skipped
+    fn skip_stale_update<L: Loader>(
+        &self,
+        ks: &KeySpaceDesc,
+        entry: &LargeTableEntry,
+        key: &Bytes,
+        wal_position: WalPosition,
+        loader: &L,
+    ) -> Result<bool, L::Error> {
+        // check the existing loaded WAL position first, if present
+        if let Some(last_position) = entry.data.get_update_position(key) {
+            return Ok(last_position > wal_position);
+        }
+        let (LargeTableEntryState::Unloaded(pos) | LargeTableEntryState::DirtyUnloaded(pos, ..)) =
+            entry.state
+        else {
+            return Ok(false);
+        };
+
+        // If the WAL position is higher than the unloaded index position, the update is safe
+        if wal_position > pos {
+            return Ok(false);
+        }
+        self.metrics
+            .read_index_on_large_table_update
+            .with_label_values(&[(ks.name())])
+            .inc();
+        let index_reader = loader.index_reader(pos)?;
+        if let Some(last_position) = runtime::block_in_place(|| {
+            ks.index_format()
+                .lookup_unloaded(ks, &index_reader, key, &self.metrics)
+        }) {
+            return Ok(last_position > wal_position);
+        }
+        Ok(false)
     }
 
     fn report_lookup_result(

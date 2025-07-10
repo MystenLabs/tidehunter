@@ -36,6 +36,8 @@ pub struct Metrics {
     pub wal_mapper_time_mcs: IntCounter,
     pub write_batch_times: IntCounterVec,
     pub write_batch_operations: IntCounterVec,
+    pub skip_stale_update: IntCounterVec,
+    pub read_index_on_large_table_update: IntCounterVec,
 
     pub snapshot_lock_time_mcs: Histogram,
     pub snapshot_force_unload: IntCounterVec,
@@ -137,6 +139,12 @@ impl Metrics {
             write_batch_operations: counter_vec!(
                 "write_batch_operations",
                 &["tag", "kind"],
+                registry
+            ),
+            skip_stale_update: counter_vec!("skip_stale_update", &["ks", "op"], registry),
+            read_index_on_large_table_update: counter_vec!(
+                "read_index_on_large_table_update",
+                &["ks"],
                 registry
             ),
 
