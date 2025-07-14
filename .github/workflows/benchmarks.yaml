@@ -89,7 +89,7 @@ jobs:
           echo '```' >> ./results/summary.md
           echo "Started at: $(date)" >> ./results/summary.md
           START_TIME=$(date +%s)
-          cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- run \
+          cargo run --release -p index_benchmark -- run \
             --num-lookups 100000 \
             --num-runs 1 \
             --batch-size 1000 \
@@ -106,13 +106,14 @@ jobs:
       - name: Run general benchmark
         if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'benchmark' || github.event_name != 'workflow_dispatch'
         run: |
+          rm -rf /opt/sui/db/tidehunter-benchmarks/*
           echo "## General Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
           echo "Started at: $(date)" >> ./results/summary.md
           START_TIME=$(date +%s)
           cargo run --release -p benchmark -- \
-            --operations 2000000 \
-            --writes 2000000 \
+            --operations 30000000 \
+            --writes 10000000 \
             --write-threads 72 \
             --mixed-threads 72 \
             --write-size 512 \
