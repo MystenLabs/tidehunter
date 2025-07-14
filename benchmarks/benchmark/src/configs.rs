@@ -234,7 +234,7 @@ pub mod defaults {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StressTestConfigs {
     pub db_parameters: tidehunter::config::Config,
     pub stress_client_parameters: StressClientParameters,
@@ -250,6 +250,23 @@ impl StressTestConfigs {
         let config = serde_yaml::from_reader(reader)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, error_message))?;
         Ok(config)
+    }
+}
+
+impl Default for StressTestConfigs {
+    fn default() -> Self {
+        // This overwrites tidehunter defaults with more reasonable values for benchmark
+        let mut db_parameters = tidehunter::config::Config::default();
+        // Allocate 100Gb space for map cache
+        db_parameters.frag_size = 1024 * 1024 * 1024;
+        db_parameters.max_maps = 100;
+        // Default to 8 flusher threads
+        db_parameters.num_flusher_threads = 8;
+        let stress_client_parameters = StressClientParameters::default();
+        Self {
+            db_parameters,
+            stress_client_parameters,
+        }
     }
 }
 
