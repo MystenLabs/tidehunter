@@ -256,12 +256,14 @@ impl StressTestConfigs {
 impl Default for StressTestConfigs {
     fn default() -> Self {
         // This overwrites tidehunter defaults with more reasonable values for benchmark
-        let mut db_parameters = tidehunter::config::Config::default();
-        // Allocate 100Gb space for map cache
-        db_parameters.frag_size = 1024 * 1024 * 1024;
-        db_parameters.max_maps = 100;
-        // Default to 8 flusher threads
-        db_parameters.num_flusher_threads = 8;
+        let db_parameters = tidehunter::config::Config {
+            // Allocate 100Gb space for map cache
+            frag_size: 1024 * 1024 * 1024,
+            max_maps: 100,
+            // Default to 8 flusher threads
+            num_flusher_threads: 8,
+            ..Default::default()
+        };
         let stress_client_parameters = StressClientParameters::default();
         Self {
             db_parameters,
