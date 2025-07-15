@@ -1,8 +1,8 @@
 ---
 testbed_id: "${USER}-tidehunter"
 cloud_provider: raw
-token_file: "/Users/${USER}/.aws/credentials"
-ssh_private_key_file: "/Users/${USER}/.ssh/mysten_baremetal_shared"
+token_file: "${HOME}/.aws/credentials"
+ssh_private_key_file: "${HOME}/.ssh/mysten_baremetal_shared"
 regions:
   - default
 specs: default
@@ -11,20 +11,21 @@ repository:
   commit: orchestrator-raw
 target_configs_path: "./orchestrator/assets/target_configs.yml"
 log_processing: true
+working_dir: "/opt/sui/db"
 
 # Raw machines configuration
 raw_machines:
-  - host: http://benchmark-00.testing.sui.io/
+  - host: benchmark-00.testing.sui.io
     region: default
   
-  - host: http://benchmark-01.testing.sui.io/
+  - host: benchmark-01.testing.sui.io
     region: default
   
-  - host: http://benchmark-02.testing.sui.io/
+  - host: benchmark-02.testing.sui.io
     region: default
   
-  - host: http://benchmark-03.testing.sui.io/
+  - host: benchmark-03.testing.sui.io
     region: default
 
-  - host: http://benchmark-04.testing.sui.io/
+  - host: benchmark-04.testing.sui.io
     region: default

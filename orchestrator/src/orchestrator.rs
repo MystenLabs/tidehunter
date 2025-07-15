@@ -151,7 +151,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Create the working directory.
             &format!("mkdir -p {working_dir}"),
             // Ensure proper ownership of the working directory
-            &format!("(sudo chown -R $USER:$USER {working_dir} || true)"),
+            &format!("sudo chown -R $USER:$USER {working_dir}"),
             // Clone the repo
             &format!("(git clone {url} || true)"),
         ];
@@ -271,7 +271,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         // Kill all tmux servers and delete the nodes dbs. Optionally clear logs.
         let mut command = vec!["(tmux kill-server || true)".into()];
+        // Ensure proper ownership of the path before attempting cleanup
         for path in self.protocol_commands.db_directories() {
+            command.push(format!("sudo chown -R $USER:$USER {}", path.display()));
             command.push(format!("(rm -rf {} || true)", path.display()));
         }
         if delete_logs {
