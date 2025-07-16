@@ -49,7 +49,6 @@ pub struct KeySpaceDescInner {
 
 #[derive(Default, Clone)]
 pub struct KeySpaceConfig {
-    key_offset: usize,
     compactor: Option<Arc<Compactor>>,
     disable_unload: bool,
     max_dirty_keys: Option<usize>,
@@ -199,7 +198,7 @@ impl KeyShapeBuilder {
                 panic!("Tidehunter currently does not support key space with both compactor and bloom filter enabled");
             }
             ks.key_type
-                .verify_key_size(ks.index_key_size() - ks.config.key_offset);
+                .verify_key_size(ks.index_key_size());
         }
     }
 }
@@ -280,11 +279,10 @@ impl KeySpaceDesc {
     }
 
     fn index_prefix<'a>(&self, k: &'a [u8]) -> &'a [u8] {
-        self.key_type.index_prefix(&k[self.config.key_offset..])
+        self.key_type.index_prefix(k)
     }
 
     pub(crate) fn cell_id(&self, k: &[u8]) -> CellId {
-        let k = &k[self.config.key_offset..];
         match self.key_type {
             KeyType::Uniform(config) => {
                 let starting_u32 = starting_u32(k);
@@ -371,13 +369,6 @@ impl KeySpaceDesc {
 impl KeySpaceConfig {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn new_with_key_offset(key_offset: usize) -> Self {
-        Self {
-            key_offset,
-            ..Self::default()
-        }
     }
 
     pub fn with_compactor(mut self, compactor: Compactor) -> Self {
