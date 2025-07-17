@@ -5,6 +5,7 @@ use crate::index::index_table::IndexWalPosition;
 use crate::math;
 use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::wal::WalPosition;
+use blake2::Digest;
 use minibytes::Bytes;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -14,7 +15,6 @@ use std::fmt::Debug;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::sync::Arc;
-use blake2::Digest;
 
 pub(crate) const CELL_PREFIX_LENGTH: usize = 4; // in bytes
 pub(crate) const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
