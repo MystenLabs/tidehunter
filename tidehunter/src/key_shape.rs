@@ -14,6 +14,7 @@ use std::fmt::Debug;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::sync::Arc;
+use blake2::Digest;
 
 pub(crate) const CELL_PREFIX_LENGTH: usize = 4; // in bytes
 pub(crate) const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
@@ -666,7 +667,7 @@ impl Debug for KeyType {
 }
 
 impl KeyIndexing {
-    const HASH_SIZE: usize = 8;
+    const HASH_SIZE: usize = 16;
 
     pub fn fixed(key_length: usize) -> Self {
         Self::check_configured_key_size(key_length);
@@ -736,11 +737,9 @@ impl KeyIndexing {
     }
 
     fn hash_key(key: &[u8]) -> Vec<u8> {
-        // todo (!) use crypto hash or process hash collision correctly
-        let hash = seahash::hash(key);
-        let mut bytes = [0u8; Self::HASH_SIZE];
-        bytes.copy_from_slice(&hash.to_be_bytes());
-        bytes.to_vec()
+        type Blake2b256 = blake2::Blake2b<typenum::U32>;
+        let hash = Blake2b256::digest(key);
+        hash[..Self::HASH_SIZE].to_vec()
     }
 }
 
