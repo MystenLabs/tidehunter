@@ -4,6 +4,7 @@ use crate::index::index_format::IndexFormatType;
 use crate::index::index_table::IndexWalPosition;
 use crate::math;
 use crate::math::{downscale_u32, starting_u32, starting_u64};
+use crate::relocation::RelocationFilter;
 use crate::wal::WalPosition;
 use blake2::Digest;
 use minibytes::Bytes;
@@ -56,6 +57,7 @@ pub struct KeySpaceConfig {
     value_cache_size: usize,
     index_format: IndexFormatType,
     unloaded_iterator: bool,
+    relocation_filter: Option<Arc<Box<dyn RelocationFilter>>>,
 }
 
 /// This enum allows customizing the key used in the index.
@@ -381,6 +383,13 @@ impl KeySpaceDesc {
         self.config.compactor.as_ref().map(Arc::as_ref)
     }
 
+    pub(crate) fn relocation_filter(&self) -> Option<&dyn RelocationFilter> {
+        self.config
+            .relocation_filter
+            .as_ref()
+            .map(|arc| arc.as_ref().as_ref())
+    }
+
     pub(crate) fn bloom_filter(&self) -> Option<&BloomFilterParams> {
         self.config.bloom_filter.as_ref()
     }
@@ -421,6 +430,11 @@ impl KeySpaceConfig {
 
     pub fn with_compactor(mut self, compactor: Compactor) -> Self {
         self.compactor = Some(Arc::new(compactor));
+        self
+    }
+
+    pub fn with_relocation_filter(mut self, filter: impl RelocationFilter) -> Self {
+        self.relocation_filter = Some(Arc::new(Box::new(filter)));
         self
     }
 

@@ -17,6 +17,7 @@ pub mod lookup;
 mod math;
 pub mod metrics;
 mod primitives;
+mod relocation;
 mod runtime;
 mod state_snapshot;
 pub mod wal;
