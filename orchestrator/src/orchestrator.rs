@@ -281,8 +281,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
         let command = command.join(" ; ");
 
-        // Execute the deletion on all machines.
-        let active = self.instances.iter().filter(|x| x.is_active()).cloned();
+        // Exclude monitoring instance:
+        let (_, monitoring_instance) = self.select_instances()?;
+        let active = self
+            .instances
+            .iter()
+            .filter(|x| x.is_active())
+            .filter(|x| Some(x) != monitoring_instance.as_ref().as_ref())
+            .cloned();
         let context = CommandContext::default();
         self.ssh_manager.execute(active, command, context).await?;
 
