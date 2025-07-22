@@ -80,6 +80,7 @@ pub struct Settings {
     /// public key defaults the same path as the private key with an added extension 'pub'.
     pub ssh_public_key_file: Option<PathBuf>,
     /// The list of cloud provider regions to deploy the testbed.
+    #[serde(default = "defaults::default_regions")]
     pub regions: Vec<String>,
     /// The specs of the instances to deploy. Those are dependent on the cloud provider, e.g.,
     /// specifying 't3.medium' creates instances with 2 vCPU and 4GBo of ram on AWS.
@@ -178,6 +179,10 @@ mod defaults {
 
     pub fn default_ssh_retries() -> usize {
         3
+    }
+
+    pub fn default_regions() -> Vec<String> {
+        vec!["default".to_string()]
     }
 }
 

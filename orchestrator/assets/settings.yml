@@ -3,8 +3,6 @@ testbed_id: "${USER}-tidehunter"
 cloud_provider: custom
 token_file: "${HOME}/.aws/credentials"
 ssh_private_key_file: "${HOME}/.ssh/mysten_baremetal_shared"
-regions:
-  - default
 specs: default
 repository:
   url: https://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@github.com/mystenlabs/tidehunter.git
@@ -16,16 +14,11 @@ working_dir: "/opt/sui/db"
 # Custom machines configuration
 custom_machines:
   - host: benchmark-00.testing.sui.io
-    region: default
   
   - host: benchmark-01.testing.sui.io
-    region: default
   
   - host: benchmark-02.testing.sui.io
-    region: default
   
   - host: benchmark-03.testing.sui.io
-    region: default
 
   - host: benchmark-04.testing.sui.io
-    region: default

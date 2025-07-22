@@ -17,6 +17,7 @@ pub struct CustomMachine {
     /// The hostname or IP address of the machine.
     pub host: String,
     /// The region/group this machine belongs to.
+    #[serde(default = "default_region")]
     pub region: String,
     /// Optional custom SSH port (defaults to 22).
     #[serde(default = "default_ssh_port")]
@@ -28,6 +29,10 @@ pub struct CustomMachine {
 
 fn default_ssh_port() -> u16 {
     22
+}
+
+fn default_region() -> String {
+    "default".to_string()
 }
 
 impl CustomMachine {
