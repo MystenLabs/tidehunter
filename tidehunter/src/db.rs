@@ -554,7 +554,9 @@ impl Db {
             match ks.key_type() {
                 KeyType::Uniform(config) => {
                     let num_cells = config.num_cells(ks);
-                    let cache_estimate = (ks.index_key_size() + size_of::<WalPosition>())
+                    // todo - provide better way to see memory usage for tables with var key length
+                    let cache_estimate = (ks.index_key_size().unwrap_or(64)
+                        + size_of::<WalPosition>())
                         * num_cells
                         * self.config.max_dirty_keys;
                     self.metrics

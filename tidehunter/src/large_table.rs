@@ -904,11 +904,12 @@ impl LargeTableEntry {
     }
 
     fn report_loaded_keys_delta(&self, delta: i64) {
+        // todo better reporting for loaded_key_bytes for variable length tables
         self.context
             .metrics
             .loaded_key_bytes
             .with_label_values(&[self.context.name()])
-            .add(delta * (self.context.index_key_size() as i64));
+            .add(delta * (self.context.index_key_size().unwrap_or(64) as i64));
     }
 
     fn insert_bloom_filter(&mut self, key: &[u8]) {

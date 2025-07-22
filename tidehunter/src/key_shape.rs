@@ -71,6 +71,7 @@ pub struct KeySpaceConfig {
 pub enum KeyIndexing {
     Fixed(usize),
     Reduction(usize, Range<usize>),
+    VariableLength,
     Hash,
 }
 
@@ -197,8 +198,14 @@ impl KeyShapeBuilder {
             if ks.config.bloom_filter.is_some() && ks.config.compactor.is_some() {
                 panic!("Tidehunter currently does not support key space with both compactor and bloom filter enabled");
             }
-            ks.key_type
-                .verify_key_size(ks.index_key_size());
+            ks.key_type.verify_key_size(ks.index_key_size());
+            if matches!(ks.key_indexing, KeyIndexing::VariableLength) {
+                // todo this can be supported
+                assert!(
+                    !ks.config.unloaded_iterator,
+                    "Unloaded iterator currently not supported for variable length key indexing"
+                );
+            }
         }
     }
 }
@@ -241,6 +248,7 @@ impl KeySpaceDesc {
             KeyIndexing::Fixed(_) => false,
             KeyIndexing::Reduction(_, _) => true,
             KeyIndexing::Hash => false,
+            KeyIndexing::VariableLength => false,
         }
     }
 
@@ -249,6 +257,7 @@ impl KeySpaceDesc {
             KeyIndexing::Fixed(_) => (),
             KeyIndexing::Reduction(_, _) => (),
             KeyIndexing::Hash => panic!("Key space {} does not support iterator bounds and reversal because it uses KeyIndexing::Hash", self.name()),
+            KeyIndexing::VariableLength => (),
         }
     }
 
@@ -260,12 +269,51 @@ impl KeySpaceDesc {
         &self.key_type
     }
 
-    pub(crate) fn index_key_size(&self) -> usize {
+    /// Returns index key size if index key size is fixed, None for variable length keys
+    pub(crate) fn index_key_size(&self) -> Option<usize> {
         self.key_indexing().index_key_size()
     }
 
-    pub(crate) fn index_element_size(&self) -> usize {
-        self.index_key_size() + WalPosition::LENGTH
+    pub(crate) fn index_key_element_size(&self) -> Option<(usize, usize)> {
+        self.index_key_size()
+            .map(|key_size| (key_size, self.index_element_size().unwrap()))
+    }
+
+    /// Returns index key size if index key size is fixed.
+    /// Panics for variable length keys.
+    pub(crate) fn require_index_key_size(&self) -> usize {
+        let Some(key_size) = self.index_key_size() else {
+            panic!(
+                "Ks {} uses uniform index that requires key length known ahead of time",
+                self.name()
+            )
+        };
+        key_size
+    }
+
+    /// Returns index element size if index key size is fixed, None for variable length keys
+    pub(crate) fn index_element_size(&self) -> Option<usize> {
+        self.index_key_size().map(|i| i + WalPosition::LENGTH)
+    }
+
+    /// Returns index element size if index key size is fixed.
+    /// Panics for variable length keys.
+    pub(crate) fn require_index_element_size(&self) -> usize {
+        let Some(element_size) = self.index_element_size() else {
+            panic!(
+                "Ks {} uses uniform index that requires key length known ahead of time",
+                self.name()
+            )
+        };
+        element_size
+    }
+
+    /// Returns imprecise element size that can be used for buffer capacity calculation.
+    /// This method uses known key size for key spaces with fixed key size.
+    /// For key spaces with variable length keys,
+    /// we use the best effort estimate of 64 bytes for index element size.
+    pub(crate) fn index_element_size_for_capacity(&self) -> usize {
+        self.index_element_size().unwrap_or(64)
     }
 
     /// Returns u32 prefix
@@ -497,16 +545,19 @@ impl KeyType {
         ))
     }
 
-    fn verify_key_size(&self, key_size: usize) {
-        match self {
-            KeyType::Uniform(_) => {}
-            KeyType::PrefixedUniform(config) => {
+    fn verify_key_size(&self, key_size: Option<usize>) {
+        match (self, key_size) {
+            (KeyType::Uniform(_), _) => {}
+            (KeyType::PrefixedUniform(config), Some(key_size)) => {
                 assert!(
                     key_size > config.prefix_len_bytes,
                     "key_size({}) must be greater then prefix len({})",
                     key_size,
                     config.prefix_len_bytes
                 );
+            }
+            (KeyType::PrefixedUniform(_config), None) => {
+                panic!("Variable len keys currently arent supported for PrefixedUniform keys");
             }
         }
     }
@@ -670,6 +721,10 @@ impl KeyIndexing {
         Self::Reduction(key_length, range)
     }
 
+    pub fn variable_length() -> Self {
+        Self::VariableLength
+    }
+
     pub fn hash() -> Self {
         Self::Hash
     }
@@ -681,11 +736,12 @@ impl KeyIndexing {
         );
     }
 
-    pub(crate) fn index_key_size(&self) -> usize {
+    pub(crate) fn index_key_size(&self) -> Option<usize> {
         match self {
-            KeyIndexing::Fixed(key_size) => *key_size,
-            KeyIndexing::Reduction(_, range) => range.len(),
-            KeyIndexing::Hash => Self::HASH_SIZE,
+            KeyIndexing::Fixed(key_size) => Some(*key_size),
+            KeyIndexing::Reduction(_, range) => Some(range.len()),
+            KeyIndexing::Hash => Some(Self::HASH_SIZE),
+            KeyIndexing::VariableLength => None,
         }
     }
 
@@ -693,7 +749,7 @@ impl KeyIndexing {
         let expected_key_size = match self {
             KeyIndexing::Fixed(key_size) => *key_size,
             KeyIndexing::Reduction(key_size, _) => *key_size,
-            KeyIndexing::Hash => {
+            KeyIndexing::Hash | KeyIndexing::VariableLength => {
                 if k > MAX_KEY_LEN {
                     panic!(
                         "Key space {} accepts maximum keys size {}, given {}",
@@ -713,7 +769,7 @@ impl KeyIndexing {
 
     pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> Cow<'a, [u8]> {
         match self {
-            KeyIndexing::Fixed(_) => Cow::Borrowed(key),
+            KeyIndexing::Fixed(_) | KeyIndexing::VariableLength => Cow::Borrowed(key),
             KeyIndexing::Reduction(_, range) => Cow::Borrowed(&key[range.clone()]),
             KeyIndexing::Hash => Cow::Owned(Self::hash_key(key)),
         }
@@ -721,7 +777,7 @@ impl KeyIndexing {
 
     pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
         match self {
-            KeyIndexing::Fixed(_) => key,
+            KeyIndexing::Fixed(_) | KeyIndexing::VariableLength => key,
             KeyIndexing::Reduction(_, range) => key.slice(range.clone()),
             KeyIndexing::Hash => Self::hash_key(&key).into(),
         }

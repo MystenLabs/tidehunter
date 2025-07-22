@@ -1,11 +1,12 @@
+use std::cmp::Ordering;
 use std::ops::Range;
-use std::time::Instant;
 
 use minibytes::Bytes;
 
 use super::lookup_header::LookupHeaderIndex;
 use super::uniform_lookup::UniformLookupIndex;
-use crate::metrics::Metrics;
+use crate::index::index_table::VariableLenKeyIndexIterator;
+use crate::metrics::{Metrics, TimerExt};
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
@@ -130,33 +131,26 @@ impl Direction {
 /// * `key` - The key to search for
 /// * `element_size` - The size of each full entry (key + position)
 /// * `key_size` - The size of just the key portion
-/// * `metrics` - Optional metrics to track performance
+/// * `metrics` - Metrics to track performance
 ///
 /// # Returns
 /// * `(found_pos, insertion_point, position)` where:
-///   - `found_pos` is Some(index) if key is found, None otherwise
-///   - `insertion_point` is where the key would be inserted if not found
+///   - `insertion_point` is where the key would be inserted
 ///   - `position` is Some(WalPosition) if key is found, None otherwise
 pub fn binary_search(
     buffer: &[u8],
     key: &[u8],
     element_size: usize,
     key_size: usize,
-    metrics: Option<&Metrics>,
+    metrics: &Metrics,
 ) -> (Option<usize>, usize, Option<WalPosition>) {
     if buffer.is_empty() {
         return (None, 0, None);
     }
+    let _timer = metrics.lookup_scan_mcs.clone().mcs_timer();
 
-    let scan_start = Instant::now();
     let count = buffer.len() / element_size;
-    if count == 0 {
-        if let Some(m) = metrics {
-            m.lookup_scan_mcs
-                .inc_by(scan_start.elapsed().as_micros() as u64);
-        }
-        return (None, 0, None);
-    }
+    assert!(count > 0);
 
     let mut left = 0;
     let mut right = count - 1;
@@ -168,12 +162,12 @@ pub fn binary_search(
         let entry_key = &buffer[entry_start..entry_start + key_size];
 
         match entry_key.cmp(key) {
-            std::cmp::Ordering::Equal => {
+            Ordering::Equal => {
                 found_pos = Some(mid);
                 break;
             }
-            std::cmp::Ordering::Less => left = mid + 1,
-            std::cmp::Ordering::Greater => {
+            Ordering::Less => left = mid + 1,
+            Ordering::Greater => {
                 if mid == 0 {
                     break;
                 }
@@ -188,12 +182,30 @@ pub fn binary_search(
         WalPosition::from_slice(pos_slice)
     });
 
-    if let Some(m) = metrics {
-        m.lookup_scan_mcs
-            .inc_by(scan_start.elapsed().as_micros() as u64);
-    }
-
     (found_pos, left, position)
+}
+
+/// Performs linear search in the loaded portion of an index.
+/// Unlike binary search, linear search can operate on key spaces with variable key lens
+/// Same arguments and return values as binary_search.
+pub fn linear_search(
+    buffer: &[u8],
+    key: &[u8],
+    metrics: &Metrics,
+) -> (Option<usize>, usize, Option<WalPosition>) {
+    let _timer = metrics.lookup_scan_mcs.clone().mcs_timer();
+    let index_iterator = VariableLenKeyIndexIterator::new(buffer);
+    for (pos, it_key, it_pos) in index_iterator {
+        match key.cmp(it_key) {
+            Ordering::Less => {}
+            Ordering::Equal => {
+                return (Some(pos), pos, Some(it_pos));
+            }
+            Ordering::Greater => return (None, pos, None),
+        }
+    }
+    // todo this will need to change to support unloaded iterator for variable len keys
+    (None, 0, None)
 }
 
 #[cfg(test)]
@@ -336,6 +348,7 @@ pub mod test {
 
     #[test]
     fn test_binary_search() {
+        let metrics = Metrics::new();
         // Create a buffer with several entries
         let key_size = 4;
         let element_size = 16; // 4-byte key + 12-byte value
@@ -358,7 +371,7 @@ pub mod test {
 
         // Test key found - first key
         let (found_pos, insertion_point, position) =
-            binary_search(&buffer, &keys[0], element_size, key_size, None);
+            binary_search(&buffer, &keys[0], element_size, key_size, &metrics);
         assert_eq!(found_pos, Some(0));
         assert_eq!(insertion_point, 0);
         assert!(position.is_some());
@@ -366,7 +379,7 @@ pub mod test {
 
         // Test key found - middle key
         let (found_pos, insertion_point, position) =
-            binary_search(&buffer, &keys[2], element_size, key_size, None);
+            binary_search(&buffer, &keys[2], element_size, key_size, &metrics);
         assert_eq!(found_pos, Some(2));
         assert_eq!(insertion_point, 2);
         assert!(position.is_some());
@@ -375,7 +388,7 @@ pub mod test {
         // Test key not found - should find insertion point
         let missing_key = vec![3, 4, 5, 6]; // Between keys[0] and keys[1]
         let (found_pos, insertion_point, position) =
-            binary_search(&buffer, &missing_key, element_size, key_size, None);
+            binary_search(&buffer, &missing_key, element_size, key_size, &metrics);
         assert_eq!(found_pos, None);
         assert_eq!(insertion_point, 1); // Would be inserted at position 1
         assert!(position.is_none());
@@ -383,7 +396,7 @@ pub mod test {
         // Test key smaller than all keys
         let smaller_key = vec![0, 0, 0, 0];
         let (found_pos, insertion_point, position) =
-            binary_search(&buffer, &smaller_key, element_size, key_size, None);
+            binary_search(&buffer, &smaller_key, element_size, key_size, &metrics);
         assert_eq!(found_pos, None);
         assert_eq!(insertion_point, 0); // Would be inserted at the beginning
         assert!(position.is_none());
@@ -391,7 +404,7 @@ pub mod test {
         // Test key larger than all keys
         let larger_key = vec![255, 255, 255, 255];
         let (found_pos, insertion_point, position) =
-            binary_search(&buffer, &larger_key, element_size, key_size, None);
+            binary_search(&buffer, &larger_key, element_size, key_size, &metrics);
         assert_eq!(found_pos, None);
         assert_eq!(insertion_point, 4); // Would be inserted after the last element
         assert!(position.is_none());
@@ -399,13 +412,11 @@ pub mod test {
         // Test with metrics
         let metrics = Metrics::new();
         let (found_pos, insertion_point, position) =
-            binary_search(&buffer, &keys[3], element_size, key_size, Some(&metrics));
+            binary_search(&buffer, &keys[3], element_size, key_size, &metrics);
         assert_eq!(found_pos, Some(3));
         assert_eq!(insertion_point, 3);
         assert!(position.is_some());
         assert_eq!(position.unwrap(), WalPosition::test_value(103));
-        // Verify metrics were updated - metrics are likely wrapped in Atomics so we can't directly check value
-        // Instead, we'll just assume they were updated as it's implementation-dependent
     }
 
     pub fn k32(k: u32) -> Bytes {

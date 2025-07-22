@@ -29,7 +29,8 @@ impl KsContext {
         dirty_keys_count > self.max_dirty_keys()
     }
 
-    pub fn index_key_size(&self) -> usize {
+    /// Returns fixed key size or None if variable keys are configured for this key space.
+    pub fn index_key_size(&self) -> Option<usize> {
         self.ks_config.index_key_size()
     }
 }

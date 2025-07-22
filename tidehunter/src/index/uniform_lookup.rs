@@ -131,8 +131,8 @@ impl UniformLookupIndex {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let element_size = ks.index_element_size();
-        let key_size = ks.index_key_size();
+        let element_size = ks.require_index_element_size();
+        let key_size = ks.require_index_key_size();
         let file_length = reader.len();
 
         // Read a window from the beginning or end of the file
@@ -179,7 +179,7 @@ impl UniformLookupIndex {
 
 impl IndexFormat for UniformLookupIndex {
     fn serialize_index(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = ks.index_element_size();
+        let element_size = ks.require_index_element_size();
         let capacity = element_size * table.len();
         let mut out = BytesMut::with_capacity(capacity);
         table.serialize_index_entries(ks, &mut out);
@@ -199,8 +199,8 @@ impl IndexFormat for UniformLookupIndex {
     ) -> Option<WalPosition> {
         // todo simplify this function
         // compute cell and prefix
-        let element_size = ks.index_element_size();
-        let key_size = ks.index_key_size();
+        let element_size = ks.require_index_element_size();
+        let key_size = ks.require_index_key_size();
         assert_eq!(key.len(), key_size);
         let cell = ks.cell_id(key);
         let cell_prefix_range = ks.index_prefix_range(&cell);
@@ -258,7 +258,7 @@ impl IndexFormat for UniformLookupIndex {
             }
 
             // Use the extracted binary search function
-            let (_, _, result) = binary_search(&buffer, key, element_size, key_size, Some(metrics));
+            let (_, _, result) = binary_search(&buffer, key, element_size, key_size, metrics);
             metrics.lookup_iterations.observe(iterations as f64);
             return result;
         }
@@ -272,8 +272,8 @@ impl IndexFormat for UniformLookupIndex {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let element_size = ks.index_element_size();
-        let key_size = ks.index_key_size();
+        let element_size = ks.require_index_element_size();
+        let key_size = ks.require_index_key_size();
         let file_length = reader.len();
 
         // If there's no previous key, just start at the beginning/end
@@ -340,7 +340,7 @@ impl IndexFormat for UniformLookupIndex {
 
             // Use binary search to find the position
             let (found_pos, insertion_point, _) =
-                binary_search(&buffer, prev_key, element_size, key_size, Some(metrics));
+                binary_search(&buffer, prev_key, element_size, key_size, metrics);
 
             let next_pos = match direction {
                 Direction::Forward => {

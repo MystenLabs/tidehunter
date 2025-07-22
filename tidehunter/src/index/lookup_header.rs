@@ -3,13 +3,15 @@ use std::time::Instant;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 
+use crate::index::index_table::IndexSerializationVisitor;
 use crate::math::{next_bounded, rescale_u32};
 use crate::metrics::Metrics;
 use crate::wal::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 use super::index_format::{
-    binary_search, Direction, IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE, HEADER_SIZE,
+    binary_search, linear_search, Direction, IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE,
+    HEADER_SIZE,
 };
 
 #[derive(Clone)]
@@ -42,7 +44,7 @@ impl LookupHeaderIndex {
         reader: &impl RandomRead,
         micro_cell: usize,
         metrics: &Metrics,
-    ) -> Option<(Bytes, usize, usize)> {
+    ) -> Option<Bytes> {
         let now = Instant::now();
         let header_element =
             reader.read(micro_cell * HEADER_ELEMENT_SIZE..(micro_cell + 1) * HEADER_ELEMENT_SIZE);
@@ -66,7 +68,7 @@ impl LookupHeaderIndex {
             .inc_by(now.elapsed().as_micros() as u64);
         metrics.lookup_io_bytes.inc_by(buffer.len() as u64);
 
-        Some((buffer, from_offset, to_offset))
+        Some(buffer)
     }
 
     /// Process a single micro-cell to find the next entry
@@ -77,11 +79,11 @@ impl LookupHeaderIndex {
         micro_cell: usize,
         prev: Option<&[u8]>,
         direction: Direction,
-        key_size: usize,
-        element_size: usize,
+        ks: &KeySpaceDesc,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let (buffer, _, _) = self.read_micro_cell_section(reader, micro_cell, metrics)?;
+        let (key_size, element_size) = ks.index_key_element_size().unwrap();
+        let buffer = self.read_micro_cell_section(reader, micro_cell, metrics)?;
 
         if buffer.is_empty() {
             return None;
@@ -96,7 +98,7 @@ impl LookupHeaderIndex {
         let start_pos = if let Some(prev_key) = prev {
             // Use binary search function to find the position
             let (found_pos, insertion_point, _) =
-                binary_search(&buffer, prev_key, element_size, key_size, Some(metrics));
+                binary_search(&buffer, prev_key, element_size, key_size, metrics);
 
             match direction {
                 Direction::Forward => {
@@ -138,22 +140,12 @@ impl LookupHeaderIndex {
 
 impl IndexFormat for LookupHeaderIndex {
     fn serialize_index(&self, table: &IndexTable, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = ks.index_element_size();
-        let capacity = element_size * table.len() + HEADER_SIZE;
+        let capacity = ks.index_element_size_for_capacity() * table.len() + HEADER_SIZE;
         let mut out = BytesMut::with_capacity(capacity);
         out.put_bytes(0, HEADER_SIZE);
 
-        // Use the common function to serialize entries
-        table.serialize_index_entries(ks, &mut out);
-
-        // Build header
         let mut header = IndexTableHeaderBuilder::new(ks);
-        let mut current_offset = HEADER_SIZE;
-
-        for key in table.keys() {
-            header.add_key(key, current_offset);
-            current_offset += element_size;
-        }
+        table.serialize_index_entries_with_visitor(ks, &mut out, &mut header);
 
         // Write header to the reserved space
         header.write_header(out.len(), &mut out[..HEADER_SIZE]);
@@ -171,16 +163,20 @@ impl IndexFormat for LookupHeaderIndex {
         key: &[u8],
         metrics: &Metrics,
     ) -> Option<WalPosition> {
-        let key_size = ks.index_key_size();
-        assert_eq!(key.len(), key_size);
+        if let Some(key_size) = ks.index_key_size() {
+            assert_eq!(key.len(), key_size);
+        }
         let micro_cell = Self::key_micro_cell(ks, key);
 
-        let (buffer, _, _) = self.read_micro_cell_section(reader, micro_cell, metrics)?;
-        let element_size = ks.index_element_size();
+        let buffer = self.read_micro_cell_section(reader, micro_cell, metrics)?;
 
-        // Use binary search instead of linear search
-        let (_, _, pos) = binary_search(&buffer, key, element_size, key_size, Some(metrics));
-        pos
+        if let Some((key_size, element_size)) = ks.index_key_element_size() {
+            let (_, _, pos) = binary_search(&buffer, key, element_size, key_size, metrics);
+            pos
+        } else {
+            let (_, _, pos) = linear_search(&buffer, key, metrics);
+            pos
+        }
     }
 
     fn next_entry_unloaded(
@@ -191,13 +187,12 @@ impl IndexFormat for LookupHeaderIndex {
         direction: Direction,
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
-        let key_size = ks.index_key_size();
-        let element_size = ks.index_element_size();
-
         // If no previous key is provided, start from the first or last micro-cell
         // depending on the direction
         let start_micro_cell = if let Some(prev_key) = prev {
-            assert_eq!(prev_key.len(), key_size);
+            if let Some(key_size) = ks.index_key_size() {
+                assert_eq!(prev_key.len(), key_size);
+            }
             Self::key_micro_cell(ks, prev_key)
         } else {
             direction.first_in_range(0..HEADER_ELEMENTS)
@@ -205,15 +200,9 @@ impl IndexFormat for LookupHeaderIndex {
 
         let mut current_micro_cell = start_micro_cell;
         loop {
-            if let result @ Some(_) = self.process_micro_cell(
-                reader,
-                current_micro_cell,
-                prev,
-                direction,
-                key_size,
-                element_size,
-                metrics,
-            ) {
+            if let result @ Some(_) =
+                self.process_micro_cell(reader, current_micro_cell, prev, direction, ks, metrics)
+            {
                 break result;
             }
             current_micro_cell = next_bounded(
@@ -228,6 +217,12 @@ pub struct IndexTableHeaderBuilder<'a> {
     ks: &'a KeySpaceDesc,
     header: Vec<(u32, u32)>,
     last_micro_cell: Option<usize>,
+}
+
+impl IndexSerializationVisitor for IndexTableHeaderBuilder<'_> {
+    fn add_key(&mut self, key: &[u8], offset: usize) {
+        self.add_key(key, offset)
+    }
 }
 
 impl<'a> IndexTableHeaderBuilder<'a> {

@@ -1,5 +1,7 @@
-use bytes::{Buf, Bytes};
+use bytes::Buf;
+use minibytes::Bytes;
 
+/// SliceBuf implements Buf on top of Bytes and allows to slice bytes from the buffer.
 pub struct SliceBuf {
     data: Bytes,
     offset: usize,
@@ -43,7 +45,6 @@ impl Buf for SliceBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
     #[test]
     fn test_slice_n_basic() {

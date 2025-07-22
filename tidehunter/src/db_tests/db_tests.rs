@@ -1896,3 +1896,91 @@ fn test_bloom_filter_restore() {
         panic!("Bloom filter efficiency less then 90%");
     }
 }
+
+#[test]
+fn test_variable_length_keys() {
+    // Aside from testing variable length keys, this test can expose a replay bug
+    for _ in 0..100 {
+        test_variable_length_keys_it();
+    }
+}
+
+fn test_variable_length_keys_it() {
+    let dir = tempdir::TempDir::new("test_variable_length_keys").unwrap();
+    let config = Arc::new(Config::small());
+    let metrics = Metrics::new();
+    let ks_config = KeySpaceConfig::default()
+        // todo unloaded iterator is not supported
+        // .with_unloaded_iterator(true)
+        .with_max_dirty_keys(1);
+    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+        KeyIndexing::VariableLength,
+        16,
+        KeyType::uniform(1),
+        ks_config,
+    );
+    let key1 = vec![];
+    let key2 = vec![1u8];
+    let key3 = vec![2u8, 3];
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+
+        assert!(db.get(ks, &key1).unwrap().is_none());
+        assert!(db.get(ks, &key2).unwrap().is_none());
+        assert!(db.get(ks, &key3).unwrap().is_none());
+
+        db.insert(ks, key1.clone(), vec![1]).unwrap();
+        db.insert(ks, key2.clone(), vec![2]).unwrap();
+        db.large_table.flusher.barrier(); // todo this test fails without this barrier
+                                          // todo This is because of a real bug in how snapshot captures replay_from
+        db.insert(ks, key3.clone(), vec![3]).unwrap();
+
+        assert_eq!(Some(vec![1].into()), db.get(ks, &key1).unwrap());
+        assert_eq!(Some(vec![2].into()), db.get(ks, &key2).unwrap());
+        assert_eq!(Some(vec![3].into()), db.get(ks, &key3).unwrap());
+
+        db.large_table.flusher.barrier();
+        db.rebuild_control_region().unwrap();
+
+        let mut it = db.iterator(ks);
+        assert_eq!(
+            (key1.clone().into(), vec![1].into()),
+            it.next().unwrap().unwrap()
+        );
+        assert_eq!(
+            (key2.clone().into(), vec![2].into()),
+            it.next().unwrap().unwrap()
+        );
+        assert_eq!(
+            (key3.clone().into(), vec![3].into()),
+            it.next().unwrap().unwrap()
+        );
+        assert!(it.next().is_none());
+        // This, small max_dirty_keys and unloaded_iterator enabled
+        // will force iterator in the next code block to be an unloaded iterator
+    }
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        assert_eq!(Some(vec![1].into()), db.get(ks, &key1).unwrap());
+        assert_eq!(Some(vec![2].into()), db.get(ks, &key2).unwrap());
+        assert_eq!(Some(vec![3].into()), db.get(ks, &key3).unwrap());
+
+        let mut it = db.iterator(ks);
+        assert_eq!((key1.into(), vec![1].into()), it.next().unwrap().unwrap());
+        assert_eq!((key2.into(), vec![2].into()), it.next().unwrap().unwrap());
+        assert_eq!((key3.into(), vec![3].into()), it.next().unwrap().unwrap());
+        assert!(it.next().is_none());
+    }
+}

@@ -1,7 +1,10 @@
 use crate::key_shape::KeySpaceDesc;
+use crate::primitives::cursor::SliceCursor;
 use crate::primitives::range_from_excluding::RangeFromExcluding;
+use crate::primitives::slice_buf::SliceBuf;
+use crate::primitives::var_int::{deserialize_u16_varint, serialize_u16_varint, MAX_U16_VARINT};
 use crate::wal::WalPosition;
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use std::collections::btree_map::{Entry, Keys};
 use std::collections::BTreeMap;
@@ -173,18 +176,42 @@ impl IndexTable {
         self.data.keys()
     }
 
-    /// Writes key-value pairs from IndexTable to a BytesMut buffer
-    /// Returns the populated buffer
+    /// Writes key-value pairs from IndexTable to a BytesMut buffer.
+    /// Returns the populated buffer.
     pub fn serialize_index_entries(&self, ks: &KeySpaceDesc, out: &mut BytesMut) {
+        self.serialize_index_entries_with_visitor(ks, out, &mut ());
+    }
+
+    /// Same as serialize_index_entries, but a visitor can be passed.
+    /// This visitor is called every time key-value pair is serialized.
+    pub fn serialize_index_entries_with_visitor(
+        &self,
+        ks: &KeySpaceDesc,
+        out: &mut BytesMut,
+        visitor: &mut impl IndexSerializationVisitor,
+    ) {
         // Write each key-value pair
         for (key, value) in self.data.iter() {
-            if key.len() != ks.index_key_size() {
-                panic!(
-                    "Index in ks {} contains key length {} (configured {})",
-                    ks.name(),
-                    key.len(),
-                    ks.index_key_size()
-                );
+            visitor.add_key(key, out.len());
+            if let Some(expected_size) = ks.index_key_size() {
+                if key.len() != expected_size {
+                    panic!(
+                        "Index in ks {} contains key length {} (configured {})",
+                        ks.name(),
+                        key.len(),
+                        expected_size
+                    );
+                }
+            } else {
+                if key.len() > MAX_U16_VARINT as usize {
+                    panic!(
+                        "Trying to insert {key:?} into ks {}, key length is {}, maximum allowed {}",
+                        ks.name(),
+                        key.len(),
+                        MAX_U16_VARINT
+                    );
+                }
+                serialize_u16_varint(key.len() as u16, out);
             }
             out.put_slice(key);
             value.ensure_clean_wal_position().write_to_buf(out);
@@ -197,25 +224,23 @@ impl IndexTable {
     /// - b: Source bytes
     ///   Returns the deserialized IndexTable
     pub fn deserialize_index_entries(ks: &KeySpaceDesc, bytes: Bytes) -> Self {
-        let element_size = ks.index_element_size();
-        let key_size = ks.index_key_size();
-        let elements = bytes.len() / element_size;
-        assert_eq!(
-            bytes.len(),
-            elements * element_size,
-            "Index data size is not a multiple of element size"
-        );
-
+        let mut bytes = SliceBuf::new(bytes);
         let mut data = BTreeMap::new();
-        for i in 0..elements {
-            let key = bytes.slice(i * element_size..(i * element_size + key_size));
-            let value = WalPosition::from_slice(
-                &bytes[(i * element_size + key_size)..(i * element_size + element_size)],
-            );
-            data.insert(key, IndexWalPosition::new_clean(value));
+        while bytes.has_remaining() {
+            let key = if let Some(key_len) = ks.index_key_size() {
+                bytes.slice_n(key_len)
+            } else {
+                let key_len = deserialize_u16_varint(&mut bytes);
+                bytes.slice_n(key_len as usize)
+            };
+            let value = WalPosition::read_from_buf(&mut bytes);
+            if data
+                .insert(key, IndexWalPosition::new_clean(value))
+                .is_some()
+            {
+                panic!("Duplicate keys detected in index");
+            }
         }
-
-        assert_eq!(data.len(), elements, "Duplicate keys detected in index");
         IndexTable { data }
     }
 
@@ -316,12 +341,83 @@ impl IndexWalPosition {
     }
 }
 
+pub trait IndexSerializationVisitor {
+    fn add_key(&mut self, key: &[u8], offset: usize);
+}
+
+impl IndexSerializationVisitor for () {
+    fn add_key(&mut self, _key: &[u8], _offset: usize) {}
+}
+
+/// An iterator for unloaded portion of an index for variable length keys.
+pub struct VariableLenKeyIndexIterator<'a> {
+    buf: SliceCursor<'a>,
+}
+
+impl<'a> VariableLenKeyIndexIterator<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        Self {
+            buf: SliceCursor::new(buf),
+        }
+    }
+}
+
+impl<'a> Iterator for VariableLenKeyIndexIterator<'a> {
+    type Item = (usize, &'a [u8], WalPosition);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buf.is_empty() {
+            return None;
+        }
+        let offset = self.buf.offset();
+        let len = deserialize_u16_varint(&mut self.buf);
+        let key = self.buf.take_slice(len as usize);
+        let wal_position = WalPosition::read_from_buf(&mut self.buf);
+        Some((offset, key, wal_position))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key_shape::{KeyIndexing, KeyShape, KeyType};
 
     #[test]
-    pub fn test_unmerge_flushed() {
+    fn test_var_len_iterator() {
+        let data = BTreeMap::from_iter([
+            (vec![1, 2, 3].into(), iwp(22)),
+            (vec![2, 5].into(), iwp(23)),
+            (vec![].into(), iwp(25)),
+        ]);
+        let index = IndexTable { data };
+        let (shape, ks) = KeyShape::new_single_config_indexing(
+            KeyIndexing::variable_length(),
+            1,
+            KeyType::uniform(1),
+            Default::default(),
+        );
+        let ks = shape.ks(ks);
+        let mut buf = BytesMut::new();
+        index.serialize_index_entries(ks, &mut buf);
+        let mut iterator = VariableLenKeyIndexIterator::new(&buf);
+        assert_eq!((0, u8ref(&[]), wp(25)), iterator.next().unwrap());
+        assert_eq!((13, u8ref(&[1, 2, 3]), wp(22)), iterator.next().unwrap());
+        assert_eq!((13 + 16, u8ref(&[2, 5]), wp(23)), iterator.next().unwrap());
+    }
+
+    fn iwp(n: u64) -> IndexWalPosition {
+        IndexWalPosition::new_clean(wp(n))
+    }
+    fn wp(n: u64) -> WalPosition {
+        WalPosition::new(n, 15)
+    }
+
+    fn u8ref(a: &[u8]) -> &[u8] {
+        a
+    }
+
+    #[test]
+    fn test_unmerge_flushed() {
         let mut index = IndexTable::default();
         index.insert(vec![1].into(), WalPosition::test_value(2));
         index.insert(vec![2].into(), WalPosition::test_value(3));
