@@ -7,7 +7,7 @@ use benchmark::BenchmarkParameters;
 use chrono::Utc;
 use clap::Parser;
 use client::aws::AwsClient;
-use client::raw::RawClient;
+use client::custom::CustomClient;
 use client::vultr::VultrClient;
 use client::ServerProviderClient;
 use eyre::Context;
@@ -143,9 +143,9 @@ async fn main() -> eyre::Result<()> {
             // Execute the command.
             run(settings, client, opts).await
         }
-        CloudProvider::Raw => {
-            // Create the client for raw machines.
-            let client = RawClient::new(settings.clone(), settings.raw_machines.clone());
+        CloudProvider::Custom => {
+            // Create the client for custom machines.
+            let client = CustomClient::new(settings.clone(), settings.custom_machines.clone());
 
             // Execute the command.
             run(settings, client, opts).await

@@ -172,11 +172,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         .concat()
         .join(" && ");
 
-        // UGLY HACK: In raw machines, the commands above lead to some weird errors due to dpkg and grub
+        // UGLY HACK: In custom machines, the commands above lead to some weird errors due to dpkg and grub
         // This forces the command to always succeed regardless of dpkg issues
         let command = if matches!(
             self.settings.cloud_provider,
-            crate::settings::CloudProvider::Raw
+            crate::settings::CloudProvider::Custom
         ) {
             format!("{}; true", command)
         } else {

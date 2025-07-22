@@ -1,6 +1,6 @@
 ---
 testbed_id: "${USER}-mysticeti"
-cloud_provider: raw
+cloud_provider: custom
 token_file: "/Users/${USER}/.aws/credentials"
 ssh_private_key_file: "/Users/${USER}/.ssh/aws"
 regions:
@@ -10,15 +10,15 @@ repository:
   url: https://github.com/asonnino/mysticeti.git
   commit: main
 
-# Example settings file for raw mode
-testbed_id: "my-raw-testbed"
-cloud_provider: "raw"
+# Example settings file for custom mode
+testbed_id: "${USER}-testbed"
+cloud_provider: "custom"
 
 # Default specs description
 specs: "default"
 
-# Raw machines configuration
-raw_machines:
+# Custom machines configuration
+cusom_machines:
   - host: "192.168.1.10"
     region: "datacenter-1"
     ssh_port: 22

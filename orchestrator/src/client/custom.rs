@@ -11,9 +11,9 @@ use crate::error::{CloudProviderError, CloudProviderResult};
 use crate::settings::Settings;
 use crate::ssh::SshConnectionManager;
 
-/// Configuration for a raw machine.
+/// Configuration for a custom machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RawMachine {
+pub struct CustomMachine {
     /// The hostname or IP address of the machine.
     pub host: String,
     /// The region/group this machine belongs to.
@@ -30,14 +30,14 @@ fn default_ssh_port() -> u16 {
     22
 }
 
-impl RawMachine {
+impl CustomMachine {
     /// Convert the hostname/IP to an Ipv4Addr, resolving if necessary.
     pub fn resolve_ip(&self) -> CloudProviderResult<Ipv4Addr> {
         // Try to parse as IP address first
         if let Ok(ip) = self.host.parse::<Ipv4Addr>() {
             return Ok(ip);
         }
-        
+
         // Try to resolve hostname
         use std::net::ToSocketAddrs;
         let socket_addr = format!("{}:{}", self.host, self.ssh_port);
@@ -49,34 +49,34 @@ impl RawMachine {
                     }
                 }
                 Err(CloudProviderError::UnexpectedResponse(format!(
-                    "Could not resolve hostname '{}' to IPv4 address", 
+                    "Could not resolve hostname '{}' to IPv4 address",
                     self.host
                 )))
             }
             Err(e) => Err(CloudProviderError::RequestError(format!(
-                "Failed to resolve hostname '{}': {}", 
+                "Failed to resolve hostname '{}': {}",
                 self.host, e
             ))),
         }
     }
 }
 
-/// A raw client for direct SSH access to predefined machines.
-pub struct RawClient {
+/// A custom client for direct SSH access to predefined machines.
+pub struct CustomClient {
     settings: Settings,
-    machines: Vec<RawMachine>,
+    machines: Vec<CustomMachine>,
     ssh_manager: SshConnectionManager,
 }
 
-impl Display for RawClient {
+impl Display for CustomClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Raw SSH client ({} machines)", self.machines.len())
+        write!(f, "Custom SSH client ({} machines)", self.machines.len())
     }
 }
 
-impl RawClient {
-    /// Create a new raw client.
-    pub fn new(settings: Settings, machines: Vec<RawMachine>) -> Self {
+impl CustomClient {
+    /// Create a new custom client.
+    pub fn new(settings: Settings, machines: Vec<CustomMachine>) -> Self {
         let ssh_manager = SshConnectionManager::new(
             Self::USERNAME.to_string(),
             settings.ssh_private_key_file.clone(),
@@ -91,11 +91,18 @@ impl RawClient {
         }
     }
 
-    /// Convert a RawMachine to an Instance.
-    fn machine_to_instance(&self, machine: &RawMachine, status: InstanceStatus) -> CloudProviderResult<Instance> {
+    /// Convert a CustomMachine to an Instance.
+    fn machine_to_instance(
+        &self,
+        machine: &CustomMachine,
+        status: InstanceStatus,
+    ) -> CloudProviderResult<Instance> {
         let ip = machine.resolve_ip()?;
         let id = format!("{}:{}", machine.host, machine.ssh_port);
-        let specs = machine.specs.clone().unwrap_or_else(|| self.settings.specs.clone());
+        let specs = machine
+            .specs
+            .clone()
+            .unwrap_or_else(|| self.settings.specs.clone());
 
         Ok(Instance {
             id,
@@ -108,14 +115,14 @@ impl RawClient {
     }
 
     /// Check if a machine is reachable via SSH.
-    async fn check_machine_status(&self, machine: &RawMachine) -> InstanceStatus {
+    async fn check_machine_status(&self, machine: &CustomMachine) -> InstanceStatus {
         let ip = match machine.resolve_ip() {
             Ok(ip) => ip,
             Err(_) => return InstanceStatus::Terminated,
         };
 
         let addr = std::net::SocketAddr::new(ip.into(), machine.ssh_port);
-        
+
         // Try to establish SSH connection
         match self.ssh_manager.connect(addr).await {
             Ok(_) => InstanceStatus::Active,
@@ -124,7 +131,7 @@ impl RawClient {
     }
 
     /// Filter machines based on region and testbed_id.
-    fn filter_machines(&self, region: Option<&str>) -> Vec<&RawMachine> {
+    fn filter_machines(&self, region: Option<&str>) -> Vec<&CustomMachine> {
         self.machines
             .iter()
             .filter(|machine| {
@@ -140,18 +147,18 @@ impl RawClient {
     }
 }
 
-impl ServerProviderClient for RawClient {
+impl ServerProviderClient for CustomClient {
     const USERNAME: &'static str = "ubuntu";
 
     async fn list_instances(&self) -> CloudProviderResult<Vec<Instance>> {
         let mut instances = Vec::new();
-        
+
         for machine in self.filter_machines(None) {
             let status = self.check_machine_status(machine).await;
             let instance = self.machine_to_instance(machine, status)?;
             instances.push(instance);
         }
-        
+
         Ok(instances)
     }
 
@@ -159,7 +166,7 @@ impl ServerProviderClient for RawClient {
     where
         I: Iterator<Item = &'a Instance> + Send,
     {
-        // For raw machines, we assume they're always running or managed externally
+        // For custom machines, we assume they're always running or managed externally
         // This is a no-op, but we could implement wake-on-LAN or similar here
         Ok(())
     }
@@ -168,7 +175,7 @@ impl ServerProviderClient for RawClient {
     where
         I: Iterator<Item = &'a Instance> + Send,
     {
-        // For raw machines, we don't control their power state
+        // For custom machines, we don't control their power state
         // This is a no-op, but we could implement shutdown commands here
         Ok(())
     }
@@ -177,30 +184,30 @@ impl ServerProviderClient for RawClient {
     where
         S: Into<String> + Serialize + Send,
     {
-        // Raw machines are predefined, so we can't create new instances
+        // Custom machines are predefined, so we can't create new instances
         Err(CloudProviderError::RequestError(
-            "Cannot create instances in raw mode - machines must be predefined".to_string(),
+            "Cannot create instances in custom mode - machines must be predefined".to_string(),
         ))
     }
 
     async fn delete_instance(&self, _instance: Instance) -> CloudProviderResult<()> {
-        // Raw machines are predefined, so we can't delete instances
+        // Custom machines are predefined, so we can't delete instances
         // This is a no-op since machines are managed externally
         Ok(())
     }
 
     async fn register_ssh_public_key(&self, _public_key: String) -> CloudProviderResult<()> {
-        // In raw mode, SSH keys are assumed to be pre-configured
+        // In custom mode, SSH keys are assumed to be pre-configured
         // This is a no-op
         Ok(())
     }
 
     async fn instance_setup_commands(&self) -> CloudProviderResult<Vec<String>> {
-        // Return generic setup commands for raw machines
+        // Return generic setup commands for custom machines
         // These should be safe to run on most Ubuntu/Debian systems
         Ok(vec![
             "sudo apt-get update -y".to_string(),
             "sudo apt-get install -y curl wget git build-essential".to_string(),
         ])
     }
-} 
+}
