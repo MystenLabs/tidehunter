@@ -30,7 +30,11 @@ mod storage;
 
 macro_rules! report {
     ($report: expr, $($arg:tt)*) => {
-        let line = format!($($arg)*);
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let line = format!("[{}] {}", timestamp, format!($($arg)*));
         println!("{line}");
         $report.lines.push('\n');
         $report.lines.push_str(&line);
@@ -41,16 +45,18 @@ pub fn main() {
     let start_time = SystemTime::now();
     let mut report = Report::default();
 
+    report!(report, "BENCHMARK_START");
+
     let args: StressArgs = StressArgs::parse();
     let default_config = if let Some(parameters_path) = &args.parameters_path {
-        println!("Loading default configs from {}", parameters_path);
+        report!(report, "Loading default configs from {}", parameters_path);
         StressTestConfigs::from_yml(parameters_path).unwrap()
     } else {
         StressTestConfigs::default()
     };
     let config = configs::override_default_args(args, default_config);
 
-    println!("DB parameters: {:#?}", &config.db_parameters);
+    report!(report, "DB parameters: {:#?}", &config.db_parameters);
     println!(
         "Stress client parameters: {:#?}",
         &config.stress_client_parameters
@@ -68,12 +74,14 @@ pub fn main() {
         temp_dir.path().to_path_buf()
     };
 
-    println!("Path to storage: {}", path.display());
-    println!(
+    report!(report, "Path to storage: {}", path.display());
+    report!(
+        report,
         "Using {:?} key layout",
         config.stress_client_parameters.key_layout
     );
-    println!(
+    report!(
+        report,
         "Using {:?} read mode",
         config.stress_client_parameters.read_mode
     );
@@ -127,7 +135,7 @@ pub fn main() {
         parameters: Arc::new(config.stress_client_parameters),
         benchmark_metrics,
     };
-    println!("Starting write test");
+    report!(report, "Starting write test");
     let write_sec;
     if stress.parameters.reuse.is_none() {
         let elapsed = stress.measure(
@@ -147,7 +155,7 @@ pub fn main() {
         );
     } else {
         write_sec = "".to_string();
-        println!("Skipping writes because reuse is specified");
+        report!(report, "Skipping writes because reuse is specified");
     }
     {
         let storage_len = fs_extra::dir::get_size(&path).unwrap();
@@ -157,7 +165,8 @@ pub fn main() {
             storage_len as f64 / 1024. / 1024. / 1024.
         );
     }
-    println!(
+    report!(
+        report,
         "Starting mixed read/write test ({}% reads, {}% writes)",
         stress.parameters.read_percentage,
         100 - stress.parameters.read_percentage
@@ -187,7 +196,7 @@ pub fn main() {
         byte_div(total_bytes / msecs * 1000),
     );
     if print_report {
-        println!("Writing report file");
+        report!(report, "Writing report file");
         fs::write("report.txt", &report.lines).unwrap();
     }
     if !stress.parameters.tldr.is_empty() {
@@ -212,6 +221,8 @@ pub fn main() {
         )
         .unwrap();
     }
+    report!(report, "BENCHMARK_END");
+
     if stress.parameters.preserve {
         temp_dir.into_path();
     }

@@ -7,6 +7,7 @@ use benchmark::BenchmarkParameters;
 use chrono::Utc;
 use clap::Parser;
 use client::aws::AwsClient;
+use client::custom::CustomClient;
 use client::vultr::VultrClient;
 use client::ServerProviderClient;
 use eyre::Context;
@@ -138,6 +139,13 @@ async fn main() -> eyre::Result<()> {
                 .load_token()
                 .wrap_err("Failed to load cloud provider's token")?;
             let client = VultrClient::new(token, settings.clone());
+
+            // Execute the command.
+            run(settings, client, opts).await
+        }
+        CloudProvider::Custom => {
+            // Create the client for custom machines.
+            let client = CustomClient::new(settings.clone(), settings.custom_machines.clone());
 
             // Execute the command.
             run(settings, client, opts).await

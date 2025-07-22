@@ -1,11 +1,63 @@
 ---
-testbed_id: "${USER}-mysticeti"
-cloud_provider: aws
-token_file: "/Users/${USER}/.aws/credentials"
-ssh_private_key_file: "/Users/${USER}/.ssh/aws"
-regions:
-  - us-west-1
-specs: m5d.8xlarge
+# Tidehunter Orchestrator Settings Template
+# This file shows different ways to configure regions for custom machines
+
+testbed_id: "${USER}-tidehunter"
+cloud_provider: custom
+token_file: "${HOME}/.aws/credentials"
+ssh_private_key_file: "${HOME}/.ssh/mysten_baremetal_shared"
+
+# OPTION 1: Omit both regions and machine regions (everything defaults to "default")
+# This is the simplest configuration - just uncomment the custom_machines section below
+# regions:         # <- can be omitted, will default to ["default"]
+#   - default
+
+# OPTION 2: Explicitly specify regions list (useful for multiple regions)
+# regions:
+#   - us-east-1
+#   - us-west-2
+#   - europe
+
+# OPTION 3: Let regions be auto-detected from machine regions
+# If you specify regions on machines but not in the regions list,
+# the regions list will be automatically populated
+
+specs: default
 repository:
-  url: https://github.com/asonnino/mysticeti.git
+  url: https://github.com/your-org/your-repo.git
   commit: main
+target_configs_path: "./orchestrator/assets/target_configs.yml"
+log_processing: true
+working_dir: "/opt/sui/db"
+
+# Custom machines configuration examples:
+
+# SIMPLE CONFIG (recommended for single region setups):
+# All machines will be in "default" region automatically
+custom_machines:
+  - host: machine1.example.com
+    # region: default  # <- can be omitted
+  - host: machine2.example.com
+    # region: default  # <- can be omitted
+
+# MULTI-REGION CONFIG:
+# Specify regions explicitly for different machines
+# custom_machines:
+#   - host: east1.example.com
+#     region: us-east-1
+#   - host: east2.example.com
+#     region: us-east-1
+#   - host: west1.example.com
+#     region: us-west-2
+#   - host: eu1.example.com
+#     region: europe
+
+# MIXED CONFIG:
+# Some machines with explicit regions, others defaulting to "default"
+# custom_machines:
+#   - host: default1.example.com
+#     # region: default  # <- will use default
+#   - host: special.example.com
+#     region: special-region
+#   - host: default2.example.com
+#     # region: default  # <- will use default

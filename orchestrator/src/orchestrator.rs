@@ -141,7 +141,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // * iftop - for getting network stats
             // * libssl-dev - Required to compile the orchestrator
             // TODO: Remove libssl-dev dependency #7
-            "sudo apt-get -y install build-essential sysstat iftop libssl-dev",
+            "sudo apt-get -y install build-essential clang libclang-dev llvm-dev cmake sysstat iftop libssl-dev",
             "sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config",
             // Install rust (non-interactive).
             "curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
@@ -150,7 +150,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             "rustup default stable",
             // Create the working directory.
             &format!("mkdir -p {working_dir}"),
-            // Clone the repo.
+            // Ensure proper ownership of the working directory
+            &format!("sudo chown -R $USER:$USER {working_dir}"),
+            // Clone the repo
             &format!("(git clone {url} || true)"),
         ];
 
@@ -258,7 +260,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         // Kill all tmux servers and delete the nodes dbs. Optionally clear logs.
         let mut command = vec!["(tmux kill-server || true)".into()];
+        // Ensure proper ownership of the path before attempting cleanup
         for path in self.protocol_commands.db_directories() {
+            command.push(format!("sudo chown -R $USER:$USER {}", path.display()));
             command.push(format!("(rm -rf {} || true)", path.display()));
         }
         if delete_logs {
@@ -266,8 +270,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
         let command = command.join(" ; ");
 
-        // Execute the deletion on all machines.
-        let active = self.instances.iter().filter(|x| x.is_active()).cloned();
+        // Exclude monitoring instance:
+        let (_, monitoring_instance) = self.select_instances()?;
+        let active = self
+            .instances
+            .iter()
+            .filter(|x| x.is_active())
+            .filter(|x| Some(x) != monitoring_instance.as_ref().as_ref())
+            .cloned();
         let context = CommandContext::default();
         self.ssh_manager.execute(active, command, context).await?;
 

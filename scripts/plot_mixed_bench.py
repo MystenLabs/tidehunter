@@ -124,8 +124,21 @@ def parse_logs_to_dataframe(log_dir: Path) -> pd.DataFrame:
         print("No valid results found in log files")
         return pd.DataFrame()
         
-    print(f"Successfully parsed {len(results)} benchmark results.")
-    return pd.DataFrame(results)
+    df = pd.DataFrame(results)
+    
+    # Drop duplicates based on key parameters, keeping the last occurrence
+    # This ensures that if multiple logs have the same parameters, the later one overwrites the earlier one
+    key_columns = ['backend', 'read_mode', 'read_percentage', 'direct_io', 'zipf_exponent']
+    initial_count = len(df)
+    df = df.drop_duplicates(subset=key_columns, keep='last')
+    final_count = len(df)
+    
+    if initial_count > final_count:
+        duplicates_removed = initial_count - final_count
+        print(f"Removed {duplicates_removed} duplicate entries (kept last occurrence for each parameter combination)")
+        
+    print(f"Successfully parsed {len(df)} unique benchmark results.")
+    return df
 
 
 def plot_throughput_bars(df: pd.DataFrame, read_mode: str, direct_io: bool, zipf: float, output_dir: Path):
