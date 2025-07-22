@@ -205,9 +205,6 @@ impl ServerProviderClient for CustomClient {
     async fn instance_setup_commands(&self) -> CloudProviderResult<Vec<String>> {
         // Return generic setup commands for custom machines
         // These should be safe to run on most Ubuntu/Debian systems
-        Ok(vec![
-            "sudo apt-get update -y".to_string(),
-            "sudo apt-get install -y curl wget git build-essential".to_string(),
-        ])
+        Ok(vec![])
     }
 }
