@@ -14,6 +14,10 @@ on:
           - index
           - benchmark
         default: "all"
+      post_to_slack:
+        description: "Post results to Slack"
+        type: boolean
+        default: false
 
   # Run benchmarks weekly
   schedule:
@@ -178,7 +182,7 @@ jobs:
           echo $CONDENSED_SUMMARY
 
       - name: Send to Slack
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || github.event.inputs.post_to_slack == 'true'
         uses: slackapi/slack-github-action@v1.25.0
         with:
           channel-id: "tidehunter" # Replace with your channel ID
