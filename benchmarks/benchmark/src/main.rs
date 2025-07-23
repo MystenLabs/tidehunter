@@ -74,6 +74,10 @@ pub fn main() {
         temp_dir.path().to_path_buf()
     };
 
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    report!(report, "Hostname: {}", hostname);
     report!(report, "Path to storage: {}", path.display());
     report!(
         report,
