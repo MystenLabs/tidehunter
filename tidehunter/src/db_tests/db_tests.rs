@@ -526,6 +526,34 @@ fn test_ordered_iterator() {
 }
 
 #[test]
+fn test_iterator_with_tombstones() {
+    let dir = tempdir::TempDir::new("test-insert-while-iterating").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+    db.insert(ks, vec![1, 2], vec![1]).unwrap();
+    db.insert(ks, vec![1, 3], vec![2]).unwrap();
+    db.insert(ks, vec![1, 4], vec![3]).unwrap();
+    db.remove(ks, vec![1, 3]).unwrap();
+    let mut it = db.iterator(ks);
+    assert_eq!(
+        it.next().unwrap().unwrap(),
+        (vec![1, 2].into(), vec![1].into())
+    );
+    assert_eq!(
+        it.next().unwrap().unwrap(),
+        (vec![1, 4].into(), vec![3].into())
+    );
+    assert!(it.next().is_none());
+}
+
+#[test]
 fn test_insert_while_iterating() {
     let dir = tempdir::TempDir::new("test-insert-while-iterating").unwrap();
     let config = Arc::new(Config::small());

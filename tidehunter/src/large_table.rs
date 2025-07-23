@@ -623,7 +623,6 @@ impl LargeTable {
 
         if !entry.context.ks_config.unloaded_iterator_enabled() {
             entry.maybe_load(loader)?;
-            return Ok(entry.next_entry(prev_key, reverse));
         }
 
         match &entry.state {
