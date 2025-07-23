@@ -37,7 +37,7 @@ pub trait IndexFormat {
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)>;
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test_methods"))]
     /// Test method that cleans index before serializing.
     fn clean_serialize_index(&self, table: &mut IndexTable, ks: &KeySpaceDesc) -> Bytes {
         table.clean_self();

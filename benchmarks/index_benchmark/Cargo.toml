@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tidehunter = {version = "0.1.0", path = "../../tidehunter"}
+tidehunter = {version = "0.1.0", path = "../../tidehunter", features = ["test_methods"]}
 prometheus = {workspace = true}
 rand = {workspace = true}
 minibytes = { path = "../../third-party/minibytes", default-features = false, features = ["frommmap", "frombytes"] }

@@ -122,7 +122,8 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                     }
 
                     // Serialize the index
-                    let bytes = index_format_clone.serialize_index(&index, &ks_desc_clone);
+                    let bytes =
+                        index_format_clone.clean_serialize_index(&mut index, &ks_desc_clone);
 
                     // Send the serialized index through the channel
                     let result = tx_clone
