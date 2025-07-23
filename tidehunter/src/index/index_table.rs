@@ -135,31 +135,25 @@ impl IndexTable {
     ///
     /// This works even if prev is set to Some(k), but the value at k does not exist (for ex. was deleted).
     pub fn next_entry(&self, prev: Option<Bytes>, reverse: bool) -> Option<(Bytes, WalPosition)> {
+        fn next<'a>(
+            mut it: impl Iterator<Item = (&'a Bytes, &'a IndexWalPosition)> + 'a,
+        ) -> Option<(Bytes, WalPosition)> {
+            it.next()
+                .map(|(key, value)| (key.clone(), value.into_wal_position()))
+        }
         if let Some(prev) = prev {
             if reverse {
-                let range = self.data.range(..prev);
-                range
-                    .into_iter()
-                    .next_back()
-                    .map(|(key, value)| (key.clone(), value.into_wal_position()))
+                next(self.data.range(..prev).rev())
             } else {
                 let range = RangeFromExcluding { from: &prev };
-                let range = self.data.range(range);
-                range
-                    .into_iter()
-                    .next()
-                    .map(|(key, value)| (key.clone(), value.into_wal_position()))
+                next(self.data.range(range))
             }
         } else {
-            let mut iterator = self.data.iter();
+            let iterator = self.data.iter();
             if reverse {
-                iterator
-                    .next_back()
-                    .map(|(key, value)| (key.clone(), value.into_wal_position()))
+                next(iterator.rev())
             } else {
-                iterator
-                    .next()
-                    .map(|(key, value)| (key.clone(), value.into_wal_position()))
+                next(iterator)
             }
         }
     }
