@@ -48,7 +48,7 @@ jobs:
         run: cargo build
 
       - name: Check Cargo.lock
-        run:  git status | grep modified && (echo "Some files are not committed"; exit 1) || true
+        run:  git status | grep modified || exit 0 && (echo "Some files are not committed"; exit 1)
 
       - name: Run unit tests
         run: cargo test
