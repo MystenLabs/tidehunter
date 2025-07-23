@@ -47,5 +47,8 @@ jobs:
       - name: Build
         run: cargo build
 
+      - name: Check Cargo.lock
+        run:  git status | grep modified && (echo "Some files are not committed"; exit 1) || true
+
       - name: Run unit tests
         run: cargo test
