@@ -72,7 +72,7 @@ jobs:
           START_TIME=$(date +%s)
           cargo run --release -p benchmark -- \
             --operations 30000000 \
-            --writes 3000000 \
+            --writes 10000000 \
             --write-threads 72 \
             --mixed-threads 72 \
             --write-size 512 \
