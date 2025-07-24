@@ -442,13 +442,20 @@ impl StressThread {
                     ReadMode::Get => {
                         let (key, value) = self.key_value(pos);
                         timer = Instant::now();
-                        if let Some(found_value) = self.db.get(&key) {
+                        let result = if let Some(found_value) = self.db.get(&key) {
                             assert_eq!(
                                 &value[..],
                                 &found_value[..],
                                 "Found value does not match expected value"
                             );
-                        }
+                            "found"
+                        } else {
+                            "not_found"
+                        };
+                        self.benchmark_metrics
+                            .get_lt_result
+                            .with_label_values(&[result])
+                            .inc();
                         // If the key is not found, we do nothing as it may not have been written yet.
                         // This can happen because we select pos between 0 and global_pos(highest_local_pos)
                         // This range includes global positions that are owned by other threads,
