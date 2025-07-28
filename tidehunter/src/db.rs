@@ -401,7 +401,6 @@ impl Db {
             .update_flushed_index(ks, &cell, original_index, position)
     }
 
-
     fn read_record_check_key(&self, k: &[u8], position: WalPosition) -> DbResult<Option<Bytes>> {
         let (wal_key, v) = self.read_record(position)?;
         if wal_key.as_ref() != k {

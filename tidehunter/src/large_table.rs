@@ -1019,13 +1019,13 @@ impl LargeTableEntry {
             let flush_kind = self
                 .flush_kind()
                 .expect("unload_if_ks_enabled is called in clean state");
-            
+
             if self.context.config.sync_flush {
                 // Perform synchronous flush
                 if let Some((_original_index, position)) = IndexFlusherThread::handle_command(
                     loader,
                     &FlusherCommand::new(self.context.id(), self.cell.clone(), flush_kind),
-                    &self.context
+                    &self.context,
                 ) {
                     self.clear_after_flush(position);
                 }

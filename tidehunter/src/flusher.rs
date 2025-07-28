@@ -139,12 +139,14 @@ impl IndexFlusherThread {
             let Some(db) = self.db.upgrade() else {
                 return;
             };
-            
+
             let ks_context = db.ks_context(command.ks);
-            if let Some((original_index, position)) = Self::handle_command(&*db, &command, &ks_context) {
+            if let Some((original_index, position)) =
+                Self::handle_command(&*db, &command, &ks_context)
+            {
                 db.update_flushed_index(command.ks, command.cell, original_index, position);
             }
-            
+
             self.metrics
                 .flush_time_mcs
                 .with_label_values(&[&self.thread_id.to_string()])
@@ -159,10 +161,7 @@ impl IndexFlusherThread {
     ) -> Option<(Arc<IndexTable>, WalPosition)> {
         let (original_index, mut merged_index) = match &command.flush_kind {
             FlushKind::MergeUnloaded(position, dirty_index) => {
-                ctx.metrics
-                    .unload
-                    .with_label_values(&["merge_flush"])
-                    .inc();
+                ctx.metrics.unload.with_label_values(&["merge_flush"]).inc();
                 let mut disk_index = loader
                     .load(&ctx.ks_config, *position)
                     .expect("Failed to load index in flusher thread");
@@ -179,12 +178,12 @@ impl IndexFlusherThread {
             #[cfg(test)]
             FlushKind::Barrier(_) => return None,
         };
-        
+
         Self::run_compactor(ctx, &mut merged_index);
         let position = loader
             .flush(command.ks, &merged_index)
             .expect("Failed to flush index");
-        
+
         Some((original_index, position))
     }
 
