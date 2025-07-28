@@ -18,21 +18,21 @@ def get_base_config():
     return {
         'db_parameters': {
             'frag_size': 1024 * 1024 * 1024,
-            'max_maps': 64,
+            'max_maps': 128,
             'max_dirty_keys': 1024,
             'snapshot_written_bytes': 64 * 1024 * 1024 * 1024,
             'snapshot_unload_threshold': 128 * 1024 * 1024 * 1024,
             'unload_jitter_pct': 30,
             'direct_io': False,
-            'num_flusher_threads': 4
+            'num_flusher_threads': 12
         },
         'stress_client_parameters': {
-            'mixed_threads': 12,
-            'write_threads': 12,
-            'write_size': 512,
+            'mixed_threads': 36,
+            'write_threads': 36,
+            'write_size': 256,
             'key_len': 32,
-            'writes': 133000000,
-            'operations': 30000000,
+            'writes': 83000000,
+            'operations': 10000000,
             'background_writes': 0,
             'no_snapshot': False,
             'report': True,
@@ -43,7 +43,9 @@ def get_base_config():
             'backend': 'Tidehunter', 
             'path': '/home/ubuntu/working_dir',
             'read_percentage': 100,
-            'zipf_exponent': 0.0
+            'zipf_exponent': 0.0,
+            'cache_size': 0,      
+            'mutexes': 131072 
         }
     }
 
@@ -135,10 +137,12 @@ def main():
     # Define parameter combinations
     # You can easily modify this dictionary to add more parameters
     parameter_combinations = {
-        'backend': ['Tidehunter'],
-        'direct_io': [False, True], 
+        'backend': ['Tidehunter', 'Rocksdb'],
+        'direct_io': ['false'], 
         'read_percentage': [0, 50, 80, 100],
-        'zipf_exponent': [0.8],
+        'zipf_exponent': [0, 0.8, 1.5, 2],
+        'read_mode': ['Get', 'Exists', '!Lt 1'],
+        'path': ['/opt/sui/db/'],
     }
     
     print("Generating configurations with the following parameter combinations:")
