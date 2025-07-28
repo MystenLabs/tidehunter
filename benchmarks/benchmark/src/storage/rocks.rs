@@ -1,25 +1,132 @@
 use crate::storage::Storage;
 use minibytes::Bytes;
+use prometheus::{IntCounter, Registry};
 use rocksdb::{BlockBasedOptions, Cache, Direction, IteratorMode, Options, DB};
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 pub struct RocksStorage {
     db: DB,
+    // Prometheus counters for RocksDB statistics
+    bc_hit: IntCounter,
+    bc_miss: IntCounter,
+    mt_hit: IntCounter,
+    mt_miss: IntCounter,
 }
 
 impl RocksStorage {
-    pub fn open(path: &Path) -> Arc<Self> {
+    pub fn open(path: &Path, registry: &Registry) -> Arc<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+
+        // Enable RocksDB statistics
+        opts.enable_statistics();
+        opts.set_stats_dump_period_sec(60); // Optional: log stats every minute
+
         Self::update_opts(&mut opts);
         Self::optimize_for_write_throughput(&mut opts);
 
         std::fs::create_dir_all(path).unwrap();
         let db = DB::open(&opts, path).unwrap();
-        let this = Self { db };
-        Arc::new(this)
+
+        // Create and register Prometheus counters for RocksDB statistics
+        let bc_hit =
+            IntCounter::new("rocksdb_block_cache_hit_total", "RocksDB block cache hits").unwrap();
+        let bc_miss = IntCounter::new(
+            "rocksdb_block_cache_miss_total",
+            "RocksDB block cache misses",
+        )
+        .unwrap();
+        let mt_hit =
+            IntCounter::new("rocksdb_memtable_hit_total", "RocksDB memtable hits").unwrap();
+        let mt_miss =
+            IntCounter::new("rocksdb_memtable_miss_total", "RocksDB memtable misses").unwrap();
+
+        registry.register(Box::new(bc_hit.clone())).unwrap();
+        registry.register(Box::new(bc_miss.clone())).unwrap();
+        registry.register(Box::new(mt_hit.clone())).unwrap();
+        registry.register(Box::new(mt_miss.clone())).unwrap();
+
+        let this = Arc::new(Self {
+            db,
+            bc_hit,
+            bc_miss,
+            mt_hit,
+            mt_miss,
+        });
+
+        // Start background thread to update Prometheus counters
+        Self::spawn_stats_updater(this.clone());
+
+        this
+    }
+
+    fn spawn_stats_updater(storage: Arc<Self>) {
+        thread::Builder::new()
+            .name("rocksdb-stats-updater".to_string())
+            .spawn(move || {
+                // Track last values to convert absolute tickers to incremental counters
+                let mut last_values = [0u64; 4];
+
+                loop {
+                    thread::sleep(Duration::from_secs(5));
+
+                    // Get statistics from RocksDB
+                    let stats_str = storage
+                        .db
+                        .property_value("rocksdb.ticker.block.cache.hit")
+                        .unwrap_or(None);
+                    let bc_hit_current = stats_str.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
+                    let stats_str = storage
+                        .db
+                        .property_value("rocksdb.ticker.block.cache.miss")
+                        .unwrap_or(None);
+                    let bc_miss_current =
+                        stats_str.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
+                    let stats_str = storage
+                        .db
+                        .property_value("rocksdb.ticker.memtable.hit")
+                        .unwrap_or(None);
+                    let mt_hit_current = stats_str.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
+                    let stats_str = storage
+                        .db
+                        .property_value("rocksdb.ticker.memtable.miss")
+                        .unwrap_or(None);
+                    let mt_miss_current =
+                        stats_str.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
+                    let current_values = [
+                        bc_hit_current,
+                        bc_miss_current,
+                        mt_hit_current,
+                        mt_miss_current,
+                    ];
+
+                    for (i, (&current, last)) in
+                        current_values.iter().zip(&mut last_values).enumerate()
+                    {
+                        let delta = current.saturating_sub(*last);
+                        *last = current;
+
+                        if delta > 0 {
+                            match i {
+                                0 => storage.bc_hit.inc_by(delta),
+                                1 => storage.bc_miss.inc_by(delta),
+                                2 => storage.mt_hit.inc_by(delta),
+                                3 => storage.mt_miss.inc_by(delta),
+                                _ => unreachable!(),
+                            }
+                        }
+                    }
+                }
+            })
+            .unwrap();
     }
 
     pub fn optimize_for_write_throughput(opt: &mut Options) {
