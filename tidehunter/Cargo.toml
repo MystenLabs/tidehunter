@@ -7,7 +7,7 @@ edition = "2021"
 memmap2 = "0.7.0"
 minibytes = { path = "../third-party/minibytes", default-features = false, features = ["frommmap", "frombytes"] }
 smallvec = { version = "1.13.2", features = ["serde"] }
-parking_lot = { workspace = true }
+parking_lot = { workspace = true, features = ["arc_lock"] }
 crc32fast = "1.3.2"
 bytes = {workspace = true}
 bincode = "1.3.3"

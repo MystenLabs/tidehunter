@@ -166,11 +166,13 @@ impl Db {
             .wal_written_bytes_type
             .with_label_values(&["record", ks.name()])
             .inc_by(w.len() as u64);
-        let position = self.wal_writer.write(&w)?;
-        self.metrics.wal_written_bytes.set(position.offset() as i64);
+        let guard = self.wal_writer.write(&w)?;
+        self.metrics
+            .wal_written_bytes
+            .set(guard.wal_position().offset() as i64);
         let reduced_key = ks.reduced_key_bytes(k);
         self.large_table
-            .insert(ks, reduced_key, position, &v, self)?;
+            .insert(ks, reduced_key, *guard.wal_position(), &v, self)?;
         Ok(())
     }
 
@@ -188,9 +190,10 @@ impl Db {
             .wal_written_bytes_type
             .with_label_values(&["tombstone", ks.name()])
             .inc_by(w.len() as u64);
-        let position = self.wal_writer.write(&w)?;
+        let guard = self.wal_writer.write(&w)?;
         let reduced_key = ks.reduced_key_bytes(k);
-        self.large_table.remove(ks, reduced_key, position, self)
+        self.large_table
+            .remove(ks, reduced_key, *guard.wal_position(), self)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -260,7 +263,7 @@ impl Db {
             .mcs_timer();
 
         let batch_start_entry = PreparedWalWrite::new(&WalEntry::BatchStart(updates.len() as u32));
-        let positions = self
+        let guards = self
             .wal_writer
             .multi_write(std::iter::once(&batch_start_entry).chain(&prepared_writes))?;
 
@@ -282,7 +285,7 @@ impl Db {
                 .wal_written_bytes_type
                 .with_label_values(&[label, self.key_shape.ks(ks).name()])
                 .inc_by(prepared_writes[idx].len() as u64);
-            update_writes.push((update, positions[idx + 1]));
+            update_writes.push((update, *guards[idx + 1].wal_position()));
         }
         drop(_write_timer);
         self.metrics
@@ -546,7 +549,7 @@ impl Db {
             .wal_written_bytes_type
             .with_label_values(&["index", ksd.name()])
             .inc_by(w.len() as u64);
-        Ok(self.wal_writer.write(&w)?)
+        Ok(*self.wal_writer.write(&w)?.wal_position())
     }
 
     fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(bool, WalEntry)> {
