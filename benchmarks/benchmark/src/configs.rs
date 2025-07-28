@@ -138,6 +138,12 @@ pub struct StressClientParameters {
     /// The zipf exponent for reader position selection. 0 means uniform.
     #[serde(default = "defaults::default_zipf_exponent")]
     pub zipf_exponent: f64,
+    /// LRU cache size for key-value pairs (0 = disabled)
+    #[serde(default = "defaults::default_cache_size")]
+    pub cache_size: usize,
+    /// Number of mutexes (cells) for the key space
+    #[serde(default = "defaults::default_mutexes")]
+    pub mutexes: usize,
 }
 
 impl Default for StressClientParameters {
@@ -161,6 +167,8 @@ impl Default for StressClientParameters {
             backend: defaults::default_backend(),
             read_percentage: defaults::default_read_percentage(),
             zipf_exponent: defaults::default_zipf_exponent(),
+            cache_size: defaults::default_cache_size(),
+            mutexes: defaults::default_mutexes(),
         }
     }
 }
@@ -231,6 +239,14 @@ pub mod defaults {
 
     pub fn default_zipf_exponent() -> f64 {
         0.0
+    }
+
+    pub fn default_cache_size() -> usize {
+        0
+    }
+
+    pub fn default_mutexes() -> usize {
+        4096 * 32 // Match the original hardcoded value
     }
 }
 
@@ -323,6 +339,13 @@ pub struct StressArgs {
         help = "The zipf exponent for reader position selection. 0 means uniform."
     )]
     zipf_exponent: Option<f64>,
+    #[arg(long, help = "LRU cache size for key-value pairs (0 = disabled)")]
+    cache_size: Option<usize>,
+    #[arg(
+        long,
+        help = "Number of mutexes (cells) for the key space (must be power of 2)"
+    )]
+    mutexes: Option<usize>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -383,6 +406,12 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     }
     if let Some(zipf_exponent) = args.zipf_exponent {
         config.stress_client_parameters.zipf_exponent = zipf_exponent;
+    }
+    if let Some(cache_size) = args.cache_size {
+        config.stress_client_parameters.cache_size = cache_size;
+    }
+    if let Some(mutexes) = args.mutexes {
+        config.stress_client_parameters.mutexes = mutexes;
     }
 
     config
