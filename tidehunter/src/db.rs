@@ -344,20 +344,31 @@ impl Db {
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> DbResult<Option<IteratorResult<Bytes>>> {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["next_entry", ks.name()])
-            .mcs_timer();
         let Some(result) =
-            self.large_table
-                .next_entry(ks, cell, prev_key, self, end_cell_exclusive, reverse)?
+            self.next_entry_position(ks, cell, prev_key, end_cell_exclusive, reverse)?
         else {
             return Ok(None);
         };
         let (key, value) = self.read_record(result.value)?;
         Ok(Some(result.with_key_value(key, value)))
+    }
+
+    pub(crate) fn next_entry_position(
+        &self,
+        ks: KeySpace,
+        cell: CellId,
+        prev_key: Option<Bytes>,
+        end_cell_exclusive: &Option<CellId>,
+        reverse: bool,
+    ) -> DbResult<Option<IteratorResult<WalPosition>>> {
+        let ksd = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["next_entry", ksd.name()])
+            .mcs_timer();
+        self.large_table
+            .next_entry(ksd, cell, prev_key, self, end_cell_exclusive, reverse)
     }
 
     /// Returns the next cell in the large table
@@ -407,7 +418,7 @@ impl Db {
         }
     }
 
-    fn read_record(&self, position: WalPosition) -> DbResult<(Bytes, Bytes)> {
+    pub(crate) fn read_record(&self, position: WalPosition) -> DbResult<(Bytes, Bytes)> {
         let entry = self.read_report_entry(position)?;
         if let WalEntry::Record(KeySpace(_), k, v) = entry {
             Ok((k, v))
