@@ -42,6 +42,7 @@ pub struct LargeTableEntry {
     bloom_filter: Option<BloomFilter>,
     unload_jitter: usize,
     flush_pending: bool,
+    last_processed: u64,
 }
 
 enum LargeTableEntryState {
@@ -827,6 +828,11 @@ pub trait Loader {
     fn flush_supported(&self) -> bool;
 
     fn flush(&self, ks: KeySpace, data: &IndexTable) -> Result<WalPosition, Self::Error>;
+
+    /// Returns the last WAL position that has been fully processed and committed.
+    /// This position represents the highest WAL offset where all operations up to and
+    /// including that offset have been successfully processed and their guards dropped.
+    fn last_processed_wal_position(&self) -> u64;
 }
 
 impl LargeTableEntry {
@@ -875,6 +881,8 @@ impl LargeTableEntry {
             bloom_filter,
             unload_jitter,
             flush_pending: false,
+            // TODO: Store and restore this value from snapshot
+            last_processed: 0,
         }
     }
 
@@ -1019,6 +1027,9 @@ impl LargeTableEntry {
             return;
         }
         if !self.flush_pending {
+            // Set the last processed WAL position before triggering the flush
+            self.last_processed = loader.last_processed_wal_position();
+            
             let flush_kind = self
                 .flush_kind()
                 .expect("unload_if_ks_enabled is called in clean state");
@@ -1525,6 +1536,11 @@ mod tests {
 
             fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> Result<WalPosition, Self::Error> {
                 Ok(WalPosition::test_value(100))
+            }
+
+            fn last_processed_wal_position(&self) -> u64 {
+                // Return a test value for mock
+                0
             }
         }
 

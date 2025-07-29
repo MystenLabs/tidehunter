@@ -673,6 +673,12 @@ impl Loader for Wal {
     fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> DbResult<WalPosition> {
         unimplemented!()
     }
+
+    fn last_processed_wal_position(&self) -> u64 {
+        // Wal doesn't have access to WalWriter, so return 0
+        // This is only used during flush which Wal doesn't support
+        0
+    }
 }
 
 impl Loader for Db {
@@ -695,6 +701,10 @@ impl Loader for Db {
 
     fn flush(&self, ks: KeySpace, data: &IndexTable) -> DbResult<WalPosition> {
         self.write_index(ks, data)
+    }
+
+    fn last_processed_wal_position(&self) -> u64 {
+        self.wal_writer.last_processed()
     }
 }
 
