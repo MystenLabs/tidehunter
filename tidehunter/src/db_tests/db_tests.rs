@@ -893,12 +893,8 @@ fn test_bloom_filter() {
     }
 }
 
-#[test]
-fn test_dirty_unloading() {
+fn test_dirty_unloading_with_config(config: Arc<Config>) {
     let dir = tempdir::TempDir::new("test-dirty-unloading").unwrap();
-    let mut config = Config::small();
-    config.max_dirty_keys = 2;
-    let config = Arc::new(config);
     let (key_shape, ks) = KeyShape::new_single(5, 2, KeyType::uniform(1024));
     #[track_caller]
     fn check_all(db: &Db, ks: KeySpace, last: u8) {
@@ -1017,6 +1013,21 @@ fn test_dirty_unloading() {
         db.get(ks, &other_key).unwrap().unwrap();
         check_metrics(&db.metrics, 0, 2, 0, 0);
     }
+}
+
+#[test]
+fn test_dirty_unloading() {
+    let mut config = Config::small();
+    config.max_dirty_keys = 2;
+    test_dirty_unloading_with_config(Arc::new(config));
+}
+
+#[test]
+fn test_dirty_unloading_sync_flush() {
+    let mut config = Config::small();
+    config.max_dirty_keys = 2;
+    config.sync_flush = true;
+    test_dirty_unloading_with_config(Arc::new(config));
 }
 
 #[test]

@@ -1,7 +1,8 @@
 use crate::cell::CellId;
+use crate::context::KsContext;
 use crate::db::Db;
 use crate::index::index_table::IndexTable;
-use crate::key_shape::{KeySpace, KeySpaceDesc};
+use crate::key_shape::KeySpace;
 use crate::large_table::Loader;
 use crate::metrics::Metrics;
 use crate::wal::WalPosition;
@@ -17,7 +18,7 @@ pub struct IndexFlusher {
     metrics: Arc<Metrics>,
 }
 
-struct IndexFlusherThread {
+pub(crate) struct IndexFlusherThread {
     db: Weak<Db>,
     receiver: mpsc::Receiver<FlusherCommand>,
     metrics: Arc<Metrics>,
@@ -28,6 +29,16 @@ pub struct FlusherCommand {
     ks: KeySpace,
     cell: CellId,
     flush_kind: FlushKind,
+}
+
+impl FlusherCommand {
+    pub fn new(ks: KeySpace, cell: CellId, flush_kind: FlushKind) -> Self {
+        Self {
+            ks,
+            cell,
+            flush_kind,
+        }
+    }
 }
 
 pub enum FlushKind {
@@ -66,11 +77,7 @@ impl IndexFlusher {
 
     pub fn request_flush(&self, ks: KeySpace, cell: CellId, flush_kind: FlushKind) {
         let thread_index = self.get_thread_for_cell(&cell);
-        let command = FlusherCommand {
-            ks,
-            cell,
-            flush_kind,
-        };
+        let command = FlusherCommand::new(ks, cell, flush_kind);
         self.metrics.flush_pending.add(1);
         self.senders[thread_index]
             .send(command)
@@ -96,11 +103,11 @@ impl IndexFlusher {
         // Send a barrier command to each thread
         for (thread_id, sender) in self.senders.iter().enumerate() {
             let lock = mutex.lock_arc();
-            let command = FlusherCommand {
-                ks: KeySpace::new_test(0),
-                cell: CellId::Integer(thread_id), // Use thread_id to ensure it goes to the right thread
-                flush_kind: FlushKind::Barrier(SendGuard(lock)),
-            };
+            let command = FlusherCommand::new(
+                KeySpace::new_test(0),
+                CellId::Integer(thread_id), // Use thread_id to ensure it goes to the right thread
+                FlushKind::Barrier(SendGuard(lock)),
+            );
             self.metrics.flush_pending.add(1);
             sender.send(command).unwrap();
         }
@@ -132,34 +139,14 @@ impl IndexFlusherThread {
             let Some(db) = self.db.upgrade() else {
                 return;
             };
-            let (original_index, mut merged_index) = match command.flush_kind {
-                FlushKind::MergeUnloaded(position, dirty_index) => {
-                    self.metrics
-                        .unload
-                        .with_label_values(&["merge_flush"])
-                        .inc();
-                    let mut disk_index = db
-                        .load_index(command.ks, position)
-                        .expect("Failed to load index in flusher thread");
-                    disk_index.merge_dirty_and_clean(&dirty_index);
-                    (dirty_index, disk_index)
-                }
-                FlushKind::FlushLoaded(index) => {
-                    self.metrics.unload.with_label_values(&["flush"]).inc();
-                    // todo - no need to make copy if there is no compactor
-                    let mut index_copy = IndexTable::clone(&index);
-                    index_copy.clean_self();
-                    (index, index_copy)
-                }
-                #[cfg(test)]
-                FlushKind::Barrier(_) => continue,
-            };
-            let ks = db.ks(command.ks);
-            self.run_compactor(ks, &mut merged_index);
-            let position = db
-                .flush(command.ks, &merged_index)
-                .expect("Failed to flush index");
-            db.update_flushed_index(command.ks, command.cell, original_index, position);
+
+            let ks_context = db.ks_context(command.ks);
+            if let Some((original_index, position)) =
+                Self::handle_command(&*db, &command, &ks_context)
+            {
+                db.update_flushed_index(command.ks, command.cell, original_index, position);
+            }
+
             self.metrics
                 .flush_time_mcs
                 .with_label_values(&[&self.thread_id.to_string()])
@@ -167,16 +154,49 @@ impl IndexFlusherThread {
         }
     }
 
+    pub(crate) fn handle_command<L: Loader>(
+        loader: &L,
+        command: &FlusherCommand,
+        ctx: &KsContext,
+    ) -> Option<(Arc<IndexTable>, WalPosition)> {
+        let (original_index, mut merged_index) = match &command.flush_kind {
+            FlushKind::MergeUnloaded(position, dirty_index) => {
+                ctx.metrics.unload.with_label_values(&["merge_flush"]).inc();
+                let mut disk_index = loader
+                    .load(&ctx.ks_config, *position)
+                    .expect("Failed to load index in flusher thread");
+                disk_index.merge_dirty_and_clean(dirty_index);
+                (dirty_index.clone(), disk_index)
+            }
+            FlushKind::FlushLoaded(index) => {
+                ctx.metrics.unload.with_label_values(&["flush"]).inc();
+                // todo - no need to make copy if there is no compactor
+                let mut index_copy = IndexTable::clone(index);
+                index_copy.clean_self();
+                (index.clone(), index_copy)
+            }
+            #[cfg(test)]
+            FlushKind::Barrier(_) => return None,
+        };
+
+        Self::run_compactor(ctx, &mut merged_index);
+        let position = loader
+            .flush(command.ks, &merged_index)
+            .expect("Failed to flush index");
+
+        Some((original_index, position))
+    }
+
     // todo - code duplicate with LargeTable::run_compactor
     // todo - result of compactor is not applied to in-memory index for DirtyLoaded
-    fn run_compactor(&self, ks: &KeySpaceDesc, index: &mut IndexTable) {
-        if let Some(compactor) = ks.compactor() {
+    fn run_compactor(ctx: &KsContext, index: &mut IndexTable) {
+        if let Some(compactor) = ctx.ks_config.compactor() {
             let pre_compact_len = index.len();
             compactor(index.data_for_compaction());
             let compacted = pre_compact_len.saturating_sub(index.len());
-            self.metrics
+            ctx.metrics
                 .compacted_keys
-                .with_label_values(&[ks.name()])
+                .with_label_values(&[ctx.name()])
                 .inc_by(compacted as u64);
         }
     }

@@ -1,6 +1,7 @@
 use crate::batch::{Update, WriteBatch};
 use crate::cell::CellId;
 use crate::config::Config;
+use crate::context::KsContext;
 use crate::control::{ControlRegion, ControlRegionStore};
 use crate::crc::IntoBytesFixed;
 use crate::flusher::IndexFlusher;
@@ -323,6 +324,14 @@ impl Db {
         self.key_shape.ks(ks)
     }
 
+    pub(crate) fn ks_context(&self, ks: KeySpace) -> KsContext {
+        KsContext {
+            config: self.config.clone(),
+            ks_config: self.ks(ks).clone(),
+            metrics: self.metrics.clone(),
+        }
+    }
+
     /// Returns the next entry in the database, after the specified previous key.
     /// Iterator must specify the cell to inspect and the (Optional) previous key.
     ///
@@ -390,12 +399,6 @@ impl Db {
             .mcs_timer();
         self.large_table
             .update_flushed_index(ks, &cell, original_index, position)
-    }
-
-    pub(crate) fn load_index(&self, ks: KeySpace, position: WalPosition) -> DbResult<IndexTable> {
-        let ks = self.key_shape.ks(ks);
-        let entry = self.read_report_entry(position)?;
-        Self::read_index(ks, entry)
     }
 
     fn read_record_check_key(&self, k: &[u8], position: WalPosition) -> DbResult<Option<Bytes>> {

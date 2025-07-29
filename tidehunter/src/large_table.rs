@@ -1,7 +1,7 @@
 use crate::cell::{CellId, CellIdBytesContainer};
 use crate::config::Config;
 use crate::context::KsContext;
-use crate::flusher::{FlushKind, IndexFlusher};
+use crate::flusher::{FlushKind, FlusherCommand, IndexFlusher, IndexFlusherThread};
 use crate::index::index_format::Direction;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
@@ -196,7 +196,7 @@ impl LargeTable {
         entry.insert(k.clone(), v);
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
-            entry.unload_if_ks_enabled(&self.flusher);
+            entry.unload_if_ks_enabled(&self.flusher, loader);
         }
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
@@ -1011,17 +1011,42 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    pub fn unload_if_ks_enabled(&mut self, flusher: &IndexFlusher) {
+    pub fn unload_if_ks_enabled<L: Loader>(&mut self, flusher: &IndexFlusher, loader: &L) {
         if self.context.ks_config.unloading_disabled() {
             return;
         }
         if !self.flush_pending {
-            self.flush_pending = true;
             let flush_kind = self
                 .flush_kind()
                 .expect("unload_if_ks_enabled is called in clean state");
-            flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
+
+            if self.context.config.sync_flush {
+                // Perform synchronous flush
+                if let Some((_original_index, position)) = IndexFlusherThread::handle_command(
+                    loader,
+                    &FlusherCommand::new(self.context.id(), self.cell.clone(), flush_kind),
+                    &self.context,
+                ) {
+                    self.clear_after_flush(position);
+                }
+            } else {
+                // Perform async flush
+                self.flush_pending = true;
+                flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
+            }
         }
+    }
+
+    fn clear_after_flush(&mut self, position: WalPosition) {
+        // Clear all data after a flush where we know data hasn't changed
+        self.report_loaded_keys_delta(-(self.data.len() as i64));
+        self.data = Default::default();
+        self.state = LargeTableEntryState::Unloaded(position);
+        self.context
+            .metrics
+            .flush_update
+            .with_label_values(&["clear"])
+            .inc();
     }
 
     pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
@@ -1038,14 +1063,7 @@ impl LargeTableEntry {
         }
         self.flush_pending = false;
         if self.data.same_shared(&original_index) {
-            self.report_loaded_keys_delta(-(self.data.len() as i64));
-            self.data = Default::default();
-            self.state = LargeTableEntryState::Unloaded(position);
-            self.context
-                .metrics
-                .flush_update
-                .with_label_values(&["clear"])
-                .inc();
+            self.clear_after_flush(position);
         } else {
             let delta = self.data.make_mut().unmerge_flushed(&original_index);
             self.report_loaded_keys_delta(delta);
