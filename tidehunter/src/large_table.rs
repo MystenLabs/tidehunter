@@ -71,19 +71,36 @@ enum Entries {
 
 pub(crate) type RowContainer<T> = BTreeMap<CellId, T>;
 
+/// Snapshot data for a single entry containing both WAL position and last processed position
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub(crate) struct SnapshotEntryData {
+    pub position: WalPosition,
+    pub last_processed: u64,
+}
+
+impl SnapshotEntryData {
+    /// Creates an empty/invalid snapshot entry data
+    pub fn empty() -> Self {
+        Self {
+            position: WalPosition::INVALID,
+            last_processed: 0,
+        }
+    }
+}
+
 /// ks -> row -> cell
 #[derive(Serialize, Deserialize)]
 pub(crate) struct LargeTableContainer<T>(pub Vec<Vec<RowContainer<T>>>);
 
 pub(crate) struct LargeTableSnapshot {
-    pub data: LargeTableContainer<WalPosition>,
+    pub data: LargeTableContainer<SnapshotEntryData>,
     pub last_added_position: WalPosition,
 }
 
 impl LargeTable {
     pub fn from_unloaded<L: Loader>(
         key_shape: &KeyShape,
-        snapshot: &LargeTableContainer<WalPosition>,
+        snapshot: &LargeTableContainer<SnapshotEntryData>,
         config: Arc<Config>,
         flusher: IndexFlusher,
         metrics: Arc<Metrics>,
@@ -114,14 +131,15 @@ impl LargeTable {
                         config: config.clone(),
                         metrics: metrics.clone(),
                     };
-                    let entries = row_snapshot.iter().map(|(cell, position)| {
+                    let entries = row_snapshot.iter().map(|(cell, entry_data)| {
                         let bloom_filter = context.ks_config.bloom_filter().map(|opts| {
                             let mut filter = BloomFilter::with_rate(opts.rate, opts.count);
-                            if position.is_valid() {
+                            if entry_data.position.is_valid() {
                                 let now = Instant::now();
-                                let data = loader.load(&context.ks_config, *position).expect(
-                                    "Failed to load an index entry to reconstruct bloom filter",
-                                );
+                                let data =
+                                    loader.load(&context.ks_config, entry_data.position).expect(
+                                        "Failed to load an index entry to reconstruct bloom filter",
+                                    );
                                 for key in data.keys() {
                                     filter.insert(key);
                                 }
@@ -130,10 +148,10 @@ impl LargeTable {
                             filter
                         });
                         let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
-                        LargeTableEntry::from_snapshot_position(
+                        LargeTableEntry::from_snapshot_data(
                             context.clone(),
                             cell.clone(),
-                            position,
+                            entry_data,
                             unload_jitter,
                             bloom_filter,
                         )
@@ -521,7 +539,7 @@ impl LargeTable {
         loader: &L,
     ) -> Result<
         (
-            Vec<RowContainer<WalPosition>>,
+            Vec<RowContainer<SnapshotEntryData>>,
             Option<WalPosition>,
             Option<WalPosition>,
         ),
@@ -536,7 +554,11 @@ impl LargeTable {
             for (key, entry) in row.entries.iter_mut() {
                 entry.maybe_unload_for_snapshot(loader, &self.config, tail_position)?;
                 let position = entry.state.wal_position();
-                row_data.insert(key, position);
+                let snapshot_data = SnapshotEntryData {
+                    position,
+                    last_processed: entry.last_processed,
+                };
+                row_data.insert(key, snapshot_data);
                 if let Some(valid_position) = position.valid() {
                     max_wal_position = if let Some(max_wal_position) = max_wal_position {
                         Some(cmp::max(max_wal_position, valid_position))
@@ -881,23 +903,30 @@ impl LargeTableEntry {
             bloom_filter,
             unload_jitter,
             flush_pending: false,
-            // TODO: Store and restore this value from snapshot
             last_processed: 0,
         }
     }
 
-    pub fn from_snapshot_position(
+    pub fn from_snapshot_data(
         context: KsContext,
         cell: CellId,
-        position: &WalPosition,
+        entry_data: &SnapshotEntryData,
         unload_jitter: usize,
         bloom_filter: Option<BloomFilter>,
     ) -> Self {
-        if position == &WalPosition::INVALID {
+        let mut entry = if entry_data.position == WalPosition::INVALID {
             LargeTableEntry::new_empty(context, cell, unload_jitter)
         } else {
-            LargeTableEntry::new_unloaded(context, cell, *position, unload_jitter, bloom_filter)
-        }
+            LargeTableEntry::new_unloaded(
+                context,
+                cell,
+                entry_data.position,
+                unload_jitter,
+                bloom_filter,
+            )
+        };
+        entry.last_processed = entry_data.last_processed;
+        entry
     }
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
@@ -1029,7 +1058,7 @@ impl LargeTableEntry {
         if !self.flush_pending {
             // Set the last processed WAL position before triggering the flush
             self.last_processed = loader.last_processed_wal_position();
-            
+
             let flush_kind = self
                 .flush_kind()
                 .expect("unload_if_ks_enabled is called in clean state");
@@ -1472,7 +1501,7 @@ mod tests {
         .unwrap();
         let l = LargeTable::from_unloaded(
             &ks,
-            &LargeTableContainer::new_from_key_shape(&ks, WalPosition::INVALID),
+            &LargeTableContainer::new_from_key_shape(&ks, SnapshotEntryData::empty()),
             Arc::new(config),
             IndexFlusher::new_unstarted_for_test(),
             Metrics::new(),
