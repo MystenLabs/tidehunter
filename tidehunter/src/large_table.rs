@@ -41,8 +41,11 @@ pub struct LargeTableEntry {
     context: KsContext,
     bloom_filter: Option<BloomFilter>,
     unload_jitter: usize,
-    flush_pending: bool,
     last_processed: u64,
+    /// Tracks the WAL last_processed position captured when an async flush was initiated.
+    /// - `None`: No flush is pending
+    /// - `Some(pos)`: Async flush is in progress, will update `last_processed` to `pos` when complete
+    pending_last_processed: Option<u64>,
 }
 
 enum LargeTableEntryState {
@@ -902,7 +905,7 @@ impl LargeTableEntry {
             data: Default::default(),
             bloom_filter,
             unload_jitter,
-            flush_pending: false,
+            pending_last_processed: None,
             last_processed: 0,
         }
     }
@@ -1031,7 +1034,7 @@ impl LargeTableEntry {
         if !self.state.is_dirty() {
             return Ok(());
         }
-        if self.flush_pending {
+        if self.pending_last_processed.is_some() {
             // todo metric / log?
             return Ok(());
         }
@@ -1055,9 +1058,9 @@ impl LargeTableEntry {
         if self.context.ks_config.unloading_disabled() {
             return;
         }
-        if !self.flush_pending {
-            // Set the last processed WAL position before triggering the flush
-            self.last_processed = loader.last_processed_wal_position();
+        if self.pending_last_processed.is_none() {
+            // Capture the last processed WAL position when starting the flush
+            let captured_last_processed = loader.last_processed_wal_position();
 
             let flush_kind = self
                 .flush_kind()
@@ -1070,11 +1073,13 @@ impl LargeTableEntry {
                     &FlusherCommand::new(self.context.id(), self.cell.clone(), flush_kind),
                     &self.context,
                 ) {
+                    // For sync flush, update last_processed immediately
+                    self.last_processed = captured_last_processed;
                     self.clear_after_flush(position);
                 }
             } else {
-                // Perform async flush
-                self.flush_pending = true;
+                // Perform async flush - store the captured value for later
+                self.pending_last_processed = Some(captured_last_processed);
                 flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
             }
         }
@@ -1093,10 +1098,10 @@ impl LargeTableEntry {
     }
 
     pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
-        assert!(
-            self.flush_pending,
-            "update_merged_index called while flush_pending is not set"
-        );
+        let pending_last_processed = self
+            .pending_last_processed
+            .take()
+            .expect("update_flushed_index called while pending_last_processed is not set");
         match self.state {
             LargeTableEntryState::DirtyUnloaded(_) => {}
             LargeTableEntryState::DirtyLoaded(_) => {}
@@ -1104,7 +1109,8 @@ impl LargeTableEntry {
             LargeTableEntryState::Unloaded(_) => panic!("update_merged_index in Unloaded state"),
             LargeTableEntryState::Loaded(_) => panic!("update_merged_index in Loaded state"),
         }
-        self.flush_pending = false;
+        // Now that flush is complete, update last_processed
+        self.last_processed = pending_last_processed;
         if self.data.same_shared(&original_index) {
             self.clear_after_flush(position);
         } else {
