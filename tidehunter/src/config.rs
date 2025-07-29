@@ -21,7 +21,7 @@ pub struct Config {
     pub direct_io: bool,
     /// Number of background flusher threads for handling index flushes
     pub num_flusher_threads: usize,
-    /// Whether to perform flushing synchronously instead of async (default: true)
+    /// Whether to perform flushing synchronously instead of async (default: false)
     pub sync_flush: bool,
 }
 
@@ -36,7 +36,7 @@ impl Default for Config {
             unload_jitter_pct: 30,
             direct_io: false,
             num_flusher_threads: 1,
-            sync_flush: true,
+            sync_flush: false,
         }
     }
 }
@@ -52,7 +52,7 @@ impl Config {
             unload_jitter_pct: 10,
             direct_io: false,
             num_flusher_threads: 1,
-            sync_flush: true,
+            sync_flush: false,
         }
     }
 

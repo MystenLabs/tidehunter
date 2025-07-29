@@ -1019,7 +1019,6 @@ fn test_dirty_unloading_with_config(config: Arc<Config>) {
 fn test_dirty_unloading() {
     let mut config = Config::small();
     config.max_dirty_keys = 2;
-    config.sync_flush = false; // Test async flush behavior
     test_dirty_unloading_with_config(Arc::new(config));
 }
 
