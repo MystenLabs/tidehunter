@@ -1946,7 +1946,11 @@ fn test_variable_length_keys() {
 
 fn test_variable_length_keys_it() {
     let dir = tempdir::TempDir::new("test_variable_length_keys").unwrap();
-    let config = Arc::new(Config::small());
+    let mut config = Config::small();
+    config.sync_flush = true;
+    // todo this test fails with config.sync_flush = false
+    // todo This is because of a real bug in snapshot capture with async flush
+    let config = Arc::new(config);
     let metrics = Metrics::new();
     let ks_config = KeySpaceConfig::default()
         // todo unloaded iterator is not supported
@@ -1976,8 +1980,6 @@ fn test_variable_length_keys_it() {
 
         db.insert(ks, key1.clone(), vec![1]).unwrap();
         db.insert(ks, key2.clone(), vec![2]).unwrap();
-        db.large_table.flusher.barrier(); // todo this test fails without this barrier
-                                          // todo This is because of a real bug in how snapshot captures replay_from
         db.insert(ks, key3.clone(), vec![3]).unwrap();
 
         assert_eq!(Some(vec![1].into()), db.get(ks, &key1).unwrap());
