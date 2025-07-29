@@ -10,14 +10,13 @@ pub struct WalGuard {
     wal_position: WalPosition,
 }
 
-pub struct WalBatch {
+pub struct WalGuardMaker {
     shared_guard: Rc<ArcMutexGuard<RawMutex, ()>>,
 }
 
 #[derive(Clone)]
 pub struct WalTracker {
     sender: mpsc::Sender<WalTrackerMessage>,
-    #[allow(dead_code)]
     last_processed: Arc<AtomicU64>,
 }
 
@@ -46,8 +45,7 @@ impl WalTracker {
         }
     }
 
-
-    pub fn new_batch(&self, end_position: u64) -> WalBatch {
+    pub fn new_batch(&self, end_position: u64) -> WalGuardMaker {
         let mutex = Arc::new(Mutex::new(()));
         let guard = mutex.lock_arc();
         let message = WalTrackerMessage {
@@ -55,12 +53,11 @@ impl WalTracker {
             position: end_position,
         };
         self.sender.send(message).ok();
-        WalBatch {
+        WalGuardMaker {
             shared_guard: Rc::new(guard),
         }
     }
 
-    #[allow(dead_code)]
     pub fn last_processed(&self) -> u64 {
         self.last_processed.load(Ordering::Relaxed)
     }
@@ -72,7 +69,7 @@ impl WalGuard {
     }
 }
 
-impl WalBatch {
+impl WalGuardMaker {
     pub fn guard(&self, position: WalPosition) -> WalGuard {
         WalGuard {
             _guard: Rc::clone(&self.shared_guard),

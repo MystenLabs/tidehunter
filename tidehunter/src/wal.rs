@@ -21,7 +21,8 @@ use std::{io, mem, ptr, thread};
 
 pub struct WalWriter {
     wal: Arc<Wal>,
-    position_and_map: Mutex<(IncrementalWalPosition, Map, WalTracker)>,
+    position_and_map: Mutex<(IncrementalWalPosition, Map)>,
+    wal_tracker: WalTracker,
     mapper: WalMapper,
 }
 
@@ -128,7 +129,13 @@ impl WalWriter {
             "Attempt to write into read-only map"
         );
         let data = current_map_and_position.1.data.clone();
-        let wal_batch = current_map_and_position.2.new_batch(pos);
+
+        // Calculate the end position after all writes
+        let end_pos = pos + len_aligned;
+        // IMPORTANT: Must call new_batch while holding the position mutex to ensure
+        // WalTracker receives positions in order
+        let wal_batch = self.wal_tracker.new_batch(end_pos);
+
         // Dropping lock to allow data copy to be done in parallel
         drop(current_map_and_position);
 
@@ -152,6 +159,11 @@ impl WalWriter {
     /// not to be used as WalPosition, only as a metric to see how many bytes were written
     pub fn position(&self) -> u64 {
         self.position_and_map.lock().0.position
+    }
+
+    /// Returns the last processed position from the WalTracker
+    pub fn last_processed(&self) -> u64 {
+        self.wal_tracker.last_processed()
     }
 }
 
@@ -616,12 +628,13 @@ impl WalIterator {
             self.wal().metrics.clone(),
         );
         assert_eq!(self.wal.layout.locate(position.position).0, self.map.id);
-        let wal_tracker = WalTracker::start();
-        let position_and_map = (position, self.map, wal_tracker);
+        let position_and_map = (position, self.map);
         let position_and_map = Mutex::new(position_and_map);
+        let wal_tracker = WalTracker::start();
         WalWriter {
             wal: self.wal,
             position_and_map,
+            wal_tracker,
             mapper,
         }
     }
@@ -928,6 +941,52 @@ mod tests {
 
     /// Test that the wal file is resized correctly when the file is corrupted in such a way that
     /// the file length is not a multiple of the frag size.
+    #[test]
+    fn test_wal_tracker_integration() {
+        let dir = tempdir::TempDir::new("test_wal_tracker").unwrap();
+        let layout = WalLayout {
+            frag_size: 1024,
+            max_maps: 16,
+            direct_io: false,
+        };
+        let wal = Wal::open(&dir.path().join("wal"), layout, Metrics::new()).unwrap();
+        let wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+        let writer = wal_iterator.into_writer();
+
+        // Write some data and get a guard
+        let data = vec![1, 2, 3, 4, 5];
+        let prepared_write = PreparedWalWrite::new(&data);
+        let guard = writer.write(&prepared_write).unwrap();
+        let guard_position = *guard.wal_position();
+
+        // Wait a bit to let any immediate processing settle
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Get initial last_processed from the writer
+        let initial_last_processed = writer.last_processed();
+
+        // Initial last_processed should be less than or equal to guard position
+        assert!(
+            initial_last_processed <= guard_position.offset(),
+            "initial last_processed ({}) should be <= guard position ({})",
+            initial_last_processed,
+            guard_position.offset()
+        );
+
+        // Drop the guard
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Check that last_processed is greater than the guard position
+        let final_last_processed = writer.last_processed();
+        assert!(
+            final_last_processed > guard_position.offset(),
+            "final last_processed ({}) should be > guard position ({})",
+            final_last_processed,
+            guard_position.offset()
+        );
+    }
+
     #[test]
     fn test_wal_resize() {
         let dir = tempdir::TempDir::new("test_wal_resize").unwrap();
