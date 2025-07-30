@@ -200,11 +200,12 @@ impl LargeTable {
         &self,
         ks: &KeySpaceDesc,
         k: Bytes,
-        v: WalPosition,
+        guard: crate::wal_tracker::WalGuard,
         value: &Bytes,
         loader: &L,
     ) -> Result<(), L::Error> {
         self.fp.fp_insert_before_lock();
+        let v = *guard.wal_position();
         let (mut row, cell) = self.row(ks, &k);
         let entry = row.entry_mut(&cell);
         if self.skip_stale_update(ks, entry, &k, v, loader)? {
@@ -217,6 +218,8 @@ impl LargeTable {
         entry.insert(k.clone(), v);
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
+            // Drop the guard before flushing to ensure last_processed is updated
+            drop(guard);
             entry.unload_if_ks_enabled(&self.flusher, loader);
         }
         if let Some(value_lru) = &mut row.value_lru {
@@ -247,10 +250,11 @@ impl LargeTable {
         &self,
         ks: &KeySpaceDesc,
         k: Bytes,
-        v: WalPosition,
+        guard: crate::wal_tracker::WalGuard,
         loader: &L,
     ) -> Result<(), L::Error> {
         self.fp.fp_remove_before_lock();
+        let v = *guard.wal_position();
         let (mut row, cell) = self.row(ks, &k);
         let entry = row.entry_mut(&cell);
         if self.skip_stale_update(ks, entry, &k, v, loader)? {
@@ -368,38 +372,18 @@ impl LargeTable {
     /// Returns true if the update is outdated and should be skipped
     fn skip_stale_update<L: Loader>(
         &self,
-        ks: &KeySpaceDesc,
+        _ks: &KeySpaceDesc,
         entry: &LargeTableEntry,
         key: &Bytes,
         wal_position: WalPosition,
-        loader: &L,
+        _loader: &L,
     ) -> Result<bool, L::Error> {
         // check the existing loaded WAL position first, if present
         if let Some(last_position) = entry.data.get_update_position(key) {
-            return Ok(last_position > wal_position);
+            Ok(last_position > wal_position)
+        } else {
+            Ok(false)
         }
-        let (LargeTableEntryState::Unloaded(pos) | LargeTableEntryState::DirtyUnloaded(pos, ..)) =
-            entry.state
-        else {
-            return Ok(false);
-        };
-
-        // If the WAL position is higher than the unloaded index position, the update is safe
-        if wal_position > pos {
-            return Ok(false);
-        }
-        self.metrics
-            .read_index_on_large_table_update
-            .with_label_values(&[(ks.name())])
-            .inc();
-        let index_reader = loader.index_reader(pos)?;
-        if let Some(last_position) = runtime::block_in_place(|| {
-            ks.index_format()
-                .lookup_unloaded(ks, &index_reader, key, &self.metrics)
-        }) {
-            return Ok(last_position > wal_position);
-        }
-        Ok(false)
     }
 
     fn report_lookup_result(
@@ -1083,7 +1067,7 @@ impl LargeTableEntry {
                 ) {
                     // For sync flush, update last_processed immediately
                     self.last_processed = captured_last_processed;
-                    self.clear_after_flush(position);
+                    self.clear_after_flush(position, captured_last_processed);
                 }
             } else {
                 // Perform async flush - store the captured value for later
@@ -1093,16 +1077,28 @@ impl LargeTableEntry {
         }
     }
 
-    fn clear_after_flush(&mut self, position: WalPosition) {
-        // Clear all data after a flush where we know data hasn't changed
-        self.report_loaded_keys_delta(-(self.data.len() as i64));
-        self.data = Default::default();
-        self.state = LargeTableEntryState::Unloaded(position);
-        self.context
-            .metrics
-            .flush_update
-            .with_label_values(&["clear"])
-            .inc();
+    fn clear_after_flush(&mut self, position: WalPosition, last_processed: u64) {
+        // Retain only entries with offset > last_processed
+        let delta = self.data.make_mut().retain_above_position(last_processed);
+        self.report_loaded_keys_delta(delta);
+
+        // If all entries were removed, update state to Unloaded
+        if self.data.is_empty() {
+            self.state = LargeTableEntryState::Unloaded(position);
+            self.context
+                .metrics
+                .flush_update
+                .with_label_values(&["clear"])
+                .inc();
+        } else {
+            // Some entries remain, keep state as DirtyUnloaded
+            self.state = LargeTableEntryState::DirtyUnloaded(position);
+            self.context
+                .metrics
+                .flush_update
+                .with_label_values(&["partial"])
+                .inc();
+        }
     }
 
     pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
@@ -1110,6 +1106,9 @@ impl LargeTableEntry {
             .pending_last_processed
             .take()
             .expect("update_flushed_index called while pending_last_processed is not set");
+
+        // For unmerge, we always use the actual last_processed value (not u64::MAX)
+        // to ensure we only remove entries that were actually committed
         match self.state {
             LargeTableEntryState::DirtyUnloaded(_) => {}
             LargeTableEntryState::DirtyLoaded(_) => {}
@@ -1120,9 +1119,12 @@ impl LargeTableEntry {
         // Now that flush is complete, update last_processed
         self.last_processed = pending_last_processed;
         if self.data.same_shared(&original_index) {
-            self.clear_after_flush(position);
+            self.clear_after_flush(position, pending_last_processed);
         } else {
-            let delta = self.data.make_mut().unmerge_flushed(&original_index);
+            let delta = self
+                .data
+                .make_mut()
+                .unmerge_flushed(&original_index, pending_last_processed);
             self.report_loaded_keys_delta(delta);
             self.state = LargeTableEntryState::DirtyUnloaded(position);
             self.context

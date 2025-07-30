@@ -168,8 +168,7 @@ impl Db {
             .wal_written_bytes
             .set(guard.wal_position().offset() as i64);
         let reduced_key = ks.reduced_key_bytes(k);
-        self.large_table
-            .insert(ks, reduced_key, *guard.wal_position(), &v, self)?;
+        self.large_table.insert(ks, reduced_key, guard, &v, self)?;
         Ok(())
     }
 
@@ -189,8 +188,7 @@ impl Db {
             .inc_by(w.len() as u64);
         let guard = self.wal_writer.write(&w)?;
         let reduced_key = ks.reduced_key_bytes(k);
-        self.large_table
-            .remove(ks, reduced_key, *guard.wal_position(), self)
+        self.large_table.remove(ks, reduced_key, guard, self)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -266,7 +264,11 @@ impl Db {
 
         let mut num_inserts = 0;
         let mut num_deletes = 0;
-        for (idx, update) in updates.iter().enumerate() {
+        // Create iterator and skip the first guard (batch start)
+        let mut guards_iter = guards.into_iter();
+        guards_iter.next(); // Skip batch start guard
+
+        for (idx, (update, guard)) in updates.iter().zip(guards_iter).enumerate() {
             let ks = update.ks();
             let label = match update {
                 Update::Record(..) => {
@@ -282,7 +284,7 @@ impl Db {
                 .wal_written_bytes_type
                 .with_label_values(&[label, self.key_shape.ks(ks).name()])
                 .inc_by(prepared_writes[idx].len() as u64);
-            update_writes.push((update, *guards[idx + 1].wal_position()));
+            update_writes.push((update, guard));
         }
         drop(_write_timer);
         self.metrics
@@ -299,17 +301,17 @@ impl Db {
             .with_label_values(&[&tag, "update"])
             .mcs_timer();
 
-        for (update, position) in update_writes {
+        for (update, guard) in update_writes {
             let ks = self.key_shape.ks(update.ks());
             let reduced_key = update.reduced_key(ks);
+            last_position = *guard.wal_position();
             match update {
                 Update::Record(_, _, value) => {
                     self.large_table
-                        .insert(ks, reduced_key, position, value, self)?
+                        .insert(ks, reduced_key, guard, value, self)?
                 }
-                Update::Remove(..) => self.large_table.remove(ks, reduced_key, position, self)?,
+                Update::Remove(..) => self.large_table.remove(ks, reduced_key, guard, self)?,
             }
-            last_position = position;
         }
         if last_position != WalPosition::INVALID {
             self.metrics
@@ -488,7 +490,8 @@ impl Db {
                     metrics.replayed_wal_records.inc();
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
-                    large_table.insert(ks, reduced_key, position, &v, wal_iterator.wal())?;
+                    let guard = crate::wal_tracker::WalGuard::replay_guard(position);
+                    large_table.insert(ks, reduced_key, guard, &v, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
@@ -497,7 +500,8 @@ impl Db {
                     metrics.replayed_wal_records.inc();
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
-                    large_table.remove(ks, reduced_key, position, wal_iterator.wal())?;
+                    let guard = crate::wal_tracker::WalGuard::replay_guard(position);
+                    large_table.remove(ks, reduced_key, guard, wal_iterator.wal())?;
                 }
                 WalEntry::BatchStart(size) => {
                     batch = VecDeque::with_capacity(size as usize);

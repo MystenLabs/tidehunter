@@ -67,6 +67,17 @@ impl WalGuard {
     pub fn wal_position(&self) -> &WalPosition {
         &self.wal_position
     }
+
+    /// Create a guard for replay that doesn't track position updates
+    pub fn replay_guard(position: WalPosition) -> Self {
+        // Create a dummy mutex that's already locked
+        let mutex = Arc::new(Mutex::new(()));
+        let guard = mutex.lock_arc();
+        Self {
+            _guard: Rc::new(guard),
+            wal_position: position,
+        }
+    }
 }
 
 impl WalGuardMaker {
