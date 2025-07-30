@@ -37,7 +37,6 @@ pub struct LargeTable {
 pub struct LargeTableEntry {
     cell: CellId,
     pub(crate) data: ArcCow<IndexTable>,
-    last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
     context: KsContext,
     bloom_filter: Option<BloomFilter>,
@@ -280,9 +279,10 @@ impl LargeTable {
         ks: &KeySpaceDesc,
         k: &[u8],
         loader: &L,
+        skip_lru_cache: bool,
     ) -> Result<GetResult, L::Error> {
         let (mut row, cell) = self.row(ks, k);
-        if let Some(value_lru) = &mut row.value_lru {
+        if let (Some(value_lru), false) = (&mut row.value_lru, skip_lru_cache) {
             if let Some(value) = value_lru.get(k) {
                 self.metrics
                     .lookup_result
@@ -324,6 +324,7 @@ impl LargeTable {
         let now = Instant::now();
         let index_reader = loader.index_reader(index_position)?;
         // todo - consider only doing block_in_place for the syscall random reader
+        // TODO: handle entries that may be removed by relocation but are still referenced in the index
         let result = runtime::block_in_place(|| {
             ks.index_format()
                 .lookup_unloaded(ks, &index_reader, k, &self.metrics)
@@ -333,6 +334,11 @@ impl LargeTable {
             .with_label_values(&[index_reader.kind_str(), ks.name()])
             .observe(now.elapsed().as_micros() as f64);
         Ok(self.report_lookup_result(ks, result, "lookup"))
+    }
+
+    pub(crate) fn get_index_position(&self, ks: &KeySpaceDesc, k: &[u8]) -> Option<WalPosition> {
+        let (mut row, cell) = self.row(ks, k);
+        row.try_entry_mut(&cell).map(|e| e.state.wal_position())
     }
 
     /// Checks if the update is potentially stale and the operation needs to be canceled.
@@ -866,7 +872,6 @@ impl LargeTableEntry {
             cell,
             state,
             data: Default::default(),
-            last_added_position: Default::default(),
             bloom_filter,
             unload_jitter,
             flush_pending: false,
@@ -892,14 +897,12 @@ impl LargeTableEntry {
         self.insert_bloom_filter(&k);
         let previous = self.data.make_mut().insert(k, v);
         self.report_loaded_keys_change(previous, Some(v));
-        self.last_added_position = Some(v);
     }
 
     pub fn remove(&mut self, k: Bytes, v: WalPosition) {
         self.state.mark_dirty();
         let previous = self.data.make_mut().remove(k, v);
         self.report_loaded_keys_change(previous, Some(v));
-        self.last_added_position = Some(v);
     }
 
     fn report_loaded_keys_delta(&self, delta: i64) {

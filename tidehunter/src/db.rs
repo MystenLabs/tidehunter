@@ -12,6 +12,7 @@ use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
+use crate::relocation::{RelocationCommand, RelocationDriver, RelocationWatermarks, Relocator};
 use crate::state_snapshot;
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
@@ -27,13 +28,14 @@ use std::time::Duration;
 use std::{io, thread};
 
 pub struct Db {
-    large_table: LargeTable,
-    wal: Arc<Wal>,
-    wal_writer: WalWriter,
+    pub(crate) large_table: LargeTable,
+    pub(crate) wal: Arc<Wal>,
+    pub(crate) wal_writer: WalWriter,
     control_region_store: Mutex<ControlRegionStore>,
     config: Arc<Config>,
     metrics: Arc<Metrics>,
-    key_shape: KeyShape,
+    pub(crate) key_shape: KeyShape,
+    relocator: Relocator,
 }
 
 pub type DbResult<T> = Result<T, DbError>;
@@ -52,14 +54,17 @@ impl Db {
         let wal_path = Self::wal_path(&path);
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
+        let relocation_watermarks = RelocationWatermarks::load(&path)?;
         let wal = Wal::open(&wal_path, config.wal_layout(), metrics.clone())?;
 
         // Create channels for flusher threads first
         let (flusher_senders, flusher_receivers) = (0..config.num_flusher_threads)
             .map(|_| mpsc::channel())
             .unzip();
+        let (relocator_sender, relocator_receiver) = mpsc::channel();
 
         let flusher = IndexFlusher::new(flusher_senders, metrics.clone());
+        let relocator = Relocator(relocator_sender);
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
@@ -79,13 +84,22 @@ impl Db {
             config,
             metrics: metrics.clone(),
             key_shape,
+            relocator,
         };
         this.report_memory_estimates();
         let this = Arc::new(this);
 
         // Now start the flusher threads with the weak reference
         let weak_db = Arc::downgrade(&this);
-        let _handles = IndexFlusher::start_threads(flusher_receivers, weak_db, metrics);
+        let _handles = IndexFlusher::start_threads(flusher_receivers, weak_db, metrics.clone());
+
+        // Start the relocator with the weak reference
+        let _handle = RelocationDriver::start(
+            Arc::downgrade(&this),
+            relocation_watermarks,
+            relocator_receiver,
+            metrics,
+        );
 
         // todo: store handles and wait for them on Db drop
 
@@ -187,7 +201,10 @@ impl Db {
             .with_label_values(&["get", ks.name()])
             .mcs_timer();
         let reduced_key = ks.reduce_key(k);
-        match self.large_table.get(ks, reduced_key.as_ref(), self)? {
+        match self
+            .large_table
+            .get(ks, reduced_key.as_ref(), self, false)?
+        {
             GetResult::Value(value) => {
                 // todo check collision ?
                 Ok(Some(value))
@@ -216,7 +233,7 @@ impl Db {
         let reduced_key = ks.reduce_key(k);
         Ok(self
             .large_table
-            .get(ks, reduced_key.as_ref(), self)?
+            .get(ks, reduced_key.as_ref(), self, false)?
             .is_found())
     }
 
@@ -605,6 +622,32 @@ impl Db {
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
         state_snapshot::load(snapshot_path, database_path, key_shape, config, metrics)
+    }
+
+    pub fn start_relocation(&self) -> Result<(), mpsc::SendError<RelocationCommand>> {
+        self.relocator.0.send(RelocationCommand::Start)
+    }
+
+    #[cfg(test)]
+    pub fn start_blocking_relocation(&self) {
+        let (sender, receiver) = mpsc::channel();
+        self.relocator
+            .0
+            .send(RelocationCommand::StartBlocking(sender))
+            .unwrap();
+        receiver.recv().unwrap();
+    }
+}
+
+impl Drop for Db {
+    fn drop(&mut self) {
+        let (sender, recv) = mpsc::channel();
+        self.relocator
+            .0
+            .send(RelocationCommand::Cancel(sender))
+            .expect("Failed to send a cancellation request to the relocator");
+        recv.recv()
+            .expect("Failed to await for graceful relocator shutdown");
     }
 }
 

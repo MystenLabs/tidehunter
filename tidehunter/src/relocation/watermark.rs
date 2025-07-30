@@ -1,0 +1,75 @@
+use crate::WalPosition;
+use bytes::Buf;
+use std::fs::{rename, File, OpenOptions};
+use std::io::{self, Error, Read, Write};
+use std::path::{Path, PathBuf};
+
+pub const RELOCATION_FILE: &str = "rel";
+
+pub struct RelocationWatermarks {
+    path: PathBuf,
+    offset: u64,
+    relocation_progress: u64,
+}
+
+impl RelocationWatermarks {
+    fn relocation_file_path(path: &Path) -> PathBuf {
+        path.join(RELOCATION_FILE)
+    }
+
+    pub fn load(path: &Path) -> Result<Self, Error> {
+        let mut file = match File::open(Self::relocation_file_path(path)) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    path: path.to_path_buf(),
+                    offset: 0,
+                    relocation_progress: 0,
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        let mut buf = [0u8; 16];
+        file.read_exact(&mut buf)?;
+        let mut buf = &buf[..];
+        let offset = buf.get_u64();
+        let relocation_progress = buf.get_u64();
+        Ok(Self {
+            path: path.to_path_buf(),
+            offset,
+            relocation_progress,
+        })
+    }
+
+    pub fn save(&self) -> Result<(), io::Error> {
+        let target_path = Self::relocation_file_path(&self.path);
+        let tmp_path = target_path.with_extension("tmp");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        file.write_all(&self.offset.to_be_bytes())?;
+        file.write_all(&self.relocation_progress.to_be_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        rename(&tmp_path, &target_path)?;
+        Ok(())
+    }
+
+    pub fn update(&mut self, position: WalPosition) {
+        self.relocation_progress = position.offset();
+    }
+
+    pub fn get_relocation_start_position(&self) -> WalPosition {
+        if self.relocation_progress > 0 {
+            WalPosition::new(self.relocation_progress, 0)
+        } else {
+            WalPosition::INVALID
+        }
+    }
+
+    pub fn get_progress_watermark(&self) -> u64 {
+        self.relocation_progress
+    }
+}

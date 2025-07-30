@@ -7,6 +7,7 @@ use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{KeyIndexing, KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
 use crate::metrics::Metrics;
+use crate::relocation::Decision;
 use minibytes::Bytes;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};
@@ -2024,4 +2025,84 @@ fn test_variable_length_keys_it() {
         assert_eq!((key3.into(), vec![3].into()), it.next().unwrap().unwrap());
         assert!(it.next().is_none());
     }
+}
+
+fn relocation_removed(metrics: &Metrics, name: &str) -> u64 {
+    metrics
+        .relocation_removed
+        .get_metric_with_label_values(&[name])
+        .unwrap()
+        .get()
+}
+
+#[test]
+fn test_relocation_point_deletes() {
+    let dir = tempdir::TempDir::new("test_relocation_point_deletes").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
+    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        force_unload_config(&config),
+        metrics.clone(),
+    )
+    .unwrap();
+    for key in 0..200u64 {
+        db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
+            .unwrap();
+    }
+    for key in 0..100u64 {
+        db.remove(ks, key.to_be_bytes().to_vec()).unwrap();
+    }
+    db.start_blocking_relocation();
+    // Half of the key-value pairs were removed
+    assert_eq!(relocation_removed(&metrics, "k"), 100);
+}
+
+#[test]
+fn test_relocation_filter() {
+    let dir = tempdir::TempDir::new("test_relocation_filter").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
+        if u64::from_be_bytes(key.try_into().unwrap()) % 2 == 0 {
+            Decision::Keep
+        } else {
+            Decision::Remove
+        }
+    });
+    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            force_unload_config(&config),
+            metrics.clone(),
+        )
+        .unwrap();
+        for key in 0..200u64 {
+            db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
+                .unwrap();
+        }
+        db.start_blocking_relocation();
+        // Half of the key-value pairs were removed
+        assert_eq!(relocation_removed(&metrics, "k"), 100);
+    }
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        metrics.clone(),
+    )
+    .unwrap();
+    db.start_blocking_relocation();
+    // Nothing left to remove
+    assert_eq!(relocation_removed(&metrics, "k"), 0);
 }
