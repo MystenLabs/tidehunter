@@ -36,7 +36,7 @@ impl Default for Config {
             unload_jitter_pct: 30,
             direct_io: false,
             num_flusher_threads: 1,
-            sync_flush: false,
+            sync_flush: true,
         }
     }
 }
