@@ -1948,9 +1948,7 @@ fn test_variable_length_keys() {
 fn test_variable_length_keys_it() {
     let dir = tempdir::TempDir::new("test_variable_length_keys").unwrap();
     let mut config = Config::small();
-    config.sync_flush = true;
-    // todo this test fails with config.sync_flush = false
-    // todo This is because of a real bug in snapshot capture with async flush
+    config.sync_flush = false;
     let config = Arc::new(config);
     let metrics = Metrics::new();
     let ks_config = KeySpaceConfig::default()

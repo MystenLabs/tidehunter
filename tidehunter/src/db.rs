@@ -133,11 +133,8 @@ impl Db {
                 let snapshot_position = db
                     .rebuild_control_region_from(current_wal_position)
                     .expect("Failed to rebuild control region");
-                // Treat WalPosition::INVALID as 0 for accounting purpose
-                position = snapshot_position
-                    .valid()
-                    .map(|p| p.offset())
-                    .unwrap_or_default();
+                // snapshot_position is now a u64 offset
+                position = snapshot_position;
             }
         }
     }
@@ -511,11 +508,11 @@ impl Db {
     }
 
     #[cfg(test)]
-    fn rebuild_control_region(&self) -> DbResult<WalPosition> {
+    fn rebuild_control_region(&self) -> DbResult<u64> {
         self.rebuild_control_region_from(self.wal_writer.position())
     }
 
-    fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<WalPosition> {
+    fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<u64> {
         let mut crs = self.control_region_store.lock();
         let _timer = self
             .metrics
@@ -525,8 +522,8 @@ impl Db {
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
         let snapshot = self.large_table.snapshot(current_wal_position, self)?;
         self.wal.fsync()?;
-        crs.store(snapshot.data, snapshot.last_added_position, &self.metrics);
-        Ok(snapshot.last_added_position)
+        crs.store(snapshot.data, snapshot.replay_from, &self.metrics);
+        Ok(snapshot.replay_from)
     }
 
     fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {

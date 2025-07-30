@@ -474,23 +474,15 @@ impl Wal {
 
     /// Iterate wal from the position after given position
     /// If WalPosition::INVALID is specified, iterate from start
-    pub fn wal_iterator(self: &Arc<Self>, position: WalPosition) -> Result<WalIterator, WalError> {
-        let (skip_one, position) = if position == WalPosition::INVALID {
-            (false, 0)
-        } else {
-            (true, position.offset)
-        };
+    pub fn wal_iterator(self: &Arc<Self>, position: u64) -> Result<WalIterator, WalError> {
         let (map_id, _) = self.layout.locate(position);
         Self::extend_to_map(&self.layout, &self.file, map_id)?;
         let map = self.map(map_id, true)?;
-        let mut iterator = WalIterator {
+        let iterator = WalIterator {
             wal: self.clone(),
             position,
             map,
         };
-        if skip_one {
-            iterator.next()?;
-        }
         Ok(iterator)
     }
 
@@ -797,10 +789,7 @@ mod tests {
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
             let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-            let writer = wal
-                .wal_iterator(WalPosition::INVALID)
-                .unwrap()
-                .into_writer();
+            let writer = wal.wal_iterator(0).unwrap().into_writer();
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap();
@@ -816,7 +805,7 @@ mod tests {
         }
         {
             let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-            let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+            let mut wal_iterator = wal.wal_iterator(0).unwrap();
             assert_bytes(&[1, 2, 3], wal_iterator.next());
             assert_bytes(&[], wal_iterator.next());
             assert_bytes(&large, wal_iterator.next());
@@ -831,7 +820,7 @@ mod tests {
         }
         {
             let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-            let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+            let mut wal_iterator = wal.wal_iterator(0).unwrap();
             let p1 = assert_bytes(&[1, 2, 3], wal_iterator.next());
             let p2 = assert_bytes(&[], wal_iterator.next());
             let p3 = assert_bytes(&large, wal_iterator.next());
@@ -884,10 +873,7 @@ mod tests {
             direct_io: false,
         };
         let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-        let wal_writer = wal
-            .wal_iterator(WalPosition::INVALID)
-            .unwrap()
-            .into_writer();
+        let wal_writer = wal.wal_iterator(0).unwrap().into_writer();
         let wal_writer = Arc::new(wal_writer);
         let threads = 8u64;
         let writes_per_thread = 256u64;
@@ -915,7 +901,7 @@ mod tests {
         drop(wal_writer);
         drop(wal);
         let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-        let mut iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+        let mut iterator = wal.wal_iterator(0).unwrap();
         while let Ok((_, value)) = iterator.next() {
             let value = u64::from_be_bytes(value[..].try_into().unwrap());
             if !all_writes.remove(&value) {
@@ -950,7 +936,7 @@ mod tests {
             direct_io: false,
         };
         let wal = Wal::open(&dir.path().join("wal"), layout, Metrics::new()).unwrap();
-        let wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+        let wal_iterator = wal.wal_iterator(0).unwrap();
         let writer = wal_iterator.into_writer();
 
         // Write some data and get a guard
@@ -1001,10 +987,7 @@ mod tests {
         // Write an entry into the WAl
         let position = {
             let wal = Wal::open(&file_path, layout.clone(), Metrics::new()).unwrap();
-            let writer = wal
-                .wal_iterator(WalPosition::INVALID)
-                .unwrap()
-                .into_writer();
+            let writer = wal.wal_iterator(0).unwrap().into_writer();
             writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap()

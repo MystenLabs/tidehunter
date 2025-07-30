@@ -1,7 +1,6 @@
 use crate::key_shape::KeyShape;
 use crate::large_table::{LargeTableContainer, SnapshotEntryData};
 use crate::metrics::Metrics;
-use crate::wal::WalPosition;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
@@ -9,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ControlRegion {
-    /// WalPosition::INVALID when wal is empty
-    last_position: WalPosition,
+    /// 0 when wal is empty or nothing has been processed
+    last_position: u64,
     snapshot: LargeTableContainer<SnapshotEntryData>,
 }
 
@@ -23,15 +22,12 @@ impl ControlRegion {
         let snapshot =
             LargeTableContainer::new_from_key_shape(key_shape, SnapshotEntryData::empty());
         Self {
-            last_position: WalPosition::INVALID,
+            last_position: 0,
             snapshot,
         }
     }
 
-    pub fn new(
-        snapshot: LargeTableContainer<SnapshotEntryData>,
-        last_position: WalPosition,
-    ) -> Self {
+    pub fn new(snapshot: LargeTableContainer<SnapshotEntryData>, last_position: u64) -> Self {
         Self {
             snapshot,
             last_position,
@@ -69,7 +65,7 @@ impl ControlRegion {
         &self.snapshot
     }
 
-    pub fn last_position(&self) -> WalPosition {
+    pub fn last_position(&self) -> u64 {
         self.last_position
     }
 }
@@ -81,7 +77,7 @@ impl ControlRegionStore {
     pub fn store(
         &mut self,
         snapshot: LargeTableContainer<SnapshotEntryData>,
-        last_position: WalPosition,
+        last_position: u64,
         metrics: &Metrics,
     ) {
         let control_region = ControlRegion::new(snapshot, last_position);

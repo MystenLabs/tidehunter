@@ -97,7 +97,7 @@ pub(crate) struct LargeTableContainer<T>(pub Vec<Vec<RowContainer<T>>>);
 
 pub(crate) struct LargeTableSnapshot {
     pub data: LargeTableContainer<SnapshotEntryData>,
-    pub last_added_position: WalPosition,
+    pub replay_from: u64,
 }
 
 impl LargeTable {
@@ -473,9 +473,11 @@ impl LargeTable {
         loader: &L,
     ) -> Result<LargeTableSnapshot, L::Error> {
         assert!(loader.flush_supported());
+        // Capture the WAL's last_processed position at snapshot time
+        let wal_last_processed = loader.last_processed_wal_position();
         // See ks_snapshot documentation for details
         // on how snapshot replay position is determined.
-        let mut replay_from = None;
+        let mut replay_from: Option<u64> = None;
         let mut max_position: Option<WalPosition> = None;
         let mut data = Vec::with_capacity(self.table.len());
         for ks_table in self.table.iter() {
@@ -483,10 +485,7 @@ impl LargeTable {
                 self.ks_snapshot(ks_table, tail_position, loader)?;
             data.push(ks_data);
             if let Some(ks_replay_from) = ks_replay_from {
-                replay_from = Some(cmp::min(
-                    replay_from.unwrap_or(WalPosition::MAX),
-                    ks_replay_from,
-                ));
+                replay_from = Some(cmp::min(replay_from.unwrap_or(u64::MAX), ks_replay_from));
             }
             if let Some(ks_max_position) = ks_max_position {
                 max_position = Some(if let Some(max_position) = max_position {
@@ -497,14 +496,19 @@ impl LargeTable {
             }
         }
 
-        let replay_from =
-            replay_from.unwrap_or_else(|| max_position.unwrap_or(WalPosition::INVALID));
+        let replay_from = if let Some(replay_from) = replay_from {
+            // Case 1: Some entries are dirty - use minimum last_processed
+            replay_from
+        } else if let Some(max_pos) = max_position {
+            // Case 2: All clean - use highest flushed position
+            max_pos.offset()
+        } else {
+            // Case 3: Empty database - use WAL's last_processed position
+            wal_last_processed
+        };
 
         let data = LargeTableContainer(data);
-        Ok(LargeTableSnapshot {
-            data,
-            last_added_position: replay_from,
-        })
+        Ok(LargeTableSnapshot { data, replay_from })
     }
 
     /// Takes snapshot of a given key space.
@@ -543,12 +547,12 @@ impl LargeTable {
     ) -> Result<
         (
             Vec<RowContainer<SnapshotEntryData>>,
-            Option<WalPosition>,
+            Option<u64>,
             Option<WalPosition>,
         ),
         L::Error,
     > {
-        let mut replay_from = None;
+        let mut replay_from: Option<u64> = None;
         let mut max_wal_position: Option<WalPosition> = None;
         let mut ks_data = Vec::with_capacity(ks_table.rows.mutexes().len());
         for mutex in ks_table.rows.mutexes() {
@@ -569,8 +573,12 @@ impl LargeTable {
                         Some(valid_position)
                     };
                 }
+                // Only dirty entries affect replay_from using their last_processed
                 if entry.state.is_dirty() {
-                    replay_from = Some(cmp::min(replay_from.unwrap_or(WalPosition::MAX), position));
+                    replay_from = Some(cmp::min(
+                        replay_from.unwrap_or(u64::MAX),
+                        entry.last_processed,
+                    ));
                 }
             }
             ks_data.push(row_data);
@@ -581,11 +589,11 @@ impl LargeTable {
             .with_label_values(&[ks_table.ks.name()]);
         match replay_from {
             None => metric.set(0),
-            Some(WalPosition::INVALID) => metric.set(-1),
+            Some(0) => metric.set(-1), // 0 indicates replay from beginning
             Some(position) => {
                 // This can go below 0 because tail_position is not synchronized
                 // and index position can be higher than the tail_position in rare cases
-                metric.set(tail_position.saturating_sub(position.offset()) as i64)
+                metric.set(tail_position.saturating_sub(position) as i64)
             }
         }
         Ok((ks_data, replay_from, max_wal_position))
