@@ -61,12 +61,8 @@ impl RelocationWatermarks {
         self.relocation_progress = position.offset();
     }
 
-    pub fn get_relocation_start_position(&self) -> WalPosition {
-        if self.relocation_progress > 0 {
-            WalPosition::new(self.relocation_progress, 0)
-        } else {
-            WalPosition::INVALID
-        }
+    pub fn get_relocation_start_position(&self) -> u64 {
+        self.relocation_progress
     }
 
     pub fn get_progress_watermark(&self) -> u64 {
