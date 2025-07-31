@@ -819,6 +819,10 @@ impl From<bincode::Error> for DbError {
 mod tests;
 
 #[cfg(test)]
+#[path = "db_tests/concurrent_test.rs"]
+mod concurrent_test;
+
+#[cfg(test)]
 mod multi_flusher_tests {
     use super::*;
     use crate::key_shape::{KeyShapeBuilder, KeyType};
