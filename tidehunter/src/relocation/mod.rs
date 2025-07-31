@@ -83,7 +83,7 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.position();
         let mut wal_iterator = db
             .wal
-            .wal_iterator(self.watermarks.get_relocation_start_position())?;
+            .wal_iterator(self.watermarks.get_relocation_start_position().offset())?;
 
         for i in 0..usize::MAX {
             if i % Self::NUM_ITERATIONS_IN_BATCH == 0 && self.should_cancel_relocation() {

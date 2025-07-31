@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Manages per-key locks to ensure atomic operations on individual keys.
-/// 
+///
 /// This allows multiple threads to operate on different keys in parallel
 /// while preventing race conditions on the same key. Essential for testing
 /// concurrent access patterns without serializing all operations.
@@ -100,19 +100,25 @@ fn test_concurrent_operations_with_overlapping_keys() {
 
     // Wrap database in RwLock to allow restarts
     let db = Arc::new(RwLock::new(
-        Db::open(temp_dir.path(), key_shape.clone(), config.clone(), Metrics::new()).unwrap()
+        Db::open(
+            temp_dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap(),
     ));
-    
+
     // Track number of database restarts for debugging
     let restart_count = Arc::new(AtomicU64::new(0));
-    
+
     // Path for database restarts
     let db_path = temp_dir.path().to_path_buf();
 
     // Key-level locking ensures atomic operations on individual keys while
     // allowing parallelism across different keys
     let key_lock_manager = KeyLockManager::new();
-    
+
     // Shadow state tracks expected database contents for verification
     let in_memory_state = InMemoryState::new();
 
@@ -153,7 +159,7 @@ fn test_concurrent_operations_with_overlapping_keys() {
                 if rng.gen_range(0..100) < 1 {
                     // 1/3 chance to rebuild control region before restart
                     let should_rebuild = rng.gen_range(0..3) == 0;
-                    
+
                     if should_rebuild {
                         // Call rebuild_control_region outside of write lock
                         let db_read = db.read();
@@ -161,17 +167,22 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         drop(db_read);
                         println!("Thread {} rebuilt control region before restart", thread_id);
                     }
-                    
+
                     // Acquire write lock to restart database
                     let mut db_write = db.write();
-                    
+
                     // Close the current database by dropping it
-                    *db_write = Db::open(&db_path, key_shape.clone(), config.clone(), Metrics::new()).unwrap();
-                    
+                    *db_write =
+                        Db::open(&db_path, key_shape.clone(), config.clone(), Metrics::new())
+                            .unwrap();
+
                     restart_count.fetch_add(1, Ordering::Relaxed);
-                    println!("Thread {} restarted database (restart #{})", 
-                            thread_id, restart_count.load(Ordering::Relaxed));
-                    
+                    println!(
+                        "Thread {} restarted database (restart #{})",
+                        thread_id,
+                        restart_count.load(Ordering::Relaxed)
+                    );
+
                     // Release write lock before continuing
                     drop(db_write);
                 }
@@ -201,7 +212,9 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         // Update both database and shadow state atomically
                         {
                             let db_read = db.read();
-                            db_read.insert(key_space, key.clone(), value.clone()).unwrap();
+                            db_read
+                                .insert(key_space, key.clone(), value.clone())
+                                .unwrap();
                         }
                         in_memory_state.insert(key.clone(), value);
                     }
@@ -308,7 +321,10 @@ fn test_concurrent_operations_with_overlapping_keys() {
 
     println!("✓ Database state matches in-memory state perfectly!");
     println!("  Total keys in final state: {}", in_memory_data.len());
-    println!("  Total database restarts: {}", restart_count.load(Ordering::Relaxed));
+    println!(
+        "  Total database restarts: {}",
+        restart_count.load(Ordering::Relaxed)
+    );
 }
 
 #[test]
