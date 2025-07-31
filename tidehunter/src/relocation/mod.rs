@@ -83,12 +83,12 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.position();
         let start_position = self.watermarks.get_relocation_start_position();
         let mut wal_iterator = db.wal.wal_iterator(start_position)?;
-        
+
         // Skip the first entry if we're resuming from a saved position
         if start_position > 0 {
             match wal_iterator.next() {
-                Ok(_) => {}, // Successfully skipped
-                Err(WalError::Crc(_)) => {}, // End of WAL, that's fine
+                Ok(_) => {}                 // Successfully skipped
+                Err(WalError::Crc(_)) => {} // End of WAL, that's fine
                 Err(e) => return Err(e.into()),
             }
         }
