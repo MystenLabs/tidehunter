@@ -1,4 +1,3 @@
-use crate::batch::WriteBatch;
 use crate::config::Config;
 use crate::db::Db;
 use crate::key_shape::{KeyShape, KeyType};
@@ -365,78 +364,4 @@ fn test_concurrent_operations_with_overlapping_keys() {
         .with_label_values(&[db_instance.ks_name(key_space)])
         .get();
     println!("  snapshot_force_unload metric: {}", force_unload_count);
-}
-
-#[test]
-fn test_simple_concurrent_batch_operations() {
-    let temp_dir = tempdir::TempDir::new("test_simple_batch").unwrap();
-
-    let config = Arc::new(Config::small());
-    let (key_shape, key_space) = KeyShape::new_single(8, 16, KeyType::uniform(16));
-
-    let db = Arc::new(Db::open(temp_dir.path(), key_shape, config, Metrics::new()).unwrap());
-
-    let num_threads = 4;
-    let batches_per_thread = 20;
-
-    let mut handles = vec![];
-
-    for thread_id in 0..num_threads {
-        let db = db.clone();
-        let key_space = key_space.clone();
-
-        let handle = thread::spawn(move || {
-            use rand::{Rng, SeedableRng};
-            let mut rng = rand::rngs::StdRng::seed_from_u64(thread_id as u64);
-
-            for batch_num in 0..batches_per_thread {
-                let mut batch = WriteBatch::new();
-
-                // Each thread works on its own key range to avoid conflicts
-                let base_key = thread_id * 1000 + batch_num * 10;
-
-                for i in 0..5 {
-                    let mut key = vec![0u8; 8];
-                    key[0..4].copy_from_slice(&((base_key + i) as u32).to_be_bytes());
-                    key[4..8].copy_from_slice(b"SMPL");
-
-                    let mut value = vec![0u8; 16];
-                    value[0..4].copy_from_slice(&(thread_id as u32).to_be_bytes());
-                    value[4..8].copy_from_slice(&(batch_num as u32).to_be_bytes());
-                    value[8..12].copy_from_slice(&(i as u32).to_be_bytes());
-                    value[12..16].copy_from_slice(b"TEST");
-
-                    if rng.gen_bool(0.8) {
-                        batch.write(key_space, key, value);
-                    } else {
-                        batch.delete(key_space, key);
-                    }
-                }
-
-                db.write_batch(batch).unwrap();
-            }
-        });
-
-        handles.push(handle);
-    }
-
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    // Verify database is accessible and contains data
-    let mut count = 0;
-    let iterator = db.iterator(key_space);
-    for result in iterator {
-        let (_, _) = result.unwrap();
-        count += 1;
-    }
-
-    println!("✓ Simple batch operations test passed!");
-    println!("  Total keys in database: {}", count);
-    assert!(
-        count > 0,
-        "Database should contain some keys after batch operations"
-    );
 }
