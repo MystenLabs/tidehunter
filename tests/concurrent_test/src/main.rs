@@ -12,6 +12,12 @@ use tidehunter::db::Db;
 use tidehunter::key_shape::{KeyShape, KeyType};
 use tidehunter::metrics::Metrics;
 
+/// Type alias for the key-specific mutex
+type KeyMutex = Arc<Mutex<()>>;
+
+/// Type alias for the locks map
+type LocksMap = Arc<Mutex<HashMap<Vec<u8>, KeyMutex>>>;
+
 /// Manages per-key locks to ensure atomic operations on individual keys.
 ///
 /// This allows multiple threads to operate on different keys in parallel
@@ -19,7 +25,7 @@ use tidehunter::metrics::Metrics;
 /// concurrent access patterns without serializing all operations.
 #[derive(Clone)]
 struct KeyLockManager {
-    locks: Arc<Mutex<HashMap<Vec<u8>, Arc<Mutex<()>>>>>,
+    locks: LocksMap,
 }
 
 impl KeyLockManager {
@@ -31,7 +37,7 @@ impl KeyLockManager {
 
     /// Returns a mutex for the given key, creating one if it doesn't exist.
     /// Threads must acquire this lock before performing any operation on the key.
-    fn get_lock(&self, key: &[u8]) -> Arc<Mutex<()>> {
+    fn get_lock(&self, key: &[u8]) -> KeyMutex {
         let mut locks = self.locks.lock();
         locks
             .entry(key.to_vec())
@@ -170,7 +176,6 @@ fn main() {
 
     for thread_id in 0..num_threads {
         let db = db.clone();
-        let key_space = key_space.clone();
         let keys = keys.clone();
         let key_lock_manager = key_lock_manager.clone();
         let in_memory_state = in_memory_state.clone();
