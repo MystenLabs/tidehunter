@@ -1,7 +1,7 @@
-use crate::config::Config;
-use crate::db::Db;
-use crate::key_shape::{KeyShape, KeyType};
-use crate::metrics::Metrics;
+use tidehunter::config::Config;
+use tidehunter::db::Db;
+use tidehunter::key_shape::{KeyShape, KeyType};
+use tidehunter::metrics::Metrics;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::Path;
@@ -103,8 +103,7 @@ fn count_open_file_descriptors(db_path: &Path) -> usize {
 /// - No lost updates or phantom reads
 /// - Iterator consistency with concurrent modifications
 /// - Memory consistency across threads
-#[test]
-fn test_concurrent_operations_with_overlapping_keys() {
+fn main() {
     let temp_dir = tempdir::TempDir::new("test_concurrent").unwrap();
 
     // Use a custom config with very small values to trigger more frequent flushes and snapshots
@@ -257,7 +256,14 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         let db_value = {
                             let db_read = db.read();
                             let db_instance = db_read.as_ref().unwrap();
-                            db_instance.get(key_space, &key).unwrap()
+                            match db_instance.get(key_space, &key) {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    println!("ERROR: db.get() failed for key {:?}: {:?}", key, e);
+                                    println!("Exiting test due to error");
+                                    std::process::exit(1);
+                                }
+                            }
                         };
 
                         // Verify database state matches our shadow state
@@ -358,10 +364,12 @@ fn test_concurrent_operations_with_overlapping_keys() {
     // Print snapshot_force_unload metric to see impact of config changes
     let db_read = db.read();
     let db_instance = db_read.as_ref().unwrap();
-    let force_unload_count = db_instance
-        .metrics
+    let metrics = db_instance.test_get_metrics();
+    let force_unload_count = metrics
         .snapshot_force_unload
         .with_label_values(&[db_instance.ks_name(key_space)])
         .get();
     println!("  snapshot_force_unload metric: {}", force_unload_count);
+
+    println!("\nTest passed successfully!");
 }

@@ -511,8 +511,8 @@ impl Db {
         }
     }
 
-    #[cfg(test)]
-    fn rebuild_control_region(&self) -> DbResult<u64> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn rebuild_control_region(&self) -> DbResult<u64> {
         self.rebuild_control_region_from(self.wal_writer.position())
     }
 
@@ -644,7 +644,7 @@ impl Db {
 
     /// Wait for all background threads to finish by polling until no strong references remain.
     /// This ensures clean shutdown before database restart in tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn wait_for_background_threads_to_finish(self: Arc<Self>) {
         use std::thread;
         use std::time::Duration;
@@ -672,6 +672,22 @@ impl Db {
             }
             thread::sleep(Duration::from_millis(10)); // Longer sleep
         }
+    }
+
+    /// Test utility accessor methods
+    #[cfg(feature = "test-utils")]
+    pub fn test_get_metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub fn test_get_key_shape(&self) -> &KeyShape {
+        &self.key_shape
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub fn test_get_large_table(&self) -> &LargeTable {
+        &self.large_table
     }
 }
 
@@ -849,10 +865,6 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 #[path = "db_tests/generated.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "db_tests/concurrent_test.rs"]
-mod concurrent_test;
 
 #[cfg(test)]
 mod multi_flusher_tests {
