@@ -1,7 +1,4 @@
-use tidehunter::config::Config;
-use tidehunter::db::Db;
-use tidehunter::key_shape::{KeyShape, KeyType};
-use tidehunter::metrics::Metrics;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,6 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+use tidehunter::config::Config;
+use tidehunter::db::Db;
+use tidehunter::key_shape::{KeyShape, KeyType};
+use tidehunter::metrics::Metrics;
 
 /// Manages per-key locks to ensure atomic operations on individual keys.
 ///
@@ -151,6 +152,18 @@ fn main() {
 
     let num_threads = 8;
     let operations_per_thread = 4 * 5000;
+    let total_operations = num_threads * operations_per_thread;
+
+    // Create progress tracking
+    let multi_progress = MultiProgress::new();
+    let overall_pb = Arc::new(multi_progress.add(ProgressBar::new(total_operations as u64)));
+    overall_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    overall_pb.set_message("Total operations");
 
     let mut handles = vec![];
     let _start_time = Instant::now();
@@ -167,11 +180,28 @@ fn main() {
         let key_shape = key_shape.clone();
         let config = config.clone();
 
+        // Create progress bar for this thread
+        let thread_pb = multi_progress.add(ProgressBar::new(operations_per_thread as u64));
+        thread_pb.set_style(
+            ProgressStyle::default_bar()
+                .template(&format!(
+                    "[Thread {thread_id}] {{bar:30.green/white}} {{pos:>6}}/{{len:6}} {{msg}}"
+                ))
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        thread_pb.set_message("Running");
+
+        let overall_pb = overall_pb.clone();
+
         let handle = thread::spawn(move || {
             use rand::{Rng, SeedableRng};
             let mut rng = rand::rngs::StdRng::seed_from_u64(thread_id as u64);
 
             for op_num in 0..operations_per_thread {
+                // Update progress bars
+                thread_pb.inc(1);
+                overall_pb.inc(1);
                 // 1% chance to restart the database
                 if rng.gen_range(0..100) < 1 {
                     // 1/3 chance to rebuild control region before restart
@@ -292,6 +322,9 @@ fn main() {
                     _ => unreachable!(),
                 }
             }
+
+            // Mark thread as finished
+            thread_pb.finish_with_message("Done");
         });
 
         handles.push(handle);
@@ -301,6 +334,12 @@ fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
+
+    // Mark overall progress as complete
+    overall_pb.finish_with_message("All operations completed");
+
+    // Keep multi_progress alive until the end
+    drop(multi_progress);
 
     // Final verification: ensure database state matches in-memory state exactly
     // This catches any operations that may have been lost or incorrectly applied
