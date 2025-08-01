@@ -590,7 +590,10 @@ impl WalIterator {
         } else {
             frame?
         };
-        let position = WalPosition::new(self.position, frame.len() as u32);
+        let position = WalPosition::new(
+            self.position,
+            (frame.len() + CrcFrame::CRC_HEADER_LENGTH) as u32,
+        );
         self.position += self
             .wal
             .layout
