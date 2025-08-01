@@ -99,8 +99,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
     let config = Arc::new(config);
     let (key_shape, key_space) = KeyShape::new_single(8, 8, KeyType::uniform(1));
 
-    // Wrap database in RwLock to allow restarts
-    let db = Arc::new(RwLock::new(
+    // Wrap database in RwLock with Option to allow safe restarts
+    let db = Arc::new(RwLock::new(Some(
         Db::open(
             temp_dir.path(),
             key_shape.clone(),
@@ -108,7 +108,7 @@ fn test_concurrent_operations_with_overlapping_keys() {
             Metrics::new(),
         )
         .unwrap(),
-    ));
+    )));
 
     // Track number of database restarts and rebuilds for debugging
     let restart_count = Arc::new(AtomicU64::new(0));
@@ -166,23 +166,28 @@ fn test_concurrent_operations_with_overlapping_keys() {
                     if should_rebuild {
                         // Call rebuild_control_region outside of write lock
                         let db_read = db.read();
-                        db_read.rebuild_control_region().unwrap();
+                        let db_instance = db_read.as_ref().unwrap();
+                        db_instance.rebuild_control_region().unwrap();
                         drop(db_read);
                         rebuild_count.fetch_add(1, Ordering::Relaxed);
                     }
 
-                    // Acquire write lock to restart database
+                    // Acquire write lock to restart database and hold it for entire restart
                     let mut db_write = db.write();
 
-                    // Close the current database by dropping it
-                    *db_write =
-                        Db::open(&db_path, key_shape.clone(), config.clone(), Metrics::new())
-                            .unwrap();
+                    // Take the current database out of the Option
+                    if let Some(old_db) = db_write.take() {
+                        // Wait for all background threads to finish while holding the lock
+                        old_db.wait_for_background_threads_to_finish();
 
-                    restart_count.fetch_add(1, Ordering::Relaxed);
-
-                    // Release write lock before continuing
-                    drop(db_write);
+                        // Create new database while still holding the write lock
+                        *db_write = Some(
+                            Db::open(&db_path, key_shape.clone(), config.clone(), Metrics::new())
+                                .unwrap(),
+                        );
+                        restart_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Lock is automatically released when db_write goes out of scope
                 }
                 // Pick a random key from our fixed set to ensure overlapping access
                 let key_index = rng.gen_range(0..keys.len());
@@ -210,7 +215,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         // Update both database and shadow state atomically
                         {
                             let db_read = db.read();
-                            db_read
+                            let db_instance = db_read.as_ref().unwrap();
+                            db_instance
                                 .insert(key_space, key.clone(), value.clone())
                                 .unwrap();
                         }
@@ -220,7 +226,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         // Read operation with immediate consistency check
                         let db_value = {
                             let db_read = db.read();
-                            db_read.get(key_space, &key).unwrap()
+                            let db_instance = db_read.as_ref().unwrap();
+                            db_instance.get(key_space, &key).unwrap()
                         };
 
                         // Verify database state matches our shadow state
@@ -241,7 +248,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         // Remove from both database and shadow state atomically
                         {
                             let db_read = db.read();
-                            db_read.remove(key_space, key.clone()).unwrap();
+                            let db_instance = db_read.as_ref().unwrap();
+                            db_instance.remove(key_space, key.clone()).unwrap();
                         }
                         in_memory_state.remove(&key);
                     }
@@ -285,7 +293,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
     for (key, expected_value) in &in_memory_data {
         let db_value = {
             let db_read = db.read();
-            db_read.get(key_space, key).unwrap()
+            let db_instance = db_read.as_ref().unwrap();
+            db_instance.get(key_space, key).unwrap()
         };
         match db_value {
             Some(actual_value) => {
@@ -304,7 +313,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
     let mut db_keys = vec![];
     {
         let db_read = db.read();
-        let iterator = db_read.iterator(key_space);
+        let db_instance = db_read.as_ref().unwrap();
+        let iterator = db_instance.iterator(key_space);
         for result in iterator {
             let (key, _) = result.unwrap();
             db_keys.push(key.to_vec());
@@ -334,10 +344,11 @@ fn test_concurrent_operations_with_overlapping_keys() {
 
     // Print snapshot_force_unload metric to see impact of config changes
     let db_read = db.read();
-    let force_unload_count = db_read
+    let db_instance = db_read.as_ref().unwrap();
+    let force_unload_count = db_instance
         .metrics
         .snapshot_force_unload
-        .with_label_values(&[db_read.ks_name(key_space)])
+        .with_label_values(&[db_instance.ks_name(key_space)])
         .get();
     println!("  snapshot_force_unload metric: {}", force_unload_count);
 }

@@ -641,6 +641,38 @@ impl Db {
             .unwrap();
         receiver.recv().unwrap();
     }
+
+    /// Wait for all background threads to finish by polling until no strong references remain.
+    /// This ensures clean shutdown before database restart in tests.
+    #[cfg(test)]
+    pub fn wait_for_background_threads_to_finish(self: Arc<Self>) {
+        use std::thread;
+        use std::time::Duration;
+
+        // Convert Arc to Weak to track when all references are dropped
+        let weak_db = Arc::downgrade(&self);
+
+        // Drop our strong reference
+        drop(self);
+
+        // Wait for all background threads to finish
+        let mut poll_count = 0;
+        loop {
+            if weak_db.upgrade().is_none() {
+                // All references dropped, safe to proceed
+                break;
+            }
+            poll_count += 1;
+            if poll_count > 10000 {
+                // Increased timeout
+                panic!(
+                    "Database shutdown timeout: background threads not terminating after {} polls",
+                    poll_count
+                );
+            }
+            thread::sleep(Duration::from_millis(10)); // Longer sleep
+        }
+    }
 }
 
 impl Drop for Db {
