@@ -30,6 +30,7 @@ hex = "0.4.3"
 [features]
 tokio = ["dep:tokio"]
 test_methods = []
+test-utils = []
 
 [lints.clippy]
 len_without_is_empty = "allow"
