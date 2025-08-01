@@ -92,9 +92,10 @@ impl InMemoryState {
 fn test_concurrent_operations_with_overlapping_keys() {
     let temp_dir = tempdir::TempDir::new("test_concurrent").unwrap();
 
-    // Use a custom config with very small max_dirty_keys to trigger more frequent flushes
+    // Use a custom config with very small values to trigger more frequent flushes and snapshots
     let mut config = Config::small();
     config.max_dirty_keys = 4;
+    // config.snapshot_unload_threshold = 1024; // Commented out - too aggressive for now
     let config = Arc::new(config);
     let (key_shape, key_space) = KeyShape::new_single(8, 8, KeyType::uniform(1));
 
@@ -109,8 +110,9 @@ fn test_concurrent_operations_with_overlapping_keys() {
         .unwrap(),
     ));
 
-    // Track number of database restarts for debugging
+    // Track number of database restarts and rebuilds for debugging
     let restart_count = Arc::new(AtomicU64::new(0));
+    let rebuild_count = Arc::new(AtomicU64::new(0));
 
     // Path for database restarts
     let db_path = temp_dir.path().to_path_buf();
@@ -134,7 +136,7 @@ fn test_concurrent_operations_with_overlapping_keys() {
         .collect();
 
     let num_threads = 8;
-    let operations_per_thread = 500;
+    let operations_per_thread = 5000;
 
     let mut handles = vec![];
     let _start_time = Instant::now();
@@ -146,6 +148,7 @@ fn test_concurrent_operations_with_overlapping_keys() {
         let key_lock_manager = key_lock_manager.clone();
         let in_memory_state = in_memory_state.clone();
         let restart_count = restart_count.clone();
+        let rebuild_count = rebuild_count.clone();
         let db_path = db_path.clone();
         let key_shape = key_shape.clone();
         let config = config.clone();
@@ -165,7 +168,7 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         let db_read = db.read();
                         db_read.rebuild_control_region().unwrap();
                         drop(db_read);
-                        println!("Thread {} rebuilt control region before restart", thread_id);
+                        rebuild_count.fetch_add(1, Ordering::Relaxed);
                     }
 
                     // Acquire write lock to restart database
@@ -177,11 +180,6 @@ fn test_concurrent_operations_with_overlapping_keys() {
                             .unwrap();
 
                     restart_count.fetch_add(1, Ordering::Relaxed);
-                    println!(
-                        "Thread {} restarted database (restart #{})",
-                        thread_id,
-                        restart_count.load(Ordering::Relaxed)
-                    );
 
                     // Release write lock before continuing
                     drop(db_write);
@@ -320,11 +318,28 @@ fn test_concurrent_operations_with_overlapping_keys() {
     }
 
     println!("✓ Database state matches in-memory state perfectly!");
+    println!(
+        "  Total operations performed: {}",
+        num_threads * operations_per_thread
+    );
     println!("  Total keys in final state: {}", in_memory_data.len());
     println!(
         "  Total database restarts: {}",
         restart_count.load(Ordering::Relaxed)
     );
+    println!(
+        "  Total control region rebuilds: {}",
+        rebuild_count.load(Ordering::Relaxed)
+    );
+
+    // Print snapshot_force_unload metric to see impact of config changes
+    let db_read = db.read();
+    let force_unload_count = db_read
+        .metrics
+        .snapshot_force_unload
+        .with_label_values(&[db_read.ks_name(key_space)])
+        .get();
+    println!("  snapshot_force_unload metric: {}", force_unload_count);
 }
 
 #[test]
