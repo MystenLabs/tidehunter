@@ -9,6 +9,8 @@ pub struct WriteBatch {
     pub(crate) tag: String,
 }
 
+const MAX_BATCH_LEN: usize = 1_000_000;
+
 impl Default for WriteBatch {
     fn default() -> Self {
         Self::new()
@@ -51,8 +53,8 @@ impl WriteBatch {
         self.prepared_writes.push(wal_write);
         self.updates.push(update);
         assert!(
-            self.updates.len() < u16::MAX as usize,
-            "Batch exceeds max length"
+            self.updates.len() < MAX_BATCH_LEN,
+            "Batch exceeds max length {MAX_BATCH_LEN}"
         );
     }
 }

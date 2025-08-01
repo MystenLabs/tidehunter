@@ -259,7 +259,7 @@ impl Db {
             .with_label_values(&[&tag, "write"])
             .mcs_timer();
 
-        let batch_start_entry = PreparedWalWrite::new(&WalEntry::BatchStart(updates.len() as u16));
+        let batch_start_entry = PreparedWalWrite::new(&WalEntry::BatchStart(updates.len() as u32));
         let positions = self
             .wal_writer
             .multi_write(std::iter::once(&batch_start_entry).chain(&prepared_writes))?;
@@ -700,7 +700,7 @@ pub(crate) enum WalEntry {
     Record(KeySpace, Bytes, Bytes),
     Index(KeySpace, Bytes),
     Remove(KeySpace, Bytes),
-    BatchStart(u16),
+    BatchStart(u32),
 }
 
 #[derive(Debug)]
@@ -737,7 +737,7 @@ impl WalEntry {
                 let ks = KeySpace(b.get_u8());
                 WalEntry::Remove(ks, bytes.slice(2..))
             }
-            WalEntry::WAL_ENTRY_BATCH_START => WalEntry::BatchStart(b.get_u16()),
+            WalEntry::WAL_ENTRY_BATCH_START => WalEntry::BatchStart(b.get_u32()),
             _ => panic!("Unknown wal entry type {entry_type}"),
         }
     }
@@ -749,7 +749,7 @@ impl IntoBytesFixed for WalEntry {
             WalEntry::Record(KeySpace(_), k, v) => 1 + 1 + 2 + k.len() + v.len(),
             WalEntry::Index(KeySpace(_), index) => 1 + 1 + index.len(),
             WalEntry::Remove(KeySpace(_), k) => 1 + 1 + k.len(),
-            WalEntry::BatchStart(_) => 1 + 2,
+            WalEntry::BatchStart(_) => 1 + 4,
         }
     }
 
@@ -776,7 +776,7 @@ impl IntoBytesFixed for WalEntry {
             }
             WalEntry::BatchStart(size) => {
                 buf.put_u8(Self::WAL_ENTRY_BATCH_START);
-                buf.put_u16(*size);
+                buf.put_u32(*size);
             }
         }
     }
