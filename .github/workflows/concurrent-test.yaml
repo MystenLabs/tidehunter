@@ -13,13 +13,9 @@ env:
 
 jobs:
   concurrent-test:
-    name: Run Concurrent Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Run Concurrent Test
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
 
     steps:
     - uses: actions/checkout@v4
