@@ -7,10 +7,10 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Manages per-key locks to ensure atomic operations on individual keys.
 ///
@@ -152,7 +152,7 @@ fn test_concurrent_operations_with_overlapping_keys() {
         .collect();
 
     let num_threads = 8;
-    let operations_per_thread = 5000;
+    let operations_per_thread = 4 * 5000;
 
     let mut handles = vec![];
     let _start_time = Instant::now();
@@ -292,27 +292,10 @@ fn test_concurrent_operations_with_overlapping_keys() {
         handles.push(handle);
     }
 
-    // Implement timeout protection to prevent test hangs
-    let timeout = Duration::from_secs(60);
-    let all_done = Arc::new(AtomicBool::new(false));
-    let all_done_clone = all_done.clone();
-
-    // Spawn a watchdog thread that will panic if test takes too long
-    let watchdog = thread::spawn(move || {
-        thread::sleep(timeout);
-        if !all_done_clone.load(Ordering::Relaxed) {
-            panic!("Test timed out after 60 seconds");
-        }
-    });
-
     // Wait for all worker threads
     for handle in handles {
         handle.join().unwrap();
     }
-
-    // Signal that we're done
-    all_done.store(true, Ordering::Relaxed);
-    watchdog.join().ok();
 
     // Final verification: ensure database state matches in-memory state exactly
     // This catches any operations that may have been lost or incorrectly applied
