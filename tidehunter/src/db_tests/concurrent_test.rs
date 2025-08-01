@@ -5,6 +5,8 @@ use crate::key_shape::{KeyShape, KeyType};
 use crate::metrics::Metrics;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -68,6 +70,20 @@ impl InMemoryState {
     fn get_all(&self) -> HashMap<Vec<u8>, Vec<u8>> {
         self.data.lock().clone()
     }
+}
+
+/// Count open file descriptors for a given directory using lsof.
+/// Returns the number of open file descriptors.
+fn count_open_file_descriptors(db_path: &Path) -> usize {
+    let mut command = Command::new("lsof");
+    command.arg("+D").arg(db_path);
+    let output = command.output();
+    let output = output.unwrap();
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1) // Skip header line
+        .count()
 }
 
 /// Tests concurrent database operations on overlapping keys to ensure thread-safety.
@@ -177,14 +193,29 @@ fn test_concurrent_operations_with_overlapping_keys() {
 
                     // Take the current database out of the Option
                     if let Some(old_db) = db_write.take() {
+                        // Check file descriptors before stopping
+                        assert_ne!(
+                            count_open_file_descriptors(&db_path),
+                            0,
+                            "Expected at least 1 open file descriptors before stopping database"
+                        );
+
                         // Wait for all background threads to finish while holding the lock
                         old_db.wait_for_background_threads_to_finish();
+
+                        // Verify all file descriptors are released after background threads finish
+                        assert_eq!(
+                            count_open_file_descriptors(&db_path),
+                            0,
+                            "Expected 0 open file descriptors after stopping database"
+                        );
 
                         // Create new database while still holding the write lock
                         *db_write = Some(
                             Db::open(&db_path, key_shape.clone(), config.clone(), Metrics::new())
                                 .unwrap(),
                         );
+
                         restart_count.fetch_add(1, Ordering::Relaxed);
                     }
                     // Lock is automatically released when db_write goes out of scope
