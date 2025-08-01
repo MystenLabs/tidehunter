@@ -101,7 +101,7 @@ pub(crate) struct LargeTableSnapshot {
 }
 
 impl LargeTable {
-    pub fn from_unloaded<L: Loader>(
+    pub(crate) fn from_unloaded<L: Loader>(
         key_shape: &KeyShape,
         snapshot: &LargeTableContainer<SnapshotEntryData>,
         config: Arc<Config>,
@@ -451,7 +451,7 @@ impl LargeTable {
     }
 
     /// Provides a snapshot of this large table along with replay position in the wal for the snapshot.
-    pub fn snapshot<L: Loader>(
+    pub(crate) fn snapshot<L: Loader>(
         &self,
         tail_position: u64,
         loader: &L,
@@ -586,7 +586,7 @@ impl LargeTable {
     /// Takes a next entry in the large table.
     ///
     /// See Db::next_entry for documentation.
-    pub fn next_entry<L: Loader>(
+    pub(crate) fn next_entry<L: Loader>(
         &self,
         ks: &KeySpaceDesc,
         mut cell: CellId,
