@@ -1505,6 +1505,7 @@ mod tests {
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
     use crate::wal::Wal;
     use std::io;
+    use std::sync::atomic::AtomicU64;
 
     #[test]
     fn test_ks_allocation() {
@@ -1519,6 +1520,7 @@ mod tests {
             &tmp_dir.path().join("wal"),
             config.wal_layout(),
             Metrics::new(),
+            Arc::new(AtomicU64::new(0)),
         )
         .unwrap();
         let l = LargeTable::from_unloaded(

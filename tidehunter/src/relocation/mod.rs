@@ -6,6 +6,7 @@ use crate::wal::WalError;
 use crate::WalPosition;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
+pub mod util;
 mod watermark;
 use crate::index::index_format::IndexFormat;
 pub use watermark::RelocationWatermarks;
@@ -81,7 +82,7 @@ impl RelocationDriver {
         };
         // TODO: handle potentially uninitialized positions at the end of the WAL
         let upper_limit = db.wal_writer.position();
-        let start_position = self.watermarks.get_relocation_start_position();
+        let start_position = self.watermarks.get_relocation_progress();
         let mut wal_iterator = db.wal.wal_iterator(start_position)?;
 
         // Skip the first entry if we're resuming from a saved position
@@ -105,7 +106,7 @@ impl RelocationDriver {
             if position.offset() >= upper_limit {
                 break;
             }
-            self.watermarks.update(position);
+            self.watermarks.set_relocation_progress(position.offset());
             match WalEntry::from_bytes(raw_entry) {
                 WalEntry::Record(ks, key, value) => {
                     let ksd = db.key_shape.ks(ks);
@@ -146,10 +147,10 @@ impl RelocationDriver {
                 WalEntry::Remove(..) | WalEntry::BatchStart(..) => {}
             }
         }
-        self.watermarks.save()?;
+        self.watermarks.save(|| Ok(()))?;
         self.metrics
             .relocation_position
-            .set(self.watermarks.get_progress_watermark() as i64);
+            .set(self.watermarks.get_relocation_progress() as i64);
         Ok(())
     }
 
