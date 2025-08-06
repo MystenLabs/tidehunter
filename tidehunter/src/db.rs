@@ -54,8 +54,14 @@ impl Db {
         let wal_path = Self::wal_path(&path);
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
-        let relocation_watermarks = RelocationWatermarks::load(&path)?;
-        let wal = Wal::open(&wal_path, config.wal_layout(), metrics.clone())?;
+        let relocation_watermarks =
+            RelocationWatermarks::load(&path, control_region.last_position(), config.wal_layout())?;
+        let wal = Wal::open(
+            &wal_path,
+            config.wal_layout(),
+            metrics.clone(),
+            relocation_watermarks.get_offset(),
+        )?;
 
         // Create channels for flusher threads first
         let (flusher_senders, flusher_receivers) = (0..config.num_flusher_threads)

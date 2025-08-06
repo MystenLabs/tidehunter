@@ -20,6 +20,7 @@ lru = "0.12.2"
 blake2 = { version = "0.10.6" }
 libc = {workspace = true}
 typenum = "1.16.0"
+nix = {version = "0.30.0", features = ["fs"] }
 
 [dev-dependencies]
 tempdir = "0.3.7"

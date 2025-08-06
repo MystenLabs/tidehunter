@@ -2098,13 +2098,30 @@ fn test_relocation_filter() {
             metrics.clone(),
         )
         .unwrap();
-        for key in 0..200u64 {
+        for key in 0..20000u64 {
             db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
                 .unwrap();
         }
         db.start_blocking_relocation();
         // Half of the key-value pairs were removed
-        assert_eq!(relocation_removed(&metrics, "k"), 100);
+        assert_eq!(relocation_removed(&metrics, "k"), 10000);
+        db.rebuild_control_region().unwrap();
+    }
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        for key in 20000..20100u64 {
+            db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
+                .unwrap();
+        }
+        db.start_blocking_relocation();
+        assert_eq!(relocation_removed(&metrics, "k"), 50);
     }
     let metrics = Metrics::new();
     let db = Db::open(
