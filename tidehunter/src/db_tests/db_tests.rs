@@ -2064,6 +2064,8 @@ fn test_relocation_point_deletes() {
     for key in 0..100u64 {
         db.remove(ks, key.to_be_bytes().to_vec()).unwrap();
     }
+    thread::sleep(Duration::from_millis(10));
+    db.rebuild_control_region().unwrap();
     db.start_blocking_relocation();
     // Half of the key-value pairs were removed
     assert_eq!(relocation_removed(&metrics, "k"), 100);
