@@ -5,6 +5,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
+/// WalTracker tracks "last processed position" for the wal.
+///
+/// When wal entry is created, WalTracker returns a guard for the given position.
+/// This guard is then passed into Db instance, and Db holds to the guard until the wal position is
+/// recorded in the in-memory index of the large table.
+/// After the in-memory index is updated, the Db drops the wal guard.
+///
+/// WalTracker considers wal positions that still have non-dropped guards as unprocessed.
+/// Its job is then to report the maximum wal position last_processed,
+/// so that all allocated positions
+/// that have offset below last_processed are included in in-memory index.
+///
+/// This is an essential property to avoid race conditions with an asynchronous flush
+/// and the snapshot process,
+/// and this is what allows us not to hold large table mutex when writing to the wal.
+#[derive(Clone)]
+pub struct WalTracker {
+    sender: mpsc::Sender<WalTrackerMessage>,
+    last_processed: Arc<AtomicU64>,
+}
+
 pub struct WalGuard {
     _guard: Rc<ArcMutexGuard<RawMutex, ()>>,
     wal_position: WalPosition,
@@ -12,12 +33,6 @@ pub struct WalGuard {
 
 pub struct WalGuardMaker {
     shared_guard: Rc<ArcMutexGuard<RawMutex, ()>>,
-}
-
-#[derive(Clone)]
-pub struct WalTracker {
-    sender: mpsc::Sender<WalTrackerMessage>,
-    last_processed: Arc<AtomicU64>,
 }
 
 struct WalTrackerThread {
@@ -92,6 +107,11 @@ impl WalGuardMaker {
 impl WalTrackerThread {
     pub fn run(self) {
         for message in self.receiver {
+            // Note that messages are sent when wal position is allocated,
+            // within the scope of position mutex in the wal.
+            // This means messages are sent(and received!) in the same order positions are allocated in wal.
+            // Therefore, we don't need to maintain BTree or similar structure here of all unprocessed wal positions,
+            // And simply blocking until received guard is dropped is enough to get correct last_processed.
             #[allow(clippy::let_underscore_lock)]
             let _ = message.mutex.lock();
             self.last_processed
