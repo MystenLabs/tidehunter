@@ -180,6 +180,9 @@ impl IndexFlusherThread {
         };
 
         Self::run_compactor(ctx, &mut merged_index);
+
+        // Always flush everything to disk to avoid data loss
+        // The filtering will happen during unmerge_flushed
         let position = loader
             .flush(command.ks, &merged_index)
             .expect("Failed to flush index");

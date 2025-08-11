@@ -1,7 +1,6 @@
 use crate::key_shape::KeyShape;
-use crate::large_table::LargeTableContainer;
+use crate::large_table::{LargeTableContainer, SnapshotEntryData};
 use crate::metrics::Metrics;
-use crate::wal::WalPosition;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
@@ -9,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ControlRegion {
-    /// WalPosition::INVALID when wal is empty
-    last_position: WalPosition,
-    snapshot: LargeTableContainer<WalPosition>,
+    /// 0 when wal is empty or nothing has been processed
+    last_position: u64,
+    snapshot: LargeTableContainer<SnapshotEntryData>,
 }
 
 pub(crate) struct ControlRegionStore {
@@ -20,14 +19,15 @@ pub(crate) struct ControlRegionStore {
 
 impl ControlRegion {
     pub fn new_empty(key_shape: &KeyShape) -> Self {
-        let snapshot = LargeTableContainer::new_from_key_shape(key_shape, WalPosition::INVALID);
+        let snapshot =
+            LargeTableContainer::new_from_key_shape(key_shape, SnapshotEntryData::empty());
         Self {
-            last_position: WalPosition::INVALID,
+            last_position: 0,
             snapshot,
         }
     }
 
-    pub fn new(snapshot: LargeTableContainer<WalPosition>, last_position: WalPosition) -> Self {
+    pub fn new(snapshot: LargeTableContainer<SnapshotEntryData>, last_position: u64) -> Self {
         Self {
             snapshot,
             last_position,
@@ -61,11 +61,11 @@ impl ControlRegion {
         // todo more verifications for the key shape
     }
 
-    pub fn snapshot(&self) -> &LargeTableContainer<WalPosition> {
+    pub fn snapshot(&self) -> &LargeTableContainer<SnapshotEntryData> {
         &self.snapshot
     }
 
-    pub fn last_position(&self) -> WalPosition {
+    pub fn last_position(&self) -> u64 {
         self.last_position
     }
 }
@@ -76,8 +76,8 @@ impl ControlRegionStore {
     }
     pub fn store(
         &mut self,
-        snapshot: LargeTableContainer<WalPosition>,
-        last_position: WalPosition,
+        snapshot: LargeTableContainer<SnapshotEntryData>,
+        last_position: u64,
         metrics: &Metrics,
     ) {
         let control_region = ControlRegion::new(snapshot, last_position);

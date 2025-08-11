@@ -3,6 +3,7 @@ use crate::file_reader::{align_size, set_direct_options, FileReader};
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal_syncer::WalSyncer;
+use crate::wal_tracker::{WalGuard, WalTracker};
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
@@ -21,6 +22,7 @@ use std::{io, mem, ptr, thread};
 pub struct WalWriter {
     wal: Arc<Wal>,
     position_and_map: Mutex<(IncrementalWalPosition, Map)>,
+    wal_tracker: WalTracker,
     mapper: WalMapper,
 }
 
@@ -71,14 +73,18 @@ pub enum WalRandomRead<'a> {
 }
 
 impl WalWriter {
-    pub fn write(&self, w: &PreparedWalWrite) -> Result<WalPosition, WalError> {
-        Ok(self.multi_write(std::iter::once(w))?[0])
+    pub fn write(&self, w: &PreparedWalWrite) -> Result<WalGuard, WalError> {
+        Ok(self
+            .multi_write(std::iter::once(w))?
+            .into_iter()
+            .next()
+            .unwrap())
     }
 
     pub fn multi_write<'a>(
         &self,
         writes: impl IntoIterator<Item = &'a PreparedWalWrite> + Clone,
-    ) -> Result<Vec<WalPosition>, WalError> {
+    ) -> Result<Vec<WalGuard>, WalError> {
         let len_aligned = writes
             .clone()
             .into_iter()
@@ -123,10 +129,17 @@ impl WalWriter {
             "Attempt to write into read-only map"
         );
         let data = current_map_and_position.1.data.clone();
+
+        // Calculate the end position after all writes
+        let end_pos = pos + len_aligned;
+        // IMPORTANT: Must call new_batch while holding the position mutex to ensure
+        // WalTracker receives positions in order
+        let wal_batch = self.wal_tracker.new_batch(end_pos);
+
         // Dropping lock to allow data copy to be done in parallel
         drop(current_map_and_position);
 
-        let mut positions = vec![];
+        let mut guards = vec![];
         for w in writes {
             let frame_size = w.len();
             let aligned_frame_size = self.wal.layout.align(frame_size as u64);
@@ -134,17 +147,23 @@ impl WalWriter {
             buf.copy_from_slice(w.frame.as_ref());
             // conversion to u32 is safe - pos is less than self.frag_size,
             // and self.frag_size is asserted less than u32::MAX
-            positions.push(WalPosition::new(pos, frame_size as u32));
+            let wal_position = WalPosition::new(pos, frame_size as u32);
+            guards.push(wal_batch.guard(wal_position));
             pos += aligned_frame_size;
             offset += aligned_frame_size;
         }
-        Ok(positions)
+        Ok(guards)
     }
 
     /// Current un-initialized position,
     /// not to be used as WalPosition, only as a metric to see how many bytes were written
     pub fn position(&self) -> u64 {
         self.position_and_map.lock().0.position
+    }
+
+    /// Returns the last processed position from the WalTracker
+    pub fn last_processed(&self) -> u64 {
+        self.wal_tracker.last_processed()
     }
 }
 
@@ -455,23 +474,15 @@ impl Wal {
 
     /// Iterate wal from the position after given position
     /// If WalPosition::INVALID is specified, iterate from start
-    pub fn wal_iterator(self: &Arc<Self>, position: WalPosition) -> Result<WalIterator, WalError> {
-        let (skip_one, position) = if position == WalPosition::INVALID {
-            (false, 0)
-        } else {
-            (true, position.offset)
-        };
+    pub fn wal_iterator(self: &Arc<Self>, position: u64) -> Result<WalIterator, WalError> {
         let (map_id, _) = self.layout.locate(position);
         Self::extend_to_map(&self.layout, &self.file, map_id)?;
         let map = self.map(map_id, true)?;
-        let mut iterator = WalIterator {
+        let iterator = WalIterator {
             wal: self.clone(),
             position,
             map,
         };
-        if skip_one {
-            iterator.next()?;
-        }
         Ok(iterator)
     }
 
@@ -611,9 +622,11 @@ impl WalIterator {
         assert_eq!(self.wal.layout.locate(position.position).0, self.map.id);
         let position_and_map = (position, self.map);
         let position_and_map = Mutex::new(position_and_map);
+        let wal_tracker = WalTracker::start();
         WalWriter {
             wal: self.wal,
             position_and_map,
+            wal_tracker,
             mapper,
         }
     }
@@ -776,26 +789,23 @@ mod tests {
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
             let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-            let writer = wal
-                .wal_iterator(WalPosition::INVALID)
-                .unwrap()
-                .into_writer();
+            let writer = wal.wal_iterator(0).unwrap().into_writer();
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap();
-            let data = wal.read(pos).unwrap();
+            let data = wal.read(*pos.wal_position()).unwrap();
             assert_eq!(&[1, 2, 3], data.as_ref());
             let pos = writer.write(&PreparedWalWrite::new(&vec![])).unwrap();
-            let data = wal.read(pos).unwrap();
+            let data = wal.read(*pos.wal_position()).unwrap();
             assert_eq!(&[] as &[u8], data.as_ref());
             drop(data);
             let pos = writer.write(&PreparedWalWrite::new(&large)).unwrap();
-            let data = wal.read(pos).unwrap();
+            let data = wal.read(*pos.wal_position()).unwrap();
             assert_eq!(&large, data.as_ref());
         }
         {
             let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-            let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+            let mut wal_iterator = wal.wal_iterator(0).unwrap();
             assert_bytes(&[1, 2, 3], wal_iterator.next());
             assert_bytes(&[], wal_iterator.next());
             assert_bytes(&large, wal_iterator.next());
@@ -804,13 +814,13 @@ mod tests {
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![91, 92, 93]))
                 .unwrap();
-            assert_eq!(pos.offset, 1024); // assert we skipped over to next frag
-            let data = wal.read(pos).unwrap();
+            assert_eq!(pos.wal_position().offset(), 1024); // assert we skipped over to next frag
+            let data = wal.read(*pos.wal_position()).unwrap();
             assert_eq!(&[91, 92, 93], data.as_ref());
         }
         {
             let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-            let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+            let mut wal_iterator = wal.wal_iterator(0).unwrap();
             let p1 = assert_bytes(&[1, 2, 3], wal_iterator.next());
             let p2 = assert_bytes(&[], wal_iterator.next());
             let p3 = assert_bytes(&large, wal_iterator.next());
@@ -863,10 +873,7 @@ mod tests {
             direct_io: false,
         };
         let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-        let wal_writer = wal
-            .wal_iterator(WalPosition::INVALID)
-            .unwrap()
-            .into_writer();
+        let wal_writer = wal.wal_iterator(0).unwrap().into_writer();
         let wal_writer = Arc::new(wal_writer);
         let threads = 8u64;
         let writes_per_thread = 256u64;
@@ -894,7 +901,7 @@ mod tests {
         drop(wal_writer);
         drop(wal);
         let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
-        let mut iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+        let mut iterator = wal.wal_iterator(0).unwrap();
         while let Ok((_, value)) = iterator.next() {
             let value = u64::from_be_bytes(value[..].try_into().unwrap());
             if !all_writes.remove(&value) {
@@ -921,6 +928,52 @@ mod tests {
     /// Test that the wal file is resized correctly when the file is corrupted in such a way that
     /// the file length is not a multiple of the frag size.
     #[test]
+    fn test_wal_tracker_integration() {
+        let dir = tempdir::TempDir::new("test_wal_tracker").unwrap();
+        let layout = WalLayout {
+            frag_size: 1024,
+            max_maps: 16,
+            direct_io: false,
+        };
+        let wal = Wal::open(&dir.path().join("wal"), layout, Metrics::new()).unwrap();
+        let wal_iterator = wal.wal_iterator(0).unwrap();
+        let writer = wal_iterator.into_writer();
+
+        // Write some data and get a guard
+        let data = vec![1, 2, 3, 4, 5];
+        let prepared_write = PreparedWalWrite::new(&data);
+        let guard = writer.write(&prepared_write).unwrap();
+        let guard_position = *guard.wal_position();
+
+        // Wait a bit to let any immediate processing settle
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Get initial last_processed from the writer
+        let initial_last_processed = writer.last_processed();
+
+        // Initial last_processed should be less than or equal to guard position
+        assert!(
+            initial_last_processed <= guard_position.offset(),
+            "initial last_processed ({}) should be <= guard position ({})",
+            initial_last_processed,
+            guard_position.offset()
+        );
+
+        // Drop the guard
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Check that last_processed is greater than the guard position
+        let final_last_processed = writer.last_processed();
+        assert!(
+            final_last_processed > guard_position.offset(),
+            "final last_processed ({}) should be > guard position ({})",
+            final_last_processed,
+            guard_position.offset()
+        );
+    }
+
+    #[test]
     fn test_wal_resize() {
         let dir = tempdir::TempDir::new("test_wal_resize").unwrap();
         let file_path = dir.path().join("wal");
@@ -934,10 +987,7 @@ mod tests {
         // Write an entry into the WAl
         let position = {
             let wal = Wal::open(&file_path, layout.clone(), Metrics::new()).unwrap();
-            let writer = wal
-                .wal_iterator(WalPosition::INVALID)
-                .unwrap()
-                .into_writer();
+            let writer = wal.wal_iterator(0).unwrap().into_writer();
             writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap()
@@ -951,7 +1001,7 @@ mod tests {
 
         // Re-open the WAL and ensure it resizes correctly
         let wal = Wal::open(&file_path, layout, Metrics::new()).unwrap();
-        let data = wal.read(position).unwrap();
+        let data = wal.read(*position.wal_position()).unwrap();
         assert_eq!(&[1, 2, 3], data.as_ref());
         assert_eq!(file.metadata().unwrap().len() % frag_size, 0);
     }

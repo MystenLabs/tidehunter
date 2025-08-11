@@ -133,11 +133,8 @@ impl Db {
                 let snapshot_position = db
                     .rebuild_control_region_from(current_wal_position)
                     .expect("Failed to rebuild control region");
-                // Treat WalPosition::INVALID as 0 for accounting purpose
-                position = snapshot_position
-                    .valid()
-                    .map(|p| p.offset())
-                    .unwrap_or_default();
+                // snapshot_position is now a u64 offset
+                position = snapshot_position;
             }
         }
     }
@@ -166,11 +163,12 @@ impl Db {
             .wal_written_bytes_type
             .with_label_values(&["record", ks.name()])
             .inc_by(w.len() as u64);
-        let position = self.wal_writer.write(&w)?;
-        self.metrics.wal_written_bytes.set(position.offset() as i64);
+        let guard = self.wal_writer.write(&w)?;
+        self.metrics
+            .wal_written_bytes
+            .set(guard.wal_position().offset() as i64);
         let reduced_key = ks.reduced_key_bytes(k);
-        self.large_table
-            .insert(ks, reduced_key, position, &v, self)?;
+        self.large_table.insert(ks, reduced_key, guard, &v, self)?;
         Ok(())
     }
 
@@ -188,9 +186,9 @@ impl Db {
             .wal_written_bytes_type
             .with_label_values(&["tombstone", ks.name()])
             .inc_by(w.len() as u64);
-        let position = self.wal_writer.write(&w)?;
+        let guard = self.wal_writer.write(&w)?;
         let reduced_key = ks.reduced_key_bytes(k);
-        self.large_table.remove(ks, reduced_key, position, self)
+        self.large_table.remove(ks, reduced_key, guard, self)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -260,13 +258,17 @@ impl Db {
             .mcs_timer();
 
         let batch_start_entry = PreparedWalWrite::new(&WalEntry::BatchStart(updates.len() as u32));
-        let positions = self
+        let guards = self
             .wal_writer
             .multi_write(std::iter::once(&batch_start_entry).chain(&prepared_writes))?;
 
         let mut num_inserts = 0;
         let mut num_deletes = 0;
-        for (idx, update) in updates.iter().enumerate() {
+        // Create iterator and skip the first guard (batch start)
+        let mut guards_iter = guards.into_iter();
+        guards_iter.next(); // Skip batch start guard
+
+        for (idx, (update, guard)) in updates.iter().zip(guards_iter).enumerate() {
             let ks = update.ks();
             let label = match update {
                 Update::Record(..) => {
@@ -282,7 +284,7 @@ impl Db {
                 .wal_written_bytes_type
                 .with_label_values(&[label, self.key_shape.ks(ks).name()])
                 .inc_by(prepared_writes[idx].len() as u64);
-            update_writes.push((update, positions[idx + 1]));
+            update_writes.push((update, guard));
         }
         drop(_write_timer);
         self.metrics
@@ -299,17 +301,17 @@ impl Db {
             .with_label_values(&[&tag, "update"])
             .mcs_timer();
 
-        for (update, position) in update_writes {
+        for (update, guard) in update_writes {
             let ks = self.key_shape.ks(update.ks());
             let reduced_key = update.reduced_key(ks);
+            last_position = *guard.wal_position();
             match update {
                 Update::Record(_, _, value) => {
                     self.large_table
-                        .insert(ks, reduced_key, position, value, self)?
+                        .insert(ks, reduced_key, guard, value, self)?
                 }
-                Update::Remove(..) => self.large_table.remove(ks, reduced_key, position, self)?,
+                Update::Remove(..) => self.large_table.remove(ks, reduced_key, guard, self)?,
             }
-            last_position = position;
         }
         if last_position != WalPosition::INVALID {
             self.metrics
@@ -488,7 +490,8 @@ impl Db {
                     metrics.replayed_wal_records.inc();
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
-                    large_table.insert(ks, reduced_key, position, &v, wal_iterator.wal())?;
+                    let guard = crate::wal_tracker::WalGuard::replay_guard(position);
+                    large_table.insert(ks, reduced_key, guard, &v, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
@@ -497,7 +500,8 @@ impl Db {
                     metrics.replayed_wal_records.inc();
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
-                    large_table.remove(ks, reduced_key, position, wal_iterator.wal())?;
+                    let guard = crate::wal_tracker::WalGuard::replay_guard(position);
+                    large_table.remove(ks, reduced_key, guard, wal_iterator.wal())?;
                 }
                 WalEntry::BatchStart(size) => {
                     batch = VecDeque::with_capacity(size as usize);
@@ -508,11 +512,11 @@ impl Db {
     }
 
     #[cfg(test)]
-    fn rebuild_control_region(&self) -> DbResult<WalPosition> {
+    fn rebuild_control_region(&self) -> DbResult<u64> {
         self.rebuild_control_region_from(self.wal_writer.position())
     }
 
-    fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<WalPosition> {
+    fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<u64> {
         let mut crs = self.control_region_store.lock();
         let _timer = self
             .metrics
@@ -522,8 +526,8 @@ impl Db {
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
         let snapshot = self.large_table.snapshot(current_wal_position, self)?;
         self.wal.fsync()?;
-        crs.store(snapshot.data, snapshot.last_added_position, &self.metrics);
-        Ok(snapshot.last_added_position)
+        crs.store(snapshot.data, snapshot.replay_from, &self.metrics);
+        Ok(snapshot.replay_from)
     }
 
     fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {
@@ -546,7 +550,7 @@ impl Db {
             .wal_written_bytes_type
             .with_label_values(&["index", ksd.name()])
             .inc_by(w.len() as u64);
-        Ok(self.wal_writer.write(&w)?)
+        Ok(*self.wal_writer.write(&w)?.wal_position())
     }
 
     fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(bool, WalEntry)> {
@@ -670,6 +674,12 @@ impl Loader for Wal {
     fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> DbResult<WalPosition> {
         unimplemented!()
     }
+
+    fn last_processed_wal_position(&self) -> u64 {
+        // Wal doesn't have access to WalWriter, so return 0
+        // This is only used during flush which Wal doesn't support
+        0
+    }
 }
 
 impl Loader for Db {
@@ -692,6 +702,10 @@ impl Loader for Db {
 
     fn flush(&self, ks: KeySpace, data: &IndexTable) -> DbResult<WalPosition> {
         self.write_index(ks, data)
+    }
+
+    fn last_processed_wal_position(&self) -> u64 {
+        self.wal_writer.last_processed()
     }
 }
 
@@ -803,6 +817,10 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 #[path = "db_tests/generated.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "db_tests/concurrent_test.rs"]
+mod concurrent_test;
 
 #[cfg(test)]
 mod multi_flusher_tests {

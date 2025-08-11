@@ -1,0 +1,182 @@
+use crate::WalPosition;
+use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
+
+pub struct WalGuard {
+    _guard: Rc<ArcMutexGuard<RawMutex, ()>>,
+    wal_position: WalPosition,
+}
+
+pub struct WalGuardMaker {
+    shared_guard: Rc<ArcMutexGuard<RawMutex, ()>>,
+}
+
+#[derive(Clone)]
+pub struct WalTracker {
+    sender: mpsc::Sender<WalTrackerMessage>,
+    last_processed: Arc<AtomicU64>,
+}
+
+struct WalTrackerThread {
+    receiver: mpsc::Receiver<WalTrackerMessage>,
+    last_processed: Arc<AtomicU64>,
+}
+
+struct WalTrackerMessage {
+    mutex: Arc<Mutex<()>>,
+    position: u64,
+}
+
+impl WalTracker {
+    pub fn start() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let last_processed = Arc::new(AtomicU64::new(0));
+        let thread = WalTrackerThread {
+            receiver,
+            last_processed: last_processed.clone(),
+        };
+        thread::spawn(move || thread.run());
+        Self {
+            sender,
+            last_processed,
+        }
+    }
+
+    pub fn new_batch(&self, end_position: u64) -> WalGuardMaker {
+        let mutex = Arc::new(Mutex::new(()));
+        let guard = mutex.lock_arc();
+        let message = WalTrackerMessage {
+            mutex,
+            position: end_position,
+        };
+        self.sender.send(message).ok();
+        WalGuardMaker {
+            shared_guard: Rc::new(guard),
+        }
+    }
+
+    pub fn last_processed(&self) -> u64 {
+        self.last_processed.load(Ordering::Relaxed)
+    }
+}
+
+impl WalGuard {
+    pub fn wal_position(&self) -> &WalPosition {
+        &self.wal_position
+    }
+
+    /// Create a guard for replay that doesn't track position updates
+    pub fn replay_guard(position: WalPosition) -> Self {
+        // Create a dummy mutex that's already locked
+        let mutex = Arc::new(Mutex::new(()));
+        let guard = mutex.lock_arc();
+        Self {
+            _guard: Rc::new(guard),
+            wal_position: position,
+        }
+    }
+}
+
+impl WalGuardMaker {
+    pub fn guard(&self, position: WalPosition) -> WalGuard {
+        WalGuard {
+            _guard: Rc::clone(&self.shared_guard),
+            wal_position: position,
+        }
+    }
+}
+
+impl WalTrackerThread {
+    pub fn run(self) {
+        for message in self.receiver {
+            #[allow(clippy::let_underscore_lock)]
+            let _ = message.mutex.lock();
+            self.last_processed
+                .store(message.position, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn test_wal_tracker_basic() {
+        let tracker = WalTracker::start();
+
+        // Initially last_processed should be 0
+        assert_eq!(tracker.last_processed(), 0);
+
+        // Create a batch and guard at position 100
+        let batch = tracker.new_batch(100);
+        let pos = WalPosition::new(100, 10);
+        let guard = batch.guard(pos);
+
+        // Guard should contain the correct position
+        assert_eq!(guard.wal_position(), &pos);
+
+        // Drop the guard and wait a bit for processing
+        drop(guard);
+        drop(batch);
+        thread::sleep(Duration::from_millis(10));
+
+        // last_processed should be updated
+        assert_eq!(tracker.last_processed(), 100);
+    }
+
+    #[test]
+    fn test_wal_batch() {
+        let tracker = WalTracker::start();
+
+        // Create a batch
+        let batch = tracker.new_batch(200);
+
+        // Create guards from the batch
+        let pos1 = WalPosition::new(150, 5);
+        let pos2 = WalPosition::new(180, 8);
+        let guard1 = batch.guard(pos1);
+        let guard2 = batch.guard(pos2);
+
+        // Guards should contain correct positions
+        assert_eq!(guard1.wal_position(), &pos1);
+        assert_eq!(guard2.wal_position(), &pos2);
+
+        // Drop guards and wait for processing
+        drop(guard1);
+        drop(guard2);
+        drop(batch);
+        thread::sleep(Duration::from_millis(10));
+
+        // last_processed should be updated to the batch end position
+        assert_eq!(tracker.last_processed(), 200);
+    }
+
+    #[test]
+    fn test_multiple_guards_ordering() {
+        let tracker = WalTracker::start();
+
+        // Create batches in order (this determines channel message order)
+        let batch1 = tracker.new_batch(100);
+        let batch2 = tracker.new_batch(200);
+        let batch3 = tracker.new_batch(300);
+
+        // Drop in reverse order - but processing is blocked by channel ordering
+        drop(batch3); // Unlocks position 300, but channel must process 100 first
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(tracker.last_processed(), 0); // No change, blocked on position 100
+
+        drop(batch1); // Unlocks position 100, allows processing of 100, but blocked on 200
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(tracker.last_processed(), 100); // Can process 100 now
+
+        drop(batch2); // Unlocks position 200, allows processing of 200 and 300
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(tracker.last_processed(), 300); // Processes 200, then 300
+    }
+}

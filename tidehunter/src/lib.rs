@@ -22,6 +22,7 @@ mod runtime;
 mod state_snapshot;
 pub mod wal;
 mod wal_syncer;
+mod wal_tracker;
 
 // todo remove re-export
 pub use minibytes;

@@ -83,19 +83,22 @@ impl IndexTable {
         }
     }
 
-    /// Remove flushed index entries, returning number of entries changed
-    pub fn unmerge_flushed(&mut self, original: &Self) -> i64 {
+    /// Remove flushed index entries that have offset <= last_processed, returning number of entries changed
+    pub fn unmerge_flushed(&mut self, original: &Self, last_processed: u64) -> i64 {
         let mut delta = 0i64;
         for (k, v) in original.data.iter() {
-            let entry = self.data.entry(k.clone());
-            match entry {
-                Entry::Vacant(_) => {
-                    // todo clarify how this is possible
-                }
-                Entry::Occupied(oc) => {
-                    if oc.get().into_wal_position() == v.into_wal_position() {
-                        oc.remove();
-                        delta -= 1;
+            // Only unmerge entries that were actually flushed (offset <= last_processed)
+            if v.offset <= last_processed {
+                let entry = self.data.entry(k.clone());
+                match entry {
+                    Entry::Vacant(_) => {
+                        // todo clarify how this is possible
+                    }
+                    Entry::Occupied(oc) => {
+                        if oc.get().into_wal_position() == v.into_wal_position() {
+                            oc.remove();
+                            delta -= 1;
+                        }
                     }
                 }
             }
@@ -248,6 +251,14 @@ impl IndexTable {
             }
             IndexEntryKind::Removed => false,
         });
+    }
+
+    /// Retain only entries with offset > last_processed, returning number of entries removed
+    pub fn retain_above_position(&mut self, last_processed: u64) -> i64 {
+        let original_len = self.data.len();
+        self.data.retain(|_k, v| v.offset > last_processed);
+        let removed = original_len - self.data.len();
+        -(removed as i64)
     }
 
     // todo compactor API should change so that we don't have to expose IndexWalPosition
@@ -419,7 +430,7 @@ mod tests {
         let mut index2 = index.clone();
         index2.insert(vec![1].into(), WalPosition::test_value(5));
         index2.insert(vec![3].into(), WalPosition::test_value(8));
-        assert_eq!(index2.unmerge_flushed(&index), -2);
+        assert_eq!(index2.unmerge_flushed(&index, u64::MAX), -2);
         let data = index2.into_data().into_iter().collect::<Vec<_>>();
         assert_eq!(
             data,
@@ -428,6 +439,53 @@ mod tests {
                 (vec![3].into(), WalPosition::test_value(8))
             ]
         );
+    }
+
+    #[test]
+    fn test_unmerge_flushed_with_position_filter() {
+        let mut index = IndexTable::default();
+        // Original index has entries at positions 2, 3, 4
+        index.insert(vec![1].into(), WalPosition::test_value(2));
+        index.insert(vec![2].into(), WalPosition::test_value(3));
+        index.insert(vec![6].into(), WalPosition::test_value(4));
+
+        let mut index2 = index.clone();
+        // New entries at positions 5 and 8
+        index2.insert(vec![1].into(), WalPosition::test_value(5));
+        index2.insert(vec![3].into(), WalPosition::test_value(8));
+
+        // With last_processed=3, only entries at positions 2 and 3 should be unmerged
+        assert_eq!(index2.unmerge_flushed(&index, 3), -1);
+        let data = index2.into_data().into_iter().collect::<Vec<_>>();
+        assert_eq!(
+            data,
+            vec![
+                (vec![1].into(), WalPosition::test_value(5)),
+                (vec![3].into(), WalPosition::test_value(8)),
+                (vec![6].into(), WalPosition::test_value(4)) // This one wasn't unmerged because offset > 3
+            ]
+        );
+    }
+
+    #[test]
+    fn test_retain_above_position() {
+        let mut index = IndexTable::default();
+        // Add entries at different positions
+        index.insert(vec![1].into(), WalPosition::test_value(100));
+        index.insert(vec![2].into(), WalPosition::test_value(200));
+        index.insert(vec![3].into(), WalPosition::test_value(300));
+        index.insert(vec![4].into(), WalPosition::test_value(400));
+
+        // Retain only entries with offset > 250
+        let delta = index.retain_above_position(250);
+        assert_eq!(delta, -2); // Removed 2 entries
+
+        // Check remaining entries
+        assert_eq!(index.len(), 2);
+        assert!(index.get(&[1]).is_none()); // offset 100, removed
+        assert!(index.get(&[2]).is_none()); // offset 200, removed
+        assert_eq!(index.get(&[3]), Some(WalPosition::test_value(300))); // offset 300, kept
+        assert_eq!(index.get(&[4]), Some(WalPosition::test_value(400))); // offset 400, kept
     }
 
     #[test]
