@@ -208,7 +208,7 @@ impl LargeTable {
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(ks, &k);
         let entry = row.entry_mut(&cell);
-        if self.skip_stale_update(ks, entry, &k, v, loader)? {
+        if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
                 .with_label_values(&[ks.name(), "insert"])
@@ -251,13 +251,13 @@ impl LargeTable {
         ks: &KeySpaceDesc,
         k: Bytes,
         guard: crate::wal_tracker::WalGuard,
-        loader: &L,
+        _loader: &L,
     ) -> Result<(), L::Error> {
         self.fp.fp_remove_before_lock();
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(ks, &k);
         let entry = row.entry_mut(&cell);
-        if self.skip_stale_update(ks, entry, &k, v, loader)? {
+        if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
                 .with_label_values(&[ks.name(), "remove"])
@@ -370,19 +370,17 @@ impl LargeTable {
     /// Checks if the update is potentially stale and the operation needs to be canceled.
     /// This can happen if there are multiple concurrent updates for the same key.
     /// Returns true if the update is outdated and should be skipped
-    fn skip_stale_update<L: Loader>(
+    fn skip_stale_update(
         &self,
-        _ks: &KeySpaceDesc,
         entry: &LargeTableEntry,
         key: &Bytes,
         wal_position: WalPosition,
-        _loader: &L,
-    ) -> Result<bool, L::Error> {
+    ) -> bool {
         // check the existing loaded WAL position first, if present
         if let Some(last_position) = entry.data.get_update_position(key) {
-            Ok(last_position > wal_position)
+            last_position > wal_position
         } else {
-            Ok(false)
+            false
         }
     }
 
