@@ -511,8 +511,8 @@ impl Db {
         }
     }
 
-    #[cfg(test)]
-    fn rebuild_control_region(&self) -> DbResult<u64> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn rebuild_control_region(&self) -> DbResult<u64> {
         self.rebuild_control_region_from(self.wal_writer.position())
     }
 
@@ -640,6 +640,54 @@ impl Db {
             .send(RelocationCommand::StartBlocking(sender))
             .unwrap();
         receiver.recv().unwrap();
+    }
+
+    /// Wait for all background threads to finish by polling until no strong references remain.
+    /// This ensures clean shutdown before database restart in tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn wait_for_background_threads_to_finish(self: Arc<Self>) {
+        use std::thread;
+        use std::time::Duration;
+
+        // Convert Arc to Weak to track when all references are dropped
+        let weak_db = Arc::downgrade(&self);
+
+        // Drop our strong reference
+        drop(self);
+
+        // Wait for all background threads to finish
+        let mut poll_count = 0;
+        loop {
+            if weak_db.upgrade().is_none() {
+                // All references dropped, safe to proceed
+                break;
+            }
+            poll_count += 1;
+            if poll_count > 10000 {
+                // Increased timeout
+                panic!(
+                    "Database shutdown timeout: background threads not terminating after {} polls",
+                    poll_count
+                );
+            }
+            thread::sleep(Duration::from_millis(10)); // Longer sleep
+        }
+    }
+
+    /// Test utility accessor methods
+    #[cfg(feature = "test-utils")]
+    pub fn test_get_metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub fn test_get_key_shape(&self) -> &KeyShape {
+        &self.key_shape
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub fn test_get_large_table(&self) -> &LargeTable {
+        &self.large_table
     }
 }
 
@@ -817,10 +865,6 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 #[path = "db_tests/generated.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "db_tests/concurrent_test.rs"]
-mod concurrent_test;
 
 #[cfg(test)]
 mod multi_flusher_tests {

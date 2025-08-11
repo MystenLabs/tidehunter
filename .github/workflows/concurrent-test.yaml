@@ -1,0 +1,42 @@
+name: Concurrent Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  concurrent-test:
+    name: Run Concurrent Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo registry and build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-concurrent-test-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-concurrent-test-
+          ${{ runner.os }}-cargo-
+
+    - name: Run concurrent test
+      run: |
+        echo "Running concurrent test with progress tracking..."
+        cargo run -p concurrent_test --release
+      timeout-minutes: 20

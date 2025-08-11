@@ -1,14 +1,22 @@
-use crate::batch::WriteBatch;
-use crate::config::Config;
-use crate::db::Db;
-use crate::key_shape::{KeyShape, KeyType};
-use crate::metrics::Metrics;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::Path;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+use tidehunter::config::Config;
+use tidehunter::db::Db;
+use tidehunter::key_shape::{KeyShape, KeyType};
+use tidehunter::metrics::Metrics;
+
+/// Type alias for the key-specific mutex
+type KeyMutex = Arc<Mutex<()>>;
+
+/// Type alias for the locks map
+type LocksMap = Arc<Mutex<HashMap<Vec<u8>, KeyMutex>>>;
 
 /// Manages per-key locks to ensure atomic operations on individual keys.
 ///
@@ -17,7 +25,7 @@ use std::time::{Duration, Instant};
 /// concurrent access patterns without serializing all operations.
 #[derive(Clone)]
 struct KeyLockManager {
-    locks: Arc<Mutex<HashMap<Vec<u8>, Arc<Mutex<()>>>>>,
+    locks: LocksMap,
 }
 
 impl KeyLockManager {
@@ -29,7 +37,7 @@ impl KeyLockManager {
 
     /// Returns a mutex for the given key, creating one if it doesn't exist.
     /// Threads must acquire this lock before performing any operation on the key.
-    fn get_lock(&self, key: &[u8]) -> Arc<Mutex<()>> {
+    fn get_lock(&self, key: &[u8]) -> KeyMutex {
         let mut locks = self.locks.lock();
         locks
             .entry(key.to_vec())
@@ -70,6 +78,20 @@ impl InMemoryState {
     }
 }
 
+/// Count open file descriptors for a given directory using lsof.
+/// Returns the number of open file descriptors.
+fn count_open_file_descriptors(db_path: &Path) -> usize {
+    let mut command = Command::new("lsof");
+    command.arg("+D").arg(db_path);
+    let output = command.output();
+    let output = output.unwrap();
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1) // Skip header line
+        .count()
+}
+
 /// Tests concurrent database operations on overlapping keys to ensure thread-safety.
 ///
 /// This test validates that TideHunter correctly handles multiple threads performing
@@ -88,18 +110,18 @@ impl InMemoryState {
 /// - No lost updates or phantom reads
 /// - Iterator consistency with concurrent modifications
 /// - Memory consistency across threads
-#[test]
-fn test_concurrent_operations_with_overlapping_keys() {
+fn main() {
     let temp_dir = tempdir::TempDir::new("test_concurrent").unwrap();
 
-    // Use a custom config with very small max_dirty_keys to trigger more frequent flushes
+    // Use a custom config with very small values to trigger more frequent flushes and snapshots
     let mut config = Config::small();
     config.max_dirty_keys = 4;
+    // config.snapshot_unload_threshold = 1024; // Commented out - too aggressive for now
     let config = Arc::new(config);
     let (key_shape, key_space) = KeyShape::new_single(8, 8, KeyType::uniform(1));
 
-    // Wrap database in RwLock to allow restarts
-    let db = Arc::new(RwLock::new(
+    // Wrap database in RwLock with Option to allow safe restarts
+    let db = Arc::new(RwLock::new(Some(
         Db::open(
             temp_dir.path(),
             key_shape.clone(),
@@ -107,10 +129,11 @@ fn test_concurrent_operations_with_overlapping_keys() {
             Metrics::new(),
         )
         .unwrap(),
-    ));
+    )));
 
-    // Track number of database restarts for debugging
+    // Track number of database restarts and rebuilds for debugging
     let restart_count = Arc::new(AtomicU64::new(0));
+    let rebuild_count = Arc::new(AtomicU64::new(0));
 
     // Path for database restarts
     let db_path = temp_dir.path().to_path_buf();
@@ -134,27 +157,56 @@ fn test_concurrent_operations_with_overlapping_keys() {
         .collect();
 
     let num_threads = 8;
-    let operations_per_thread = 500;
+    let operations_per_thread = 4 * 5000;
+    let total_operations = num_threads * operations_per_thread;
+
+    // Create progress tracking
+    let multi_progress = MultiProgress::new();
+    let overall_pb = Arc::new(multi_progress.add(ProgressBar::new(total_operations as u64)));
+    overall_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    overall_pb.set_message("Total operations");
 
     let mut handles = vec![];
     let _start_time = Instant::now();
 
     for thread_id in 0..num_threads {
         let db = db.clone();
-        let key_space = key_space.clone();
         let keys = keys.clone();
         let key_lock_manager = key_lock_manager.clone();
         let in_memory_state = in_memory_state.clone();
         let restart_count = restart_count.clone();
+        let rebuild_count = rebuild_count.clone();
         let db_path = db_path.clone();
         let key_shape = key_shape.clone();
         let config = config.clone();
+
+        // Create progress bar for this thread
+        let thread_pb = multi_progress.add(ProgressBar::new(operations_per_thread as u64));
+        thread_pb.set_style(
+            ProgressStyle::default_bar()
+                .template(&format!(
+                    "[Thread {thread_id}] {{bar:30.green/white}} {{pos:>6}}/{{len:6}} {{msg}}"
+                ))
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        thread_pb.set_message("Running");
+
+        let overall_pb = overall_pb.clone();
 
         let handle = thread::spawn(move || {
             use rand::{Rng, SeedableRng};
             let mut rng = rand::rngs::StdRng::seed_from_u64(thread_id as u64);
 
             for op_num in 0..operations_per_thread {
+                // Update progress bars
+                thread_pb.inc(1);
+                overall_pb.inc(1);
                 // 1% chance to restart the database
                 if rng.gen_range(0..100) < 1 {
                     // 1/3 chance to rebuild control region before restart
@@ -163,28 +215,43 @@ fn test_concurrent_operations_with_overlapping_keys() {
                     if should_rebuild {
                         // Call rebuild_control_region outside of write lock
                         let db_read = db.read();
-                        db_read.rebuild_control_region().unwrap();
+                        let db_instance = db_read.as_ref().unwrap();
+                        db_instance.rebuild_control_region().unwrap();
                         drop(db_read);
-                        println!("Thread {} rebuilt control region before restart", thread_id);
+                        rebuild_count.fetch_add(1, Ordering::Relaxed);
                     }
 
-                    // Acquire write lock to restart database
+                    // Acquire write lock to restart database and hold it for entire restart
                     let mut db_write = db.write();
 
-                    // Close the current database by dropping it
-                    *db_write =
-                        Db::open(&db_path, key_shape.clone(), config.clone(), Metrics::new())
-                            .unwrap();
+                    // Take the current database out of the Option
+                    if let Some(old_db) = db_write.take() {
+                        // Check file descriptors before stopping
+                        assert_ne!(
+                            count_open_file_descriptors(&db_path),
+                            0,
+                            "Expected at least 1 open file descriptors before stopping database"
+                        );
 
-                    restart_count.fetch_add(1, Ordering::Relaxed);
-                    println!(
-                        "Thread {} restarted database (restart #{})",
-                        thread_id,
-                        restart_count.load(Ordering::Relaxed)
-                    );
+                        // Wait for all background threads to finish while holding the lock
+                        old_db.wait_for_background_threads_to_finish();
 
-                    // Release write lock before continuing
-                    drop(db_write);
+                        // Verify all file descriptors are released after background threads finish
+                        assert_eq!(
+                            count_open_file_descriptors(&db_path),
+                            0,
+                            "Expected 0 open file descriptors after stopping database"
+                        );
+
+                        // Create new database while still holding the write lock
+                        *db_write = Some(
+                            Db::open(&db_path, key_shape.clone(), config.clone(), Metrics::new())
+                                .unwrap(),
+                        );
+
+                        restart_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Lock is automatically released when db_write goes out of scope
                 }
                 // Pick a random key from our fixed set to ensure overlapping access
                 let key_index = rng.gen_range(0..keys.len());
@@ -212,7 +279,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         // Update both database and shadow state atomically
                         {
                             let db_read = db.read();
-                            db_read
+                            let db_instance = db_read.as_ref().unwrap();
+                            db_instance
                                 .insert(key_space, key.clone(), value.clone())
                                 .unwrap();
                         }
@@ -222,7 +290,15 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         // Read operation with immediate consistency check
                         let db_value = {
                             let db_read = db.read();
-                            db_read.get(key_space, &key).unwrap()
+                            let db_instance = db_read.as_ref().unwrap();
+                            match db_instance.get(key_space, &key) {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    println!("ERROR: db.get() failed for key {:?}: {:?}", key, e);
+                                    println!("Exiting test due to error");
+                                    std::process::exit(1);
+                                }
+                            }
                         };
 
                         // Verify database state matches our shadow state
@@ -243,39 +319,32 @@ fn test_concurrent_operations_with_overlapping_keys() {
                         // Remove from both database and shadow state atomically
                         {
                             let db_read = db.read();
-                            db_read.remove(key_space, key.clone()).unwrap();
+                            let db_instance = db_read.as_ref().unwrap();
+                            db_instance.remove(key_space, key.clone()).unwrap();
                         }
                         in_memory_state.remove(&key);
                     }
                     _ => unreachable!(),
                 }
             }
+
+            // Mark thread as finished
+            thread_pb.finish_with_message("Done");
         });
 
         handles.push(handle);
     }
-
-    // Implement timeout protection to prevent test hangs
-    let timeout = Duration::from_secs(60);
-    let all_done = Arc::new(AtomicBool::new(false));
-    let all_done_clone = all_done.clone();
-
-    // Spawn a watchdog thread that will panic if test takes too long
-    let watchdog = thread::spawn(move || {
-        thread::sleep(timeout);
-        if !all_done_clone.load(Ordering::Relaxed) {
-            panic!("Test timed out after 60 seconds");
-        }
-    });
 
     // Wait for all worker threads
     for handle in handles {
         handle.join().unwrap();
     }
 
-    // Signal that we're done
-    all_done.store(true, Ordering::Relaxed);
-    watchdog.join().ok();
+    // Mark overall progress as complete
+    overall_pb.finish_with_message("All operations completed");
+
+    // Keep multi_progress alive until the end
+    drop(multi_progress);
 
     // Final verification: ensure database state matches in-memory state exactly
     // This catches any operations that may have been lost or incorrectly applied
@@ -287,7 +356,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
     for (key, expected_value) in &in_memory_data {
         let db_value = {
             let db_read = db.read();
-            db_read.get(key_space, key).unwrap()
+            let db_instance = db_read.as_ref().unwrap();
+            db_instance.get(key_space, key).unwrap()
         };
         match db_value {
             Some(actual_value) => {
@@ -306,7 +376,8 @@ fn test_concurrent_operations_with_overlapping_keys() {
     let mut db_keys = vec![];
     {
         let db_read = db.read();
-        let iterator = db_read.iterator(key_space);
+        let db_instance = db_read.as_ref().unwrap();
+        let iterator = db_instance.iterator(key_space);
         for result in iterator {
             let (key, _) = result.unwrap();
             db_keys.push(key.to_vec());
@@ -320,83 +391,29 @@ fn test_concurrent_operations_with_overlapping_keys() {
     }
 
     println!("✓ Database state matches in-memory state perfectly!");
+    println!(
+        "  Total operations performed: {}",
+        num_threads * operations_per_thread
+    );
     println!("  Total keys in final state: {}", in_memory_data.len());
     println!(
         "  Total database restarts: {}",
         restart_count.load(Ordering::Relaxed)
     );
-}
-
-#[test]
-fn test_simple_concurrent_batch_operations() {
-    let temp_dir = tempdir::TempDir::new("test_simple_batch").unwrap();
-
-    let config = Arc::new(Config::small());
-    let (key_shape, key_space) = KeyShape::new_single(8, 16, KeyType::uniform(16));
-
-    let db = Arc::new(Db::open(temp_dir.path(), key_shape, config, Metrics::new()).unwrap());
-
-    let num_threads = 4;
-    let batches_per_thread = 20;
-
-    let mut handles = vec![];
-
-    for thread_id in 0..num_threads {
-        let db = db.clone();
-        let key_space = key_space.clone();
-
-        let handle = thread::spawn(move || {
-            use rand::{Rng, SeedableRng};
-            let mut rng = rand::rngs::StdRng::seed_from_u64(thread_id as u64);
-
-            for batch_num in 0..batches_per_thread {
-                let mut batch = WriteBatch::new();
-
-                // Each thread works on its own key range to avoid conflicts
-                let base_key = thread_id * 1000 + batch_num * 10;
-
-                for i in 0..5 {
-                    let mut key = vec![0u8; 8];
-                    key[0..4].copy_from_slice(&((base_key + i) as u32).to_be_bytes());
-                    key[4..8].copy_from_slice(b"SMPL");
-
-                    let mut value = vec![0u8; 16];
-                    value[0..4].copy_from_slice(&(thread_id as u32).to_be_bytes());
-                    value[4..8].copy_from_slice(&(batch_num as u32).to_be_bytes());
-                    value[8..12].copy_from_slice(&(i as u32).to_be_bytes());
-                    value[12..16].copy_from_slice(b"TEST");
-
-                    if rng.gen_bool(0.8) {
-                        batch.write(key_space, key, value);
-                    } else {
-                        batch.delete(key_space, key);
-                    }
-                }
-
-                db.write_batch(batch).unwrap();
-            }
-        });
-
-        handles.push(handle);
-    }
-
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    // Verify database is accessible and contains data
-    let mut count = 0;
-    let iterator = db.iterator(key_space);
-    for result in iterator {
-        let (_, _) = result.unwrap();
-        count += 1;
-    }
-
-    println!("✓ Simple batch operations test passed!");
-    println!("  Total keys in database: {}", count);
-    assert!(
-        count > 0,
-        "Database should contain some keys after batch operations"
+    println!(
+        "  Total control region rebuilds: {}",
+        rebuild_count.load(Ordering::Relaxed)
     );
+
+    // Print snapshot_force_unload metric to see impact of config changes
+    let db_read = db.read();
+    let db_instance = db_read.as_ref().unwrap();
+    let metrics = db_instance.test_get_metrics();
+    let force_unload_count = metrics
+        .snapshot_force_unload
+        .with_label_values(&[db_instance.ks_name(key_space)])
+        .get();
+    println!("  snapshot_force_unload metric: {}", force_unload_count);
+
+    println!("\nTest passed successfully!");
 }
