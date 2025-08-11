@@ -604,6 +604,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "generate_target_configs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "benchmark",
+ "serde",
+ "serde_yaml",
+ "tidehunter",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
