@@ -927,23 +927,25 @@ impl LargeTableEntry {
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         self.state.mark_dirty();
         self.insert_bloom_filter(&k);
-        let previous = self.data.make_mut().insert(k, v);
-        self.report_loaded_keys_change(previous, Some(v));
+        self.data.make_mut().insert(k, v);
+        self.report_loaded_keys_count();
     }
 
     pub fn remove(&mut self, k: Bytes, v: WalPosition) {
         self.state.mark_dirty();
-        let previous = self.data.make_mut().remove(k, v);
-        self.report_loaded_keys_change(previous, Some(v));
+        self.data.make_mut().remove(k, v);
+        self.report_loaded_keys_count();
     }
 
-    fn report_loaded_keys_delta(&self, delta: i64) {
-        // todo better reporting for loaded_key_bytes for variable length tables
+    fn report_loaded_keys_count(&self) {
+        // Report the total number of keys * key size as the metric
+        let num_keys = self.data.len() as i64;
+        let key_size = self.context.index_key_size().unwrap_or(64) as i64;
         self.context
             .metrics
             .loaded_key_bytes
             .with_label_values(&[self.context.name()])
-            .add(delta * (self.context.index_key_size().unwrap_or(64) as i64));
+            .set(num_keys * key_size);
     }
 
     fn insert_bloom_filter(&mut self, key: &[u8]) {
@@ -961,16 +963,6 @@ impl LargeTableEntry {
         } else {
             false
         }
-    }
-
-    fn report_loaded_keys_change(&self, old: Option<WalPosition>, new: Option<WalPosition>) {
-        let delta = match (old, new) {
-            (None, None) => return,
-            (Some(_), Some(_)) => return,
-            (Some(_), None) => -1,
-            (None, Some(_)) => 1,
-        };
-        self.report_loaded_keys_delta(delta);
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
@@ -1007,8 +999,8 @@ impl LargeTableEntry {
                 false
             }
         };
-        self.report_loaded_keys_delta(data.len() as i64 - self.data.len() as i64);
         self.data = ArcCow::new_owned(data);
+        self.report_loaded_keys_count();
         if is_dirty {
             self.state = LargeTableEntryState::DirtyLoaded(position);
         } else {
@@ -1079,8 +1071,8 @@ impl LargeTableEntry {
 
     fn clear_after_flush(&mut self, position: WalPosition, last_processed: u64) {
         // Retain only entries with offset > last_processed
-        let delta = self.data.make_mut().retain_above_position(last_processed);
-        self.report_loaded_keys_delta(delta);
+        self.data.make_mut().retain_above_position(last_processed);
+        self.report_loaded_keys_count();
 
         // If all entries were removed, update state to Unloaded
         if self.data.is_empty() {
@@ -1121,11 +1113,10 @@ impl LargeTableEntry {
         if self.data.same_shared(&original_index) {
             self.clear_after_flush(position, pending_last_processed);
         } else {
-            let delta = self
-                .data
+            self.data
                 .make_mut()
                 .unmerge_flushed(&original_index, pending_last_processed);
-            self.report_loaded_keys_delta(delta);
+            self.report_loaded_keys_count();
             self.state = LargeTableEntryState::DirtyUnloaded(position);
             self.context
                 .metrics
@@ -1151,8 +1142,8 @@ impl LargeTableEntry {
                     .with_label_values(&["clean"])
                     .inc();
                 self.state = LargeTableEntryState::Unloaded(*pos);
-                self.report_loaded_keys_delta(-(self.data.len() as i64));
                 self.data = Default::default();
+                self.report_loaded_keys_count();
             }
             LargeTableEntryState::DirtyUnloaded(_pos) => {
                 // load, merge, flush and unload -> Unloaded(..)
@@ -1184,8 +1175,8 @@ impl LargeTableEntry {
                         .with_label_values(&["unmerge"])
                         .inc();
                     // or (b) unmerge and unload -> DirtyUnloaded(..)
-                    let delta = self.data.make_mut().retain_dirty();
-                    self.report_loaded_keys_delta(delta);
+                    self.data.make_mut().retain_dirty();
+                    self.report_loaded_keys_count();
                     self.state = LargeTableEntryState::DirtyUnloaded(*position);
                 }
             }
@@ -1204,7 +1195,6 @@ impl LargeTableEntry {
 
     fn unload_dirty_loaded<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
         self.run_compactor();
-        let num_unloaded = self.data.len();
         let mut data = Default::default();
         mem::swap(&mut data, &mut self.data);
         let mut data = data.into_owned();
@@ -1212,7 +1202,8 @@ impl LargeTableEntry {
         // todo - if this line returns error, self.data will be in the inconsistent state
         let position = loader.flush(self.context.id(), &data)?;
         self.state = LargeTableEntryState::Unloaded(position);
-        self.report_loaded_keys_delta(-(num_unloaded as i64));
+        self.data = Default::default();
+        self.report_loaded_keys_count();
         Ok(())
     }
 
@@ -1227,7 +1218,7 @@ impl LargeTableEntry {
                 .compacted_keys
                 .with_label_values(&[self.context.name()])
                 .inc_by(compacted as u64);
-            self.report_loaded_keys_delta(-(compacted as i64));
+            self.report_loaded_keys_count();
         }
     }
 

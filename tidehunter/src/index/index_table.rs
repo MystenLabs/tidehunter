@@ -83,9 +83,8 @@ impl IndexTable {
         }
     }
 
-    /// Remove flushed index entries that have offset <= last_processed, returning number of entries changed
-    pub fn unmerge_flushed(&mut self, original: &Self, last_processed: u64) -> i64 {
-        let mut delta = 0i64;
+    /// Remove flushed index entries that have offset <= last_processed
+    pub fn unmerge_flushed(&mut self, original: &Self, last_processed: u64) {
         for (k, v) in original.data.iter() {
             // Only unmerge entries that were actually flushed (offset <= last_processed)
             if v.offset <= last_processed {
@@ -97,13 +96,11 @@ impl IndexTable {
                     Entry::Occupied(oc) => {
                         if oc.get().into_wal_position() == v.into_wal_position() {
                             oc.remove();
-                            delta -= 1;
                         }
                     }
                 }
             }
         }
-        delta
     }
 
     /// Count the number of dirty(modified or removed) wal positions in this index.
@@ -113,12 +110,8 @@ impl IndexTable {
     }
 
     /// Change loaded dirty IndexTable into unloaded dirty by retaining dirty keys and tombstones
-    /// Returns delta in number of entries
-    pub fn retain_dirty(&mut self) -> i64 {
-        let original_data_len = self.data.len() as i64;
+    pub fn retain_dirty(&mut self) {
         self.data.retain(|_, pos| !pos.is_clean());
-        let data_len = self.data.len() as i64;
-        data_len - original_data_len
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
@@ -253,12 +246,9 @@ impl IndexTable {
         });
     }
 
-    /// Retain only entries with offset > last_processed, returning number of entries removed
-    pub fn retain_above_position(&mut self, last_processed: u64) -> i64 {
-        let original_len = self.data.len();
+    /// Retain only entries with offset > last_processed
+    pub fn retain_above_position(&mut self, last_processed: u64) {
         self.data.retain(|_k, v| v.offset > last_processed);
-        let removed = original_len - self.data.len();
-        -(removed as i64)
     }
 
     // todo compactor API should change so that we don't have to expose IndexWalPosition
@@ -430,7 +420,10 @@ mod tests {
         let mut index2 = index.clone();
         index2.insert(vec![1].into(), WalPosition::test_value(5));
         index2.insert(vec![3].into(), WalPosition::test_value(8));
-        assert_eq!(index2.unmerge_flushed(&index, u64::MAX), -2);
+        let len_before = index2.len();
+        index2.unmerge_flushed(&index, u64::MAX);
+        let len_after = index2.len();
+        assert_eq!(len_after as i64 - len_before as i64, -2);
         let data = index2.into_data().into_iter().collect::<Vec<_>>();
         assert_eq!(
             data,
@@ -455,7 +448,10 @@ mod tests {
         index2.insert(vec![3].into(), WalPosition::test_value(8));
 
         // With last_processed=3, only entries at positions 2 and 3 should be unmerged
-        assert_eq!(index2.unmerge_flushed(&index, 3), -1);
+        let len_before = index2.len();
+        index2.unmerge_flushed(&index, 3);
+        let len_after = index2.len();
+        assert_eq!(len_after as i64 - len_before as i64, -1);
         let data = index2.into_data().into_iter().collect::<Vec<_>>();
         assert_eq!(
             data,
@@ -477,8 +473,10 @@ mod tests {
         index.insert(vec![4].into(), WalPosition::test_value(400));
 
         // Retain only entries with offset > 250
-        let delta = index.retain_above_position(250);
-        assert_eq!(delta, -2); // Removed 2 entries
+        let len_before = index.len();
+        index.retain_above_position(250);
+        let len_after = index.len();
+        assert_eq!(len_before - len_after, 2); // Removed 2 entries
 
         // Check remaining entries
         assert_eq!(index.len(), 2);
