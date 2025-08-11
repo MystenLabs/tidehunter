@@ -15,23 +15,24 @@ fn main() -> Result<()> {
     let base_db: tidehunter::config::Config = tidehunter::config::Config {
         ..Default::default()
     };
-    let mut base_client: StressClientParameters = StressClientParameters::default();
-    // Align base_client defaults with the original Python script
-    base_client.mixed_threads = 36;
-    base_client.write_threads = 36;
-    base_client.write_size = 64;
-    base_client.key_len = 32;
-    base_client.writes = 50_000_000;
-    base_client.operations = 10_000_000;
-    base_client.background_writes = 0;
-    base_client.no_snapshot = false;
-    base_client.report = true;
-    base_client.key_layout = benchmark::configs::KeyLayout::Uniform;
-    base_client.tldr = String::new();
-    base_client.preserve = false;
-    base_client.read_percentage = 100;
-    base_client.zipf_exponent = 0.0;
-    base_client.path = Some("/home/ubuntu/working_dir".to_string());
+    let base_client: StressClientParameters = StressClientParameters {
+        mixed_threads: 36,
+        write_threads: 36,
+        write_size: 64,
+        key_len: 32,
+        writes: 50_000_000,
+        operations: 10_000_000,
+        background_writes: 0,
+        no_snapshot: false,
+        report: true,
+        key_layout: benchmark::configs::KeyLayout::Uniform,
+        tldr: String::new(),
+        preserve: false,
+        read_percentage: 100,
+        zipf_exponent: 0.0,
+        path: Some("/home/ubuntu/working_dir".to_string()),
+        ..Default::default()
+    };
 
     // Serialize base to YAML string once, then produce combinations via string replacements.
     let base_item = TargetConfigOutput {
@@ -140,10 +141,9 @@ fn format_yaml_value(v: &str) -> String {
 
 fn replace_in_section(yaml: &str, section: &str, key: &str, new_value: &str) -> String {
     let mut out = String::with_capacity(yaml.len());
-    let mut lines = yaml.lines().peekable();
     let mut in_section = false;
     let mut section_indent: usize = 0;
-    while let Some(line) = lines.next() {
+    for line in yaml.lines() {
         let indent = line.chars().take_while(|c| *c == ' ').count();
         let trimmed = line.trim_start();
 
