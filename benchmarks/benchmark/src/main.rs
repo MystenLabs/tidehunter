@@ -108,15 +108,25 @@ pub fn main() {
                     32,
                     mutexes,
                     KeyType::uniform(1),
-                    key_space_config(),
+                    key_space_config(config.db_parameters.max_dirty_keys),
                 ),
                 KeyLayout::SequenceChoice => {
                     let key_type = KeyType::prefix_uniform(8, 2);
-                    KeyShape::new_single_config(32, mutexes, key_type, key_space_config())
+                    KeyShape::new_single_config(
+                        32,
+                        mutexes,
+                        key_type,
+                        key_space_config(config.db_parameters.max_dirty_keys),
+                    )
                 }
                 KeyLayout::ChoiceSequence => {
                     let key_type = KeyType::prefix_uniform(15, 5);
-                    KeyShape::new_single_config(32, mutexes, key_type, key_space_config())
+                    KeyShape::new_single_config(
+                        32,
+                        mutexes,
+                        key_type,
+                        key_space_config(config.db_parameters.max_dirty_keys),
+                    )
                 }
             };
             let storage =
@@ -232,7 +242,7 @@ pub fn main() {
     }
 }
 
-fn key_space_config() -> KeySpaceConfig {
+fn key_space_config(max_dirty_keys: usize) -> KeySpaceConfig {
     use tidehunter::index::index_format::IndexFormatType;
     use tidehunter::index::uniform_lookup::UniformLookupIndex;
     KeySpaceConfig::new()
@@ -240,6 +250,7 @@ fn key_space_config() -> KeySpaceConfig {
             UniformLookupIndex::new_with_window_size(744),
         ))
         .with_unloaded_iterator(true)
+        .with_bloom_filter(0.01, max_dirty_keys as u32)
 }
 
 struct Stress {
