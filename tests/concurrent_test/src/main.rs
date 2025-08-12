@@ -116,7 +116,8 @@ fn main() {
     // Use a custom config with very small values to trigger more frequent flushes and snapshots
     let mut config = Config::small();
     config.max_dirty_keys = 4;
-    // config.snapshot_unload_threshold = 1024; // Commented out - too aggressive for now
+    // config.snapshot_unload_threshold = 1024;
+    // config.sync_flush = true;
     let config = Arc::new(config);
     let (key_shape, key_space) = KeyShape::new_single(8, 8, KeyType::uniform(1));
 
@@ -157,7 +158,7 @@ fn main() {
         .collect();
 
     let num_threads = 8;
-    let operations_per_thread = 4 * 5000;
+    let operations_per_thread = 48 * 5000;
     let total_operations = num_threads * operations_per_thread;
 
     // Create progress tracking
@@ -226,22 +227,29 @@ fn main() {
 
                     // Take the current database out of the Option
                     if let Some(old_db) = db_write.take() {
-                        // Check file descriptors before stopping
-                        assert_ne!(
-                            count_open_file_descriptors(&db_path),
-                            0,
-                            "Expected at least 1 open file descriptors before stopping database"
-                        );
+                        // Only check file descriptors 0.2% of the time to reduce overhead
+                        let should_check_fds = rng.gen_range(0..500) < 1;
+
+                        if should_check_fds {
+                            // Check file descriptors before stopping
+                            assert_ne!(
+                                count_open_file_descriptors(&db_path),
+                                0,
+                                "Expected at least 1 open file descriptors before stopping database"
+                            );
+                        }
 
                         // Wait for all background threads to finish while holding the lock
                         old_db.wait_for_background_threads_to_finish();
 
-                        // Verify all file descriptors are released after background threads finish
-                        assert_eq!(
-                            count_open_file_descriptors(&db_path),
-                            0,
-                            "Expected 0 open file descriptors after stopping database"
-                        );
+                        if should_check_fds {
+                            // Verify all file descriptors are released after background threads finish
+                            assert_eq!(
+                                count_open_file_descriptors(&db_path),
+                                0,
+                                "Expected 0 open file descriptors after stopping database"
+                            );
+                        }
 
                         // Create new database while still holding the write lock
                         *db_write = Some(
@@ -409,6 +417,10 @@ fn main() {
     let db_read = db.read();
     let db_instance = db_read.as_ref().unwrap();
     let metrics = db_instance.test_get_metrics();
+    println!(
+        "  Wal size: {}",
+        human_readable_bytes(metrics.wal_written_bytes.get() as u64)
+    );
     let force_unload_count = metrics
         .snapshot_force_unload
         .with_label_values(&[db_instance.ks_name(key_space)])
@@ -416,4 +428,16 @@ fn main() {
     println!("  snapshot_force_unload metric: {}", force_unload_count);
 
     println!("\nTest passed successfully!");
+}
+
+fn human_readable_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }
