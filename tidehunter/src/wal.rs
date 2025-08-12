@@ -348,13 +348,13 @@ impl Wal {
         if let Some(map) = self.get_map(map) {
             let offset = offset as usize;
             let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
-            let data = map
-                .data
-                .slice(header_end + inner_offset..header_end + pos.len());
+            let data = map.data.slice(
+                header_end + inner_offset..header_end + pos.len() - CrcFrame::CRC_HEADER_LENGTH,
+            );
             Ok(WalRandomRead::Mapped(data))
         } else {
             let header_end = pos.offset + CrcFrame::CRC_HEADER_LENGTH as u64;
-            let range = (header_end + inner_offset as u64)..(header_end + pos.len() as u64);
+            let range = (header_end + inner_offset as u64)..(pos.offset + pos.len() as u64);
             Ok(WalRandomRead::File(FileRange::new(
                 self.file_reader(),
                 range,
@@ -1007,6 +1007,95 @@ mod tests {
         let data = wal.read(*position.wal_position()).unwrap();
         assert_eq!(&[1, 2, 3], data.as_ref());
         assert_eq!(file.metadata().unwrap().len() % frag_size, 0);
+    }
+
+    #[test]
+    fn test_wal_random_reader_at() {
+        use rand::{Rng, SeedableRng};
+
+        let dir = tempdir::TempDir::new("test-wal-random-reader").unwrap();
+        let file = dir.path().join("wal");
+        let layout = WalLayout {
+            frag_size: 4096, // 4KB as requested
+            max_maps: 16,
+            direct_io: false,
+        };
+
+        let wal = Arc::new(Wal::open(&file, layout.clone(), Metrics::new()).unwrap());
+        let writer = wal.wal_iterator(0).unwrap().into_writer();
+
+        // Use a seeded RNG for reproducibility
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        // Store written data and their positions for verification
+        let mut written_data: Vec<(WalPosition, Vec<u8>)> = Vec::new();
+
+        // Write 1000 random-sized values
+        for i in 0..1000 {
+            let size = rng.gen_range(0..=1024);
+            let mut data = vec![0u8; size];
+            rng.fill(&mut data[..]);
+
+            // Also add a marker at the beginning to help with debugging
+            if size >= 4 {
+                data[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            }
+
+            let prepared = PreparedWalWrite::new(&data);
+            let guard = writer.write(&prepared).unwrap();
+            let pos = *guard.wal_position();
+
+            written_data.push((pos, data));
+        }
+
+        // Now read each position with random offsets
+        for (i, (pos, original_data)) in written_data.iter().enumerate() {
+            // Skip if the data is empty
+            if original_data.is_empty() {
+                continue;
+            }
+
+            // Generate a random offset within the data
+            let max_offset = original_data.len();
+            let random_offset = rng.gen_range(0..max_offset);
+
+            // Read using random_reader_at
+            let reader = wal.random_reader_at(*pos, random_offset).unwrap();
+
+            // Extract the data from the reader using the RandomRead trait
+            use crate::lookup::RandomRead;
+            let len = reader.len();
+            let read_data = reader.read(0..len).to_vec();
+
+            // Verify the read data matches the original data from the offset
+            let expected_data = &original_data[random_offset..];
+            assert_eq!(
+                read_data.as_slice(),
+                expected_data,
+                "Entry {}: Data mismatch at offset {}. Size was {}",
+                i,
+                random_offset,
+                original_data.len()
+            );
+        }
+
+        // Also test reading the full data (offset 0) for a subset of entries
+        for (i, (pos, original_data)) in written_data.iter().enumerate() {
+            if original_data.is_empty() {
+                continue;
+            }
+
+            let reader = wal.random_reader_at(*pos, 0).unwrap();
+            use crate::lookup::RandomRead;
+            let read_data = reader.read(0..reader.len()).to_vec();
+
+            assert_eq!(
+                read_data.as_slice(),
+                original_data.as_slice(),
+                "Entry {} (full read): Data mismatch",
+                i
+            );
+        }
     }
 
     #[track_caller]
