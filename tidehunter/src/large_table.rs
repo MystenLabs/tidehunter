@@ -540,14 +540,14 @@ impl LargeTable {
         for mutex in ks_table.rows.mutexes() {
             let mut row = mutex.lock();
             let mut row_data = RowContainer::new();
-            for (key, entry) in row.entries.iter_mut() {
+            for entry in row.entries.iter_mut() {
                 entry.maybe_unload_for_snapshot(loader, &self.config, tail_position)?;
                 let position = entry.state.wal_position();
                 let snapshot_data = SnapshotEntryData {
                     position,
                     last_processed: entry.last_processed,
                 };
-                row_data.insert(key, snapshot_data);
+                row_data.insert(entry.cell.clone(), snapshot_data);
                 if let Some(valid_position) = position.valid() {
                     max_wal_position = if let Some(max_wal_position) = max_wal_position {
                         Some(cmp::max(max_wal_position, valid_position))
@@ -800,7 +800,7 @@ impl LargeTable {
         for ks_table in &self.table {
             for mutex in ks_table.rows.mutexes() {
                 let mut lock = mutex.lock();
-                for (_, entry) in lock.entries.iter_mut() {
+                for entry in lock.entries.iter_mut() {
                     f(entry);
                 }
             }
@@ -812,7 +812,7 @@ impl LargeTable {
         for ks_table in &self.table {
             for mutex in ks_table.rows.mutexes() {
                 let mut lock = mutex.lock();
-                for (_, entry) in lock.entries.iter_mut() {
+                for entry in lock.entries.iter_mut() {
                     if entry.state.is_dirty() {
                         return false;
                     }
@@ -1426,17 +1426,14 @@ impl Entries {
         self.iter().all(LargeTableEntry::is_empty)
     }
 
-    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = (CellId, &mut LargeTableEntry)> + '_> {
+    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = &mut LargeTableEntry> + '_> {
         match self {
             Entries::Array(_, arr) => {
-                let iter = arr
-                    .iter_mut()
-                    .enumerate()
-                    .map(|(i, e)| (CellId::Integer(i), e));
+                let iter = arr.iter_mut();
                 Box::new(iter)
             }
             Entries::Tree(tree) => {
-                let iter = tree.iter_mut().map(|(k, v)| (CellId::Bytes(k.clone()), v));
+                let iter = tree.iter_mut().map(|(_k, v)| v);
                 Box::new(iter)
             }
         }
