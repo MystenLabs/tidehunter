@@ -158,7 +158,7 @@ fn main() {
         .collect();
 
     let num_threads = 8;
-    let operations_per_thread = 48 * 5000;
+    let operations_per_thread = 16 * 5000;
     let total_operations = num_threads * operations_per_thread;
 
     // Create progress tracking

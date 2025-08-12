@@ -67,6 +67,15 @@ impl IndexTable {
     pub fn merge_dirty_and_clean(&mut self, dirty: &Self) {
         // todo implement this efficiently taking into account both self and dirty are sorted
         for (k, v) in dirty.data.iter() {
+            // Strict check for concurrent_test and unit tests
+            #[cfg(any(debug_assertions, feature = "test_methods"))]
+            if let Some(found) = self.data.get(k) {
+                if found.offset > v.offset {
+                    // This can't happen - this would mean we somehow have written an
+                    // older entry in a dirty set.
+                    panic!("found.offset {} > v.offset {}", found.offset, v.offset);
+                }
+            }
             if v.is_removed() {
                 self.data.remove(k);
             } else {
@@ -86,17 +95,20 @@ impl IndexTable {
     /// Remove flushed index entries that have offset <= last_processed
     pub fn unmerge_flushed(&mut self, original: &Self, last_processed: u64) {
         for (k, v) in original.data.iter() {
-            // Only unmerge entries that were actually flushed (offset <= last_processed)
-            if v.offset <= last_processed {
-                let entry = self.data.entry(k.clone());
-                match entry {
-                    Entry::Vacant(_) => {
-                        // todo clarify how this is possible
-                    }
-                    Entry::Occupied(oc) => {
-                        if oc.get().into_wal_position() == v.into_wal_position() {
-                            oc.remove();
-                        }
+            if v.offset >= last_processed {
+                // Do not unmerge entries that might have in-flight operations
+                continue;
+            }
+            let entry = self.data.entry(k.clone());
+            match entry {
+                Entry::Vacant(_) => {
+                    #[cfg(any(debug_assertions, feature = "test_methods"))]
+                    panic!("unmerge_flushed entry mismatch {:?}", k)
+                    // todo promote this to unconditional panic?
+                }
+                Entry::Occupied(oc) => {
+                    if oc.get().into_wal_position() == v.into_wal_position() {
+                        oc.remove();
                     }
                 }
             }
@@ -248,7 +260,7 @@ impl IndexTable {
 
     /// Retain only entries with offset > last_processed
     pub fn retain_above_position(&mut self, last_processed: u64) {
-        self.data.retain(|_k, v| v.offset > last_processed);
+        self.data.retain(|_k, v| v.offset >= last_processed);
     }
 
     // todo compactor API should change so that we don't have to expose IndexWalPosition
@@ -447,9 +459,9 @@ mod tests {
         index2.insert(vec![1].into(), WalPosition::test_value(5));
         index2.insert(vec![3].into(), WalPosition::test_value(8));
 
-        // With last_processed=3, only entries at positions 2 and 3 should be unmerged
+        // With last_processed=4, only entries at positions 2 and 3 should be unmerged
         let len_before = index2.len();
-        index2.unmerge_flushed(&index, 3);
+        index2.unmerge_flushed(&index, 4);
         let len_after = index2.len();
         assert_eq!(len_after as i64 - len_before as i64, -1);
         let data = index2.into_data().into_iter().collect::<Vec<_>>();
