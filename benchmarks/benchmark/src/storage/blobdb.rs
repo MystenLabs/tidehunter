@@ -23,7 +23,7 @@ impl BlobDbStorage {
         opts.set_enable_blob_files(true);
         // Values smaller than this remain in LSM; tune for large-value workloads
         // Using 4KiB default threshold
-        opts.set_min_blob_size(4 * 1024);
+        opts.set_min_blob_size(256);
         // Size of blob files before rolling
         opts.set_blob_file_size(128 * 1024 * 1024);
         // Compression for blobs; ZSTD for better ratio
