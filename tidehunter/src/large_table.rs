@@ -1138,76 +1138,7 @@ impl LargeTableEntry {
     }
 
     #[allow(dead_code)]
-    fn unload<L: Loader>(
-        &mut self,
-        loader: &L,
-        _config: &Config,
-        force_clean: bool,
-    ) -> Result<(), L::Error> {
-        match &self.state {
-            LargeTableEntryState::Empty => {}
-            LargeTableEntryState::Unloaded(_) => {}
-            LargeTableEntryState::Loaded(pos) => {
-                self.context
-                    .metrics
-                    .unload
-                    .with_label_values(&["clean"])
-                    .inc();
-                self.state = LargeTableEntryState::Unloaded(*pos);
-                self.data = Default::default();
-                self.report_loaded_keys_count();
-            }
-            LargeTableEntryState::DirtyUnloaded(_pos) => {
-                // load, merge, flush and unload -> Unloaded(..)
-                self.context
-                    .metrics
-                    .unload
-                    .with_label_values(&["merge_flush"])
-                    .inc();
-                self.maybe_load(loader)?;
-                assert!(matches!(self.state, LargeTableEntryState::DirtyLoaded(_)));
-                self.unload_dirty_loaded(loader)?;
-            }
-            LargeTableEntryState::DirtyLoaded(position) => {
-                // IndexTable::count_dirty is expensive,
-                // but this operation should not happen very often.
-                if force_clean || self.context.excess_dirty_keys(self.data.count_dirty()) {
-                    self.context
-                        .metrics
-                        .unload
-                        .with_label_values(&["flush"])
-                        .inc();
-                    // either (a) flush and unload -> Unloaded(..)
-                    // small code duplicate between here and unload_dirty_unloaded
-                    self.unload_dirty_loaded(loader)?;
-                } else {
-                    self.context
-                        .metrics
-                        .unload
-                        .with_label_values(&["unmerge"])
-                        .inc();
-                    // or (b) unmerge and unload -> DirtyUnloaded(..)
-                    self.data.make_mut().retain_dirty();
-                    self.report_loaded_keys_count();
-                    self.state = LargeTableEntryState::DirtyUnloaded(*position);
-                }
-            }
-        }
-        // if let LargeTableEntryState::Loaded(position) = self.state {
-        //     self.state = LargeTableEntryState::Unloaded(position);
-        //     self.data.clear();
-        // } else if let LargeTableEntryState::Dirty(_) = self.state {
-        //     let position = loader.unload(&self.data)?;
-        //     // todo trigger re-index to cap memory during restart?
-        //     self.state = LargeTableEntryState::Unloaded(position);
-        //     self.data.clear();
-        // }
-        Ok(())
-    }
-
-    #[allow(dead_code)]
     fn unload_dirty_loaded<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
-        self.run_compactor();
         let mut data = Default::default();
         mem::swap(&mut data, &mut self.data);
         let mut data = data.into_owned();
@@ -1218,22 +1149,6 @@ impl LargeTableEntry {
         self.data = Default::default();
         self.report_loaded_keys_count();
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn run_compactor(&mut self) {
-        if let Some(compactor) = self.context.ks_config.compactor() {
-            let index = self.data.make_mut();
-            let pre_compact_len = index.len();
-            compactor(index.data_for_compaction());
-            let compacted = pre_compact_len.saturating_sub(index.len());
-            self.context
-                .metrics
-                .compacted_keys
-                .with_label_values(&[self.context.name()])
-                .inc_by(compacted as u64);
-            self.report_loaded_keys_count();
-        }
     }
 
     pub fn is_empty(&self) -> bool {
