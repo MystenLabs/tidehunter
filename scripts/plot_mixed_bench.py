@@ -4,7 +4,7 @@ Plot mixed benchmark results from a directory of logs.
 
 This script parses all .log files in a given directory, extracts benchmark
 results for different configurations, and generates bar plots comparing
-Tidehunter and RocksDB throughput.
+Tidehunter, RocksDB, and BlobDB throughput.
 """
 
 import os
@@ -39,7 +39,7 @@ ZIPF_EXPONENTS = [0, 0.8, 1.5, 2]
 # --- Log Parsing ---
 
 # Regex patterns for parsing log files
-BACKEND_PATTERN = re.compile(r'backend:\s+(Tidehunter|Rocksdb)')
+BACKEND_PATTERN = re.compile(r'backend:\s+(Tidehunter|Rocksdb|Blobdb)')
 READ_MODE_PATTERN = re.compile(r'read_mode:\s+(Get|Exists|Lt\(\s*\d+\s*,?\s*\))', re.DOTALL)
 READ_PERCENTAGE_PATTERN = re.compile(r'read_percentage:\s+(\d+)')
 DIRECT_IO_PATTERN = re.compile(r'direct_io:\s+(true|false)')
@@ -160,17 +160,37 @@ def plot_throughput_bars(df: pd.DataFrame, read_mode: str, direct_io: bool, zipf
     read_percents = sorted(plot_df['read_percentage'].unique())
     tidehunter_perf = plot_df[plot_df['backend'] == 'Tidehunter'].set_index('read_percentage')['ops_per_sec']
     rocksdb_perf = plot_df[plot_df['backend'] == 'Rocksdb'].set_index('read_percentage')['ops_per_sec']
+    blobdb_perf = plot_df[plot_df['backend'] == 'Blobdb'].set_index('read_percentage')['ops_per_sec']
 
     # Align performance data with all read percentages for this plot
     tidehunter_perf = tidehunter_perf.reindex(read_percents, fill_value=0)
     rocksdb_perf = rocksdb_perf.reindex(read_percents, fill_value=0)
+    blobdb_perf = blobdb_perf.reindex(read_percents, fill_value=0)
+
+    # Collect active backends (those that have any non-zero datapoints)
+    series_list = [
+        (tidehunter_perf, 'Tidehunter'),
+        (rocksdb_perf, 'RocksDB'),
+        (blobdb_perf, 'BlobDB'),
+    ]
+    active = [(s, label) for (s, label) in series_list if (s > 0).any()]
+    if not active:
+        # Fallback: plot all three (will be zeros, but shouldn't happen due to has_data check)
+        active = series_list
 
     x = np.arange(len(read_percents))  # the label locations
-    width = 0.35  # the width of the bars
+    n = len(active)
+    total_span = 0.8
+    width = total_span / max(n, 1)
 
     fig, ax = plt.subplots(figsize=(12, 7))
-    rects1 = ax.bar(x - width/2, tidehunter_perf, width, label='Tidehunter')
-    rects2 = ax.bar(x + width/2, rocksdb_perf, width, label='RocksDB')
+    rects_all = []
+    # Center the group around x by offsetting bars
+    start_offset = - (n - 1) * width / 2
+    for idx, (series, label) in enumerate(active):
+        offset = start_offset + idx * width
+        rects = ax.bar(x + offset, series, width, label=label)
+        rects_all.append(rects)
 
     # Add some text for labels, title and axes ticks
     ax.set_ylabel('Throughput (ops/s)')
@@ -184,8 +204,8 @@ def plot_throughput_bars(df: pd.DataFrame, read_mode: str, direct_io: bool, zipf
     ax.set_xticklabels(read_percents)
     ax.legend()
 
-    ax.bar_label(rects1, padding=3, fmt='%.0f')
-    ax.bar_label(rects2, padding=3, fmt='%.0f')
+    for rects in rects_all:
+        ax.bar_label(rects, padding=3, fmt='%.0f')
     
     ax.yaxis.grid(True, linestyle='--', alpha=0.6)
     fig.tight_layout()
