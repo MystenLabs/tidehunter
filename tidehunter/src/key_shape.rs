@@ -245,6 +245,10 @@ impl KeySpaceDesc {
         self.key_type.first_cell()
     }
 
+    pub(crate) fn last_cell(&self) -> CellId {
+        self.key_type.last_cell(self)
+    }
+
     pub(crate) fn use_key_reduction_iterator(&self) -> bool {
         match self.key_indexing {
             KeyIndexing::Fixed(_) => false,
@@ -581,6 +585,15 @@ impl KeyType {
             KeyType::Uniform(_) => CellId::Integer(0),
             KeyType::PrefixedUniform(config) => {
                 let bytes = SmallVec::from_elem(0, config.prefix_len_bytes);
+                CellId::Bytes(bytes)
+            }
+        }
+    }
+    fn last_cell(&self, ksd: &KeySpaceDesc) -> CellId {
+        match self {
+            KeyType::Uniform(config) => CellId::Integer(config.num_cells(ksd) - 1),
+            KeyType::PrefixedUniform(config) => {
+                let bytes = SmallVec::from_elem(255, config.prefix_len_bytes);
                 CellId::Bytes(bytes)
             }
         }

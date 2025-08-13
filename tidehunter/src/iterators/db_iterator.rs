@@ -45,6 +45,12 @@ impl DbIterator {
             self.end_cell_exclusive =
                 self.db
                     .next_cell(ks, &ks.cell_id(&reduced_lower_bound), true);
+            // When iterating in reverse with only a lower bound,
+            // we need to start from the end if no upper bound has been set yet
+            if self.full_upper_bound.is_none() {
+                self.cell = Some(ks.last_cell());
+                self.prev_key = None;
+            }
         } else {
             let next_key = saturated_decrement_vec(&reduced_lower_bound);
 

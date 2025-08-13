@@ -474,7 +474,7 @@ fn test_extensive_iterator_random_ranges() {
     let dir = tempdir::TempDir::new("test-extensive-iterator").unwrap();
     let config = Arc::new(Config::small());
     let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
-    
+
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -482,68 +482,74 @@ fn test_extensive_iterator_random_ranges() {
         Metrics::new(),
     )
     .unwrap();
-    
+
     // Fill database with values from 0x0000 to 0x0fff (4096 values)
     for i in 0u16..0x1000 {
         let key = i.to_be_bytes().to_vec();
         let value = format!("value_{:04x}", i).into_bytes();
         db.insert(ks, key, value).unwrap();
     }
-    
+
     // Test iterator 1000 times with random ranges
     let mut rng = StdRng::seed_from_u64(42); // Use seeded RNG for reproducibility
-    
+
     for iteration in 0..100 {
         // Generate random range bounds
         let start = rng.gen_range(0u16..0x1000);
         let end = rng.gen_range(start..=0x1000);
-        
+
         // Randomly decide forward or reverse iteration
         let reverse = rng.gen_bool(0.5);
-        
+
         // Create iterator with bounds
         let mut iterator = db.iterator(ks);
         iterator.set_lower_bound(start.to_be_bytes().to_vec());
         iterator.set_upper_bound(end.to_be_bytes().to_vec());
-        
+
         if reverse {
             iterator.reverse();
         }
-        
+
         // Collect all items from iterator
         let items: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
-        
+
         // Verify results
         let expected_count = (end - start) as usize;
-        
+
         assert_eq!(
-            items.len(), 
+            items.len(),
             expected_count,
             "Iteration {}: range [{:04x}, {:04x}), reverse={}, expected {} items but got {}",
-            iteration, start, end, reverse, expected_count, items.len()
+            iteration,
+            start,
+            end,
+            reverse,
+            expected_count,
+            items.len()
         );
-        
+
         // Verify actual key-value pairs
         if reverse {
             // In reverse mode, we expect keys from (end-1) down to start
             for (idx, (key, value)) in items.iter().enumerate() {
                 let expected_key_num = end - 1 - idx as u16;
                 let expected_value = format!("value_{:04x}", expected_key_num).into_bytes();
-                
+
                 // First check the key value as u16 for better error messages
                 let actual_key_num = u16::from_be_bytes([key[0], key[1]]);
                 assert_eq!(
-                    actual_key_num, 
-                    expected_key_num,
+                    actual_key_num, expected_key_num,
                     "Iteration {} (reverse): Wrong key at position {}. Expected {:04x}, got {:04x}",
                     iteration, idx, expected_key_num, actual_key_num
                 );
-                
+
                 assert_eq!(
-                    value.as_ref(), 
+                    value.as_ref(),
                     &expected_value[..],
                     "Iteration {} (reverse): Wrong value for key {:04x} at position {}",
-                    iteration, expected_key_num, idx
+                    iteration,
+                    expected_key_num,
+                    idx
                 );
             }
         } else {
@@ -551,45 +557,49 @@ fn test_extensive_iterator_random_ranges() {
             for (idx, (key, value)) in items.iter().enumerate() {
                 let expected_key_num = start + idx as u16;
                 let expected_value = format!("value_{:04x}", expected_key_num).into_bytes();
-                
+
                 // First check the key value as u16 for better error messages
                 let actual_key_num = u16::from_be_bytes([key[0], key[1]]);
                 assert_eq!(
-                    actual_key_num, 
-                    expected_key_num,
+                    actual_key_num, expected_key_num,
                     "Iteration {} (forward): Wrong key at position {}. Expected {:04x}, got {:04x}",
                     iteration, idx, expected_key_num, actual_key_num
                 );
-                
+
                 assert_eq!(
-                    value.as_ref(), 
+                    value.as_ref(),
                     &expected_value[..],
                     "Iteration {} (forward): Wrong value for key {:04x} at position {}",
-                    iteration, expected_key_num, idx
+                    iteration,
+                    expected_key_num,
+                    idx
                 );
             }
         }
-        
+
         // Additional check: verify that all returned keys are within the range
         for (key, _) in &items {
             let key_num = u16::from_be_bytes([key[0], key[1]]);
             assert!(
                 key_num >= start && key_num < end,
                 "Iteration {}: Key {:04x} is outside the range [{:04x}, {:04x})",
-                iteration, key_num, start, end
+                iteration,
+                key_num,
+                start,
+                end
             );
         }
     }
-    
+
     // Additional edge case tests
-    
+
     // Test empty range
     let mut iterator = db.iterator(ks);
     iterator.set_lower_bound(0x0500u16.to_be_bytes().to_vec());
     iterator.set_upper_bound(0x0500u16.to_be_bytes().to_vec());
     let items: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
     assert_eq!(items.len(), 0, "Empty range should return no items");
-    
+
     // Test single item range
     let mut iterator = db.iterator(ks);
     iterator.set_lower_bound(0x0500u16.to_be_bytes().to_vec());
@@ -597,23 +607,39 @@ fn test_extensive_iterator_random_ranges() {
     let items: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
     assert_eq!(items.len(), 1, "Single item range should return 1 item");
     assert_eq!(items[0].0.as_ref(), &0x0500u16.to_be_bytes()[..]);
-    
+
     // Test full range forward
     let mut iterator = db.iterator(ks);
     iterator.set_lower_bound(0x0000u16.to_be_bytes().to_vec());
     let items: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
-    assert_eq!(items.len(), 0x1000, "Full range forward should return all items");
-    
+    assert_eq!(
+        items.len(),
+        0x1000,
+        "Full range forward should return all items"
+    );
+
     // Test full range reverse
     let mut iterator = db.iterator(ks);
     iterator.set_lower_bound(0x0000u16.to_be_bytes().to_vec());
     iterator.reverse();
     let items: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
-    assert_eq!(items.len(), 0x1000, "Full range reverse should return all items");
-    
+    assert_eq!(
+        items.len(),
+        0x1000,
+        "Full range reverse should return all items"
+    );
+
     // Verify first and last items in reverse
-    assert_eq!(items[0].0.as_ref(), &0x0fffu16.to_be_bytes()[..], "First item in reverse should be 0x0fff");
-    assert_eq!(items[0x0fff].0.as_ref(), &0x0000u16.to_be_bytes()[..], "Last item in reverse should be 0x0000");
+    assert_eq!(
+        items[0].0.as_ref(),
+        &0x0fffu16.to_be_bytes()[..],
+        "First item in reverse should be 0x0fff"
+    );
+    assert_eq!(
+        items[0x0fff].0.as_ref(),
+        &0x0000u16.to_be_bytes()[..],
+        "Last item in reverse should be 0x0000"
+    );
 }
 
 #[test]
