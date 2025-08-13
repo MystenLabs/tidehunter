@@ -42,6 +42,7 @@ pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
         .unwrap();
         assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
         assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
+        thread::sleep(Duration::from_millis(10)); // todo replace this with wal tracker barrier
         db.rebuild_control_region().unwrap();
         assert!(
             db.large_table.is_all_clean(),
@@ -295,6 +296,7 @@ pub(super) fn test_remove((key_shape, ks): (KeyShape, KeySpace)) {
         db.insert(ks, vec![1, 2, 3, 4], vec![9, 10]).unwrap();
         assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
         assert_eq!(Some(vec![9, 10].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+        thread::sleep(Duration::from_millis(10)); // todo replace this with wal tracker barrier
         db.rebuild_control_region().unwrap();
         db.remove(ks, vec![1, 2, 3, 4]).unwrap();
         assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
@@ -1911,6 +1913,7 @@ fn test_bloom_filter_restore() {
             db.insert(ks, i.to_be_bytes().to_vec(), vec![0, 1, 2])
                 .unwrap();
         }
+        thread::sleep(Duration::from_millis(10)); // todo replace this with wal tracker barrier
         db.rebuild_control_region().unwrap();
         assert!(db.large_table.is_all_clean());
     }
