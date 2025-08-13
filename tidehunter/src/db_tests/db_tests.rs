@@ -470,10 +470,23 @@ fn test_iterator_slice(db: &Arc<Db>, ks: KeySpace, slice: &[u128], reverse: bool
 }
 
 #[test]
+#[ignore = "long test"]
 fn test_extensive_iterator_random_ranges() {
+    test_extensive_iterator_random_ranges_for_key_type(KeyType::uniform(1));
+    test_extensive_iterator_random_ranges_for_key_type(KeyType::uniform(16));
+    test_extensive_iterator_random_ranges_for_key_type(KeyType::prefix_uniform(1, 0));
+    test_extensive_iterator_random_ranges_for_key_type(KeyType::prefix_uniform(1, 4));
+    test_extensive_iterator_random_ranges_for_key_type(KeyType::prefix_uniform(1, 3));
+    test_extensive_iterator_random_ranges_for_key_type(KeyType::prefix_uniform(2, 0));
+    test_extensive_iterator_random_ranges_for_key_type(KeyType::prefix_uniform(2, 4));
+    test_extensive_iterator_random_ranges_for_key_type(KeyType::prefix_uniform(2, 3));
+}
+
+fn test_extensive_iterator_random_ranges_for_key_type(key_type: KeyType) {
+    println!("Testing extensive iterator with KeyType: {:?}", key_type);
     let dir = tempdir::TempDir::new("test-extensive-iterator").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let (key_shape, ks) = KeyShape::new_single(2, 16, key_type);
 
     let db = Db::open(
         dir.path(),
@@ -483,8 +496,9 @@ fn test_extensive_iterator_random_ranges() {
     )
     .unwrap();
 
-    // Fill database with values from 0x0000 to 0x0fff (4096 values)
-    for i in 0u16..0x1000 {
+    // Fill a database with values
+    const MAX: u16 = 0xffff;
+    for i in 0u16..MAX {
         let key = i.to_be_bytes().to_vec();
         let value = format!("value_{:04x}", i).into_bytes();
         db.insert(ks, key, value).unwrap();
@@ -493,10 +507,10 @@ fn test_extensive_iterator_random_ranges() {
     // Test iterator 1000 times with random ranges
     let mut rng = StdRng::seed_from_u64(42); // Use seeded RNG for reproducibility
 
-    for iteration in 0..100 {
+    for iteration in 0..10000 {
         // Generate random range bounds
-        let start = rng.gen_range(0u16..0x1000);
-        let end = rng.gen_range(start..=0x1000);
+        let start = rng.gen_range(0u16..MAX);
+        let end = rng.gen_range(start..=std::cmp::min(start.saturating_add(1000), MAX));
 
         // Randomly decide forward or reverse iteration
         let reverse = rng.gen_bool(0.5);
@@ -614,7 +628,7 @@ fn test_extensive_iterator_random_ranges() {
     let items: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
     assert_eq!(
         items.len(),
-        0x1000,
+        MAX as usize,
         "Full range forward should return all items"
     );
 
@@ -625,18 +639,18 @@ fn test_extensive_iterator_random_ranges() {
     let items: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
     assert_eq!(
         items.len(),
-        0x1000,
+        MAX as usize,
         "Full range reverse should return all items"
     );
 
     // Verify first and last items in reverse
     assert_eq!(
         items[0].0.as_ref(),
-        &0x0fffu16.to_be_bytes()[..],
-        "First item in reverse should be 0x0fff"
+        &(MAX - 1).to_be_bytes()[..],
+        "First item in reverse is not correct"
     );
     assert_eq!(
-        items[0x0fff].0.as_ref(),
+        items[(MAX - 1) as usize].0.as_ref(),
         &0x0000u16.to_be_bytes()[..],
         "Last item in reverse should be 0x0000"
     );
