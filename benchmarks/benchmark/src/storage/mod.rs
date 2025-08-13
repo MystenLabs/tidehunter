@@ -1,3 +1,4 @@
+pub mod blobdb;
 pub mod rocks;
 pub mod tidehunter;
 

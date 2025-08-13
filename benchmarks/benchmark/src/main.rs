@@ -143,6 +143,11 @@ pub fn main() {
             let storage = RocksStorage::open(&path);
             Arc::new(storage)
         }
+        Backend::Blobdb => {
+            use crate::storage::blobdb::BlobDbStorage;
+            let storage = BlobDbStorage::open(&path);
+            Arc::new(storage)
+        }
     };
     let stress = Stress {
         storage,
