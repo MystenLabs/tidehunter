@@ -75,7 +75,7 @@ enum Entries {
 pub(crate) type RowContainer<T> = BTreeMap<CellId, T>;
 
 /// Snapshot data for a single entry containing both WAL position and last processed position
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub(crate) struct SnapshotEntryData {
     pub position: WalPosition,
     pub last_processed: u64,
@@ -92,7 +92,7 @@ impl SnapshotEntryData {
 }
 
 /// ks -> row -> cell
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct LargeTableContainer<T>(pub Vec<Vec<RowContainer<T>>>);
 
 pub(crate) struct LargeTableSnapshot {
@@ -541,7 +541,7 @@ impl LargeTable {
             let mut row = mutex.lock();
             let mut row_data = RowContainer::new();
             for entry in row.entries.iter_mut() {
-                entry.maybe_unload_for_snapshot(loader, &self.config, tail_position)?;
+                entry.maybe_flush_for_snapshot(loader, &self.config, tail_position)?;
                 let position = entry.state.wal_position();
                 let snapshot_data = SnapshotEntryData {
                     position,
@@ -555,8 +555,8 @@ impl LargeTable {
                         Some(valid_position)
                     };
                 }
-                // Only dirty entries affect replay_from using their last_processed
-                if entry.state.is_dirty() {
+                // Do not use last_processed from empty entries
+                if !entry.state.is_empty() {
                     replay_from = Some(cmp::min(
                         replay_from.unwrap_or(u64::MAX),
                         entry.last_processed,
@@ -1007,7 +1007,7 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    pub fn maybe_unload_for_snapshot<L: Loader>(
+    pub fn maybe_flush_for_snapshot<L: Loader>(
         &mut self,
         loader: &L,
         config: &Config,
@@ -1023,45 +1023,58 @@ impl LargeTableEntry {
         let position = self.state.wal_position();
         // position can actually be great then tail_position due to concurrency
         let distance = tail_position.saturating_sub(position.offset());
-        if distance >= config.snapshot_unload_threshold {
+        // todo this needs to be fixed for ks with self.context.ks_config.unloading_disabled()
+        if distance >= config.snapshot_unload_threshold
+            && !self.context.ks_config.unloading_disabled()
+        {
             self.context
                 .metrics
                 .snapshot_force_unload
                 .with_label_values(&[self.context.name()])
                 .inc();
-            // todo - we don't need to unload here, only persist the entry,
-            // Just reusing unload logic for now.
-            self.unload(loader, config, true)?;
+            self.sync_flush(loader);
         }
         Ok(())
     }
 
-    pub fn unload_if_ks_enabled<L: Loader>(&mut self, flusher: &IndexFlusher, loader: &L) {
+    /// Performs a synchronous flush regardless of the config setting
+    /// Caller is responsible for checking to things:
+    /// * ks_config.unloading_disabled is false
+    /// * pending_last_processed is None
+    fn sync_flush<L: Loader>(&mut self, loader: &L) {
+        let flush_kind = match self.flush_kind() {
+            Some(kind) => kind,
+            None => return, // Not in a flushable state
+        };
+
+        let last_processed = loader.last_processed_wal_position();
+        // Perform a synchronous flush
+        let Some((_original_index, position)) = IndexFlusherThread::handle_command(
+            loader,
+            &FlusherCommand::new(self.context.id(), self.cell.clone(), flush_kind),
+            &self.context,
+        ) else {
+            unreachable!(
+                "IndexFlusherThread::handle_command should not return None for non-test command"
+            )
+        };
+        self.last_processed = last_processed;
+        self.clear_after_flush(position, last_processed);
+    }
+
+    fn unload_if_ks_enabled<L: Loader>(&mut self, flusher: &IndexFlusher, loader: &L) {
         if self.context.ks_config.unloading_disabled() {
             return;
         }
         if self.pending_last_processed.is_none() {
-            // Capture the last processed WAL position when starting the flush
-            let captured_last_processed = loader.last_processed_wal_position();
-
-            let flush_kind = self
-                .flush_kind()
-                .expect("unload_if_ks_enabled is called in clean state");
-
             if self.context.config.sync_flush {
-                // Perform synchronous flush
-                if let Some((_original_index, position)) = IndexFlusherThread::handle_command(
-                    loader,
-                    &FlusherCommand::new(self.context.id(), self.cell.clone(), flush_kind),
-                    &self.context,
-                ) {
-                    // For sync flush, update last_processed immediately
-                    self.last_processed = captured_last_processed;
-                    self.clear_after_flush(position, captured_last_processed);
-                }
+                self.sync_flush(loader);
             } else {
                 // Perform async flush - store the captured value for later
-                self.pending_last_processed = Some(captured_last_processed);
+                let flush_kind = self
+                    .flush_kind()
+                    .expect("unload_if_ks_enabled is called in clean state");
+                self.pending_last_processed = Some(loader.last_processed_wal_position());
                 flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
             }
         }
@@ -1124,6 +1137,7 @@ impl LargeTableEntry {
         }
     }
 
+    #[allow(dead_code)]
     fn unload<L: Loader>(
         &mut self,
         loader: &L,
@@ -1191,6 +1205,7 @@ impl LargeTableEntry {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn unload_dirty_loaded<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
         self.run_compactor();
         let mut data = Default::default();
@@ -1205,6 +1220,7 @@ impl LargeTableEntry {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn run_compactor(&mut self) {
         if let Some(compactor) = self.context.ks_config.compactor() {
             let index = self.data.make_mut();
@@ -1275,6 +1291,10 @@ impl LargeTableEntryState {
             LargeTableEntryState::DirtyUnloaded(w) => *w,
             LargeTableEntryState::DirtyLoaded(w) => *w,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, LargeTableEntryState::Empty)
     }
 
     /// Returns whether wal needs to be replayed from the position returned by wal_position()

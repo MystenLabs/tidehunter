@@ -1,4 +1,4 @@
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,6 +11,7 @@ use tidehunter::config::Config;
 use tidehunter::db::Db;
 use tidehunter::key_shape::{KeyShape, KeyType};
 use tidehunter::metrics::Metrics;
+use tidehunter::minibytes::Bytes;
 
 /// Type alias for the key-specific mutex
 type KeyMutex = Arc<Mutex<()>>;
@@ -116,10 +117,9 @@ fn main() {
     // Use a custom config with very small values to trigger more frequent flushes and snapshots
     let mut config = Config::small();
     config.max_dirty_keys = 4;
-    // config.snapshot_unload_threshold = 1024;
-    // config.sync_flush = true;
+    config.snapshot_unload_threshold = 1024;
     let config = Arc::new(config);
-    let (key_shape, key_space) = KeyShape::new_single(8, 8, KeyType::uniform(1));
+    let (key_shape, key_space) = KeyShape::new_single(1, 8, KeyType::uniform(1));
 
     // Wrap database in RwLock with Option to allow safe restarts
     let db = Arc::new(RwLock::new(Some(
@@ -148,29 +148,32 @@ fn main() {
 
     // Define a set of keys that will be accessed by multiple threads
     // Using a fixed set of keys ensures high contention
-    let keys: Vec<Vec<u8>> = (0..100)
-        .map(|i| {
-            // Create 8-byte keys as expected by KeyShape
-            let mut key = vec![0u8; 8];
-            key[0..4].copy_from_slice(&(i as u32).to_be_bytes());
-            key
-        })
-        .collect();
+    let keys: Vec<Vec<u8>> = (0u8..25).map(|i| vec![i + b'a']).collect();
 
     let num_threads = 8;
     let operations_per_thread = 16 * 5000;
     let total_operations = num_threads * operations_per_thread;
 
-    // Create progress tracking
-    let multi_progress = MultiProgress::new();
+    // Check if progress bars should be disabled
+    let no_progress = std::env::var("NO_PROGRESS").is_ok();
+
+    // Create progress tracking (completely hidden if NO_PROGRESS is set)
+    let multi_progress = if no_progress {
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+    } else {
+        MultiProgress::new()
+    };
+
     let overall_pb = Arc::new(multi_progress.add(ProgressBar::new(total_operations as u64)));
-    overall_pb.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
-            .unwrap()
-            .progress_chars("##-"),
-    );
-    overall_pb.set_message("Total operations");
+    if !no_progress {
+        overall_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+                .unwrap()
+                .progress_chars("##-"),
+        );
+        overall_pb.set_message("Total operations");
+    }
 
     let mut handles = vec![];
     let _start_time = Instant::now();
@@ -188,15 +191,17 @@ fn main() {
 
         // Create progress bar for this thread
         let thread_pb = multi_progress.add(ProgressBar::new(operations_per_thread as u64));
-        thread_pb.set_style(
-            ProgressStyle::default_bar()
-                .template(&format!(
-                    "[Thread {thread_id}] {{bar:30.green/white}} {{pos:>6}}/{{len:6}} {{msg}}"
-                ))
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        thread_pb.set_message("Running");
+        if !no_progress {
+            thread_pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(&format!(
+                        "[Thread {thread_id}] {{bar:30.green/white}} {{pos:>6}}/{{len:6}} {{msg}}"
+                    ))
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            thread_pb.set_message("Running");
+        }
 
         let overall_pb = overall_pb.clone();
 
@@ -296,9 +301,9 @@ fn main() {
                     }
                     1 => {
                         // Read operation with immediate consistency check
+                        let db_read = db.read();
+                        let db_instance = db_read.as_ref().unwrap();
                         let db_value = {
-                            let db_read = db.read();
-                            let db_instance = db_read.as_ref().unwrap();
                             match db_instance.get(key_space, &key) {
                                 Ok(value) => value,
                                 Err(e) => {
@@ -313,13 +318,31 @@ fn main() {
                         // This catches any consistency issues immediately
                         let in_memory_data = in_memory_state.data.lock();
                         let in_memory_value = in_memory_data.get(&key);
-
+                        let key = Bytes::from(key);
                         match (db_value, in_memory_value) {
                             (Some(db_val), Some(mem_val)) => {
-                                assert_eq!(db_val.as_ref(), mem_val.as_slice());
+                                assert_eq!(
+                                    db_val.as_ref(),
+                                    mem_val.as_slice(),
+                                    "Value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
+                                    key,
+                                    db_val.as_ref(),
+                                    mem_val.as_slice()
+                                );
                             }
                             (None, None) => {} // Both agree key doesn't exist
-                            _ => panic!("Database and in-memory state mismatch for key: {:?}", key),
+                            (Some(db_val), None) => {
+                                panic!(
+                                    "Key {:?} exists in database with value {:?}, but not in in-memory state",
+                                    key, db_val.as_ref()
+                                );
+                            }
+                            (None, Some(mem_val)) => {
+                                panic!(
+                                    "Key {:?} exists in in-memory state with value {:?}, but not in database",
+                                    key, mem_val.as_slice()
+                                );
+                            }
                         }
                     }
                     2 => {
@@ -372,11 +395,16 @@ fn main() {
                 assert_eq!(
                     actual_value.as_ref(),
                     expected_value.as_slice(),
-                    "Value mismatch for key: {:?}",
-                    key
+                    "Final verification: Value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
+                    key,
+                    actual_value.as_ref(),
+                    expected_value.as_slice()
                 );
             }
-            None => panic!("Key exists in memory but not in database: {:?}", key),
+            None => panic!(
+                "Key {:?} exists in in-memory state with value {:?}, but not in database",
+                key, expected_value
+            ),
         }
     }
 
@@ -392,9 +420,16 @@ fn main() {
         }
     }
 
-    for db_key in db_keys {
-        if !in_memory_data.contains_key(&db_key) {
-            panic!("Key exists in database but not in memory: {:?}", db_key);
+    for db_key in &db_keys {
+        if !in_memory_data.contains_key(db_key) {
+            let db_read = db.read();
+            let db_instance = db_read.as_ref().unwrap();
+            let db_value = db_instance.get(key_space, db_key).unwrap();
+            panic!(
+                "Key {:?} exists in database with value {:?}, but not in in-memory state",
+                db_key,
+                db_value.map(|v| v.as_ref().to_vec())
+            );
         }
     }
 
