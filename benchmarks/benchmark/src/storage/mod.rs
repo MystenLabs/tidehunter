@@ -13,5 +13,8 @@ pub trait Storage: Sync + Send + 'static {
 
     fn exists(&self, k: &[u8]) -> bool;
 
+    /// Backend-specific cache hit report. Empty for now.
+    fn cache_hit_report(&self) -> String;
+
     fn name(&self) -> &'static str;
 }

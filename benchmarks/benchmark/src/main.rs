@@ -242,6 +242,15 @@ pub fn main() {
     }
     report!(report, "BENCHMARK_END");
 
+    // Append backend-specific cache-hit report to the end of the benchmark log
+    let cache_report = stress.storage.cache_hit_report();
+    if !cache_report.is_empty() {
+        report!(report, "{}", cache_report);
+        if print_report {
+            fs::write("report.txt", &report.lines).unwrap();
+        }
+    }
+
     if stress.parameters.preserve {
         temp_dir.into_path();
     }

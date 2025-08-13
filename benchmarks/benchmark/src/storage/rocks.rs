@@ -123,6 +123,10 @@ impl Storage for Arc<RocksStorage> {
         self.db.get(k).unwrap().is_some()
     }
 
+    fn cache_hit_report(&self) -> String {
+        String::new()
+    }
+
     fn name(&self) -> &'static str {
         "rocksdb"
     }

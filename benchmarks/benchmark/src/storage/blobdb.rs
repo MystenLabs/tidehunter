@@ -110,6 +110,10 @@ impl Storage for Arc<BlobDbStorage> {
         self.db.get(k).unwrap().is_some()
     }
 
+    fn cache_hit_report(&self) -> String {
+        String::new()
+    }
+
     fn name(&self) -> &'static str {
         "blobdb"
     }

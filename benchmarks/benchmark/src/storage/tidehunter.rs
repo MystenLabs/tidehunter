@@ -41,6 +41,10 @@ impl Storage for Arc<TidehunterStorage> {
         self.db.exists(self.ks, k).unwrap()
     }
 
+    fn cache_hit_report(&self) -> String {
+        String::new()
+    }
+
     fn name(&self) -> &'static str {
         "tidehunter"
     }
