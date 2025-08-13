@@ -6,12 +6,20 @@ use std::path::PathBuf;
 fn main() -> Result<()> {
     // Base config from Tidehunter defaults + benchmark defaults
     let mut base_item = StressTestConfigs::default();
-
+    base_item.db_parameters.frag_size = 1073741824;
+    base_item.db_parameters.max_maps = 128;
+    base_item.db_parameters.max_dirty_keys = 1024;
+    base_item.db_parameters.snapshot_written_bytes = 68719476736;
+    base_item.db_parameters.snapshot_unload_threshold = 137438953472;
+    base_item.db_parameters.unload_jitter_pct = 30;
+    base_item.db_parameters.direct_io = false;
+    base_item.db_parameters.num_flusher_threads = 12;
+    base_item.db_parameters.sync_flush = false;
     base_item.stress_client_parameters.mixed_threads = 36;
     base_item.stress_client_parameters.write_threads = 36;
     base_item.stress_client_parameters.write_size = 512;
     base_item.stress_client_parameters.key_len = 32;
-    base_item.stress_client_parameters.writes = 83_000_000;
+    base_item.stress_client_parameters.writes = 44_000_000;
     base_item.stress_client_parameters.operations = 10_000_000;
     base_item.stress_client_parameters.background_writes = 0;
     base_item.stress_client_parameters.no_snapshot = false;
