@@ -623,9 +623,9 @@ impl WalIterator {
             self.wal().metrics.clone(),
         );
         assert_eq!(self.wal.layout.locate(position.position).0, self.map.id);
+        let wal_tracker = WalTracker::start(position.position);
         let position_and_map = (position, self.map);
         let position_and_map = Mutex::new(position_and_map);
-        let wal_tracker = WalTracker::start();
         WalWriter {
             wal: self.wal,
             position_and_map,

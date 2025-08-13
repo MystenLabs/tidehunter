@@ -46,9 +46,9 @@ struct WalTrackerMessage {
 }
 
 impl WalTracker {
-    pub fn start() -> Self {
+    pub fn start(last_processed: u64) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let last_processed = Arc::new(AtomicU64::new(0));
+        let last_processed = Arc::new(AtomicU64::new(last_processed));
         let thread = WalTrackerThread {
             receiver,
             last_processed: last_processed.clone(),
@@ -74,7 +74,7 @@ impl WalTracker {
     }
 
     pub fn last_processed(&self) -> u64 {
-        self.last_processed.load(Ordering::Relaxed)
+        self.last_processed.load(Ordering::SeqCst)
     }
 }
 
@@ -115,7 +115,7 @@ impl WalTrackerThread {
             #[allow(clippy::let_underscore_lock)]
             let _ = message.mutex.lock();
             self.last_processed
-                .store(message.position, Ordering::Relaxed);
+                .store(message.position, Ordering::SeqCst);
         }
     }
 }
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_wal_tracker_basic() {
-        let tracker = WalTracker::start();
+        let tracker = WalTracker::start(0);
 
         // Initially last_processed should be 0
         assert_eq!(tracker.last_processed(), 0);
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_wal_batch() {
-        let tracker = WalTracker::start();
+        let tracker = WalTracker::start(0);
 
         // Create a batch
         let batch = tracker.new_batch(200);
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_multiple_guards_ordering() {
-        let tracker = WalTracker::start();
+        let tracker = WalTracker::start(0);
 
         // Create batches in order (this determines channel message order)
         let batch1 = tracker.new_batch(100);
