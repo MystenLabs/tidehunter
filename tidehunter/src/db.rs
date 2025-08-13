@@ -689,6 +689,13 @@ impl Db {
     pub fn test_get_large_table(&self) -> &LargeTable {
         &self.large_table
     }
+
+    #[cfg(feature = "test-utils")]
+    pub fn test_get_replay_from(&self) -> u64 {
+        let path = self.control_region_store.lock().path().clone();
+        let cr = ControlRegion::read_or_create(&path, &self.key_shape);
+        cr.last_position()
+    }
 }
 
 impl Drop for Db {

@@ -421,6 +421,12 @@ fn main() {
         "  Wal size: {}",
         human_readable_bytes(metrics.wal_written_bytes.get() as u64)
     );
+    let replay_from = db_instance.test_get_replay_from();
+    println!(
+        "  Replay from: {}({})",
+        replay_from,
+        human_readable_bytes(replay_from)
+    );
     let force_unload_count = metrics
         .snapshot_force_unload
         .with_label_values(&[db_instance.ks_name(key_space)])
