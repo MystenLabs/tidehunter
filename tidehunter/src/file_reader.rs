@@ -5,21 +5,22 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
+use std::sync::Arc;
 
-pub struct FileReader<'a> {
-    file: &'a File,
+pub struct FileReader {
+    file: Arc<File>,
     direct_io: bool,
 }
 
-impl<'a> FileReader<'a> {
-    pub fn new(file: &'a File, direct_io: bool) -> Self {
+impl FileReader {
+    pub fn new(file: Arc<File>, direct_io: bool) -> Self {
         Self { file, direct_io }
     }
 
     /// Returns new un-initialized buffer of a given size
     #[allow(clippy::uninit_vec)] // todo look more into it?
-    pub fn io_buffer(&self, size: usize) -> Vec<u8> {
-        if self.direct_io {
+    pub fn io_buffer(size: usize, direct_io: bool) -> Vec<u8> {
+        if direct_io {
             unsafe {
                 const PAGE_SIZE: usize = 4 * 1024;
                 let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
@@ -33,8 +34,8 @@ impl<'a> FileReader<'a> {
         }
     }
 
-    pub fn io_buffer_bytes(&self, size: usize) -> BytesMut {
-        let buffer = self.io_buffer(size);
+    pub fn io_buffer_bytes(size: usize, direct_io: bool) -> BytesMut {
+        let buffer = Self::io_buffer(size, direct_io);
         BytesMut::from(bytes::Bytes::from(buffer))
     }
 
@@ -42,13 +43,14 @@ impl<'a> FileReader<'a> {
         if self.direct_io {
             let range = pos..(pos + len as u64);
             let (read_range, map_range) = align_range(range);
-            let mut buffer = self.io_buffer((read_range.end - read_range.start) as usize);
+            let mut buffer =
+                Self::io_buffer((read_range.end - read_range.start) as usize, self.direct_io);
             self.file.read_exact_at(&mut buffer, read_range.start)?;
             let buffer = Bytes::from(buffer);
             let buffer = buffer.slice(map_range);
             Ok(buffer)
         } else {
-            let mut buffer = self.io_buffer(len);
+            let mut buffer = Self::io_buffer(len, self.direct_io);
             self.file.read_exact_at(&mut buffer, pos)?;
             Ok(Bytes::from(buffer))
         }
@@ -188,7 +190,7 @@ mod tests {
         options.read(true);
         set_direct_options(&mut options, direct_io);
         let file = options.open(path).unwrap();
-        let reader = FileReader::new(&file, direct_io);
+        let reader = FileReader::new(Arc::new(file), direct_io);
         #[track_caller]
         fn test_read(reader: &FileReader, v: u32) {
             let pos = (v as u64) * 4;

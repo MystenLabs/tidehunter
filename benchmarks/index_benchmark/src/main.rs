@@ -6,6 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use tidehunter::metrics::print_histogram_stats;
 
@@ -176,15 +177,15 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     Ok(())
 }
 
-struct IndexBenchmark<'a> {
-    readers: Vec<FileRange<'a>>,
+struct IndexBenchmark {
+    readers: Vec<FileRange>,
     key_shape: KeyShape,
     ks: KeySpace,
 }
 
-impl<'a> IndexBenchmark<'a> {
-    fn load_from_file(file: &'a File, file_length: u64, direct_io: bool) -> std::io::Result<Self> {
-        let reader = FileReader::new(file, direct_io);
+impl IndexBenchmark {
+    fn load_from_file(file: Arc<File>, file_length: u64, direct_io: bool) -> std::io::Result<Self> {
+        let reader = FileReader::new(file.clone(), direct_io);
         // get index count (first 8 bytes of file)
         let index_count = match reader.read_exact_at(0, 8) {
             Ok(buf) => u64::from_be_bytes(buf.as_ref().try_into().unwrap()),
@@ -206,7 +207,10 @@ impl<'a> IndexBenchmark<'a> {
                 start: 8 + i * index_size,
                 end: 8 + (i + 1) * index_size,
             };
-            readers.push(FileRange::new(FileReader::new(file, direct_io), range));
+            readers.push(FileRange::new(
+                FileReader::new(file.clone(), direct_io),
+                range,
+            ));
         }
 
         let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::uniform(1));
@@ -479,25 +483,29 @@ fn main() {
             options.read(true);
             set_direct_options(&mut options, direct_io);
 
-            let uniform_file = options
-                .open(uniform_path)
-                .expect("Failed to open UniformLookupIndex file");
+            let uniform_file = Arc::new(
+                options
+                    .open(uniform_path)
+                    .expect("Failed to open UniformLookupIndex file"),
+            );
             let uniform_file_length = std::fs::metadata(uniform_path)
                 .expect("Failed to get file metadata")
                 .len();
             let uniform_bench =
-                IndexBenchmark::load_from_file(&uniform_file, uniform_file_length, direct_io)
+                IndexBenchmark::load_from_file(uniform_file, uniform_file_length, direct_io)
                     .expect("Failed to load UniformLookupIndex benchmark file");
 
             let header_path = Path::new(&header_file);
-            let header_file = options
-                .open(header_path)
-                .expect("Failed to open HeaderLookupIndex file");
+            let header_file = Arc::new(
+                options
+                    .open(header_path)
+                    .expect("Failed to open HeaderLookupIndex file"),
+            );
             let header_file_length = std::fs::metadata(header_path)
                 .expect("Failed to get file metadata")
                 .len();
             let header_bench =
-                IndexBenchmark::load_from_file(&header_file, header_file_length, direct_io)
+                IndexBenchmark::load_from_file(header_file, header_file_length, direct_io)
                     .expect("Failed to load HeaderLookupIndex benchmark file");
 
             println!(

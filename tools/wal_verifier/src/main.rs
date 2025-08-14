@@ -108,13 +108,12 @@ pub struct VerificationResult {
 }
 
 /// Verifies that all keys in a database's WAL file are accessible from the database
-pub fn verify_wal(db_path: &Path, verbose: bool) -> Result<VerificationResult> {
+pub fn verify_wal(wal_path: &Path, verbose: bool) -> Result<VerificationResult> {
     // Get the WAL path from the database path
-    let wal_path = Db::wal_path(db_path);
 
     // Step 1: Read all keys from WAL file
     println!("Step 1: Reading keys from WAL file...");
-    let keys = read_keys_from_wal(&wal_path, verbose)?;
+    let keys = read_keys_from_wal(wal_path, verbose)?;
     println!("Found {} keys in WAL file", keys.len());
 
     if verbose {
@@ -133,7 +132,7 @@ pub fn verify_wal(db_path: &Path, verbose: bool) -> Result<VerificationResult> {
     println!("\nStep 2: Loading key shape and opening database...");
 
     // Load the key shape from the database directory
-    let key_shape = Db::load_key_shape(db_path)
+    let key_shape = Db::load_key_shape(wal_path)
         .map_err(|e| anyhow::anyhow!("Failed to load key shape: {:?}", e))?;
 
     // Create default config and metrics
@@ -141,7 +140,7 @@ pub fn verify_wal(db_path: &Path, verbose: bool) -> Result<VerificationResult> {
     let metrics = Metrics::new();
 
     // Open the database - it will replay the WAL automatically
-    let db = Db::open(db_path, key_shape, config, metrics)
+    let db = Db::open(wal_path, key_shape, config, metrics)
         .map_err(|e| anyhow::anyhow!("Failed to open database: {:?}", e))?;
     println!("Database opened successfully");
 

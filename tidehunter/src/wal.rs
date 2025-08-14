@@ -4,6 +4,7 @@ use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal_syncer::WalSyncer;
 use crate::wal_tracker::{WalGuard, WalTracker};
+use arc_swap::ArcSwap;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
@@ -13,11 +14,13 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Instant;
 use std::{io, mem, ptr, thread};
+
+const WAL_PREFIX: &str = "wal_";
 
 pub struct WalWriter {
     wal: Arc<Wal>,
@@ -27,7 +30,7 @@ pub struct WalWriter {
 }
 
 pub struct Wal {
-    file: File,
+    files: Arc<ArcSwap<WalFiles>>,
     layout: WalLayout,
     maps: RwLock<BTreeMap<u64, Map>>,
     wal_syncer: WalSyncer,
@@ -42,7 +45,7 @@ struct WalMapper {
 struct WalMapperThread {
     sender: mpsc::SyncSender<Map>,
     last_map: u64,
-    file: File,
+    files: Arc<ArcSwap<WalFiles>>,
     layout: WalLayout,
     metrics: Arc<Metrics>,
 }
@@ -61,15 +64,24 @@ pub(crate) struct Map {
     writeable: bool,
 }
 
+struct WalFiles {
+    base_path: PathBuf,
+    files: Vec<Arc<File>>,
+    min_file_id: WalFileId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition {
     offset: u64,
     len: u32,
 }
 
-pub enum WalRandomRead<'a> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct WalFileId(u64);
+
+pub enum WalRandomRead {
     Mapped(Bytes),
-    File(FileRange<'a>),
+    File(FileRange),
 }
 
 impl WalWriter {
@@ -192,6 +204,7 @@ pub struct WalLayout {
     pub frag_size: u64,
     pub max_maps: usize,
     pub direct_io: bool,
+    pub wal_file_size: u64,
 }
 
 impl WalLayout {
@@ -201,6 +214,11 @@ impl WalLayout {
             self.frag_size,
             self.align(self.frag_size),
             "Frag size not aligned"
+        );
+        assert_eq!(
+            self.wal_file_size % self.frag_size,
+            0,
+            "WAL file size must be a multiple of the frag size"
         );
     }
 
@@ -233,25 +251,98 @@ impl WalLayout {
         start..end
     }
 
+    #[inline]
+    fn locate_file(&self, offset: u64) -> WalFileId {
+        WalFileId(offset / self.wal_file_size)
+    }
+
+    #[inline]
+    fn offset_in_wal_file(&self, offset: u64) -> u64 {
+        offset % self.wal_file_size
+    }
+
     pub fn align(&self, v: u64) -> u64 {
         align_size(v, self.direct_io)
     }
 }
 
+impl WalFiles {
+    fn new(base_path: &Path, layout: &WalLayout) -> io::Result<Arc<ArcSwap<Self>>> {
+        let mut files = vec![];
+        for entry in std::fs::read_dir(base_path)? {
+            let file_path = entry?.path();
+            if file_path.is_file() {
+                if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
+                    if let Some(id_str) = file_name.strip_prefix(WAL_PREFIX) {
+                        let id = u64::from_str_radix(id_str, 16)
+                            .unwrap_or_else(|_| panic!("invalid wal file name {:?}", id_str));
+                        let file = Wal::open_file(&file_path, layout)?;
+                        files.push((id, file));
+                    }
+                }
+            }
+        }
+        if files.is_empty() {
+            let file = Wal::open_file(&Wal::wal_file_name(base_path, WalFileId(0)), layout)?;
+            files.push((0, file));
+        }
+        files.sort_by_key(|(id, _)| *id);
+        let min_file_id = files[0].0;
+        assert_eq!(
+            files[files.len() - 1].0 - min_file_id + 1,
+            files.len() as u64,
+            "WAL file IDs must form a contiguous range",
+        );
+        let wal_files = Self {
+            base_path: base_path.to_path_buf(),
+            files: files.into_iter().map(|(_, file)| Arc::new(file)).collect(),
+            min_file_id: WalFileId(min_file_id),
+        };
+        Ok(Arc::new(ArcSwap::from(Arc::new(wal_files))))
+    }
+
+    fn current_file_id(&self) -> WalFileId {
+        WalFileId(self.min_file_id.0 + self.files.len() as u64 - 1)
+    }
+
+    #[inline]
+    fn current_file(&self) -> &Arc<File> {
+        self.files.last().expect("unable to find current WAL file")
+    }
+
+    fn get(&self, id: WalFileId) -> &Arc<File> {
+        self.files
+            .get((id.0 - self.min_file_id.0) as usize)
+            .expect("attempt to access non existing file")
+    }
+}
+
 impl Wal {
     #[doc(hidden)] // Used by tools/wal_verifier to open WAL files directly
-    pub fn open(p: &Path, layout: WalLayout, metrics: Arc<Metrics>) -> io::Result<Arc<Self>> {
+    pub fn open(
+        base_path: &Path,
+        layout: WalLayout,
+        metrics: Arc<Metrics>,
+    ) -> io::Result<Arc<Self>> {
         layout.assert_layout();
+        let files = WalFiles::new(base_path, &layout)?;
+        let wal_syncer = WalSyncer::start(metrics.clone());
+        let reader = Wal {
+            files,
+            layout,
+            maps: Default::default(),
+            wal_syncer,
+            metrics,
+        };
+        Ok(Arc::new(reader))
+    }
+
+    fn open_file(path: &Path, layout: &WalLayout) -> io::Result<File> {
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
         set_direct_options(&mut options, layout.direct_io);
-        let file = options.open(p)?;
-        Self::resize(&layout, &file)?;
-        Ok(Self::from_file(file, layout, metrics))
-    }
-
-    fn from_file(file: File, layout: WalLayout, metrics: Arc<Metrics>) -> Arc<Self> {
-        let wal_syncer = WalSyncer::start(metrics.clone());
+        let file = options.open(path)?;
+        Wal::resize(layout, &file)?;
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd;
@@ -268,15 +359,11 @@ impl Wal {
                 );
             }
         }
-        let reader = Wal {
-            file,
-            layout,
-            maps: Default::default(),
-            wal_syncer,
-            metrics,
-        };
+        Ok(file)
+    }
 
-        Arc::new(reader)
+    fn wal_file_name(base_path: &Path, file_id: WalFileId) -> PathBuf {
+        base_path.join(format!("{}{:016x}", WAL_PREFIX, file_id.0))
     }
 
     // todo remove
@@ -321,8 +408,10 @@ impl Wal {
             } else {
                 pos.len()
             };
-            let mut buf = self.file_reader().io_buffer_bytes(buffer_size);
-            self.file.read_exact_at(&mut buf, pos.offset)?;
+            let mut buf = FileReader::io_buffer_bytes(buffer_size, self.layout.direct_io);
+            let files = self.files.load();
+            let file = files.get(self.layout.locate_file(pos.offset));
+            file.read_exact_at(&mut buf, self.layout.offset_in_wal_file(pos.offset))?;
             let mut bytes = Bytes::from(bytes::Bytes::from(buf));
             if self.layout.direct_io && bytes.len() > pos.len() {
                 // Direct IO buffer can be larger then needed
@@ -351,10 +440,13 @@ impl Wal {
             );
             Ok(WalRandomRead::Mapped(data))
         } else {
-            let header_end = pos.offset + CrcFrame::CRC_HEADER_LENGTH as u64;
-            let range = (header_end + inner_offset as u64)..(pos.offset + pos.len() as u64);
+            let files = self.files.load();
+            let file = files.get(self.layout.locate_file(pos.offset));
+            let offset = self.layout.offset_in_wal_file(pos.offset);
+            let header_end = offset + CrcFrame::CRC_HEADER_LENGTH as u64;
+            let range = (header_end + inner_offset as u64)..(offset + pos.len() as u64);
             Ok(WalRandomRead::File(FileRange::new(
-                self.file_reader(),
+                FileReader::new(file.clone(), self.layout.direct_io),
                 range,
             )))
         }
@@ -417,14 +509,16 @@ impl Wal {
                 let data = unsafe {
                     let mut options = memmap2::MmapOptions::new();
                     options
-                        .offset(range.start)
+                        .offset(self.layout.offset_in_wal_file(range.start))
                         .len(self.layout.frag_size as usize);
+                    let files = self.files.load();
+                    let file = files.get(self.layout.locate_file(range.start));
                     if writeable {
                         options /*.populate()*/
-                            .map_mut(&self.file)?
+                            .map_mut(file)?
                             .into()
                     } else {
-                        options.map(&self.file)?.into()
+                        options.map(file)?.into()
                     }
                 };
                 let map = Map {
@@ -434,14 +528,7 @@ impl Wal {
                 };
                 va.insert(map)
             }
-            Entry::Occupied(oc) => {
-                let map = oc.into_mut();
-                if writeable && !map.writeable {
-                    // this can be supported but not needed?
-                    panic!("Requested writable mapping but it is already mapped as read-only");
-                }
-                map
-            }
+            Entry::Occupied(oc) => oc.into_mut(),
         };
         let map = map.clone();
         if maps.len() > self.layout.max_maps {
@@ -451,11 +538,18 @@ impl Wal {
     }
 
     /// Resize file to fit the specified map id
-    fn extend_to_map(layout: &WalLayout, file: &File, id: u64) -> io::Result<()> {
-        let range = layout.map_range(id);
+    fn extend_to_map(layout: &WalLayout, files: &WalFiles, position: u64) -> io::Result<()> {
+        let (map_id, _) = layout.locate(position);
+        let file = files.get(layout.locate_file(position));
+        let mut end = layout.offset_in_wal_file(layout.map_range(map_id).end);
+        if end == 0 {
+            // If the map range end equals wal_file_size, set the end explicitly instead of using 0
+            end = layout.wal_file_size;
+        }
+
         let len = file.metadata()?.len();
-        if len < range.end {
-            file.set_len(range.end)?;
+        if len < end {
+            file.set_len(end)?;
         }
         Ok(())
     }
@@ -474,7 +568,7 @@ impl Wal {
     /// If WalPosition::INVALID is specified, iterate from start
     pub fn wal_iterator(self: &Arc<Self>, position: u64) -> Result<WalIterator, WalError> {
         let (map_id, _) = self.layout.locate(position);
-        Self::extend_to_map(&self.layout, &self.file, map_id)?;
+        Self::extend_to_map(&self.layout, &self.files.load(), position)?;
         let map = self.map(map_id, true)?;
         let iterator = WalIterator {
             wal: self.clone(),
@@ -484,28 +578,29 @@ impl Wal {
         Ok(iterator)
     }
 
-    fn file_reader(&self) -> FileReader {
-        FileReader::new(&self.file, self.layout.direct_io)
-    }
-
     /// Ensure the file is written to disk (blocking call).
     pub fn fsync(&self) -> io::Result<()> {
-        self.file.sync_all()
+        self.files.load().current_file().sync_all()
     }
 
     /// Returns the file descriptor of the wal file
     #[cfg(test)]
-    pub(crate) fn file(&self) -> &File {
-        &self.file
+    pub(crate) fn file(&self) -> File {
+        self.files.load().current_file().try_clone().unwrap()
     }
 }
 
 impl WalMapper {
-    pub fn start(last_map: u64, file: File, layout: WalLayout, metrics: Arc<Metrics>) -> Self {
+    pub fn start(
+        last_map: u64,
+        files: Arc<ArcSwap<WalFiles>>,
+        layout: WalLayout,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(2);
         let this = WalMapperThread {
             last_map,
-            file,
+            files,
             layout,
             sender,
             metrics,
@@ -545,26 +640,45 @@ impl WalMapperThread {
     pub fn run(mut self) {
         loop {
             let timer = Instant::now();
-            let id = self.last_map + 1;
-            Wal::extend_to_map(&self.layout, &self.file, id).expect("Failed to extend wal file");
-            let range = self.layout.map_range(id);
+            let map_id = self.last_map + 1;
+            let range = self.layout.map_range(map_id);
+            let file_id = self.layout.locate_file(range.start);
+            let mut files = self.files.load();
+            if file_id > files.current_file_id() {
+                assert_eq!(file_id, WalFileId(files.current_file_id().0 + 1));
+                let mut new_files = files.files.clone();
+                let new_file_path = Wal::wal_file_name(&files.base_path, file_id);
+                let new_file = Wal::open_file(&new_file_path, &self.layout)
+                    .expect("Failed to create new wal file");
+                new_files.push(Arc::new(new_file));
+
+                let new_wal_files = WalFiles {
+                    base_path: files.base_path.clone(),
+                    files: new_files,
+                    min_file_id: files.min_file_id,
+                };
+                self.files.store(Arc::new(new_wal_files));
+                files = self.files.load();
+            }
+            Wal::extend_to_map(&self.layout, &files, range.start)
+                .expect("Failed to extend wal file");
             let data = unsafe {
                 let mut options = memmap2::MmapOptions::new();
                 options
-                    .offset(range.start)
+                    .offset(self.layout.offset_in_wal_file(range.start))
                     .len(self.layout.frag_size as usize);
                 options
                     .populate()
-                    .map_mut(&self.file)
+                    .map_mut(files.get(file_id))
                     .expect("Failed to mmap on wal file")
                     .into()
             };
             let map = Map {
-                id,
+                id: map_id,
                 writeable: true,
                 data,
             };
-            self.last_map = id;
+            self.last_map = map_id;
             self.metrics
                 .wal_mapper_time_mcs
                 .inc_by(timer.elapsed().as_micros() as u64);
@@ -603,7 +717,7 @@ impl WalIterator {
         // todo duplicated code
         let (map_id, offset) = self.wal.layout.locate(self.position);
         if self.map.id != map_id {
-            Wal::extend_to_map(&self.wal.layout, &self.wal.file, map_id)?;
+            Wal::extend_to_map(&self.wal.layout, &self.wal.files.load(), self.position)?;
             self.map = self.wal.map(map_id, true)?;
         }
         Ok(CrcFrame::read_from_bytes(&self.map.data, offset as usize)?)
@@ -616,7 +730,7 @@ impl WalIterator {
         };
         let mapper = WalMapper::start(
             self.map.id,
-            self.wal.file.try_clone().unwrap(),
+            Arc::clone(&self.wal.files),
             self.wal.layout.clone(),
             self.wal().metrics.clone(),
         );
@@ -637,7 +751,7 @@ impl WalIterator {
     }
 }
 
-impl WalRandomRead<'_> {
+impl WalRandomRead {
     pub fn kind_str(&self) -> &'static str {
         match self {
             WalRandomRead::Mapped(_) => "mapped",
@@ -646,7 +760,7 @@ impl WalRandomRead<'_> {
     }
 }
 
-impl RandomRead for WalRandomRead<'_> {
+impl RandomRead for WalRandomRead {
     fn read(&self, range: Range<usize>) -> Bytes {
         match self {
             WalRandomRead::Mapped(bytes) => bytes.slice(range),
@@ -780,16 +894,16 @@ mod tests {
     #[test]
     fn test_wal() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
-        let file = dir.path().join("wal");
         let layout = WalLayout {
             frag_size: 1024,
             max_maps: 2,
             direct_io: false,
+            wal_file_size: 10 << 12,
         };
         // todo - add second test case when there is no space for skip marker after large
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
-            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
+            let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
             let writer = wal.wal_iterator(0).unwrap().into_writer();
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
@@ -805,7 +919,7 @@ mod tests {
             assert_eq!(&large, data.as_ref());
         }
         {
-            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
+            let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
             let mut wal_iterator = wal.wal_iterator(0).unwrap();
             assert_bytes(&[1, 2, 3], wal_iterator.next());
             assert_bytes(&[], wal_iterator.next());
@@ -820,14 +934,14 @@ mod tests {
             assert_eq!(&[91, 92, 93], data.as_ref());
         }
         {
-            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
+            let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
             let mut wal_iterator = wal.wal_iterator(0).unwrap();
             let p1 = assert_bytes(&[1, 2, 3], wal_iterator.next());
             let p2 = assert_bytes(&[], wal_iterator.next());
             let p3 = assert_bytes(&large, wal_iterator.next());
             let p4 = assert_bytes(&[91, 92, 93], wal_iterator.next());
             wal_iterator.next().expect_err("Error expected");
-            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
+            let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
             assert_eq!(&[1, 2, 3], wal.read(p1).unwrap().as_ref());
             assert_eq!(&[] as &[u8], wal.read(p2).unwrap().as_ref());
             assert_eq!(&large, wal.read(p3).unwrap().as_ref());
@@ -848,6 +962,7 @@ mod tests {
             frag_size: 512,
             max_maps: 2,
             direct_io: false,
+            wal_file_size: 10 << 12,
         };
         let mut position = IncrementalWalPosition {
             layout,
@@ -867,13 +982,13 @@ mod tests {
     #[test]
     fn test_concurrent_wal_write() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
-        let file = dir.path().join("wal");
         let layout = WalLayout {
             frag_size: 512,
             max_maps: 2,
             direct_io: false,
+            wal_file_size: 10 << 12,
         };
-        let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
+        let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let wal_writer = wal.wal_iterator(0).unwrap().into_writer();
         let wal_writer = Arc::new(wal_writer);
         let threads = 8u64;
@@ -901,7 +1016,7 @@ mod tests {
         }
         drop(wal_writer);
         drop(wal);
-        let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
+        let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let mut iterator = wal.wal_iterator(0).unwrap();
         while let Ok((_, value)) = iterator.next() {
             let value = u64::from_be_bytes(value[..].try_into().unwrap());
@@ -935,8 +1050,9 @@ mod tests {
             frag_size: 1024,
             max_maps: 16,
             direct_io: false,
+            wal_file_size: 10 << 12,
         };
-        let wal = Wal::open(&dir.path().join("wal"), layout, Metrics::new()).unwrap();
+        let wal = Wal::open(dir.path(), layout, Metrics::new()).unwrap();
         let wal_iterator = wal.wal_iterator(0).unwrap();
         let writer = wal_iterator.into_writer();
 
@@ -977,17 +1093,18 @@ mod tests {
     #[test]
     fn test_wal_resize() {
         let dir = tempdir::TempDir::new("test_wal_resize").unwrap();
-        let file_path = dir.path().join("wal");
+        let file_path = dir.path().join("wal_0000000000000000");
         let frag_size = 512;
         let layout = WalLayout {
             frag_size,
             max_maps: 2,
             direct_io: false,
+            wal_file_size: 10 << 12,
         };
 
         // Write an entry into the WAl
         let position = {
-            let wal = Wal::open(&file_path, layout.clone(), Metrics::new()).unwrap();
+            let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
             let writer = wal.wal_iterator(0).unwrap().into_writer();
             writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
@@ -1001,10 +1118,51 @@ mod tests {
         assert_ne!(file.metadata().unwrap().len() % frag_size, 0);
 
         // Re-open the WAL and ensure it resizes correctly
-        let wal = Wal::open(&file_path, layout, Metrics::new()).unwrap();
+        let wal = Wal::open(dir.path(), layout, Metrics::new()).unwrap();
         let data = wal.read(*position.wal_position()).unwrap();
         assert_eq!(&[1, 2, 3], data.as_ref());
         assert_eq!(file.metadata().unwrap().len() % frag_size, 0);
+    }
+
+    #[test]
+    fn test_multi_file_wal() {
+        let dir = tempdir::TempDir::new("test-multi-file-wal").unwrap();
+        let layout = WalLayout {
+            frag_size: 1024,
+            max_maps: 2,
+            direct_io: false,
+            wal_file_size: 8192,
+        };
+        let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
+        let writer = wal.wal_iterator(0).unwrap().into_writer();
+        for i in 0..100 {
+            let mut data = vec![0; 256];
+            data[0] = i as u8;
+            writer.write(&PreparedWalWrite::new(&data)).unwrap();
+        }
+
+        // Check that multiple WAL files were created
+        let wal_files = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                let name = path.file_name()?.to_str()?;
+                if name.starts_with("wal_") {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(wal_files.len(), 5);
+
+        let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
+        let mut wal_iterator = wal.wal_iterator(0).unwrap();
+
+        for i in 0..100 {
+            let (_, data) = wal_iterator.next().unwrap();
+            assert!(data[0] == i as u8 && data.len() == 256);
+        }
     }
 
     #[test]
@@ -1012,14 +1170,14 @@ mod tests {
         use rand::{Rng, SeedableRng};
 
         let dir = tempdir::TempDir::new("test-wal-random-reader").unwrap();
-        let file = dir.path().join("wal");
         let layout = WalLayout {
             frag_size: 4096, // 4KB as requested
             max_maps: 16,
             direct_io: false,
+            wal_file_size: 1024 << 12, // 4MB to handle 1000 writes
         };
 
-        let wal = Arc::new(Wal::open(&file, layout.clone(), Metrics::new()).unwrap());
+        let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
         let writer = wal.wal_iterator(0).unwrap().into_writer();
 
         // Use a seeded RNG for reproducibility

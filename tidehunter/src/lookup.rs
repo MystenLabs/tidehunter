@@ -2,8 +2,8 @@ use crate::file_reader::FileReader;
 use minibytes::Bytes;
 use std::ops::Range;
 
-pub struct FileRange<'a> {
-    reader: FileReader<'a>,
+pub struct FileRange {
+    reader: FileReader,
     range: Range<u64>,
 }
 
@@ -22,7 +22,7 @@ impl RandomRead for Bytes {
     }
 }
 
-impl RandomRead for FileRange<'_> {
+impl RandomRead for FileRange {
     fn read(&self, range: Range<usize>) -> Bytes {
         let read_range = self.checked_range(range);
         self.reader
@@ -38,8 +38,8 @@ impl RandomRead for FileRange<'_> {
     }
 }
 
-impl<'a> FileRange<'a> {
-    pub fn new(reader: FileReader<'a>, range: Range<u64>) -> Self {
+impl FileRange {
+    pub fn new(reader: FileReader, range: Range<u64>) -> Self {
         Self { reader, range }
     }
 

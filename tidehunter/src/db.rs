@@ -51,14 +51,11 @@ impl Db {
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
         let path = path.canonicalize()?;
-
         Self::maybe_create_shape_file(&path, &key_shape)?;
-
-        let wal_path = Self::wal_path(&path);
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let relocation_watermarks = RelocationWatermarks::load(&path)?;
-        let wal = Wal::open(&wal_path, config.wal_layout(), metrics.clone())?;
+        let wal = Wal::open(&path, config.wal_layout(), metrics.clone())?;
 
         // Create channels for flusher threads first
         let (flusher_senders, flusher_receivers) = (0..config.num_flusher_threads)
