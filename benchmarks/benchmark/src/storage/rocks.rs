@@ -16,6 +16,8 @@ impl RocksStorage {
         Self::update_opts(&mut opts);
         Self::optimize_for_write_throughput(&mut opts);
 
+        opts.enable_statistics();
+
         std::fs::create_dir_all(path).unwrap();
         let db = DB::open(&opts, path).unwrap();
         let this = Self { db };
@@ -124,7 +126,187 @@ impl Storage for Arc<RocksStorage> {
     }
 
     fn cache_hit_report(&self) -> String {
-        String::new()
+        // Pull the aggregated RocksDB stats string. This requires RocksDB statistics to be enabled.
+        // If stats are not enabled, this will likely be None or contain no tickers and we return an empty string.
+        let Ok(Some(stats)) = self.db.property_value("rocksdb.stats") else {
+            return String::new();
+        };
+
+        // Helper to extract a u64 ticker value from the stats string by name.
+        // The stats string usually includes lines like:
+        //   MEMTABLE_HIT: 123
+        //   BLOCK_CACHE_DATA_HIT: 456
+        fn parse_ticker(stats: &str, name: &str) -> u64 {
+            let mut total: u64 = 0;
+            for line in stats.lines() {
+                // Match lines that contain the ticker name as a whole word to reduce false positives.
+                if line.contains(name) {
+                    // Extract the last integer on the line
+                    let mut last_num: Option<u64> = None;
+                    for token in line.split(|c: char| !c.is_ascii_alphanumeric()) {
+                        if token.is_empty() {
+                            continue;
+                        }
+                        if let Ok(v) = token.parse::<u64>() {
+                            last_num = Some(v);
+                        }
+                    }
+                    if let Some(v) = last_num {
+                        total = v;
+                    }
+                }
+            }
+            total
+        }
+
+        // Core request-path metrics
+        let mem_hit = parse_ticker(&stats, "MEMTABLE_HIT");
+        let mem_miss = parse_ticker(&stats, "MEMTABLE_MISS");
+        let total_gets = mem_hit.saturating_add(mem_miss);
+
+        // Level where GET was satisfied (only for found keys in SST)
+        let l0_hits = parse_ticker(&stats, "GET_HIT_L0");
+        let l1_hits = parse_ticker(&stats, "GET_HIT_L1");
+        let l2_up_hits = parse_ticker(&stats, "GET_HIT_L2_AND_UP");
+        let total_sst_level_hits = l0_hits.saturating_add(l1_hits).saturating_add(l2_up_hits);
+
+        // Block cache (overall and breakdowns). Note these are block-level counters, not request-level.
+        let bc_hit = parse_ticker(&stats, "BLOCK_CACHE_HIT");
+        let bc_miss = parse_ticker(&stats, "BLOCK_CACHE_MISS");
+        let bc_data_hit = parse_ticker(&stats, "BLOCK_CACHE_DATA_HIT");
+        let bc_data_miss = parse_ticker(&stats, "BLOCK_CACHE_DATA_MISS");
+        let bc_index_hit = parse_ticker(&stats, "BLOCK_CACHE_INDEX_HIT");
+        let bc_index_miss = parse_ticker(&stats, "BLOCK_CACHE_INDEX_MISS");
+        let bc_filter_hit = parse_ticker(&stats, "BLOCK_CACHE_FILTER_HIT");
+        let bc_filter_miss = parse_ticker(&stats, "BLOCK_CACHE_FILTER_MISS");
+
+        // Disk reads (block-level). Names differ across versions; try both common variants.
+        let mut block_read_count = parse_ticker(&stats, "BLOCK_READ_COUNT");
+        if block_read_count == 0 {
+            block_read_count = parse_ticker(&stats, "BLOCKS_READ");
+        }
+        let mut block_read_bytes = parse_ticker(&stats, "BLOCK_READ_BYTES");
+        if block_read_bytes == 0 {
+            block_read_bytes = parse_ticker(&stats, "BYTES_READ");
+        }
+
+        // Bloom filter effectiveness
+        let bloom_useful = parse_ticker(&stats, "BLOOM_FILTER_USEFUL");
+        // Some builds expose BLOOM_FILTER_CHECKED; others expose FULL_* variants. Capture all we can.
+        let bloom_checked = parse_ticker(&stats, "BLOOM_FILTER_CHECKED");
+        let bloom_full_pos = parse_ticker(&stats, "BLOOM_FILTER_FULL_POSITIVE");
+        let _bloom_full_true = parse_ticker(&stats, "BLOOM_FILTER_FULL_TRUE_POSITIVE");
+
+        // Other caches if enabled
+        let row_cache_hit = parse_ticker(&stats, "ROW_CACHE_HIT");
+        let row_cache_miss = parse_ticker(&stats, "ROW_CACHE_MISS");
+        let persistent_cache_hit = parse_ticker(&stats, "PERSISTENT_CACHE_HIT");
+        let persistent_cache_miss = parse_ticker(&stats, "PERSISTENT_CACHE_MISS");
+        let sim_bc_hit = parse_ticker(&stats, "SIM_BLOCK_CACHE_HIT");
+        let sim_bc_miss = parse_ticker(&stats, "SIM_BLOCK_CACHE_MISS");
+
+        // Ratios with safe divisions
+        let ratio = |num: u64, den: u64| -> f64 {
+            if den == 0 {
+                0.0
+            } else {
+                (num as f64) / (den as f64)
+            }
+        };
+
+        let mem_hit_ratio = ratio(mem_hit, total_gets);
+        // Among requests that missed memtable, many are satisfied from SST. We can't perfectly map per-request
+        // block cache effectiveness, but we report data-block hit ratio which is the most relevant for values.
+        let data_bc_total = bc_data_hit.saturating_add(bc_data_miss);
+        let data_bc_hit_ratio = ratio(bc_data_hit, data_bc_total);
+        let overall_bc_total = bc_hit.saturating_add(bc_miss);
+        let overall_bc_hit_ratio = ratio(bc_hit, overall_bc_total);
+
+        let level_total = total_sst_level_hits;
+        let l0_ratio = ratio(l0_hits, level_total);
+        let l1_ratio = ratio(l1_hits, level_total);
+        let l2up_ratio = ratio(l2_up_hits, level_total);
+
+        let bloom_checked_total = if bloom_checked > 0 {
+            bloom_checked
+        } else {
+            bloom_useful.saturating_add(bloom_full_pos)
+        };
+        let bloom_effectiveness = ratio(bloom_useful, bloom_checked_total);
+
+        let row_cache_total = row_cache_hit.saturating_add(row_cache_miss);
+        let row_cache_hit_ratio = ratio(row_cache_hit, row_cache_total);
+
+        let persistent_cache_total = persistent_cache_hit.saturating_add(persistent_cache_miss);
+        let persistent_cache_hit_ratio = ratio(persistent_cache_hit, persistent_cache_total);
+
+        let sim_bc_total = sim_bc_hit.saturating_add(sim_bc_miss);
+        let sim_bc_hit_ratio = ratio(sim_bc_hit, sim_bc_total);
+
+        // Compose report
+        let mut out = String::new();
+        use std::fmt::Write as _;
+        let _ = write!(
+	            &mut out,
+	            "RocksDB cache hit report\n\
+	            - MemTable: hits={} misses={} total={} hit_ratio={:.4}\n\
+	            - SST level hits (found keys only): L0={} ({:.4}) L1={} ({:.4}) L2+={} ({:.4}) total={}\n\
+	            - Block cache (overall blocks): hits={} misses={} hit_ratio={:.4}\n\
+	            - Block cache (data blocks): hits={} misses={} hit_ratio={:.4}\n\
+	              Index blocks: hits={} misses={} | Filter blocks: hits={} misses={}\n\
+	            - Disk reads (blocks): count={} bytes={}\n\
+	            - Bloom filter: useful={} checked={} effectiveness={:.4}\n",
+	            mem_hit,
+	            mem_miss,
+	            total_gets,
+	            mem_hit_ratio,
+	            l0_hits,
+	            l0_ratio,
+	            l1_hits,
+	            l1_ratio,
+	            l2_up_hits,
+	            l2up_ratio,
+	            level_total,
+	            bc_hit,
+	            bc_miss,
+	            overall_bc_hit_ratio,
+	            bc_data_hit,
+	            bc_data_miss,
+	            data_bc_hit_ratio,
+	            bc_index_hit,
+	            bc_index_miss,
+	            bc_filter_hit,
+	            bc_filter_miss,
+	            block_read_count,
+	            block_read_bytes,
+	            bloom_useful,
+	            bloom_checked_total,
+	            bloom_effectiveness,
+	        );
+
+        if row_cache_total > 0 {
+            let _ = write!(
+                &mut out,
+                "- Row cache: hits={} misses={} hit_ratio={:.4}\n",
+                row_cache_hit, row_cache_miss, row_cache_hit_ratio
+            );
+        }
+        if persistent_cache_total > 0 {
+            let _ = write!(
+                &mut out,
+                "- Persistent cache: hits={} misses={} hit_ratio={:.4}\n",
+                persistent_cache_hit, persistent_cache_miss, persistent_cache_hit_ratio
+            );
+        }
+        if sim_bc_total > 0 {
+            let _ = write!(
+                &mut out,
+                "- Simulated block cache: hits={} misses={} hit_ratio={:.4}\n",
+                sim_bc_hit, sim_bc_miss, sim_bc_hit_ratio
+            );
+        }
+
+        out
     }
 
     fn name(&self) -> &'static str {
