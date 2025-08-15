@@ -1,0 +1,12 @@
+[package]
+name = "wal_verifier"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tidehunter = { path = "../../tidehunter", features = ["test-utils"] }
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.0"

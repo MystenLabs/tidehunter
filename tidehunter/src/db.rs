@@ -764,8 +764,9 @@ impl Loader for Db {
     }
 }
 
+#[doc(hidden)] // Used by tools/wal_verifier for WAL inspection
 #[derive(Debug)]
-pub(crate) enum WalEntry {
+pub enum WalEntry {
     Record(KeySpace, Bytes, Bytes),
     Index(KeySpace, Bytes),
     Remove(KeySpace, Bytes),

@@ -541,6 +541,18 @@ impl KeySpace {
     pub fn new_test(v: u8) -> Self {
         Self(v)
     }
+
+    #[doc(hidden)] // Used by tools/wal_verifier for keyspace handling
+    #[cfg(feature = "test-utils")]
+    pub fn new(v: u8) -> Self {
+        Self(v)
+    }
+
+    #[doc(hidden)] // Used by tools/wal_verifier for keyspace handling
+    #[cfg(feature = "test-utils")]
+    pub fn as_u8(&self) -> u8 {
+        self.0
+    }
 }
 
 impl Deref for KeySpaceDesc {

@@ -29,3 +29,10 @@ pub use minibytes;
 
 pub use index::index_table::IndexWalPosition;
 pub use wal::WalPosition;
+
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    pub use crate::db::WalEntry;
+    pub use crate::metrics::Metrics;
+    pub use crate::wal::{Wal, WalError, WalIterator, WalLayout};
+}

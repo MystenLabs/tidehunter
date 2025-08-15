@@ -60,7 +60,8 @@ impl Config {
         self.frag_size
     }
 
-    pub(crate) fn wal_layout(&self) -> WalLayout {
+    #[doc(hidden)] // Used by tools/wal_verifier to get WAL configuration
+    pub fn wal_layout(&self) -> WalLayout {
         WalLayout {
             frag_size: self.frag_size,
             max_maps: self.max_maps,

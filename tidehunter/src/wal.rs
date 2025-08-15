@@ -186,8 +186,9 @@ impl IncrementalWalPosition {
     }
 }
 
+#[doc(hidden)] // Used by tools/wal_verifier for WAL configuration
 #[derive(Clone)]
-pub(crate) struct WalLayout {
+pub struct WalLayout {
     pub frag_size: u64,
     pub max_maps: usize,
     pub direct_io: bool,
@@ -238,11 +239,8 @@ impl WalLayout {
 }
 
 impl Wal {
-    pub(crate) fn open(
-        p: &Path,
-        layout: WalLayout,
-        metrics: Arc<Metrics>,
-    ) -> io::Result<Arc<Self>> {
+    #[doc(hidden)] // Used by tools/wal_verifier to open WAL files directly
+    pub fn open(p: &Path, layout: WalLayout, metrics: Arc<Metrics>) -> io::Result<Arc<Self>> {
         layout.assert_layout();
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);

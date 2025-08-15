@@ -7,6 +7,7 @@ members = [
     "benchmarks/index_benchmark",
     "scripts/generate_target_configs",
     "tests/concurrent_test",
+    "tools/wal_verifier",
 ]
 resolver = "2"
 
