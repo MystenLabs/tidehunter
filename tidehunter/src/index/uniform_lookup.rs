@@ -1,5 +1,6 @@
 use bytes::BytesMut;
 use minibytes::Bytes;
+use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::time::Instant;
 
@@ -13,7 +14,7 @@ use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::Ran
 const DEFAULT_WINDOW_SIZE: usize = 800;
 const NUM_WINDOW_SIZES: usize = 1;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UniformLookupIndex {
     window_sizes: Vec<Vec<usize>>,
 }

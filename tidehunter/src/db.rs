@@ -51,6 +51,9 @@ impl Db {
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
         let path = path.canonicalize()?;
+
+        Self::maybe_create_shape_file(&path, &key_shape)?;
+
         let wal_path = Self::wal_path(&path);
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
@@ -108,6 +111,45 @@ impl Db {
 
     pub fn wal_path(path: &Path) -> PathBuf {
         path.join("wal")
+    }
+
+    pub fn shape_file_path(path: &Path) -> PathBuf {
+        path.join("shape.yaml")
+    }
+
+    /// Create shape file if it doesn't exist
+    fn maybe_create_shape_file(path: &Path, key_shape: &KeyShape) -> DbResult<()> {
+        let shape_file_path = Self::shape_file_path(path);
+        if !shape_file_path.exists() {
+            let yaml = key_shape.to_yaml().map_err(|e| {
+                DbError::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to serialize key shape: {}", e),
+                ))
+            })?;
+            std::fs::write(&shape_file_path, yaml)?;
+        }
+        Ok(())
+    }
+
+    /// Load key shape from database directory
+    #[doc(hidden)] // Used by tools/wal_verifier for loading database schema
+    pub fn load_key_shape(path: &Path) -> DbResult<KeyShape> {
+        let shape_file_path = Self::shape_file_path(path);
+        if !shape_file_path.exists() {
+            return Err(DbError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Key shape file not found at {}", shape_file_path.display()),
+            )));
+        }
+
+        let yaml = std::fs::read_to_string(&shape_file_path)?;
+        KeyShape::from_yaml(&yaml).map_err(|e| {
+            DbError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to deserialize key shape: {}", e),
+            ))
+        })
     }
 
     pub fn start_periodic_snapshot(self: &Arc<Self>) {

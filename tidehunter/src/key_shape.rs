@@ -8,6 +8,7 @@ use crate::relocation::RelocationFilter;
 use crate::wal::WalPosition;
 use blake2::Digest;
 use minibytes::Bytes;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -20,7 +21,7 @@ use std::sync::Arc;
 pub(crate) const CELL_PREFIX_LENGTH: usize = 4; // in bytes
 pub(crate) const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KeyShape {
     key_spaces: Vec<KeySpaceDesc>,
 }
@@ -29,16 +30,17 @@ pub struct KeyShapeBuilder {
     key_spaces: Vec<KeySpaceDesc>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KeySpace(pub(crate) u8);
 
 #[doc(hidden)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KeySpaceDesc {
     inner: Arc<KeySpaceDescInner>,
 }
 
 #[doc(hidden)]
+#[derive(Serialize, Deserialize)]
 pub struct KeySpaceDescInner {
     id: KeySpace,
     name: String,
@@ -48,8 +50,9 @@ pub struct KeySpaceDescInner {
     config: KeySpaceConfig,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct KeySpaceConfig {
+    #[serde(skip)]
     compactor: Option<Arc<Compactor>>,
     disable_unload: bool,
     max_dirty_keys: Option<usize>,
@@ -57,6 +60,7 @@ pub struct KeySpaceConfig {
     value_cache_size: usize,
     index_format: IndexFormatType,
     unloaded_iterator: bool,
+    #[serde(skip)]
     relocation_filter: Option<Arc<Box<dyn RelocationFilter>>>,
 }
 
@@ -69,7 +73,7 @@ pub struct KeySpaceConfig {
 ///
 /// This allows for various use cases such as
 /// * Key reduction (reducing index size by using fewer bytes from the key in the index)
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum KeyIndexing {
     Fixed(usize),
     Reduction(usize, Range<usize>),
@@ -77,18 +81,18 @@ pub enum KeyIndexing {
     Hash,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum KeyType {
     Uniform(UniformKeyConfig),
     PrefixedUniform(PrefixedUniformKeyConfig),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct UniformKeyConfig {
     cells_per_mutex: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct PrefixedUniformKeyConfig {
     /// First prefix_len_bytes of a key considered a 'prefix'
     prefix_len_bytes: usize,
@@ -101,7 +105,7 @@ pub struct PrefixedUniformKeyConfig {
     reset_mask: u8,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct BloomFilterParams {
     pub rate: f32,
     pub count: u32,
@@ -476,6 +480,16 @@ impl KeySpaceConfig {
 }
 
 impl KeyShape {
+    /// Serialize KeyShape to YAML string
+    pub(crate) fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
+        serde_yaml::to_string(self)
+    }
+
+    /// Deserialize KeyShape from YAML string
+    pub(crate) fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
+        serde_yaml::from_str(yaml)
+    }
+
     pub fn new_single(key_size: usize, mutexes: usize, key_type: KeyType) -> (Self, KeySpace) {
         Self::new_single_config(key_size, mutexes, key_type, Default::default())
     }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidehunter::config::Config;
 use tidehunter::db::Db;
-use tidehunter::key_shape::{KeyShape, KeySpace, KeyType};
+use tidehunter::key_shape::KeySpace;
 use tidehunter::minibytes::Bytes;
 use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
 
@@ -44,13 +44,13 @@ fn main() -> Result<()> {
         ));
     }
 
-    // For now, we need to provide a KeyShape manually since it's not stored in WAL
-    // This is a placeholder - in real usage, the user would need to provide the correct schema
-    println!("WARNING: Using default KeyShape - this may not match your actual database schema!");
-    println!("KeyShape information is not stored in WAL files.");
-    let (key_shape, _ks) = KeyShape::new_single(32, 16, KeyType::uniform(16));
+    // Check that shape file exists (verify_wal will load it internally)
+    println!("Checking for key shape file...");
+    let _ = Db::load_key_shape(&args.db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load key shape: {:?}", e))?;
+    println!("Key shape file found");
 
-    let result = verify_wal(&args.db_path, key_shape, args.verbose)?;
+    let result = verify_wal(&args.db_path, args.verbose)?;
 
     // Print summary
     println!("\n{}", "=".repeat(50));
@@ -83,11 +83,7 @@ pub struct VerificationResult {
 }
 
 /// Verifies that all keys in a database's WAL file are accessible from the database
-pub fn verify_wal(
-    db_path: &Path,
-    key_shape: KeyShape,
-    verbose: bool,
-) -> Result<VerificationResult> {
+pub fn verify_wal(db_path: &Path, verbose: bool) -> Result<VerificationResult> {
     // Get the WAL path from the database path
     let wal_path = Db::wal_path(db_path);
 
@@ -104,8 +100,12 @@ pub fn verify_wal(
         }
     }
 
-    // Step 2: Open database from the WAL file
-    println!("\nStep 2: Opening database from WAL file...");
+    // Step 2: Load key shape and open database from the WAL file
+    println!("\nStep 2: Loading key shape and opening database...");
+
+    // Load the key shape from the database directory
+    let key_shape = Db::load_key_shape(db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load key shape: {:?}", e))?;
 
     // Create default config and metrics
     let config = Arc::new(Config::default());
@@ -252,6 +252,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use tidehunter::batch::WriteBatch;
+    use tidehunter::key_shape::{KeyShape, KeyType};
 
     #[test]
     fn test_verify_wal_with_simple_records() -> Result<()> {
@@ -281,7 +282,7 @@ mod tests {
         drop(db);
 
         // Now verify the WAL
-        let result = verify_wal(&db_path, key_shape, false)?;
+        let result = verify_wal(&db_path, false)?;
 
         // Check results
         assert_eq!(result.total_keys, 3, "Should have 3 keys in WAL");
@@ -326,7 +327,7 @@ mod tests {
         drop(db);
 
         // Now verify the WAL
-        let result = verify_wal(&db_path, key_shape, false)?;
+        let result = verify_wal(&db_path, false)?;
 
         // Check results - should only have 2 keys after deletion
         assert_eq!(

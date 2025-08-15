@@ -12,6 +12,7 @@ crc32fast = "1.3.2"
 bytes = {workspace = true}
 bincode = "1.3.3"
 serde = { version = "1.0.208", features = ["derive"] }
+serde_yaml = "0.9.34"
 rand = {workspace = true}
 prometheus = {workspace = true}
 tokio = { version = "1.36.0", features = ["full"], optional = true}

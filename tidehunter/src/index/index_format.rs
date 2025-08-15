@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 use minibytes::Bytes;
+use serde::{Deserialize, Serialize};
 
 use super::lookup_header::LookupHeaderIndex;
 use super::uniform_lookup::UniformLookupIndex;
@@ -45,7 +46,7 @@ pub trait IndexFormat {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub enum IndexFormatType {
     #[default]
     Header,
