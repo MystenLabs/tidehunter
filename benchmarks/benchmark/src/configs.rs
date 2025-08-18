@@ -77,7 +77,7 @@ impl FromStr for Backend {
             Ok(Self::Tidehunter)
         } else if s == "rocks" {
             Ok(Self::Rocksdb)
-        } else if s == "blobdb" || s == "blob" || s == "blob-db" {
+        } else if s == "blobdb" {
             Ok(Self::Blobdb)
         } else {
             anyhow::bail!(
