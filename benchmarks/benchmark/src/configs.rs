@@ -66,6 +66,7 @@ impl FromStr for ReadMode {
 pub enum Backend {
     Tidehunter,
     Rocksdb,
+    Blobdb,
 }
 
 impl FromStr for Backend {
@@ -76,9 +77,11 @@ impl FromStr for Backend {
             Ok(Self::Tidehunter)
         } else if s == "rocks" {
             Ok(Self::Rocksdb)
+        } else if s == "blobdb" {
+            Ok(Self::Blobdb)
         } else {
             anyhow::bail!(
-                "Only allowed choices for backend are 'thdb'(Tidehunter) or 'rocks'(RocksDB)"
+                "Only allowed choices for backend are 'thdb'(Tidehunter), 'rocks'(RocksDB), or 'blobdb'(RocksDB BlobDB)"
             );
         }
     }
