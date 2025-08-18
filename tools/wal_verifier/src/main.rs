@@ -120,8 +120,12 @@ pub fn verify_wal(db_path: &Path, verbose: bool) -> Result<VerificationResult> {
     if verbose {
         println!("\nKeys found:");
         for (i, (ks, key)) in keys.iter().enumerate() {
-            let key_str = String::from_utf8_lossy(key);
-            println!("  [{}] KeySpace: {:?}, Key: {:?}", i + 1, ks, key_str);
+            println!(
+                "  [{}] KeySpace: {:?}, Key: {}",
+                i + 1,
+                ks,
+                hex::encode(key)
+            );
         }
     }
 
@@ -152,19 +156,16 @@ pub fn verify_wal(db_path: &Path, verbose: bool) -> Result<VerificationResult> {
             Ok(Some(_value)) => {
                 verified += 1;
                 if verbose {
-                    let key_str = String::from_utf8_lossy(key);
-                    println!("  ✓ Key {:?} found", key_str);
+                    println!("  ✓ Key {} found", hex::encode(key));
                 }
             }
             Ok(None) => {
                 missing += 1;
-                let key_str = String::from_utf8_lossy(key);
-                println!("  ✗ Key {:?} NOT FOUND", key_str);
+                println!("  ✗ Key {} NOT FOUND", hex::encode(key));
             }
             Err(e) => {
                 errors += 1;
-                let key_str = String::from_utf8_lossy(key);
-                println!("  ✗ Error accessing key {:?}: {:?}", key_str, e);
+                println!("  ✗ Error accessing key {}: {:?}", hex::encode(key), e);
             }
         }
     }
@@ -280,40 +281,32 @@ fn verify_keys_through_iteration(
                     // Just count it as verified if we found it through iteration
                     verified += 1;
                     if verbose {
-                        let key_str = String::from_utf8_lossy(expected_key);
-                        println!("    ✓ Key {:?} found through iteration (value not checked - key was missing in direct access)", key_str);
+                        println!("    ✓ Key {} found through iteration (value not checked - key was missing in direct access)", hex::encode(expected_key));
                     }
                 } else if found_value == expected_value {
                     verified += 1;
                     if verbose {
-                        let key_str = String::from_utf8_lossy(expected_key);
                         println!(
-                            "    ✓ Key {:?} found through iteration with correct value",
-                            key_str
+                            "    ✓ Key {} found through iteration with correct value",
+                            hex::encode(expected_key)
                         );
                     }
                 } else {
                     errors += 1;
-                    let key_str = String::from_utf8_lossy(expected_key);
                     println!(
-                        "    ✗ Key {:?} found through iteration but VALUE MISMATCH in keyspace {}",
-                        key_str, ks_id
+                        "    ✗ Key {} found through iteration but VALUE MISMATCH in keyspace {}",
+                        hex::encode(expected_key),
+                        ks_id
                     );
-                    println!(
-                        "      Expected value: {:?}",
-                        String::from_utf8_lossy(expected_value)
-                    );
-                    println!(
-                        "      Found value: {:?}",
-                        String::from_utf8_lossy(found_value)
-                    );
+                    println!("      Expected value: {}", hex::encode(expected_value));
+                    println!("      Found value: {}", hex::encode(found_value));
                 }
             } else {
                 missing += 1;
-                let key_str = String::from_utf8_lossy(expected_key);
                 println!(
-                    "    ✗ Key {:?} NOT FOUND through iteration in keyspace {}",
-                    key_str, ks_id
+                    "    ✗ Key {} NOT FOUND through iteration in keyspace {}",
+                    hex::encode(expected_key),
+                    ks_id
                 );
             }
         }
@@ -331,8 +324,7 @@ fn verify_keys_through_iteration(
             );
             for extra_key in extra_keys.iter().take(10) {
                 // Show first 10
-                let key_str = String::from_utf8_lossy(extra_key);
-                println!("    + Extra key: {:?}", key_str);
+                println!("    + Extra key: {}", hex::encode(extra_key));
             }
             if extra_keys.len() > 10 {
                 println!("    + ... and {} more", extra_keys.len() - 10);
