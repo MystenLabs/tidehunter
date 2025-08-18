@@ -56,17 +56,39 @@ fn main() -> Result<()> {
     println!("\n{}", "=".repeat(50));
     println!("Verification Summary:");
     println!("  Total keys in WAL: {}", result.total_keys);
-    println!("  Successfully verified: {}", result.verified);
-    println!("  Missing keys: {}", result.missing);
-    println!("  Errors: {}", result.errors);
+    println!();
+    println!("  Direct Access Verification:");
+    println!("    Successfully verified: {}", result.verified);
+    println!("    Missing keys: {}", result.missing);
+    println!("    Errors: {}", result.errors);
+    println!();
+    println!("  Iterator Verification:");
+    println!("    Successfully verified: {}", result.iterator_verified);
+    println!("    Missing keys: {}", result.iterator_missing);
+    println!("    Errors: {}", result.iterator_errors);
 
-    if result.missing > 0 || result.errors > 0 {
+    let total_failures =
+        result.missing + result.errors + result.iterator_missing + result.iterator_errors;
+
+    if total_failures > 0 {
         println!("\n❌ VERIFICATION FAILED");
+        if result.missing > 0 || result.errors > 0 {
+            println!(
+                "  Direct access failures: {}",
+                result.missing + result.errors
+            );
+        }
+        if result.iterator_missing > 0 || result.iterator_errors > 0 {
+            println!(
+                "  Iterator failures: {}",
+                result.iterator_missing + result.iterator_errors
+            );
+        }
         std::process::exit(1);
     } else {
         println!("\n✅ VERIFICATION SUCCESSFUL");
         println!(
-            "All {} keys from WAL are accessible in the database",
+            "All {} keys from WAL are accessible through both direct access and iteration",
             result.total_keys
         );
     }
@@ -80,6 +102,9 @@ pub struct VerificationResult {
     pub verified: usize,
     pub missing: usize,
     pub errors: usize,
+    pub iterator_verified: usize,
+    pub iterator_missing: usize,
+    pub iterator_errors: usize,
 }
 
 /// Verifies that all keys in a database's WAL file are accessible from the database
@@ -144,12 +169,178 @@ pub fn verify_wal(db_path: &Path, verbose: bool) -> Result<VerificationResult> {
         }
     }
 
+    // Step 4: Verify all keys are accessible through iteration
+    println!("\nStep 4: Verifying all keys are accessible through iteration...");
+    let (iterator_verified, iterator_missing, iterator_errors) =
+        verify_keys_through_iteration(&db, &keys, verbose)?;
+
     Ok(VerificationResult {
         total_keys: keys.len(),
         verified,
         missing,
         errors,
+        iterator_verified,
+        iterator_missing,
+        iterator_errors,
     })
+}
+
+/// Verify that all keys from WAL are accessible through database iteration
+fn verify_keys_through_iteration(
+    db: &std::sync::Arc<Db>,
+    expected_keys: &[(KeySpace, Bytes)],
+    verbose: bool,
+) -> Result<(usize, usize, usize)> {
+    use std::collections::HashMap;
+
+    // Group expected keys by keyspace, and also store their expected values
+    // We need to get the values from the database first since we only have keys from WAL
+    let mut expected_by_ks: HashMap<u8, HashMap<Vec<u8>, Vec<u8>>> = HashMap::new();
+    for (ks, key) in expected_keys {
+        // Get the value from the database for comparison
+        match db.get(*ks, key) {
+            Ok(Some(value)) => {
+                expected_by_ks
+                    .entry(ks.as_u8())
+                    .or_default()
+                    .insert(key.to_vec(), value.to_vec());
+            }
+            Ok(None) => {
+                // Key not found - this will be caught in the regular verification
+                // Still add it with empty value so we can report it as missing
+                expected_by_ks
+                    .entry(ks.as_u8())
+                    .or_default()
+                    .insert(key.to_vec(), Vec::new());
+            }
+            Err(_) => {
+                // Error getting value - will be reported in regular verification
+                expected_by_ks
+                    .entry(ks.as_u8())
+                    .or_default()
+                    .insert(key.to_vec(), Vec::new());
+            }
+        }
+    }
+
+    let mut verified = 0;
+    let mut missing = 0;
+    let mut errors = 0;
+
+    // Iterate through each keyspace found in the WAL
+    for (&ks_id, expected_keys_set) in &expected_by_ks {
+        let ks = KeySpace::new(ks_id);
+
+        if verbose {
+            println!(
+                "  Iterating keyspace {}: expecting {} keys",
+                ks_id,
+                expected_keys_set.len()
+            );
+        }
+
+        // Collect all key-value pairs found through iteration for this keyspace
+        let mut found_kv_pairs: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+
+        let mut iterator = db.iterator(ks);
+        loop {
+            match iterator.next() {
+                Some(Ok((key, value))) => {
+                    found_kv_pairs.insert(key.to_vec(), value.to_vec());
+                    if verbose && found_kv_pairs.len() % 100 == 0 {
+                        println!(
+                            "    Found {} key-value pairs so far in keyspace {}",
+                            found_kv_pairs.len(),
+                            ks_id
+                        );
+                    }
+                }
+                Some(Err(e)) => {
+                    errors += 1;
+                    println!("  ✗ Error during iteration in keyspace {}: {:?}", ks_id, e);
+                    break;
+                }
+                None => break, // End of iteration
+            }
+        }
+
+        if verbose {
+            println!(
+                "  Found {} key-value pairs through iteration in keyspace {}",
+                found_kv_pairs.len(),
+                ks_id
+            );
+        }
+
+        // Check that all expected key-value pairs were found through iteration with correct values
+        for (expected_key, expected_value) in expected_keys_set {
+            if let Some(found_value) = found_kv_pairs.get(expected_key) {
+                if expected_value.is_empty() {
+                    // We couldn't get the expected value earlier (key was missing or error)
+                    // Just count it as verified if we found it through iteration
+                    verified += 1;
+                    if verbose {
+                        let key_str = String::from_utf8_lossy(expected_key);
+                        println!("    ✓ Key {:?} found through iteration (value not checked - key was missing in direct access)", key_str);
+                    }
+                } else if found_value == expected_value {
+                    verified += 1;
+                    if verbose {
+                        let key_str = String::from_utf8_lossy(expected_key);
+                        println!(
+                            "    ✓ Key {:?} found through iteration with correct value",
+                            key_str
+                        );
+                    }
+                } else {
+                    errors += 1;
+                    let key_str = String::from_utf8_lossy(expected_key);
+                    println!(
+                        "    ✗ Key {:?} found through iteration but VALUE MISMATCH in keyspace {}",
+                        key_str, ks_id
+                    );
+                    println!(
+                        "      Expected value: {:?}",
+                        String::from_utf8_lossy(expected_value)
+                    );
+                    println!(
+                        "      Found value: {:?}",
+                        String::from_utf8_lossy(found_value)
+                    );
+                }
+            } else {
+                missing += 1;
+                let key_str = String::from_utf8_lossy(expected_key);
+                println!(
+                    "    ✗ Key {:?} NOT FOUND through iteration in keyspace {}",
+                    key_str, ks_id
+                );
+            }
+        }
+
+        // Report any extra keys found through iteration (shouldn't happen)
+        let expected_keys: std::collections::HashSet<_> =
+            expected_keys_set.keys().cloned().collect();
+        let found_keys: std::collections::HashSet<_> = found_kv_pairs.keys().cloned().collect();
+        let extra_keys: Vec<_> = found_keys.difference(&expected_keys).collect();
+        if !extra_keys.is_empty() {
+            println!(
+                "  ⚠ Found {} extra keys through iteration in keyspace {} (not in WAL):",
+                extra_keys.len(),
+                ks_id
+            );
+            for extra_key in extra_keys.iter().take(10) {
+                // Show first 10
+                let key_str = String::from_utf8_lossy(extra_key);
+                println!("    + Extra key: {:?}", key_str);
+            }
+            if extra_keys.len() > 10 {
+                println!("    + ... and {} more", extra_keys.len() - 10);
+            }
+        }
+    }
+
+    Ok((verified, missing, errors))
 }
 
 // Helper type to track keys - using string representation for simplicity
@@ -289,6 +480,15 @@ mod tests {
         assert_eq!(result.verified, 3, "All 3 keys should be verified");
         assert_eq!(result.missing, 0, "No keys should be missing");
         assert_eq!(result.errors, 0, "No errors should occur");
+        assert_eq!(
+            result.iterator_verified, 3,
+            "All 3 keys should be verified through iteration"
+        );
+        assert_eq!(
+            result.iterator_missing, 0,
+            "No keys should be missing through iteration"
+        );
+        assert_eq!(result.iterator_errors, 0, "No iterator errors should occur");
 
         Ok(())
     }
@@ -337,6 +537,15 @@ mod tests {
         assert_eq!(result.verified, 2, "Both remaining keys should be verified");
         assert_eq!(result.missing, 0, "No keys should be missing");
         assert_eq!(result.errors, 0, "No errors should occur");
+        assert_eq!(
+            result.iterator_verified, 2,
+            "Both remaining keys should be verified through iteration"
+        );
+        assert_eq!(
+            result.iterator_missing, 0,
+            "No keys should be missing through iteration"
+        );
+        assert_eq!(result.iterator_errors, 0, "No iterator errors should occur");
 
         Ok(())
     }
