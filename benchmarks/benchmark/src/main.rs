@@ -130,12 +130,11 @@ pub fn main() {
             Arc::new(storage)
         }
         Backend::Rocksdb => {
-            let storage = RocksStorage::open(&path);
+            let storage = RocksStorage::open(&path, false);
             Arc::new(storage)
         }
         Backend::Blobdb => {
-            use crate::storage::blobdb::BlobDbStorage;
-            let storage = BlobDbStorage::open(&path);
+            let storage = RocksStorage::open(&path, true);
             Arc::new(storage)
         }
     };

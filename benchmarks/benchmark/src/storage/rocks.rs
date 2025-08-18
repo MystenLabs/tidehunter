@@ -6,20 +6,35 @@ use std::sync::Arc;
 
 pub struct RocksStorage {
     db: DB,
+    mode: RocksMode,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum RocksMode {
+    Plain,
+    BlobDb,
 }
 
 impl RocksStorage {
-    pub fn open(path: &Path) -> Arc<Self> {
+    pub fn open(path: &Path, use_blob_store: bool) -> Arc<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
         Self::update_opts(&mut opts);
         Self::optimize_for_write_throughput(&mut opts);
+        if use_blob_store {
+            // Enable integrated BlobDB with sensible defaults
+            Self::enable_blobdb(&mut opts);
+        }
 
         std::fs::create_dir_all(path).unwrap();
         let db = DB::open(&opts, path).unwrap();
-        let this = Self { db };
-        Arc::new(this)
+        let mode = if use_blob_store {
+            RocksMode::BlobDb
+        } else {
+            RocksMode::Plain
+        };
+        Arc::new(Self { db, mode })
     }
 
     pub fn optimize_for_write_throughput(opt: &mut Options) {
@@ -93,6 +108,19 @@ impl RocksStorage {
         // Set memtable bloomfilter.
         opt.set_memtable_prefix_bloom_ratio(0.02);
     }
+
+    fn enable_blobdb(opt: &mut Options) {
+        // Integrated BlobDB switches
+        opt.set_enable_blob_files(true);
+        // Values smaller than this remain in LSM; keep small threshold as previously used
+        opt.set_min_blob_size(256);
+        // Size of blob files before rolling
+        opt.set_blob_file_size(128 * 1024 * 1024);
+        // Compression for blobs; ZSTD for better ratio
+        opt.set_blob_compression_type(rocksdb::DBCompressionType::Zstd);
+        // Readahead for compaction over blob files (0 disables)
+        opt.set_blob_compaction_readahead_size(0);
+    }
 }
 
 impl Storage for Arc<RocksStorage> {
@@ -124,7 +152,10 @@ impl Storage for Arc<RocksStorage> {
     }
 
     fn name(&self) -> &'static str {
-        "rocksdb"
+        match self.mode {
+            RocksMode::Plain => "rocksdb",
+            RocksMode::BlobDb => "blobdb",
+        }
     }
 }
 
