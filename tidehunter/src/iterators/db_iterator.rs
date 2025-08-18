@@ -95,6 +95,9 @@ impl DbIterator {
         let ks = self.db.ks(self.ks);
         ks.assert_supports_iterator_bound();
         self.reverse = !self.reverse;
+        if self.full_upper_bound.is_none() {
+            self.cell = Some(ks.last_cell()); // Initialize current cell as the last cell in ks
+        }
         if let Some(lower_bound) = self.full_lower_bound.take() {
             self.set_lower_bound(lower_bound);
         }

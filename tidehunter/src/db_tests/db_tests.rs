@@ -2305,3 +2305,68 @@ fn test_relocation_filter() {
     // Nothing left to remove
     assert_eq!(relocation_removed(&metrics, "k"), 0);
 }
+
+#[test]
+fn test_reverse_iterator_without_bounds() {
+    // Test that reverse iterator works without setting any bounds
+    let dir = tempdir::TempDir::new("test-reverse-no-bounds").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    // Insert some test data with 8-byte keys
+    let test_data = vec![
+        (b"key00001".to_vec(), b"value1".to_vec()),
+        (b"key00002".to_vec(), b"value2".to_vec()),
+        (b"key00003".to_vec(), b"value3".to_vec()),
+    ];
+
+    for (key, value) in &test_data {
+        db.insert(ks, key.clone(), value.clone()).unwrap();
+    }
+
+    // Test forward iterator without bounds - this should work
+    let forward_iterator = db.iterator(ks);
+    let forward_results: Vec<_> = forward_iterator
+        .collect::<DbResult<Vec<_>>>()
+        .expect("Forward iterator should work without bounds");
+
+    assert_eq!(
+        forward_results.len(),
+        3,
+        "Forward iterator should find all 3 keys"
+    );
+
+    // Test reverse iterator without bounds - this is what we're testing
+    let mut reverse_iterator = db.iterator(ks);
+    reverse_iterator.reverse();
+
+    let reverse_results: Vec<_> = reverse_iterator
+        .collect::<DbResult<Vec<_>>>()
+        .expect("Reverse iterator should work without bounds");
+
+    // The issue: reverse iterator returns no results without bounds
+    assert_eq!(
+        reverse_results.len(),
+        3,
+        "Reverse iterator should find all 3 keys without needing bounds, but found {}",
+        reverse_results.len()
+    );
+
+    // Verify the keys are the same (just in reverse order)
+    let forward_keys: Vec<_> = forward_results.iter().map(|(k, _)| k.clone()).collect();
+    let mut reverse_keys: Vec<_> = reverse_results.iter().map(|(k, _)| k.clone()).collect();
+    reverse_keys.reverse();
+
+    assert_eq!(
+        forward_keys, reverse_keys,
+        "Reverse iterator should return same keys as forward iterator (in reverse order)"
+    );
+}
