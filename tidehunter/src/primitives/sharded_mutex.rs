@@ -1,6 +1,6 @@
+use crate::metrics::MetricHistogram;
 use crate::runtime;
 use parking_lot::{Mutex, MutexGuard};
-use prometheus::Histogram;
 use std::time::Instant;
 
 pub struct ShardedMutex<V>(Box<[Mutex<V>]>);
@@ -11,7 +11,7 @@ impl<V> ShardedMutex<V> {
         Self(arr)
     }
 
-    pub fn lock(&self, n: usize, metric: &Histogram) -> MutexGuard<'_, V> {
+    pub fn lock(&self, n: usize, metric: &MetricHistogram) -> MutexGuard<'_, V> {
         let mutex = &self.0[n % self.0.len()];
         if let Some(lock) = mutex.try_lock() {
             return lock;

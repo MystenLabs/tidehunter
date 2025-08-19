@@ -50,6 +50,8 @@ impl Db {
         config: Arc<Config>,
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
+        // Respect runtime metrics toggle from configuration
+        crate::metrics::set_enabled(config.metrics_enabled());
         let path = path.canonicalize()?;
         let wal_path = Self::wal_path(&path);
         let (control_region_store, control_region) =

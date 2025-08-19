@@ -1,62 +1,204 @@
 use prometheus::{
-    exponential_buckets, linear_buckets, Histogram, HistogramVec, IntCounter, IntCounterVec,
-    IntGauge, IntGaugeVec, Registry,
+    exponential_buckets, linear_buckets, Histogram as PromHistogram,
+    HistogramVec as PromHistogramVec, IntCounter as PromIntCounter,
+    IntCounterVec as PromIntCounterVec, IntGauge as PromIntGauge, IntGaugeVec as PromIntGaugeVec,
+    Registry,
 };
-use std::sync::atomic::AtomicUsize;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+// Global runtime toggle for metrics
+static METRICS_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_enabled(enabled: bool) {
+    METRICS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_enabled() -> bool {
+    METRICS_ENABLED.load(Ordering::Relaxed)
+}
+
+#[derive(Clone)]
+pub(crate) enum Maybe<T> {
+    Real(T),
+    Noop,
+}
+
+#[derive(Clone)]
+pub struct MetricHistogram(pub(crate) Maybe<PromHistogram>);
+
+impl MetricHistogram {
+    pub fn observe(&self, v: f64) {
+        if let Maybe::Real(inner) = &self.0 {
+            if is_enabled() {
+                inner.observe(v);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MetricHistogramVec(pub(crate) Maybe<PromHistogramVec>);
+
+impl MetricHistogramVec {
+    pub fn with_label_values(&self, labels: &[&str]) -> MetricHistogram {
+        if !is_enabled() {
+            return MetricHistogram(Maybe::Noop);
+        }
+        match &self.0 {
+            Maybe::Real(v) => MetricHistogram(Maybe::Real(v.with_label_values(labels))),
+            Maybe::Noop => MetricHistogram(Maybe::Noop),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MetricIntCounter(pub(crate) Maybe<PromIntCounter>);
+
+impl MetricIntCounter {
+    pub fn inc(&self) {
+        if let Maybe::Real(inner) = &self.0 {
+            if is_enabled() {
+                inner.inc();
+            }
+        }
+    }
+    pub fn inc_by(&self, v: u64) {
+        if let Maybe::Real(inner) = &self.0 {
+            if is_enabled() {
+                inner.inc_by(v);
+            }
+        }
+    }
+    pub fn get(&self) -> u64 {
+        match &self.0 {
+            Maybe::Real(inner) => inner.get(),
+            Maybe::Noop => 0,
+        }
+    }
+}
+
+impl fmt::Debug for MetricIntCounter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Maybe::Real(inner) => inner.fmt(f),
+            Maybe::Noop => f.write_str("noop"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MetricIntCounterVec(pub(crate) Maybe<PromIntCounterVec>);
+
+impl MetricIntCounterVec {
+    pub fn with_label_values(&self, labels: &[&str]) -> MetricIntCounter {
+        if !is_enabled() {
+            return MetricIntCounter(Maybe::Noop);
+        }
+        match &self.0 {
+            Maybe::Real(v) => MetricIntCounter(Maybe::Real(v.with_label_values(labels))),
+            Maybe::Noop => MetricIntCounter(Maybe::Noop),
+        }
+    }
+    pub fn get_metric_with_label_values(
+        &self,
+        labels: &[&str],
+    ) -> Result<PromIntCounter, prometheus::Error> {
+        match &self.0 {
+            Maybe::Real(v) => v.get_metric_with_label_values(labels),
+            Maybe::Noop => Ok(PromIntCounter::new("noop", "noop").unwrap()),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MetricIntGauge(pub(crate) Maybe<PromIntGauge>);
+
+impl MetricIntGauge {
+    pub fn set(&self, v: i64) {
+        if let Maybe::Real(inner) = &self.0 {
+            if is_enabled() {
+                inner.set(v);
+            }
+        }
+    }
+    pub fn add(&self, v: i64) {
+        if let Maybe::Real(inner) = &self.0 {
+            if is_enabled() {
+                inner.add(v);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MetricIntGaugeVec(pub(crate) Maybe<PromIntGaugeVec>);
+
+impl MetricIntGaugeVec {
+    pub fn with_label_values(&self, labels: &[&str]) -> MetricIntGauge {
+        if !is_enabled() {
+            return MetricIntGauge(Maybe::Noop);
+        }
+        match &self.0 {
+            Maybe::Real(v) => MetricIntGauge(Maybe::Real(v.with_label_values(labels))),
+            Maybe::Noop => MetricIntGauge(Maybe::Noop),
+        }
+    }
+}
+
 pub struct Metrics {
-    pub replayed_wal_records: IntCounter,
-    pub index_size: Histogram,
+    pub replayed_wal_records: MetricIntCounter,
+    pub index_size: MetricHistogram,
     pub max_index_size: AtomicUsize,
-    pub max_index_size_metric: IntGauge,
-    pub wal_written_bytes: IntGauge,
-    pub wal_written_bytes_type: IntCounterVec,
-    pub unload: IntCounterVec,
-    pub entry_state: IntGaugeVec,
-    pub compacted_keys: IntCounterVec,
-    pub read: IntCounterVec,
-    pub read_bytes: IntCounterVec,
-    pub loaded_key_bytes: IntGaugeVec,
-    pub index_distance_from_tail: IntGaugeVec,
+    pub max_index_size_metric: MetricIntGauge,
+    pub wal_written_bytes: MetricIntGauge,
+    pub wal_written_bytes_type: MetricIntCounterVec,
+    pub unload: MetricIntCounterVec,
+    pub entry_state: MetricIntGaugeVec,
+    pub compacted_keys: MetricIntCounterVec,
+    pub read: MetricIntCounterVec,
+    pub read_bytes: MetricIntCounterVec,
+    pub loaded_key_bytes: MetricIntGaugeVec,
+    pub index_distance_from_tail: MetricIntGaugeVec,
 
-    pub lookup_mcs: HistogramVec,
-    pub lookup_result: IntCounterVec,
-    pub lookup_iterations: Histogram,
-    pub lookup_scan_mcs: IntCounter,
-    pub lookup_io_mcs: IntCounter,
-    pub lookup_io_bytes: IntCounter,
+    pub lookup_mcs: MetricHistogramVec,
+    pub lookup_result: MetricIntCounterVec,
+    pub lookup_iterations: MetricHistogram,
+    pub lookup_scan_mcs: MetricIntCounter,
+    pub lookup_io_mcs: MetricIntCounter,
+    pub lookup_io_bytes: MetricIntCounter,
 
-    pub large_table_contention: HistogramVec,
-    pub wal_contention: Histogram,
-    pub wal_synced_position: IntGauge,
-    pub db_op_mcs: HistogramVec,
-    pub map_time_mcs: Histogram,
-    pub wal_mapper_time_mcs: IntCounter,
-    pub write_batch_times: IntCounterVec,
-    pub write_batch_operations: IntCounterVec,
-    pub skip_stale_update: IntCounterVec,
+    pub large_table_contention: MetricHistogramVec,
+    pub wal_contention: MetricHistogram,
+    pub wal_synced_position: MetricIntGauge,
+    pub db_op_mcs: MetricHistogramVec,
+    pub map_time_mcs: MetricHistogram,
+    pub wal_mapper_time_mcs: MetricIntCounter,
+    pub write_batch_times: MetricIntCounterVec,
+    pub write_batch_operations: MetricIntCounterVec,
+    pub skip_stale_update: MetricIntCounterVec,
 
-    pub snapshot_lock_time_mcs: Histogram,
-    pub snapshot_force_unload: IntCounterVec,
-    pub snapshot_written_bytes: IntCounter,
-    pub rebuild_control_region_time_mcs: Histogram,
-    pub bloom_filter_restore_time_mcs: IntCounterVec,
+    pub snapshot_lock_time_mcs: MetricHistogram,
+    pub snapshot_force_unload: MetricIntCounterVec,
+    pub snapshot_written_bytes: MetricIntCounter,
+    pub rebuild_control_region_time_mcs: MetricHistogram,
+    pub bloom_filter_restore_time_mcs: MetricIntCounterVec,
 
-    pub flush_time_mcs: IntCounterVec,
-    pub flush_count: IntCounterVec,
-    pub flush_update: IntCounterVec,
-    pub flushed_keys: IntCounterVec,
-    pub flushed_bytes: IntCounterVec,
-    pub flush_pending: IntGauge,
+    pub flush_time_mcs: MetricIntCounterVec,
+    pub flush_count: MetricIntCounterVec,
+    pub flush_update: MetricIntCounterVec,
+    pub flushed_keys: MetricIntCounterVec,
+    pub flushed_bytes: MetricIntCounterVec,
+    pub flush_pending: MetricIntGauge,
 
-    pub relocation_position: IntGauge,
-    pub relocation_kept: IntCounterVec,
-    pub relocation_removed: IntCounterVec,
+    pub relocation_position: MetricIntGauge,
+    pub relocation_kept: MetricIntCounterVec,
+    pub relocation_removed: MetricIntCounterVec,
 
-    pub memory_estimate: IntGaugeVec,
-    pub value_cache_size: IntGaugeVec,
+    pub memory_estimate: MetricIntGaugeVec,
+    pub value_cache_size: MetricIntGaugeVec,
 }
 
 #[macro_export]
@@ -98,85 +240,197 @@ impl Metrics {
         let lookup_iterations_buckets = linear_buckets(1., 1.0, 10).unwrap();
 
         let this = Metrics {
-            replayed_wal_records: counter!("replayed_wal_records", registry),
+            replayed_wal_records: MetricIntCounter(Maybe::Real(counter!(
+                "replayed_wal_records",
+                registry
+            ))),
             max_index_size: AtomicUsize::new(0),
-            index_size: histogram!("index_size", index_size_buckets, registry),
-            max_index_size_metric: gauge!("max_index_size", registry),
-            wal_written_bytes: gauge!("wal_written_bytes", registry),
-            wal_written_bytes_type: counter_vec!(
+            index_size: MetricHistogram(Maybe::Real(histogram!(
+                "index_size",
+                index_size_buckets,
+                registry
+            ))),
+            max_index_size_metric: MetricIntGauge(Maybe::Real(gauge!("max_index_size", registry))),
+            wal_written_bytes: MetricIntGauge(Maybe::Real(gauge!("wal_written_bytes", registry))),
+            wal_written_bytes_type: MetricIntCounterVec(Maybe::Real(counter_vec!(
                 "wal_written_bytes_type",
                 &["type", "ks"],
                 registry
-            ),
-            unload: counter_vec!("unload", &["kind"], registry),
-            entry_state: gauge_vec!("entry_state", &["ks", "state"], registry),
-            compacted_keys: counter_vec!("compacted_keys", &["ks"], registry),
-            read: counter_vec!("read", &["ks", "kind", "type"], registry),
-            read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
-            loaded_key_bytes: gauge_vec!("loaded_key_bytes", &["ks"], registry),
-            index_distance_from_tail: gauge_vec!("index_distance_from_tail", &["ks"], registry),
+            ))),
+            unload: MetricIntCounterVec(Maybe::Real(counter_vec!("unload", &["kind"], registry))),
+            entry_state: MetricIntGaugeVec(Maybe::Real(gauge_vec!(
+                "entry_state",
+                &["ks", "state"],
+                registry
+            ))),
+            compacted_keys: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "compacted_keys",
+                &["ks"],
+                registry
+            ))),
+            read: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "read",
+                &["ks", "kind", "type"],
+                registry
+            ))),
+            read_bytes: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "read_bytes",
+                &["ks", "kind", "type"],
+                registry
+            ))),
+            loaded_key_bytes: MetricIntGaugeVec(Maybe::Real(gauge_vec!(
+                "loaded_key_bytes",
+                &["ks"],
+                registry
+            ))),
+            index_distance_from_tail: MetricIntGaugeVec(Maybe::Real(gauge_vec!(
+                "index_distance_from_tail",
+                &["ks"],
+                registry
+            ))),
 
-            lookup_mcs: histogram_vec!(
+            lookup_mcs: MetricHistogramVec(Maybe::Real(histogram_vec!(
                 "lookup_mcs",
                 &["type", "ks"],
                 lookup_buckets.clone(),
                 registry
-            ),
-            lookup_result: counter_vec!("lookup_result", &["ks", "result", "source"], registry),
-            lookup_iterations: histogram!("lookup_iterations", lookup_iterations_buckets, registry),
-            lookup_scan_mcs: counter!("lookup_scan_mcs", registry),
-            lookup_io_mcs: counter!("lookup_io_mcs", registry),
-            lookup_io_bytes: counter!("lookup_io_bytes", registry),
-            large_table_contention: histogram_vec!(
+            ))),
+            lookup_result: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "lookup_result",
+                &["ks", "result", "source"],
+                registry
+            ))),
+            lookup_iterations: MetricHistogram(Maybe::Real(histogram!(
+                "lookup_iterations",
+                lookup_iterations_buckets,
+                registry
+            ))),
+            lookup_scan_mcs: MetricIntCounter(Maybe::Real(counter!("lookup_scan_mcs", registry))),
+            lookup_io_mcs: MetricIntCounter(Maybe::Real(counter!("lookup_io_mcs", registry))),
+            lookup_io_bytes: MetricIntCounter(Maybe::Real(counter!("lookup_io_bytes", registry))),
+            large_table_contention: MetricHistogramVec(Maybe::Real(histogram_vec!(
                 "large_table_contention",
                 &["ks"],
                 lock_buckets.clone(),
                 registry
-            ),
-            wal_contention: histogram!("wal_contention", lock_buckets.clone(), registry),
-            wal_synced_position: gauge!("wal_synced_position", registry),
-            db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry),
-            map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry),
-            wal_mapper_time_mcs: counter!("wal_mapper_time_mcs", registry),
-            write_batch_times: counter_vec!("write_batch_times", &["tag", "kind"], registry),
-            write_batch_operations: counter_vec!(
+            ))),
+            wal_contention: MetricHistogram(Maybe::Real(histogram!(
+                "wal_contention",
+                lock_buckets.clone(),
+                registry
+            ))),
+            wal_synced_position: MetricIntGauge(Maybe::Real(gauge!(
+                "wal_synced_position",
+                registry
+            ))),
+            db_op_mcs: MetricHistogramVec(Maybe::Real(histogram_vec!(
+                "db_op",
+                &["op", "ks"],
+                db_op_buckets,
+                registry
+            ))),
+            map_time_mcs: MetricHistogram(Maybe::Real(histogram!(
+                "map_time_mcs",
+                lookup_buckets.clone(),
+                registry
+            ))),
+            wal_mapper_time_mcs: MetricIntCounter(Maybe::Real(counter!(
+                "wal_mapper_time_mcs",
+                registry
+            ))),
+            write_batch_times: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "write_batch_times",
+                &["tag", "kind"],
+                registry
+            ))),
+            write_batch_operations: MetricIntCounterVec(Maybe::Real(counter_vec!(
                 "write_batch_operations",
                 &["tag", "kind"],
                 registry
-            ),
-            skip_stale_update: counter_vec!("skip_stale_update", &["ks", "op"], registry),
+            ))),
+            skip_stale_update: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "skip_stale_update",
+                &["ks", "op"],
+                registry
+            ))),
 
-            snapshot_lock_time_mcs: histogram!(
+            snapshot_lock_time_mcs: MetricHistogram(Maybe::Real(histogram!(
                 "snapshot_lock_time_mcs",
                 snapshot_buckets,
                 registry
-            ),
-            snapshot_force_unload: counter_vec!("snapshot_force_unload", &["ks"], registry),
-            snapshot_written_bytes: counter!("snapshot_written_bytes", registry),
-            rebuild_control_region_time_mcs: histogram!(
+            ))),
+            snapshot_force_unload: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "snapshot_force_unload",
+                &["ks"],
+                registry
+            ))),
+            snapshot_written_bytes: MetricIntCounter(Maybe::Real(counter!(
+                "snapshot_written_bytes",
+                registry
+            ))),
+            rebuild_control_region_time_mcs: MetricHistogram(Maybe::Real(histogram!(
                 "rebuild_control_region_time_mcs",
                 rebuild_buckets,
                 registry
-            ),
-            bloom_filter_restore_time_mcs: counter_vec!(
+            ))),
+            bloom_filter_restore_time_mcs: MetricIntCounterVec(Maybe::Real(counter_vec!(
                 "bloom_filter_restore_time_mcs",
                 &["ks"],
                 registry
-            ),
+            ))),
 
-            flush_time_mcs: counter_vec!("flush_time_mcs", &["thread_id"], registry),
-            flush_count: counter_vec!("flush_count", &["ks"], registry),
-            flush_update: counter_vec!("flush_update", &["kind"], registry),
-            flushed_keys: counter_vec!("flushed_keys", &["ks"], registry),
-            flushed_bytes: counter_vec!("flushed_bytes", &["ks"], registry),
-            flush_pending: gauge!("flush_pending", registry),
+            flush_time_mcs: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "flush_time_mcs",
+                &["thread_id"],
+                registry
+            ))),
+            flush_count: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "flush_count",
+                &["ks"],
+                registry
+            ))),
+            flush_update: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "flush_update",
+                &["kind"],
+                registry
+            ))),
+            flushed_keys: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "flushed_keys",
+                &["ks"],
+                registry
+            ))),
+            flushed_bytes: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "flushed_bytes",
+                &["ks"],
+                registry
+            ))),
+            flush_pending: MetricIntGauge(Maybe::Real(gauge!("flush_pending", registry))),
 
-            relocation_position: gauge!("relocation_position", registry),
-            relocation_kept: counter_vec!("relocation_kept", &["ks"], registry),
-            relocation_removed: counter_vec!("relocation_removed", &["ks"], registry),
+            relocation_position: MetricIntGauge(Maybe::Real(gauge!(
+                "relocation_position",
+                registry
+            ))),
+            relocation_kept: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "relocation_kept",
+                &["ks"],
+                registry
+            ))),
+            relocation_removed: MetricIntCounterVec(Maybe::Real(counter_vec!(
+                "relocation_removed",
+                &["ks"],
+                registry
+            ))),
 
-            memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),
-            value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry),
+            memory_estimate: MetricIntGaugeVec(Maybe::Real(gauge_vec!(
+                "memory_estimate",
+                &["ks", "kind"],
+                registry
+            ))),
+            value_cache_size: MetricIntGaugeVec(Maybe::Real(gauge_vec!(
+                "value_cache_size",
+                &["ks"],
+                registry
+            ))),
         };
         Arc::new(this)
     }
@@ -187,46 +441,58 @@ pub trait TimerExt {
 }
 
 pub struct McsHistogramTimer {
-    histogram: Histogram,
-    start: Instant,
+    histogram: MetricHistogram,
+    start: Option<Instant>,
 }
 
 pub struct McsCounterTimer {
-    counter: IntCounter,
-    start: Instant,
+    counter: MetricIntCounter,
+    start: Option<Instant>,
 }
 
-impl TimerExt for Histogram {
+impl TimerExt for MetricHistogram {
     fn mcs_timer(self) -> impl Drop {
         McsHistogramTimer {
             histogram: self,
-            start: Instant::now(),
+            start: if is_enabled() {
+                Some(Instant::now())
+            } else {
+                None
+            },
         }
     }
 }
 
 impl Drop for McsHistogramTimer {
     fn drop(&mut self) {
-        self.histogram
-            .observe(self.start.elapsed().as_micros() as f64)
+        if let Some(start) = self.start.take() {
+            self.histogram.observe(start.elapsed().as_micros() as f64)
+        }
     }
 }
 
-impl TimerExt for IntCounter {
+impl TimerExt for MetricIntCounter {
     fn mcs_timer(self) -> impl Drop {
         McsCounterTimer {
             counter: self,
-            start: Instant::now(),
+            start: if is_enabled() {
+                Some(Instant::now())
+            } else {
+                None
+            },
         }
     }
 }
 
 impl Drop for McsCounterTimer {
     fn drop(&mut self) {
-        self.counter.inc_by(self.start.elapsed().as_micros() as u64)
+        if let Some(start) = self.start.take() {
+            self.counter.inc_by(start.elapsed().as_micros() as u64)
+        }
     }
 }
 
-pub fn print_histogram_stats(histogram: &Histogram) {
-    println!("Histogram: {:?}", histogram);
+pub fn print_histogram_stats(_histogram: &MetricHistogram) {
+    // Keep simple to avoid tight coupling with prometheus Debug impl
+    println!("Histogram stats requested");
 }

@@ -23,6 +23,8 @@ pub struct Config {
     pub num_flusher_threads: usize,
     /// Whether to perform flushing synchronously instead of async (default: false)
     pub sync_flush: bool,
+    /// Enable Tidehunter runtime metrics collection
+    pub metrics_enabled: bool,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             direct_io: false,
             num_flusher_threads: 1,
             sync_flush: false,
+            metrics_enabled: true,
         }
     }
 }
@@ -53,6 +56,7 @@ impl Config {
             direct_io: false,
             num_flusher_threads: 1,
             sync_flush: false,
+            metrics_enabled: true,
         }
     }
 
@@ -86,5 +90,9 @@ impl Config {
 
     pub fn direct_io(&self) -> bool {
         self.direct_io
+    }
+
+    pub fn metrics_enabled(&self) -> bool {
+        self.metrics_enabled
     }
 }
