@@ -23,6 +23,8 @@ pub struct Config {
     pub num_flusher_threads: usize,
     /// Whether to perform flushing synchronously instead of async (default: false)
     pub sync_flush: bool,
+    /// Maximum size of a single WAL file
+    pub wal_file_size: u64,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             direct_io: false,
             num_flusher_threads: 1,
             sync_flush: false,
+            wal_file_size: 10 * (1 << 30), // 10Gb
         }
     }
 }
@@ -53,6 +56,7 @@ impl Config {
             direct_io: false,
             num_flusher_threads: 1,
             sync_flush: false,
+            wal_file_size: 4 * 1024 * 1024,
         }
     }
 
@@ -66,6 +70,7 @@ impl Config {
             frag_size: self.frag_size,
             max_maps: self.max_maps,
             direct_io: self.direct_io,
+            wal_file_size: self.wal_file_size,
         }
     }
 

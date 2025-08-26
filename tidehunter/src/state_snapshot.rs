@@ -60,8 +60,10 @@ pub fn load(
 
     // Open the WAL file, truncate it, and then close it
     {
-        let wal_path = Db::wal_path(&database_path);
-        let file = fs::OpenOptions::new().write(true).open(wal_path)?;
+        // TODO: Update this to properly handle multi-file WAL system
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(database_path.join("wal_0000000000000000"))?;
         file.set_len(last_wal_position)?;
     }
 

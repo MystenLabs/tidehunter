@@ -428,6 +428,8 @@ mod test {
     use crate::key_shape::KeyType;
     use crate::{file_reader::FileReader, index::index_format::test::*, key_shape::KeyShape};
     use std::collections::HashSet;
+    use std::sync::Arc;
+
     #[test]
     pub fn test_index_lookup() {
         let pi = UniformLookupIndex::new();
@@ -731,7 +733,8 @@ mod test {
 
         let file_len = file.metadata().unwrap().len();
         // Full file range is 0..file_len
-        let file_range = crate::lookup::FileRange::new(FileReader::new(&file, false), 0..file_len);
+        let file_range =
+            crate::lookup::FileRange::new(FileReader::new(Arc::new(file), false), 0..file_len);
 
         // 7) Use lookup_unloaded to find each key
         // let found1 = index_impl.lookup_unloaded(ks, &file_range, &key1);
