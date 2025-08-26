@@ -8,7 +8,7 @@ pub const RELOCATION_FILE: &str = "rel";
 
 pub struct RelocationWatermarks {
     path: PathBuf,
-    offset: u64,
+    /// Watermark that tracks internal relocation progress
     relocation_progress: u64,
 }
 
@@ -23,21 +23,17 @@ impl RelocationWatermarks {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Ok(Self {
                     path: path.to_path_buf(),
-                    offset: 0,
                     relocation_progress: 0,
                 });
             }
             Err(e) => return Err(e),
         };
-        let mut buf = [0u8; 16];
+        let mut buf = [0u8; 8];
         file.read_exact(&mut buf)?;
         let mut buf = &buf[..];
-        let offset = buf.get_u64();
-        let relocation_progress = buf.get_u64();
         Ok(Self {
             path: path.to_path_buf(),
-            offset,
-            relocation_progress,
+            relocation_progress: buf.get_u64(),
         })
     }
 
@@ -49,7 +45,6 @@ impl RelocationWatermarks {
             .create(true)
             .truncate(true)
             .open(&tmp_path)?;
-        file.write_all(&self.offset.to_be_bytes())?;
         file.write_all(&self.relocation_progress.to_be_bytes())?;
         file.sync_all()?;
         drop(file);
@@ -57,15 +52,11 @@ impl RelocationWatermarks {
         Ok(())
     }
 
-    pub fn update(&mut self, position: WalPosition) {
+    pub fn set_relocation_progress(&mut self, position: WalPosition) {
         self.relocation_progress = position.offset();
     }
 
-    pub fn get_relocation_start_position(&self) -> u64 {
-        self.relocation_progress
-    }
-
-    pub fn get_progress_watermark(&self) -> u64 {
+    pub fn get_relocation_progress(&self) -> u64 {
         self.relocation_progress
     }
 }

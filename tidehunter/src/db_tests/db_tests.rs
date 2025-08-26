@@ -2261,8 +2261,22 @@ fn test_relocation_point_deletes() {
     assert_eq!(relocation_removed(&metrics, "k"), 100);
 }
 
+fn list_wal_files(path: &Path) -> Vec<String> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with("wal_") {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
 #[test]
-#[ignore] // todo - andll - fix this
 fn test_relocation_filter() {
     let dir = tempdir::TempDir::new("test_relocation_filter").unwrap();
     let config = Arc::new(Config::small());
@@ -2285,14 +2299,36 @@ fn test_relocation_filter() {
             metrics.clone(),
         )
         .unwrap();
-        for key in 0..200u64 {
+        for key in 0..30000u64 {
             db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
                 .unwrap();
         }
         db.start_blocking_relocation();
         // Half of the key-value pairs were removed
-        assert_eq!(relocation_removed(&metrics, "k"), 100);
+        assert_eq!(relocation_removed(&metrics, "k"), 15000);
+        db.rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
     }
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        for key in 30000..30100u64 {
+            db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
+                .unwrap();
+        }
+        db.start_blocking_relocation();
+        assert_eq!(relocation_removed(&metrics, "k"), 50);
+        db.wait_for_background_threads_to_finish();
+    }
+    assert!(list_wal_files(&dir.path())
+        .into_iter()
+        .all(|name| name != "wal_0000000000000000"));
     let metrics = Metrics::new();
     let db = Db::open(
         dir.path(),

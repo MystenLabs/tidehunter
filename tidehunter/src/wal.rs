@@ -177,6 +177,30 @@ impl WalWriter {
     pub fn last_processed(&self) -> u64 {
         self.wal_tracker.last_processed()
     }
+
+    /// Deletes WAL files that have been fully processed by the relocation process up to the watermark position
+    pub fn gc(&self, watermark: u64) -> io::Result<()> {
+        let wal_files = self.wal.files.load();
+        let mut new_min_file_id = None;
+        for idx in 0..wal_files.files.len() {
+            let file_id = WalFileId(wal_files.min_file_id.0 + idx as u64);
+            if (file_id.0 + 1) * self.wal.layout.wal_file_size > watermark {
+                break;
+            }
+            let path = Wal::wal_file_name(&wal_files.base_path, file_id);
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            new_min_file_id = Some(file_id);
+        }
+        if let Some(new_min_file_id) = new_min_file_id {
+            let threshold =
+                (new_min_file_id.0 + 1) * self.wal.layout.wal_file_size / self.wal.layout.frag_size;
+            let mut maps = self.wal.maps.write();
+            maps.retain(|map_id, _| *map_id >= threshold);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -268,6 +292,11 @@ impl WalLayout {
 
 impl WalFiles {
     fn new(base_path: &Path, layout: &WalLayout) -> io::Result<Arc<ArcSwap<Self>>> {
+        let wal_files = Self::load(base_path, layout)?;
+        Ok(Arc::new(ArcSwap::from(Arc::new(wal_files))))
+    }
+
+    fn load(base_path: &Path, layout: &WalLayout) -> io::Result<Self> {
         let mut files = vec![];
         for entry in std::fs::read_dir(base_path)? {
             let file_path = entry?.path();
@@ -293,12 +322,11 @@ impl WalFiles {
             files.len() as u64,
             "WAL file IDs must form a contiguous range",
         );
-        let wal_files = Self {
+        Ok(Self {
             base_path: base_path.to_path_buf(),
             files: files.into_iter().map(|(_, file)| Arc::new(file)).collect(),
             min_file_id: WalFileId(min_file_id),
-        };
-        Ok(Arc::new(ArcSwap::from(Arc::new(wal_files))))
+        })
     }
 
     fn current_file_id(&self) -> WalFileId {
@@ -644,6 +672,13 @@ impl WalMapperThread {
             let range = self.layout.map_range(map_id);
             let file_id = self.layout.locate_file(range.start);
             let mut files = self.files.load();
+            // if min_file_id has already been removed by relocation, reload the list of active files
+            if !Wal::wal_file_name(&files.base_path, files.min_file_id).exists() {
+                let new_files = WalFiles::load(&files.base_path, &self.layout)
+                    .expect("Failed to reload wal files directory");
+                self.files.store(Arc::new(new_files));
+                files = self.files.load();
+            }
             if file_id > files.current_file_id() {
                 assert_eq!(file_id, WalFileId(files.current_file_id().0 + 1));
                 let mut new_files = files.files.clone();

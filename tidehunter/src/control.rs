@@ -15,6 +15,7 @@ pub(crate) struct ControlRegion {
 
 pub(crate) struct ControlRegionStore {
     path: PathBuf,
+    last_position: u64,
 }
 
 impl ControlRegion {
@@ -71,8 +72,11 @@ impl ControlRegion {
 }
 
 impl ControlRegionStore {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
+    pub fn new(path: PathBuf, last_position: u64) -> Self {
+        Self {
+            path,
+            last_position,
+        }
     }
     pub fn store(
         &mut self,
@@ -89,10 +93,15 @@ impl ControlRegionStore {
             .snapshot_written_bytes
             .inc_by(serialized.len() as u64);
         fs::rename(&temp_file, &self.path).expect("Failed to rename control region file");
+        self.last_position = last_position;
     }
 
     /// The path to the control region file
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    pub fn last_position(&self) -> u64 {
+        self.last_position
     }
 }
