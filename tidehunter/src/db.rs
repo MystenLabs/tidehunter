@@ -161,7 +161,14 @@ impl Db {
 
     fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
         loop {
-            thread::sleep(Duration::from_secs(60));
+            // Check if database is still alive periodically (every second) to allow faster shutdown
+            for _ in 0..60 {
+                if weak.strong_count() == 0 {
+                    return None;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+
             let db = weak.upgrade()?;
             db.large_table.report_entries_state();
             // todo when we get to wal position wrapping around this will need to be fixed

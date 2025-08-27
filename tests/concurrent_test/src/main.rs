@@ -93,6 +93,13 @@ fn count_open_file_descriptors(db_path: &Path) -> usize {
         .count()
 }
 
+/// Opens a database with the given configuration and starts periodic snapshots.
+fn open_db_with_snapshots(db_path: &Path, key_shape: KeyShape, config: Arc<Config>) -> Arc<Db> {
+    let db = Db::open(db_path, key_shape, config, Metrics::new()).unwrap();
+    db.start_periodic_snapshot();
+    db
+}
+
 /// Tests concurrent database operations on overlapping keys to ensure thread-safety.
 ///
 /// This test validates that TideHunter correctly handles multiple threads performing
@@ -122,15 +129,11 @@ fn main() {
     let (key_shape, key_space) = KeyShape::new_single(1, 8, KeyType::uniform(1));
 
     // Wrap database in RwLock with Option to allow safe restarts
-    let db = Arc::new(RwLock::new(Some(
-        Db::open(
-            temp_dir.path(),
-            key_shape.clone(),
-            config.clone(),
-            Metrics::new(),
-        )
-        .unwrap(),
-    )));
+    let db = Arc::new(RwLock::new(Some(open_db_with_snapshots(
+        temp_dir.path(),
+        key_shape.clone(),
+        config.clone(),
+    ))));
 
     // Track number of database restarts and rebuilds for debugging
     let restart_count = Arc::new(AtomicU64::new(0));
@@ -257,10 +260,11 @@ fn main() {
                         }
 
                         // Create new database while still holding the write lock
-                        *db_write = Some(
-                            Db::open(&db_path, key_shape.clone(), config.clone(), Metrics::new())
-                                .unwrap(),
-                        );
+                        *db_write = Some(open_db_with_snapshots(
+                            &db_path,
+                            key_shape.clone(),
+                            config.clone(),
+                        ));
 
                         restart_count.fetch_add(1, Ordering::Relaxed);
                     }
