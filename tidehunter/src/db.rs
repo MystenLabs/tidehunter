@@ -31,7 +31,7 @@ pub struct Db {
     pub(crate) large_table: LargeTable,
     pub(crate) wal: Arc<Wal>,
     pub(crate) wal_writer: WalWriter,
-    control_region_store: Mutex<ControlRegionStore>,
+    pub(crate) control_region_store: Mutex<ControlRegionStore>,
     config: Arc<Config>,
     metrics: Arc<Metrics>,
     pub(crate) key_shape: KeyShape,
@@ -190,7 +190,7 @@ impl Db {
         key_shape: &KeyShape,
     ) -> Result<(ControlRegionStore, ControlRegion), DbError> {
         let control_region = ControlRegion::read_or_create(&path, key_shape);
-        let control_region_store = ControlRegionStore::new(path);
+        let control_region_store = ControlRegionStore::new(path, control_region.last_position());
         Ok((control_region_store, control_region))
     }
 
