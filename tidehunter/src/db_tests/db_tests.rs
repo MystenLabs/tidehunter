@@ -2279,7 +2279,9 @@ fn list_wal_files(path: &Path) -> Vec<String> {
 #[test]
 fn test_relocation_filter() {
     let dir = tempdir::TempDir::new("test_relocation_filter").unwrap();
-    let config = Arc::new(Config::small());
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    let config = Arc::new(config);
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
         if u64::from_be_bytes(key.try_into().unwrap()) % 2 == 0 {
@@ -2291,6 +2293,8 @@ fn test_relocation_filter() {
     let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
     let key_shape = ksb.build();
     let metrics = Metrics::new();
+    let sample_key = 3_u64.to_be_bytes().to_vec();
+    let mut insert_count = 0_u64;
     {
         let db = Db::open(
             dir.path(),
@@ -2299,14 +2303,33 @@ fn test_relocation_filter() {
             metrics.clone(),
         )
         .unwrap();
-        for key in 0..30000u64 {
-            db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
+        loop {
+            db.insert(ks, insert_count.to_be_bytes().to_vec(), vec![0, 1, 2])
                 .unwrap();
+            insert_count += 1;
+            if insert_count % 10000 == 0 && list_wal_files(&dir.path()).len() > 1 {
+                break;
+            }
         }
+        assert_eq!(db.get(ks, &sample_key).unwrap(), Some(vec![0, 1, 2].into()));
+        db.wait_for_background_threads_to_finish();
+    }
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            force_unload_config(&config),
+            metrics.clone(),
+        )
+        .unwrap();
+
+        db.rebuild_control_region().unwrap();
         db.start_blocking_relocation();
         // Half of the key-value pairs were removed
-        assert_eq!(relocation_removed(&metrics, "k"), 15000);
+        assert_eq!(relocation_removed(&metrics, "k"), insert_count / 2);
         db.rebuild_control_region().unwrap();
+
         db.wait_for_background_threads_to_finish();
     }
     {
@@ -2318,10 +2341,11 @@ fn test_relocation_filter() {
             metrics.clone(),
         )
         .unwrap();
-        for key in 30000..30100u64 {
+        for key in insert_count..(insert_count + 100) {
             db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
                 .unwrap();
         }
+        db.rebuild_control_region().unwrap();
         db.start_blocking_relocation();
         assert_eq!(relocation_removed(&metrics, "k"), 50);
         db.wait_for_background_threads_to_finish();
@@ -2338,6 +2362,7 @@ fn test_relocation_filter() {
     )
     .unwrap();
     db.start_blocking_relocation();
+    assert_eq!(db.get(ks, &sample_key).unwrap(), None);
     // Nothing left to remove
     assert_eq!(relocation_removed(&metrics, "k"), 0);
 }

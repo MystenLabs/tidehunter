@@ -430,7 +430,10 @@ impl Db {
         else {
             return Ok(None);
         };
-        let (key, value) = self.read_record(result.value)?;
+        let Some(record) = self.read_record(result.value)? else {
+            return Ok(None);
+        };
+        let (key, value) = record;
         Ok(Some(result.with_key_value(key, value)))
     }
 
@@ -467,7 +470,10 @@ impl Db {
     }
 
     fn read_record_check_key(&self, k: &[u8], position: WalPosition) -> DbResult<Option<Bytes>> {
-        let (wal_key, v) = self.read_record(position)?;
+        let Some(record) = self.read_record(position)? else {
+            return Ok(None);
+        };
+        let (wal_key, v) = record;
         if wal_key.as_ref() != k {
             Ok(None)
         } else {
@@ -475,10 +481,13 @@ impl Db {
         }
     }
 
-    fn read_record(&self, position: WalPosition) -> DbResult<(Bytes, Bytes)> {
+    fn read_record(&self, position: WalPosition) -> DbResult<Option<(Bytes, Bytes)>> {
         let entry = self.read_report_entry(position)?;
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
         if let WalEntry::Record(KeySpace(_), k, v) = entry {
-            Ok((k, v))
+            Ok(Some((k, v)))
         } else {
             panic!("Unexpected wal entry where expected record");
         }
@@ -599,14 +608,16 @@ impl Db {
         Ok(*self.wal_writer.write(&w)?.wal_position())
     }
 
-    fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(bool, WalEntry)> {
+    fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(bool, Option<WalEntry>)> {
         let (mapped, entry) = wal.read_unmapped(position)?;
-        Ok((mapped, WalEntry::from_bytes(entry)))
+        Ok((mapped, entry.map(WalEntry::from_bytes)))
     }
 
-    fn read_report_entry(&self, position: WalPosition) -> DbResult<WalEntry> {
+    fn read_report_entry(&self, position: WalPosition) -> DbResult<Option<WalEntry>> {
         let (mapped, entry) = Self::read_entry(&self.wal, position)?;
-        self.report_read(&entry, mapped);
+        if let Some(ref entry) = entry {
+            self.report_read(entry, mapped);
+        }
         Ok(entry)
     }
 
@@ -615,7 +626,7 @@ impl Db {
             let entry = ks.index_format().deserialize_index(ks, bytes);
             Ok(entry)
         } else {
-            panic!("Unexpected wal entry where expected record");
+            panic!("Unexpected wal entry where expected index");
         }
     }
 
@@ -761,7 +772,15 @@ impl Loader for Wal {
 
     fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> DbResult<IndexTable> {
         let (_, entry) = Db::read_entry(self, position)?;
-        Db::read_index(ks, entry)
+        Db::read_index(
+            ks,
+            entry.unwrap_or_else(|| {
+                panic!(
+                    "Trying to read file from position {} but the file was deleted",
+                    position.offset()
+                )
+            }),
+        )
     }
 
     fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
@@ -788,7 +807,15 @@ impl Loader for Db {
 
     fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> DbResult<IndexTable> {
         let entry = self.read_report_entry(position)?;
-        Self::read_index(ks, entry)
+        Self::read_index(
+            ks,
+            entry.unwrap_or_else(|| {
+                panic!(
+                    "Trying to read file from position {} but the file was deleted",
+                    position.offset()
+                )
+            }),
+        )
     }
 
     fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
