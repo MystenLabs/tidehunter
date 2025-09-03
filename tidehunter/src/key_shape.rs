@@ -600,9 +600,7 @@ impl KeyType {
                     config.prefix_len_bytes
                 );
             }
-            (KeyType::PrefixedUniform(_config), None) => {
-                panic!("Variable len keys currently arent supported for PrefixedUniform keys");
-            }
+            (KeyType::PrefixedUniform(_config), None) => {}
         }
     }
 
