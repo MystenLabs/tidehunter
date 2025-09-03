@@ -338,10 +338,14 @@ impl WalFiles {
         self.files.last().expect("unable to find current WAL file")
     }
 
+    fn get_checked(&self, id: WalFileId) -> Option<&Arc<File>> {
+        id.0.checked_sub(self.min_file_id.0)
+            .and_then(|id| self.files.get(id as usize))
+    }
+
     fn get(&self, id: WalFileId) -> &Arc<File> {
-        self.files
-            .get((id.0 - self.min_file_id.0) as usize)
-            .expect("attempt to access non existing file")
+        self.get_checked(id)
+            .unwrap_or_else(|| panic!("attempt to access non existing file {:?}", id))
     }
 }
 
@@ -415,7 +419,7 @@ impl Wal {
     ///
     /// Returns (false, _) if read syscall was used
     /// Returns (true, _) if mapping was used
-    pub fn read_unmapped(&self, pos: WalPosition) -> Result<(bool, Bytes), WalError> {
+    pub fn read_unmapped(&self, pos: WalPosition) -> Result<(bool, Option<Bytes>), WalError> {
         assert_ne!(
             pos,
             WalPosition::INVALID,
@@ -426,9 +430,11 @@ impl Wal {
             // using CrcFrame::read_from_slice to avoid holding the larger byte array
             Ok((
                 true,
-                CrcFrame::read_from_slice(&map.data, offset as usize)?
-                    .to_vec()
-                    .into(),
+                Some(
+                    CrcFrame::read_from_slice(&map.data, offset as usize)?
+                        .to_vec()
+                        .into(),
+                ),
             ))
         } else {
             let buffer_size = if self.layout.direct_io {
@@ -438,14 +444,16 @@ impl Wal {
             };
             let mut buf = FileReader::io_buffer_bytes(buffer_size, self.layout.direct_io);
             let files = self.files.load();
-            let file = files.get(self.layout.locate_file(pos.offset));
+            let Some(file) = files.get_checked(self.layout.locate_file(pos.offset)) else {
+                return Ok((false, None));
+            };
             file.read_exact_at(&mut buf, self.layout.offset_in_wal_file(pos.offset))?;
             let mut bytes = Bytes::from(bytes::Bytes::from(buf));
             if self.layout.direct_io && bytes.len() > pos.len() {
                 // Direct IO buffer can be larger then needed
                 bytes = bytes.slice(..pos.len());
             }
-            Ok((false, CrcFrame::read_from_bytes(&bytes, 0)?))
+            Ok((false, Some(CrcFrame::read_from_bytes(&bytes, 0)?)))
         }
     }
 
@@ -982,10 +990,19 @@ mod tests {
             assert_eq!(&large, wal.read(p3).unwrap().as_ref());
             assert_eq!(&[91, 92, 93], wal.read(p4).unwrap().as_ref());
 
-            assert_eq!(&[1, 2, 3], wal.read_unmapped(p1).unwrap().1.as_ref());
-            assert_eq!(&[] as &[u8], wal.read_unmapped(p2).unwrap().1.as_ref());
-            assert_eq!(&large, wal.read_unmapped(p3).unwrap().1.as_ref());
-            assert_eq!(&[91, 92, 93], wal.read_unmapped(p4).unwrap().1.as_ref());
+            assert_eq!(
+                &[1, 2, 3],
+                wal.read_unmapped(p1).unwrap().1.unwrap().as_ref()
+            );
+            assert_eq!(
+                &[] as &[u8],
+                wal.read_unmapped(p2).unwrap().1.unwrap().as_ref()
+            );
+            assert_eq!(&large, wal.read_unmapped(p3).unwrap().1.unwrap().as_ref());
+            assert_eq!(
+                &[91, 92, 93],
+                wal.read_unmapped(p4).unwrap().1.unwrap().as_ref()
+            );
         }
         // we wrote into two frags
         // assert_eq!(2048, fs::metadata(file).unwrap().len());
