@@ -64,7 +64,7 @@ impl Config {
         self.frag_size
     }
 
-    #[doc(hidden)] // Used by tools/wal_verifier to get WAL configuration
+    #[doc(hidden)] // Used by tools/wal_inspector to get WAL configuration
     pub fn wal_layout(&self) -> WalLayout {
         WalLayout {
             frag_size: self.frag_size,

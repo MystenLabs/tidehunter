@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,28 +11,43 @@ use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "wal_verifier",
-    about = "Verifies that all keys in a database's WAL file are accessible from the database"
+    name = "wal_inspector",
+    about = "Tool for inspecting and verifying TideHunter WAL files"
 )]
-struct Args {
-    /// Path to the database directory containing the WAL file
-    #[arg(short = 'd', long)]
-    db_path: PathBuf,
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Verbose output
-    #[arg(short, long)]
-    verbose: bool,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Verify that all keys in a database's WAL file are accessible from the database
+    Verify {
+        /// Path to the database directory containing the WAL file
+        #[arg(short = 'd', long)]
+        db_path: PathBuf,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    println!("WAL Verifier");
-    println!("============");
-    println!("DB path: {:?}", args.db_path);
+    match cli.command {
+        Commands::Verify { db_path, verbose } => verify_command(db_path, verbose),
+    }
+}
+
+fn verify_command(db_path: PathBuf, verbose: bool) -> Result<()> {
+    println!("WAL Inspector - Verify");
+    println!("======================");
+    println!("DB path: {:?}", db_path);
 
     // Derive WAL path from database path
-    let wal_path = Db::wal_path(&args.db_path);
+    let wal_path = Db::wal_path(&db_path);
     println!("WAL file: {:?}", wal_path);
     println!();
 
@@ -46,11 +61,11 @@ fn main() -> Result<()> {
 
     // Check that shape file exists (verify_wal will load it internally)
     println!("Checking for key shape file...");
-    let _ = Db::load_key_shape(&args.db_path)
+    let _ = Db::load_key_shape(&db_path)
         .map_err(|e| anyhow::anyhow!("Failed to load key shape: {:?}", e))?;
     println!("Key shape file found");
 
-    let result = verify_wal(&args.db_path, args.verbose)?;
+    let result = verify_wal(&db_path, verbose)?;
 
     // Print summary
     println!("\n{}", "=".repeat(50));

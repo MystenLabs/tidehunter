@@ -130,7 +130,7 @@ impl Db {
     }
 
     /// Load key shape from database directory
-    #[doc(hidden)] // Used by tools/wal_verifier for loading database schema
+    #[doc(hidden)] // Used by tools/wal_inspector for loading database schema
     pub fn load_key_shape(path: &Path) -> DbResult<KeyShape> {
         let shape_file_path = Self::shape_file_path(path);
         if !shape_file_path.exists() {
@@ -837,7 +837,7 @@ impl Loader for Db {
     }
 }
 
-#[doc(hidden)] // Used by tools/wal_verifier for WAL inspection
+#[doc(hidden)] // Used by tools/wal_inspector for WAL inspection
 #[derive(Debug)]
 pub enum WalEntry {
     Record(KeySpace, Bytes, Bytes),

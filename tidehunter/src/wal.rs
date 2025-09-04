@@ -222,7 +222,7 @@ impl IncrementalWalPosition {
     }
 }
 
-#[doc(hidden)] // Used by tools/wal_verifier for WAL configuration
+#[doc(hidden)] // Used by tools/wal_inspector for WAL configuration
 #[derive(Clone)]
 pub struct WalLayout {
     pub frag_size: u64,
@@ -350,7 +350,7 @@ impl WalFiles {
 }
 
 impl Wal {
-    #[doc(hidden)] // Used by tools/wal_verifier to open WAL files directly
+    #[doc(hidden)] // Used by tools/wal_inspector to open WAL files directly
     pub fn open(
         base_path: &Path,
         layout: WalLayout,
