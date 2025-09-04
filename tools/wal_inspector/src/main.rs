@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod stat;
 mod verify;
 
 #[derive(Parser, Debug)]
@@ -26,6 +27,16 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// Analyze WAL file and display statistics about entry types and space usage
+    Stat {
+        /// Path to the database directory containing the WAL file
+        #[arg(short = 'd', long)]
+        db_path: PathBuf,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -33,5 +44,6 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Verify { db_path, verbose } => verify::verify_command(db_path, verbose),
+        Commands::Stat { db_path, verbose } => stat::stat_command(db_path, verbose),
     }
 }
