@@ -2,26 +2,12 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tidehunter::config::Config;
-use tidehunter::db::Db;
 use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
 
 pub fn stat_command(db_path: PathBuf, verbose: bool) -> Result<()> {
     println!("WAL Inspector - Statistics");
     println!("==========================");
     println!("DB path: {:?}", db_path);
-
-    // Derive WAL path from database path
-    let wal_path = Db::wal_path(&db_path);
-    println!("WAL file: {:?}", wal_path);
-    println!();
-
-    // Check if WAL file exists
-    if !wal_path.exists() {
-        return Err(anyhow::anyhow!(
-            "WAL file not found at {:?}. Is this a valid TideHunter database directory?",
-            wal_path
-        ));
-    }
 
     let stats = collect_wal_statistics(&db_path, verbose)?;
     print_statistics_report(&stats);
