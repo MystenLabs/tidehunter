@@ -78,6 +78,7 @@ fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics
 
     let mut stats = WalStatistics::default();
     let mut entry_count = 0;
+    let mut last_position = 0u64;
 
     println!("Analyzing WAL entries...");
 
@@ -86,14 +87,13 @@ fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics
         let entry_result = wal_iterator.next();
 
         // Check for end of WAL (CRC error typically indicates end)
-        if matches!(entry_result, Err(WalError::Crc(_))) {
-            if verbose {
-                println!("Reached end of WAL (CRC error)");
-            }
+        if let Err(WalError::Crc(crc_err)) = &entry_result {
+            println!("CRC error encountered: {:?}", crc_err);
+            println!("Last successful WAL position: {:#x}", last_position);
             break;
         }
 
-        let (_position, raw_entry) = match entry_result {
+        let (position, raw_entry) = match entry_result {
             Ok(entry) => entry,
             Err(e) => {
                 if verbose {
@@ -102,6 +102,9 @@ fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics
                 break;
             }
         };
+
+        // Update last successful position
+        last_position = position.offset();
 
         entry_count += 1;
         if verbose && entry_count % 10000 == 0 {
