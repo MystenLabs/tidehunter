@@ -388,6 +388,8 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use tidehunter::batch::WriteBatch;
+    use tidehunter::config::Config;
+    use tidehunter::db::Db;
     use tidehunter::key_shape::{KeyShape, KeyType};
 
     #[test]
@@ -417,8 +419,9 @@ mod tests {
         // Close the database
         drop(db);
 
-        // Now verify the WAL
-        let result = verify_wal(&db_path, false)?;
+        // Now verify the WAL using InspectorContext
+        let context = InspectorContext::load(db_path, false)?;
+        let result = verify_wal(&context)?;
 
         // Check results
         assert_eq!(result.total_keys, 3, "Should have 3 keys in WAL");
@@ -471,8 +474,9 @@ mod tests {
         // Close the database
         drop(db);
 
-        // Now verify the WAL
-        let result = verify_wal(&db_path, false)?;
+        // Now verify the WAL using InspectorContext
+        let context = InspectorContext::load(db_path, false)?;
+        let result = verify_wal(&context)?;
 
         // Check results - should only have 2 keys after deletion
         assert_eq!(

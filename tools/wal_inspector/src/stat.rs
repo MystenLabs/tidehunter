@@ -255,10 +255,7 @@ fn print_statistics_report(stats: &WalStatistics, key_shape: &KeyShape) {
 
     // Overall summary
     println!("\n📊 OVERALL SUMMARY");
-    println!(
-        "  Total entries: {:>12}",
-        format_number(stats.total_entries)
-    );
+    println!("  Total entries: {:>12}", format_count(stats.total_entries));
     println!("  Total size:    {:>12}", format_bytes(stats.total_space));
 
     // Entry type breakdown
@@ -275,7 +272,7 @@ fn print_statistics_report(stats: &WalStatistics, key_shape: &KeyShape) {
         println!(
             "  {:20} {:>10} {:>12} {:>12} {:>7.1}%",
             "Record",
-            format_number(stats.record_count),
+            format_count(stats.record_count),
             format_bytes(stats.record_space),
             format_bytes(avg_size),
             percent
@@ -288,7 +285,7 @@ fn print_statistics_report(stats: &WalStatistics, key_shape: &KeyShape) {
         println!(
             "  {:20} {:>10} {:>12} {:>12} {:>7.1}%",
             "Remove",
-            format_number(stats.remove_count),
+            format_count(stats.remove_count),
             format_bytes(stats.remove_space),
             format_bytes(avg_size),
             percent
@@ -301,7 +298,7 @@ fn print_statistics_report(stats: &WalStatistics, key_shape: &KeyShape) {
         println!(
             "  {:20} {:>10} {:>12} {:>12} {:>7.1}%",
             "Index",
-            format_number(stats.index_count),
+            format_count(stats.index_count),
             format_bytes(stats.index_space),
             format_bytes(avg_size),
             percent
@@ -314,7 +311,7 @@ fn print_statistics_report(stats: &WalStatistics, key_shape: &KeyShape) {
         println!(
             "  {:20} {:>10} {:>12} {:>12} {:>7.1}%",
             "BatchStart",
-            format_number(stats.batch_start_count),
+            format_count(stats.batch_start_count),
             format_bytes(stats.batch_start_space),
             format_bytes(avg_size),
             percent
@@ -380,9 +377,9 @@ fn print_statistics_report(stats: &WalStatistics, key_shape: &KeyShape) {
             println!(
                 "  {:35} {:>10} {:>10} {:>10} {:>12} {:>7.1}%",
                 ks_name,
-                format_number(ks_stats.record_count),
-                format_number(ks_stats.remove_count),
-                format_number(ks_stats.index_count),
+                format_count(ks_stats.record_count),
+                format_count(ks_stats.remove_count),
+                format_count(ks_stats.index_count),
                 format_bytes(ks_stats.total_space),
                 percent
             );
@@ -409,21 +406,21 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
-fn format_number(num: usize) -> String {
-    let s = num.to_string();
-    let mut result = String::new();
-    let mut count = 0;
+fn format_count(count: usize) -> String {
+    const UNITS: &[&str] = &["", "K", "M", "B", "T"];
+    let mut size = count as f64;
+    let mut unit_index = 0;
 
-    for c in s.chars().rev() {
-        if count == 3 {
-            result.push(',');
-            count = 0;
-        }
-        result.push(c);
-        count += 1;
+    while size >= 1000.0 && unit_index < UNITS.len() - 1 {
+        size /= 1000.0;
+        unit_index += 1;
     }
 
-    result.chars().rev().collect()
+    if unit_index == 0 {
+        format!("{}", count)
+    } else {
+        format!("{:.1}{}", size, UNITS[unit_index])
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +429,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use tidehunter::batch::WriteBatch;
+    use tidehunter::config::Config;
     use tidehunter::db::Db;
     use tidehunter::key_shape::{KeyShape, KeyType};
 
@@ -476,8 +474,9 @@ mod tests {
         // Close the database
         drop(db);
 
-        // Now collect statistics
-        let stats = collect_wal_statistics(&db_path, false)?;
+        // Now collect statistics using InspectorContext
+        let context = InspectorContext::load(db_path, false)?;
+        let stats = collect_wal_statistics(&context)?;
 
         // Verify statistics
         assert_eq!(stats.record_count, 10, "Should have 10 record entries");
@@ -495,11 +494,15 @@ mod tests {
     }
 
     #[test]
-    fn test_format_number() {
-        assert_eq!(format_number(0), "0");
-        assert_eq!(format_number(999), "999");
-        assert_eq!(format_number(1000), "1,000");
-        assert_eq!(format_number(1234567), "1,234,567");
+    fn test_format_count() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1.0K");
+        assert_eq!(format_count(1500), "1.5K");
+        assert_eq!(format_count(1000000), "1.0M");
+        assert_eq!(format_count(2500000), "2.5M");
+        assert_eq!(format_count(1000000000), "1.0B");
+        assert_eq!(format_count(1000000000000), "1.0T");
     }
 
     #[test]
