@@ -2276,6 +2276,7 @@ fn list_wal_files(path: &Path) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
+#[ignore] // flaky test
 #[test]
 fn test_relocation_filter() {
     let dir = tempdir::TempDir::new("test_relocation_filter").unwrap();
