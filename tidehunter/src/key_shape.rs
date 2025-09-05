@@ -418,7 +418,8 @@ impl KeySpaceDesc {
         self.config.unloaded_iterator
     }
 
-    pub(crate) fn name(&self) -> &str {
+    #[doc(hidden)] // Used by tools/wal_inspector to display keyspace names
+    pub fn name(&self) -> &str {
         &self.name
     }
 

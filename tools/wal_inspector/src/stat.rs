@@ -2,6 +2,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tidehunter::config::Config;
+use tidehunter::db::Db;
+use tidehunter::key_shape::{KeyShape, KeySpace};
 use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
 
 pub fn stat_command(db_path: PathBuf, verbose: bool) -> Result<()> {
@@ -9,8 +11,12 @@ pub fn stat_command(db_path: PathBuf, verbose: bool) -> Result<()> {
     println!("==========================");
     println!("DB path: {:?}", db_path);
 
+    // Load the key shape to get keyspace names
+    let key_shape = Db::load_key_shape(&db_path)
+        .expect("Failed to load key shape from database - is this a valid TideHunter database?");
+
     let stats = collect_wal_statistics(&db_path, verbose)?;
-    print_statistics_report(&stats);
+    print_statistics_report(&stats, &key_shape);
 
     Ok(())
 }
@@ -190,7 +196,7 @@ fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics
     Ok(stats)
 }
 
-fn print_statistics_report(stats: &WalStatistics) {
+fn print_statistics_report(stats: &WalStatistics, key_shape: &KeyShape) {
     println!("\n{}", "=".repeat(70));
     println!("WAL STATISTICS REPORT");
     println!("{}", "=".repeat(70));
@@ -303,19 +309,25 @@ fn print_statistics_report(stats: &WalStatistics) {
     if !stats.keyspace_stats.is_empty() {
         println!("\n🗂️  KEYSPACE DISTRIBUTION");
         println!(
-            "  {:10} {:>10} {:>10} {:>10} {:>12} {:>8}",
+            "  {:35} {:>10} {:>10} {:>10} {:>12} {:>8}",
             "Keyspace", "Records", "Removes", "Indexes", "Total Size", "% Space"
         );
-        println!("  {}", "-".repeat(70));
+        println!("  {}", "-".repeat(95));
 
         let mut keyspaces: Vec<_> = stats.keyspace_stats.iter().collect();
         keyspaces.sort_by_key(|(k, _)| *k);
 
         for (ks_id, ks_stats) in keyspaces {
             let percent = (ks_stats.total_space as f64 / stats.total_space as f64) * 100.0;
+
+            // Get the keyspace name
+            let ks = KeySpace::new(*ks_id);
+            let ks_desc = key_shape.ks(ks);
+            let ks_name = format!("{} ({})", ks_desc.name(), ks_id);
+
             println!(
-                "  {:10} {:>10} {:>10} {:>10} {:>12} {:>7.1}%",
-                format!("KS {}", ks_id),
+                "  {:35} {:>10} {:>10} {:>10} {:>12} {:>7.1}%",
+                ks_name,
                 format_number(ks_stats.record_count),
                 format_number(ks_stats.remove_count),
                 format_number(ks_stats.index_count),
