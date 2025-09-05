@@ -13,25 +13,6 @@ pub fn verify_command(db_path: PathBuf, verbose: bool) -> Result<()> {
     println!("======================");
     println!("DB path: {:?}", db_path);
 
-    // Derive WAL path from database path
-    let wal_path = Db::wal_path(&db_path);
-    println!("WAL file: {:?}", wal_path);
-    println!();
-
-    // Check if WAL file exists
-    if !wal_path.exists() {
-        return Err(anyhow::anyhow!(
-            "WAL file not found at {:?}. Is this a valid TideHunter database directory?",
-            wal_path
-        ));
-    }
-
-    // Check that shape file exists (verify_wal will load it internally)
-    println!("Checking for key shape file...");
-    let _ = Db::load_key_shape(&db_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load key shape: {:?}", e))?;
-    println!("Key shape file found");
-
     let result = verify_wal(&db_path, verbose)?;
 
     // Print summary

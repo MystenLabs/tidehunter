@@ -107,10 +107,6 @@ impl Db {
         Ok(this)
     }
 
-    pub fn wal_path(path: &Path) -> PathBuf {
-        path.join("wal")
-    }
-
     pub fn shape_file_path(path: &Path) -> PathBuf {
         path.join("shape.yaml")
     }
