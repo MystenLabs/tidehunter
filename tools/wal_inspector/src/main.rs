@@ -36,7 +36,10 @@ impl InspectorContext {
             println!("Loaded database context:");
             println!("  DB path: {:?}", db_path);
             println!("  Fragment size: {} MB", config.frag_size / (1024 * 1024));
-            println!("  WAL file size: {} GB", config.wal_file_size / (1024 * 1024 * 1024));
+            println!(
+                "  WAL file size: {} GB",
+                config.wal_file_size / (1024 * 1024 * 1024)
+            );
             println!("  Key shape loaded successfully");
             println!();
         }
