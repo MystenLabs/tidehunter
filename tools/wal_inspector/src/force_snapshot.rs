@@ -1,37 +1,27 @@
+use crate::InspectorContext;
 use anyhow::Result;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tidehunter::config::Config;
 use tidehunter::db::Db;
 use tidehunter::test_utils::Metrics;
 
-pub fn force_snapshot_command(db_path: PathBuf, verbose: bool) -> Result<()> {
+pub fn force_snapshot_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Force Snapshot");
     println!("==============================");
-    println!("DB path: {:?}", db_path);
-
-    // Load the key shape from the database
-    let key_shape = Db::load_key_shape(&db_path)
-        .expect("Failed to load key shape from database - is this a valid TideHunter database?");
-
-    if verbose {
-        println!("Loaded key shape successfully");
-    }
 
     // Create config and metrics for opening the database
-    let config = Arc::new(Config::default());
+    let config = Arc::new(context.config.clone());
     let metrics = Metrics::new();
 
     // Open the database
-    if verbose {
+    if context.verbose {
         println!("Opening database...");
     }
-    let db = Db::open(&db_path, key_shape, config, metrics)
+    let db = Db::open(&context.db_path, context.key_shape.clone(), config, metrics)
         .map_err(|e| anyhow::anyhow!("Failed to open database: {:?}", e))?;
 
     // Check if there are any dirty entries
     let has_dirty_entries = !db.is_all_clean();
-    if verbose {
+    if context.verbose {
         if has_dirty_entries {
             println!("Database has dirty entries that will be flushed");
         } else {
@@ -51,17 +41,17 @@ pub fn force_snapshot_command(db_path: PathBuf, verbose: bool) -> Result<()> {
     // Verify all entries are clean
     if !db.is_all_clean() {
         println!("⚠️  Warning: Some entries are still dirty after forced snapshot");
-    } else if verbose {
+    } else if context.verbose {
         println!("✓ All entries are now clean");
     }
 
     // Report statistics
-    if has_dirty_entries && verbose {
+    if has_dirty_entries && context.verbose {
         println!("  Dirty entries were flushed to disk");
     }
 
     // The database will be closed when it goes out of scope
-    if verbose {
+    if context.verbose {
         println!("Closing database...");
     }
 

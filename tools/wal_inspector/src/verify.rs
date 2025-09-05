@@ -1,19 +1,17 @@
+use crate::InspectorContext;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tidehunter::config::Config;
 use tidehunter::db::Db;
 use tidehunter::key_shape::KeySpace;
 use tidehunter::minibytes::Bytes;
 use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
 
-pub fn verify_command(db_path: PathBuf, verbose: bool) -> Result<()> {
+pub fn verify_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Verify");
     println!("======================");
-    println!("DB path: {:?}", db_path);
 
-    let result = verify_wal(&db_path, verbose)?;
+    let result = verify_wal(context)?;
 
     // Print summary
     println!("\n{}", "=".repeat(50));
@@ -71,15 +69,13 @@ pub struct VerificationResult {
 }
 
 /// Verifies that all keys in a database's WAL file are accessible from the database
-pub fn verify_wal(wal_path: &Path, verbose: bool) -> Result<VerificationResult> {
-    // Get the WAL path from the database path
-
+pub fn verify_wal(context: &InspectorContext) -> Result<VerificationResult> {
     // Step 1: Read all keys from WAL file
     println!("Step 1: Reading keys from WAL file...");
-    let keys = read_keys_from_wal(wal_path, verbose)?;
+    let keys = read_keys_from_wal(context)?;
     println!("Found {} keys in WAL file", keys.len());
 
-    if verbose {
+    if context.verbose {
         println!("\nKeys found:");
         for (i, (ks, key)) in keys.iter().enumerate() {
             println!(
@@ -91,19 +87,15 @@ pub fn verify_wal(wal_path: &Path, verbose: bool) -> Result<VerificationResult> 
         }
     }
 
-    // Step 2: Load key shape and open database from the WAL file
-    println!("\nStep 2: Loading key shape and opening database...");
+    // Step 2: Open database with loaded configuration
+    println!("\nStep 2: Opening database with loaded configuration...");
 
-    // Load the key shape from the database directory
-    let key_shape = Db::load_key_shape(wal_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load key shape: {:?}", e))?;
-
-    // Create default config and metrics
-    let config = Arc::new(Config::default());
+    // Create config and metrics
+    let config = Arc::new(context.config.clone());
     let metrics = Metrics::new();
 
     // Open the database - it will replay the WAL automatically
-    let db = Db::open(wal_path, key_shape, config, metrics)
+    let db = Db::open(&context.db_path, context.key_shape.clone(), config, metrics)
         .map_err(|e| anyhow::anyhow!("Failed to open database: {:?}", e))?;
     println!("Database opened successfully");
 
@@ -117,7 +109,7 @@ pub fn verify_wal(wal_path: &Path, verbose: bool) -> Result<VerificationResult> 
         match db.get(*ks, key) {
             Ok(Some(_value)) => {
                 verified += 1;
-                if verbose {
+                if context.verbose {
                     println!("  ✓ Key {} found", hex::encode(key));
                 }
             }
@@ -135,7 +127,7 @@ pub fn verify_wal(wal_path: &Path, verbose: bool) -> Result<VerificationResult> 
     // Step 4: Verify all keys are accessible through iteration
     println!("\nStep 4: Verifying all keys are accessible through iteration...");
     let (iterator_verified, iterator_missing, iterator_errors) =
-        verify_keys_through_iteration(&db, &keys, verbose)?;
+        verify_keys_through_iteration(&db, &keys, context.verbose)?;
 
     Ok(VerificationResult {
         total_keys: keys.len(),
@@ -300,13 +292,12 @@ fn verify_keys_through_iteration(
 // Helper type to track keys - using string representation for simplicity
 type KeyEntry = (u8, Vec<u8>); // (keyspace_id, key_bytes)
 
-fn read_keys_from_wal(wal_path: &Path, verbose: bool) -> Result<Vec<(KeySpace, Bytes)>> {
-    // Create config and metrics for WAL reading
-    let config = Config::default();
+fn read_keys_from_wal(context: &InspectorContext) -> Result<Vec<(KeySpace, Bytes)>> {
+    // Create metrics for WAL reading
     let metrics = Metrics::new();
 
-    // Open the WAL file
-    let wal = Wal::open(wal_path, config.wal_layout(), metrics)
+    // Open the WAL file with correct configuration
+    let wal = Wal::open(&context.db_path, context.config.wal_layout(), metrics)
         .map_err(|e| anyhow::anyhow!("Failed to open WAL file: {:?}", e))?;
 
     // Create iterator starting from beginning
@@ -330,7 +321,7 @@ fn read_keys_from_wal(wal_path: &Path, verbose: bool) -> Result<Vec<(KeySpace, B
 
         // Check for end of WAL (CRC error typically indicates end)
         if matches!(entry_result, Err(WalError::Crc(_))) {
-            if verbose {
+            if context.verbose {
                 println!("Reached end of WAL (CRC error)");
             }
             break;
@@ -339,7 +330,7 @@ fn read_keys_from_wal(wal_path: &Path, verbose: bool) -> Result<Vec<(KeySpace, B
         let (_position, raw_entry) = match entry_result {
             Ok(entry) => entry,
             Err(e) => {
-                if verbose {
+                if context.verbose {
                     println!("Error reading WAL entry: {:?}", e);
                 }
                 break;
@@ -355,7 +346,7 @@ fn read_keys_from_wal(wal_path: &Path, verbose: bool) -> Result<Vec<(KeySpace, B
                 // Store as simpler key entry
                 let key_entry = (ks.as_u8(), key.to_vec());
                 keys_map.insert(key_entry, ());
-                if verbose && record_count % 1000 == 0 {
+                if context.verbose && record_count % 1000 == 0 {
                     println!("  Processed {} records...", record_count);
                 }
             }

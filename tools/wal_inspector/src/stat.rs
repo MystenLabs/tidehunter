@@ -1,22 +1,15 @@
+use crate::InspectorContext;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use tidehunter::config::Config;
-use tidehunter::db::Db;
 use tidehunter::key_shape::{KeyShape, KeySpace};
 use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
 
-pub fn stat_command(db_path: PathBuf, verbose: bool) -> Result<()> {
+pub fn stat_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Statistics");
     println!("==========================");
-    println!("DB path: {:?}", db_path);
 
-    // Load the key shape to get keyspace names
-    let key_shape = Db::load_key_shape(&db_path)
-        .expect("Failed to load key shape from database - is this a valid TideHunter database?");
-
-    let stats = collect_wal_statistics(&db_path, verbose)?;
-    print_statistics_report(&stats, &key_shape);
+    let stats = collect_wal_statistics(context)?;
+    print_statistics_report(&stats, &context.key_shape);
 
     Ok(())
 }
@@ -62,23 +55,11 @@ struct KeyspaceStats {
     total_space: usize,
 }
 
-fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics> {
-    // Load the actual WAL configuration from the database, fallback to defaults if not found
-    let config = Db::load_config(db_path).unwrap_or_else(|e| {
-        if verbose {
-            println!("Could not load config file ({:?}), using defaults", e);
-        }
-        Config::default()
-    });
+fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
     let metrics = Metrics::new();
 
-    if verbose {
-        println!("Using WAL configuration:");
-        println!("  Fragment size: {} MB", config.frag_size / (1024 * 1024));
-    }
-
     // Open the WAL file with the correct configuration
-    let wal = Wal::open(db_path, config.wal_layout(), metrics)
+    let wal = Wal::open(&context.db_path, context.config.wal_layout(), metrics)
         .map_err(|e| anyhow::anyhow!("Failed to open WAL file: {:?}", e))?;
 
     // Create iterator starting from beginning
@@ -106,7 +87,7 @@ fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics
         let (position, raw_entry) = match entry_result {
             Ok(entry) => entry,
             Err(e) => {
-                if verbose {
+                if context.verbose {
                     println!("Error reading WAL entry: {:?}", e);
                 }
                 break;
@@ -117,7 +98,7 @@ fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics
         last_position = position.offset();
 
         entry_count += 1;
-        if verbose && entry_count % 10000 == 0 {
+        if context.verbose && entry_count % 10000 == 0 {
             println!("  Processed {} entries...", entry_count);
         }
 
@@ -202,7 +183,7 @@ fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics
         }
     }
 
-    if verbose {
+    if context.verbose {
         println!("Finished analyzing {} entries", stats.total_entries);
     }
 
