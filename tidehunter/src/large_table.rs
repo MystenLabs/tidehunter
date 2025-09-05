@@ -453,6 +453,7 @@ impl LargeTable {
         &self,
         tail_position: u64,
         loader: &L,
+        snapshot_unload_threshold_override: Option<u64>,
     ) -> Result<LargeTableSnapshot, L::Error> {
         assert!(loader.flush_supported());
         // Capture the WAL's last_processed position at snapshot time
@@ -463,8 +464,12 @@ impl LargeTable {
         let mut max_position: Option<WalPosition> = None;
         let mut data = Vec::with_capacity(self.table.len());
         for ks_table in self.table.iter() {
-            let (ks_data, ks_replay_from, ks_max_position) =
-                self.ks_snapshot(ks_table, tail_position, loader)?;
+            let (ks_data, ks_replay_from, ks_max_position) = self.ks_snapshot(
+                ks_table,
+                tail_position,
+                loader,
+                snapshot_unload_threshold_override,
+            )?;
             data.push(ks_data);
             if let Some(ks_replay_from) = ks_replay_from {
                 replay_from = Some(cmp::min(replay_from.unwrap_or(u64::MAX), ks_replay_from));
@@ -526,6 +531,7 @@ impl LargeTable {
         ks_table: &KsTable,
         tail_position: u64,
         loader: &L,
+        snapshot_unload_threshold_override: Option<u64>,
     ) -> Result<
         (
             Vec<RowContainer<SnapshotEntryData>>,
@@ -541,7 +547,12 @@ impl LargeTable {
             let mut row = mutex.lock();
             let mut row_data = RowContainer::new();
             for entry in row.entries.iter_mut() {
-                entry.maybe_flush_for_snapshot(loader, &self.config, tail_position)?;
+                entry.maybe_flush_for_snapshot(
+                    loader,
+                    &self.config,
+                    tail_position,
+                    snapshot_unload_threshold_override,
+                )?;
                 let position = entry.state.wal_position();
                 let snapshot_data = SnapshotEntryData {
                     position,
@@ -1012,6 +1023,7 @@ impl LargeTableEntry {
         loader: &L,
         config: &Config,
         tail_position: u64,
+        snapshot_unload_threshold_override: Option<u64>,
     ) -> Result<(), L::Error> {
         if !self.state.is_dirty() {
             return Ok(());
@@ -1023,10 +1035,11 @@ impl LargeTableEntry {
         let position = self.state.wal_position();
         // position can actually be great then tail_position due to concurrency
         let distance = tail_position.saturating_sub(position.offset());
+        // Use override if provided, otherwise use config value
+        let threshold =
+            snapshot_unload_threshold_override.unwrap_or(config.snapshot_unload_threshold);
         // todo this needs to be fixed for ks with self.context.ks_config.unloading_disabled()
-        if distance >= config.snapshot_unload_threshold
-            && !self.context.ks_config.unloading_disabled()
-        {
+        if distance >= threshold && !self.context.ks_config.unloading_disabled() {
             self.context
                 .metrics
                 .snapshot_force_unload

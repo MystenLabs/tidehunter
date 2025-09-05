@@ -2431,3 +2431,62 @@ fn test_reverse_iterator_without_bounds() {
         "Reverse iterator should return same keys as forward iterator (in reverse order)"
     );
 }
+
+#[test]
+fn test_force_rebuild_control_region() {
+    let dir = tempdir::TempDir::new("test-force-rebuild").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    // Insert some data
+    db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
+    db.insert(ks, vec![7, 8, 9, 10], vec![11, 12]).unwrap();
+
+    // Initially, should have dirty entries
+    assert!(
+        !db.large_table.is_all_clean(),
+        "Should have dirty entries after inserts"
+    );
+
+    // Force rebuild control region - should flush all dirty entries
+    db.force_rebuild_control_region().unwrap();
+
+    // After force rebuild, all entries should be clean
+    assert!(
+        db.large_table.is_all_clean(),
+        "All entries should be clean after force_rebuild_control_region"
+    );
+
+    // Verify data is still accessible
+    assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+    assert_eq!(
+        Some(vec![11, 12].into()),
+        db.get(ks, &[7, 8, 9, 10]).unwrap()
+    );
+
+    // Insert more data
+    db.insert(ks, vec![13, 14, 15, 16], vec![17, 18]).unwrap();
+
+    // Should have dirty entries again
+    assert!(
+        !db.large_table.is_all_clean(),
+        "Should have dirty entries after new insert"
+    );
+
+    // Force rebuild again
+    db.force_rebuild_control_region().unwrap();
+
+    // All should be clean again
+    assert!(
+        db.large_table.is_all_clean(),
+        "All entries should be clean after second force_rebuild_control_region"
+    );
+}

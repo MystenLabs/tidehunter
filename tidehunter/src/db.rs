@@ -566,12 +566,24 @@ impl Db {
         }
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn rebuild_control_region(&self) -> DbResult<u64> {
         self.rebuild_control_region_from(self.wal_writer.position())
     }
 
+    pub fn force_rebuild_control_region(&self) -> DbResult<u64> {
+        // Force flush by setting snapshot_unload_threshold to 0
+        self.rebuild_control_region_from_with_threshold(self.wal_writer.position(), Some(0))
+    }
+
     fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<u64> {
+        self.rebuild_control_region_from_with_threshold(current_wal_position, None)
+    }
+
+    fn rebuild_control_region_from_with_threshold(
+        &self,
+        current_wal_position: u64,
+        snapshot_unload_threshold_override: Option<u64>,
+    ) -> DbResult<u64> {
         let mut crs = self.control_region_store.lock();
         let _timer = self
             .metrics
@@ -579,7 +591,11 @@ impl Db {
             .clone()
             .mcs_timer();
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
-        let snapshot = self.large_table.snapshot(current_wal_position, self)?;
+        let snapshot = self.large_table.snapshot(
+            current_wal_position,
+            self,
+            snapshot_unload_threshold_override,
+        )?;
         self.wal.fsync()?;
         crs.store(snapshot.data, snapshot.replay_from, &self.metrics);
         Ok(snapshot.replay_from)
