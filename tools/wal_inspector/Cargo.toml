@@ -8,6 +8,7 @@ tidehunter = { path = "../../tidehunter", features = ["test-utils"] }
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 hex = "0.4.3"
+indicatif = "0.17"
 
 [dev-dependencies]
 tempfile = "3.0"

@@ -1,8 +1,9 @@
 use crate::InspectorContext;
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use tidehunter::key_shape::{KeyShape, KeySpace};
-use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
+use tidehunter::test_utils::{list_wal_files_with_sizes, Metrics, Wal, WalEntry, WalError};
 
 pub fn stat_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Statistics");
@@ -58,6 +59,42 @@ struct KeyspaceStats {
 fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
     let metrics = Metrics::new();
 
+    // First, get the list of WAL files and their sizes for progress tracking
+    let wal_files = list_wal_files_with_sizes(&context.db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to list WAL files: {:?}", e))?;
+
+    let total_wal_size: u64 = wal_files.iter().map(|(_, size)| *size).sum();
+
+    if context.verbose {
+        println!(
+            "Found {} WAL files with total size: {}",
+            wal_files.len(),
+            format_bytes(total_wal_size as usize)
+        );
+        for (path, size) in &wal_files {
+            println!(
+                "  {}: {}",
+                path.file_name().unwrap().to_string_lossy(),
+                format_bytes(*size as usize)
+            );
+        }
+        println!();
+    }
+
+    // Set up progress bar
+    let progress_bar = if total_wal_size > 0 {
+        let pb = ProgressBar::new(total_wal_size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
     // Open the WAL file with the correct configuration
     let wal = Wal::open(&context.db_path, context.config.wal_layout(), metrics)
         .map_err(|e| anyhow::anyhow!("Failed to open WAL file: {:?}", e))?;
@@ -70,8 +107,11 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
     let mut stats = WalStatistics::default();
     let mut entry_count = 0;
     let mut last_position = 0u64;
+    let mut bytes_processed = 0u64;
 
-    println!("Analyzing WAL entries...");
+    if !context.verbose {
+        println!("Analyzing WAL entries...");
+    }
 
     // Read all entries from WAL
     loop {
@@ -79,6 +119,9 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
 
         // Check for end of WAL (CRC error typically indicates end)
         if let Err(WalError::Crc(crc_err)) = &entry_result {
+            if let Some(pb) = &progress_bar {
+                pb.finish_and_clear();
+            }
             println!("CRC error encountered: {:?}", crc_err);
             println!("Last successful WAL position: {:#x}", last_position);
             break;
@@ -87,6 +130,9 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
         let (position, raw_entry) = match entry_result {
             Ok(entry) => entry,
             Err(e) => {
+                if let Some(pb) = &progress_bar {
+                    pb.finish_and_clear();
+                }
                 if context.verbose {
                     println!("Error reading WAL entry: {:?}", e);
                 }
@@ -97,8 +143,17 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
         // Update last successful position
         last_position = position.offset();
 
+        // Update progress bar
+        let new_bytes_processed = position.offset();
+        if let Some(pb) = &progress_bar {
+            if new_bytes_processed > bytes_processed {
+                pb.set_position(new_bytes_processed);
+                bytes_processed = new_bytes_processed;
+            }
+        }
+
         entry_count += 1;
-        if context.verbose && entry_count % 10000 == 0 {
+        if context.verbose && progress_bar.is_none() && entry_count % 10000 == 0 {
             println!("  Processed {} entries...", entry_count);
         }
 
@@ -183,9 +238,12 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
         }
     }
 
-    if context.verbose {
-        println!("Finished analyzing {} entries", stats.total_entries);
+    // Finish progress bar
+    if let Some(pb) = progress_bar {
+        pb.finish_and_clear();
     }
+
+    println!("Finished analyzing {} entries", stats.total_entries);
 
     Ok(stats)
 }

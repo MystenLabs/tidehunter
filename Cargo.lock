@@ -1940,6 +1940,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hex",
+ "indicatif",
  "tempfile",
  "tidehunter",
 ]

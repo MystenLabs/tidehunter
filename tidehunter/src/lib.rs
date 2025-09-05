@@ -35,5 +35,5 @@ pub use wal::WalPosition;
 pub mod test_utils {
     pub use crate::db::WalEntry;
     pub use crate::metrics::Metrics;
-    pub use crate::wal::{Wal, WalError, WalIterator, WalLayout};
+    pub use crate::wal::{list_wal_files_with_sizes, Wal, WalError, WalIterator, WalLayout};
 }

@@ -928,6 +928,44 @@ impl From<io::Error> for WalError {
     }
 }
 
+#[doc(hidden)] // Used by tools/wal_inspector for progress tracking
+#[cfg(any(test, feature = "test-utils"))]
+pub fn list_wal_files_with_sizes(base_path: &Path) -> io::Result<Vec<(PathBuf, u64)>> {
+    let mut files = vec![];
+
+    for entry in std::fs::read_dir(base_path)? {
+        let file_path = entry?.path();
+        if file_path.is_file() {
+            if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
+                if let Some(id_str) = file_name.strip_prefix(WAL_PREFIX) {
+                    if u64::from_str_radix(id_str, 16).is_ok() {
+                        let metadata = std::fs::metadata(&file_path)?;
+                        files.push((file_path, metadata.len()));
+                    }
+                }
+            }
+        }
+    }
+
+    // If no WAL files found, check for the default wal_0000000000000000 file
+    if files.is_empty() {
+        let default_wal_path = base_path.join(format!("{}{:016x}", WAL_PREFIX, 0));
+        if default_wal_path.exists() {
+            let metadata = std::fs::metadata(&default_wal_path)?;
+            files.push((default_wal_path, metadata.len()));
+        }
+    }
+
+    // Sort by file name (which corresponds to WAL file ID)
+    files.sort_by(|(a, _), (b, _)| {
+        let a_name = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let b_name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        a_name.cmp(b_name)
+    });
+
+    Ok(files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
