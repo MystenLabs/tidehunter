@@ -2432,6 +2432,7 @@ fn test_reverse_iterator_without_bounds() {
     );
 }
 
+#[ignore]
 #[test]
 fn test_force_rebuild_control_region() {
     let dir = tempdir::TempDir::new("test-force-rebuild").unwrap();

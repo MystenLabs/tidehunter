@@ -52,6 +52,7 @@ impl Db {
     ) -> DbResult<Arc<Self>> {
         let path = path.canonicalize()?;
         Self::maybe_create_shape_file(&path, &key_shape)?;
+        Self::maybe_create_config_file(&path, &config)?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let relocation_watermarks = RelocationWatermarks::load(&path)?;
@@ -145,6 +146,45 @@ impl Db {
             DbError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Failed to deserialize key shape: {}", e),
+            ))
+        })
+    }
+
+    pub fn config_file_path(path: &Path) -> PathBuf {
+        path.join("config.yaml")
+    }
+
+    /// Create config file if it doesn't exist
+    fn maybe_create_config_file(path: &Path, config: &Config) -> DbResult<()> {
+        let config_file_path = Self::config_file_path(path);
+        if !config_file_path.exists() {
+            let yaml = serde_yaml::to_string(config).map_err(|e| {
+                DbError::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to serialize config: {}", e),
+                ))
+            })?;
+            std::fs::write(&config_file_path, yaml)?;
+        }
+        Ok(())
+    }
+
+    /// Load config from database directory
+    #[doc(hidden)] // Used by tools/wal_inspector for loading database config
+    pub fn load_config(path: &Path) -> DbResult<Config> {
+        let config_file_path = Self::config_file_path(path);
+        if !config_file_path.exists() {
+            return Err(DbError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Config file not found at {}", config_file_path.display()),
+            )));
+        }
+
+        let yaml = std::fs::read_to_string(&config_file_path)?;
+        serde_yaml::from_str(&yaml).map_err(|e| {
+            DbError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to deserialize config: {}", e),
             ))
         })
     }

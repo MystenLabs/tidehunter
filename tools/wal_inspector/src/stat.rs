@@ -63,11 +63,21 @@ struct KeyspaceStats {
 }
 
 fn collect_wal_statistics(db_path: &Path, verbose: bool) -> Result<WalStatistics> {
-    // Create config and metrics for WAL reading
-    let config = Config::default();
+    // Load the actual WAL configuration from the database, fallback to defaults if not found
+    let config = Db::load_config(db_path).unwrap_or_else(|e| {
+        if verbose {
+            println!("Could not load config file ({:?}), using defaults", e);
+        }
+        Config::default()
+    });
     let metrics = Metrics::new();
 
-    // Open the WAL file (Wal::open expects the database directory path)
+    if verbose {
+        println!("Using WAL configuration:");
+        println!("  Fragment size: {} MB", config.frag_size / (1024 * 1024));
+    }
+
+    // Open the WAL file with the correct configuration
     let wal = Wal::open(db_path, config.wal_layout(), metrics)
         .map_err(|e| anyhow::anyhow!("Failed to open WAL file: {:?}", e))?;
 
