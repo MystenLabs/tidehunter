@@ -818,8 +818,8 @@ impl LargeTable {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_all_clean(&self) -> bool {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn is_all_clean(&self) -> bool {
         for ks_table in &self.table {
             for mutex in ks_table.rows.mutexes() {
                 let mut lock = mutex.lock();

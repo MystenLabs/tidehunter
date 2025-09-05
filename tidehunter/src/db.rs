@@ -575,6 +575,11 @@ impl Db {
         self.rebuild_control_region_from_with_threshold(self.wal_writer.position(), Some(0))
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn is_all_clean(&self) -> bool {
+        self.large_table.is_all_clean()
+    }
+
     fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<u64> {
         self.rebuild_control_region_from_with_threshold(current_wal_position, None)
     }

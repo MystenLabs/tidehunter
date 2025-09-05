@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod force_snapshot;
 mod stat;
 mod verify;
 
@@ -37,6 +38,16 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// Force a snapshot by rebuilding the control region with all dirty entries flushed
+    ForceSnapshot {
+        /// Path to the database directory
+        #[arg(short = 'd', long)]
+        db_path: PathBuf,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -45,5 +56,8 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Verify { db_path, verbose } => verify::verify_command(db_path, verbose),
         Commands::Stat { db_path, verbose } => stat::stat_command(db_path, verbose),
+        Commands::ForceSnapshot { db_path, verbose } => {
+            force_snapshot::force_snapshot_command(db_path, verbose)
+        }
     }
 }

@@ -2452,7 +2452,7 @@ fn test_force_rebuild_control_region() {
 
     // Initially, should have dirty entries
     assert!(
-        !db.large_table.is_all_clean(),
+        !db.is_all_clean(),
         "Should have dirty entries after inserts"
     );
 
@@ -2461,7 +2461,7 @@ fn test_force_rebuild_control_region() {
 
     // After force rebuild, all entries should be clean
     assert!(
-        db.large_table.is_all_clean(),
+        db.is_all_clean(),
         "All entries should be clean after force_rebuild_control_region"
     );
 
@@ -2477,7 +2477,7 @@ fn test_force_rebuild_control_region() {
 
     // Should have dirty entries again
     assert!(
-        !db.large_table.is_all_clean(),
+        !db.is_all_clean(),
         "Should have dirty entries after new insert"
     );
 
@@ -2486,7 +2486,7 @@ fn test_force_rebuild_control_region() {
 
     // All should be clean again
     assert!(
-        db.large_table.is_all_clean(),
+        db.is_all_clean(),
         "All entries should be clean after second force_rebuild_control_region"
     );
 }
