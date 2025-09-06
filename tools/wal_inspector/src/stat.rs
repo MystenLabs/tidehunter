@@ -2,12 +2,17 @@ use crate::InspectorContext;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
+use std::fs;
+use std::io::ErrorKind;
 use tidehunter::key_shape::{KeyShape, KeySpace};
 use tidehunter::test_utils::{list_wal_files_with_sizes, Metrics, Wal, WalEntry, WalError};
 
 pub fn stat_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Statistics");
     println!("==========================");
+
+    // Read control region if it exists
+    print_control_region_info(context)?;
 
     let stats = collect_wal_statistics(context)?;
     print_statistics_report(&stats, &context.key_shape);
@@ -387,6 +392,74 @@ fn print_statistics_report(stats: &WalStatistics, key_shape: &KeyShape) {
     }
 
     println!("\n{}", "=".repeat(70));
+}
+
+fn print_control_region_info(context: &InspectorContext) -> Result<()> {
+    // Control region file is named "cr" in the database directory
+    let control_region_path = context.db_path.join("cr");
+
+    // Try to read the control region file
+    let control_region_data = match fs::read(&control_region_path) {
+        Ok(data) => data,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            println!("\n⚠️  No control region found (database may be new or not yet flushed)");
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(anyhow::anyhow!("Failed to read control region: {}", err));
+        }
+    };
+
+    // Deserialize the control region to get the replay position
+    // The control region structure has a field called last_position
+    // We'll use bincode to deserialize just the u64 at the beginning
+    if control_region_data.len() >= 8 {
+        // The first 8 bytes should be the last_position (u64)
+        let replay_position = u64::from_le_bytes([
+            control_region_data[0],
+            control_region_data[1],
+            control_region_data[2],
+            control_region_data[3],
+            control_region_data[4],
+            control_region_data[5],
+            control_region_data[6],
+            control_region_data[7],
+        ]);
+
+        println!("\n📍 CONTROL REGION INFO");
+        println!(
+            "  Replay position:     {}",
+            format_bytes(replay_position as usize)
+        );
+
+        // Get total WAL file sizes
+        let wal_files = list_wal_files_with_sizes(&context.db_path)
+            .map_err(|e| anyhow::anyhow!("Failed to list WAL files: {:?}", e))?;
+        let total_wal_size: u64 = wal_files.iter().map(|(_, size)| *size).sum();
+
+        println!(
+            "  Total WAL size:      {}",
+            format_bytes(total_wal_size as usize)
+        );
+
+        // Calculate bytes to replay
+        if total_wal_size >= replay_position {
+            let bytes_to_replay = total_wal_size - replay_position;
+            println!(
+                "  Bytes to replay:     {}",
+                format_bytes(bytes_to_replay as usize)
+            );
+
+            if total_wal_size > 0 {
+                let replay_percent = (replay_position as f64 / total_wal_size as f64) * 100.0;
+                println!("  Progress:            {:.1}%", replay_percent);
+            }
+        }
+    } else {
+        println!("\n⚠️  Control region file exists but appears to be corrupted or empty");
+    }
+
+    Ok(())
 }
 
 fn format_bytes(bytes: usize) -> String {
