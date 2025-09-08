@@ -13,6 +13,7 @@ use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{thread, usize};
 
 // see generate.py
@@ -2491,4 +2492,43 @@ fn test_force_rebuild_control_region() {
         db.is_all_clean(),
         "All entries should be clean after second force_rebuild_control_region"
     );
+}
+
+#[test]
+fn db_test_snapshot_unload_threshold() {
+    let dir = tempdir::TempDir::new("test_unload_threshold").unwrap();
+    let mut config = Config::small();
+    // Set snapshot_unload_threshold to 4KB
+    config.snapshot_unload_threshold = 4 * 1024;
+    let config = Arc::new(config);
+    let (key_shape, ks) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+    let metrics = Metrics::new();
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        metrics.clone(),
+    )
+    .expect("open failed");
+
+    // Write 20 values, each approximately 1KB
+    let value_size = 1024;
+    let large_value = vec![0xAB; value_size];
+
+    for i in 0u64..20 {
+        db.insert(ks, i.to_be_bytes().to_vec(), large_value.clone())
+            .expect("insert failed");
+    }
+
+    // Get the current WAL position before snapshot
+    let wal_position_before = db.wal_writer.position();
+    println!("WAL position before snapshot: {}", wal_position_before);
+
+    let replay_position = db
+        .rebuild_control_region()
+        .expect("force_rebuild_control_region failed");
+
+    println!("  - WAL position: {}", wal_position_before);
+    println!("  - Replay position in control region: {}", replay_position);
 }
