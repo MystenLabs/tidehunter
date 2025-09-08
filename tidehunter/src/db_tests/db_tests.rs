@@ -2521,6 +2521,8 @@ fn db_test_snapshot_unload_threshold() {
             .expect("insert failed");
     }
 
+    thread::sleep(Duration::from_millis(10));
+
     // Get the current WAL position before snapshot
     let wal_position_before = db.wal_writer.position();
     println!("WAL position before snapshot: {}", wal_position_before);
@@ -2528,7 +2530,8 @@ fn db_test_snapshot_unload_threshold() {
     let replay_position = db
         .rebuild_control_region()
         .expect("force_rebuild_control_region failed");
-
     println!("  - WAL position: {}", wal_position_before);
     println!("  - Replay position in control region: {}", replay_position);
+
+    assert_eq!(replay_position, wal_position_before);
 }

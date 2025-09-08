@@ -1032,9 +1032,9 @@ impl LargeTableEntry {
             // todo metric / log?
             return Ok(());
         }
-        let position = self.state.wal_position();
+        let position = self.last_processed;
         // position can actually be great then tail_position due to concurrency
-        let distance = tail_position.saturating_sub(position.offset());
+        let distance = tail_position.saturating_sub(position);
         // Use override if provided, otherwise use config value
         let threshold =
             snapshot_unload_threshold_override.unwrap_or(config.snapshot_unload_threshold);
