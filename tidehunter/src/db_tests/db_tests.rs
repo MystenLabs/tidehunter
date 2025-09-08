@@ -2501,7 +2501,16 @@ fn db_test_snapshot_unload_threshold() {
     // Set snapshot_unload_threshold to 4KB
     config.snapshot_unload_threshold = 4 * 1024;
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+
+    // Use KeyShapeBuilder instead of KeyShape::new_single
+    let mut builder = KeyShapeBuilder::new();
+    let ks = builder.add_key_space("test", 8, 16, KeyType::uniform(16));
+    // Make sure ks that only was written once does not affect forced snapshot
+    let ks2 = builder.add_key_space("small", 8, 16, KeyType::uniform(16));
+    // Make sure empty key space does not affect forced snapshot
+    let _ks2 = builder.add_key_space("empty", 8, 16, KeyType::uniform(16));
+    let key_shape = builder.build();
+
     let metrics = Metrics::new();
 
     let db = Db::open(
@@ -2515,6 +2524,8 @@ fn db_test_snapshot_unload_threshold() {
     // Write 20 values, each approximately 1KB
     let value_size = 1024;
     let large_value = vec![0xAB; value_size];
+    db.insert(ks2, 0u64.to_be_bytes().to_vec(), large_value.clone())
+        .expect("insert failed");
 
     for i in 0u64..20 {
         db.insert(ks, i.to_be_bytes().to_vec(), large_value.clone())
