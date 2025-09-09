@@ -1432,7 +1432,7 @@ impl LargeTableFailPoints {
 mod tests {
     use super::*;
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
-    use crate::wal::Wal;
+    use crate::wal::{Wal, WalKind};
     use std::io;
 
     #[test]
@@ -1444,7 +1444,12 @@ mod tests {
         ks.add_key_space("c", 0, 1, KeyType::uniform(1));
         let ks = ks.build();
         let tmp_dir = tempdir::TempDir::new("test_ks_allocation").unwrap();
-        let wal = Wal::open(tmp_dir.path(), config.wal_layout(), Metrics::new()).unwrap();
+        let wal = Wal::open(
+            tmp_dir.path(),
+            config.wal_layout(WalKind::Replay),
+            Metrics::new(),
+        )
+        .unwrap();
         let l = LargeTable::from_unloaded(
             &ks,
             &LargeTableContainer::new_from_key_shape(&ks, SnapshotEntryData::empty()),

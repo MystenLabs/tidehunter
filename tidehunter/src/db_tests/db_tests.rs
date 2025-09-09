@@ -194,7 +194,7 @@ fn test_corrupted_batch_replay() {
 
         let position = db.wal_writer.position();
         let record_length = CrcFrame::CRC_HEADER_LENGTH as u64 + 4 + 1 + 4;
-        let offset = config.wal_layout().align(record_length) - record_length;
+        let offset = config.wal_layout(WalKind::Replay).align(record_length) - record_length;
         let file = db.wal.file().try_clone().unwrap();
         (position - offset - 1, file)
     };

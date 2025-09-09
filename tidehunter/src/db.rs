@@ -15,7 +15,7 @@ use crate::metrics::{Metrics, TimerExt};
 use crate::relocation::{RelocationCommand, RelocationDriver, RelocationWatermarks, Relocator};
 use crate::state_snapshot;
 use crate::wal::{
-    PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
+    PreparedWalWrite, Wal, WalError, WalIterator, WalKind, WalPosition, WalRandomRead, WalWriter,
 };
 use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
@@ -56,7 +56,7 @@ impl Db {
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let relocation_watermarks = RelocationWatermarks::load(&path)?;
-        let wal = Wal::open(&path, config.wal_layout(), metrics.clone())?;
+        let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
 
         // Create channels for flusher threads first
         let (flusher_senders, flusher_receivers) = (0..config.num_flusher_threads)

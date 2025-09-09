@@ -1,4 +1,4 @@
-use crate::wal::WalLayout;
+use crate::wal::{WalKind, WalLayout};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::cmp;
@@ -65,12 +65,13 @@ impl Config {
     }
 
     #[doc(hidden)] // Used by tools/wal_inspector to get WAL configuration
-    pub fn wal_layout(&self) -> WalLayout {
+    pub fn wal_layout(&self, kind: WalKind) -> WalLayout {
         WalLayout {
             frag_size: self.frag_size,
             max_maps: self.max_maps,
             direct_io: self.direct_io,
             wal_file_size: self.wal_file_size,
+            kind,
         }
     }
 

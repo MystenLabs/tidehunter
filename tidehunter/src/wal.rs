@@ -20,8 +20,6 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 use std::{io, mem, ptr, thread};
 
-const WAL_PREFIX: &str = "wal_";
-
 pub struct WalWriter {
     wal: Arc<Wal>,
     position_and_map: Mutex<(IncrementalWalPosition, Map)>,
@@ -187,7 +185,7 @@ impl WalWriter {
             if (file_id.0 + 1) * self.wal.layout.wal_file_size > watermark {
                 break;
             }
-            let path = Wal::wal_file_name(&wal_files.base_path, file_id);
+            let path = self.wal.layout.wal_file_name(&wal_files.base_path, file_id);
             if path.exists() {
                 std::fs::remove_file(path)?;
             }
@@ -222,6 +220,12 @@ impl IncrementalWalPosition {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum WalKind {
+    Replay,
+    Index,
+}
+
 #[doc(hidden)] // Used by tools/wal_inspector for WAL configuration
 #[derive(Clone)]
 pub struct WalLayout {
@@ -229,6 +233,7 @@ pub struct WalLayout {
     pub max_maps: usize,
     pub direct_io: bool,
     pub wal_file_size: u64,
+    pub kind: WalKind,
 }
 
 impl WalLayout {
@@ -288,6 +293,19 @@ impl WalLayout {
     pub fn align(&self, v: u64) -> u64 {
         align_size(v, self.direct_io)
     }
+
+    pub fn wal_file_name(&self, base_path: &Path, file_id: WalFileId) -> PathBuf {
+        base_path.join(format!("{}_{:016x}", self.kind.name(), file_id.0))
+    }
+}
+
+impl WalKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            WalKind::Replay => "wal",
+            WalKind::Index => "index",
+        }
+    }
 }
 
 impl WalFiles {
@@ -302,9 +320,15 @@ impl WalFiles {
             let file_path = entry?.path();
             if file_path.is_file() {
                 if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
-                    if let Some(id_str) = file_name.strip_prefix(WAL_PREFIX) {
+                    if let Some(id_str) = file_name.strip_prefix(layout.kind.name()) {
+                        let Some(id_str) = id_str.strip_prefix("_") else {
+                            panic!(
+                                "invalid wal file name {:?}(failed to strip _ prefix)",
+                                file_name
+                            );
+                        };
                         let id = u64::from_str_radix(id_str, 16)
-                            .unwrap_or_else(|_| panic!("invalid wal file name {:?}", id_str));
+                            .unwrap_or_else(|_| panic!("invalid wal file name {:?}", file_name));
                         let file = Wal::open_file(&file_path, layout)?;
                         files.push((id, file));
                     }
@@ -312,7 +336,7 @@ impl WalFiles {
             }
         }
         if files.is_empty() {
-            let file = Wal::open_file(&Wal::wal_file_name(base_path, WalFileId(0)), layout)?;
+            let file = Wal::open_file(&layout.wal_file_name(base_path, WalFileId(0)), layout)?;
             files.push((0, file));
         }
         files.sort_by_key(|(id, _)| *id);
@@ -392,10 +416,6 @@ impl Wal {
             }
         }
         Ok(file)
-    }
-
-    fn wal_file_name(base_path: &Path, file_id: WalFileId) -> PathBuf {
-        base_path.join(format!("{}{:016x}", WAL_PREFIX, file_id.0))
     }
 
     // todo remove
@@ -681,7 +701,11 @@ impl WalMapperThread {
             let file_id = self.layout.locate_file(range.start);
             let mut files = self.files.load();
             // if min_file_id has already been removed by relocation, reload the list of active files
-            if !Wal::wal_file_name(&files.base_path, files.min_file_id).exists() {
+            if !self
+                .layout
+                .wal_file_name(&files.base_path, files.min_file_id)
+                .exists()
+            {
                 let new_files = WalFiles::load(&files.base_path, &self.layout)
                     .expect("Failed to reload wal files directory");
                 self.files.store(Arc::new(new_files));
@@ -690,7 +714,7 @@ impl WalMapperThread {
             if file_id > files.current_file_id() {
                 assert_eq!(file_id, WalFileId(files.current_file_id().0 + 1));
                 let mut new_files = files.files.clone();
-                let new_file_path = Wal::wal_file_name(&files.base_path, file_id);
+                let new_file_path = self.layout.wal_file_name(&files.base_path, file_id);
                 let new_file = Wal::open_file(&new_file_path, &self.layout)
                     .expect("Failed to create new wal file");
                 new_files.push(Arc::new(new_file));
@@ -931,13 +955,14 @@ impl From<io::Error> for WalError {
 #[doc(hidden)] // Used by tools/wal_inspector for progress tracking
 #[cfg(any(test, feature = "test-utils"))]
 pub fn list_wal_files_with_sizes(base_path: &Path) -> io::Result<Vec<(PathBuf, u64)>> {
+    let prefix = format!("{}_", WalKind::Replay.name());
     let mut files = vec![];
 
     for entry in std::fs::read_dir(base_path)? {
         let file_path = entry?.path();
         if file_path.is_file() {
             if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
-                if let Some(id_str) = file_name.strip_prefix(WAL_PREFIX) {
+                if let Some(id_str) = file_name.strip_prefix(&prefix) {
                     if u64::from_str_radix(id_str, 16).is_ok() {
                         let metadata = std::fs::metadata(&file_path)?;
                         files.push((file_path, metadata.len()));
@@ -949,7 +974,7 @@ pub fn list_wal_files_with_sizes(base_path: &Path) -> io::Result<Vec<(PathBuf, u
 
     // If no WAL files found, check for the default wal_0000000000000000 file
     if files.is_empty() {
-        let default_wal_path = base_path.join(format!("{}{:016x}", WAL_PREFIX, 0));
+        let default_wal_path = base_path.join(format!("{}{:016x}", prefix, 0));
         if default_wal_path.exists() {
             let metadata = std::fs::metadata(&default_wal_path)?;
             files.push((default_wal_path, metadata.len()));
@@ -980,6 +1005,7 @@ mod tests {
             max_maps: 2,
             direct_io: false,
             wal_file_size: 10 << 12,
+            kind: WalKind::Replay,
         };
         // todo - add second test case when there is no space for skip marker after large
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
@@ -1053,6 +1079,7 @@ mod tests {
             max_maps: 2,
             direct_io: false,
             wal_file_size: 10 << 12,
+            kind: WalKind::Replay,
         };
         let mut position = IncrementalWalPosition {
             layout,
@@ -1077,6 +1104,7 @@ mod tests {
             max_maps: 2,
             direct_io: false,
             wal_file_size: 10 << 12,
+            kind: WalKind::Replay,
         };
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let wal_writer = wal.wal_iterator(0).unwrap().into_writer();
@@ -1141,6 +1169,7 @@ mod tests {
             max_maps: 16,
             direct_io: false,
             wal_file_size: 10 << 12,
+            kind: WalKind::Replay,
         };
         let wal = Wal::open(dir.path(), layout, Metrics::new()).unwrap();
         let wal_iterator = wal.wal_iterator(0).unwrap();
@@ -1190,6 +1219,7 @@ mod tests {
             max_maps: 2,
             direct_io: false,
             wal_file_size: 10 << 12,
+            kind: WalKind::Replay,
         };
 
         // Write an entry into the WAl
@@ -1222,6 +1252,7 @@ mod tests {
             max_maps: 2,
             direct_io: false,
             wal_file_size: 8192,
+            kind: WalKind::Replay,
         };
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let writer = wal.wal_iterator(0).unwrap().into_writer();
@@ -1265,6 +1296,7 @@ mod tests {
             max_maps: 16,
             direct_io: false,
             wal_file_size: 1024 << 12, // 4MB to handle 1000 writes
+            kind: WalKind::Replay,
         };
 
         let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());

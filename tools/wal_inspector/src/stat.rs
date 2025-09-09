@@ -6,6 +6,7 @@ use std::fs;
 use std::io::ErrorKind;
 use tidehunter::key_shape::{KeyShape, KeySpace};
 use tidehunter::test_utils::{list_wal_files_with_sizes, Metrics, Wal, WalEntry, WalError};
+use tidehunter::wal::WalKind;
 
 pub fn stat_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Statistics");
@@ -101,8 +102,12 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
     };
 
     // Open the WAL file with the correct configuration
-    let wal = Wal::open(&context.db_path, context.config.wal_layout(), metrics)
-        .map_err(|e| anyhow::anyhow!("Failed to open WAL file: {:?}", e))?;
+    let wal = Wal::open(
+        &context.db_path,
+        context.config.wal_layout(WalKind::Replay),
+        metrics,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to open WAL file: {:?}", e))?;
 
     // Create iterator starting from beginning
     let mut wal_iterator = wal

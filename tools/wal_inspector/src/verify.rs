@@ -6,6 +6,7 @@ use tidehunter::db::Db;
 use tidehunter::key_shape::KeySpace;
 use tidehunter::minibytes::Bytes;
 use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
+use tidehunter::wal::WalKind;
 
 pub fn verify_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Verify");
@@ -297,8 +298,12 @@ fn read_keys_from_wal(context: &InspectorContext) -> Result<Vec<(KeySpace, Bytes
     let metrics = Metrics::new();
 
     // Open the WAL file with correct configuration
-    let wal = Wal::open(&context.db_path, context.config.wal_layout(), metrics)
-        .map_err(|e| anyhow::anyhow!("Failed to open WAL file: {:?}", e))?;
+    let wal = Wal::open(
+        &context.db_path,
+        context.config.wal_layout(WalKind::Replay),
+        metrics,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to open WAL file: {:?}", e))?;
 
     // Create iterator starting from beginning
     let mut wal_iterator = wal
