@@ -1,6 +1,7 @@
 use crate::key_shape::KeyShape;
 use crate::large_table::{LargeTableContainer, SnapshotEntryData};
 use crate::metrics::Metrics;
+use crate::WalPosition;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
@@ -68,6 +69,13 @@ impl ControlRegion {
 
     pub fn last_position(&self) -> u64 {
         self.last_position
+    }
+
+    pub fn last_index_wal_position(&self) -> Option<WalPosition> {
+        self.snapshot
+            .iter_cells()
+            .filter_map(|entry| entry.position.valid())
+            .max()
     }
 }
 

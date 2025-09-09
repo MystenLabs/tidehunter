@@ -1299,6 +1299,12 @@ impl<T: Copy> LargeTableContainer<T> {
             KeyType::PrefixedUniform(_) => RowContainer::new(),
         }
     }
+
+    pub fn iter_cells(&self) -> impl Iterator<Item = &T> {
+        self.0
+            .iter()
+            .flat_map(|ks| ks.iter().flat_map(|row| row.values()))
+    }
 }
 
 impl Default for LargeTableEntryState {

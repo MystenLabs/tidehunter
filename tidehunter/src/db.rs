@@ -30,7 +30,9 @@ use std::{io, thread};
 pub struct Db {
     pub(crate) large_table: LargeTable,
     pub(crate) wal: Arc<Wal>,
+    pub(crate) indexes: Arc<Wal>,
     pub(crate) wal_writer: WalWriter,
+    pub(crate) index_writer: WalWriter,
     pub(crate) control_region_store: Mutex<ControlRegionStore>,
     config: Arc<Config>,
     metrics: Arc<Metrics>,
@@ -57,6 +59,7 @@ impl Db {
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         let relocation_watermarks = RelocationWatermarks::load(&path)?;
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
+        let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
 
         // Create channels for flusher threads first
         let (flusher_senders, flusher_receivers) = (0..config.num_flusher_threads)
@@ -72,15 +75,20 @@ impl Db {
             config.clone(),
             flusher,
             metrics.clone(),
-            wal.as_ref(),
+            indexes.as_ref(),
         );
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
-        let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
+        let wal_writer =
+            Self::replay_wal(&key_shape, &large_table, wal_iterator, &indexes, &metrics)?;
+        let last_index_position = control_region.last_index_wal_position();
+        let index_writer = indexes.writer_after(last_index_position)?;
         let control_region_store = Mutex::new(control_region_store);
         let this = Self {
             large_table,
             wal_writer,
+            index_writer,
             wal,
+            indexes,
             control_region_store,
             config,
             metrics: metrics.clone(),
@@ -518,7 +526,7 @@ impl Db {
     }
 
     fn read_record(&self, position: WalPosition) -> DbResult<Option<(Bytes, Bytes)>> {
-        let entry = self.read_report_entry(position)?;
+        let entry = self.read_report_entry(&self.wal, position)?;
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -551,6 +559,7 @@ impl Db {
         key_shape: &KeyShape,
         large_table: &LargeTable,
         mut wal_iterator: WalIterator,
+        indexes: &Wal,
         metrics: &Metrics,
     ) -> DbResult<WalWriter> {
         let mut batch = VecDeque::new();
@@ -582,7 +591,7 @@ impl Db {
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
                     let guard = crate::wal_tracker::WalGuard::replay_guard(position);
-                    large_table.insert(ks, reduced_key, guard, &v, wal_iterator.wal())?;
+                    large_table.insert(ks, reduced_key, guard, &v, indexes)?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
@@ -592,7 +601,7 @@ impl Db {
                     let ks = key_shape.ks(ks);
                     let reduced_key = ks.reduced_key_bytes(k);
                     let guard = crate::wal_tracker::WalGuard::replay_guard(position);
-                    large_table.remove(ks, reduced_key, guard, wal_iterator.wal())?;
+                    large_table.remove(ks, reduced_key, guard, indexes)?;
                 }
                 WalEntry::BatchStart(size) => {
                     batch = VecDeque::with_capacity(size as usize);
@@ -662,7 +671,7 @@ impl Db {
             .wal_written_bytes_type
             .with_label_values(&["index", ksd.name()])
             .inc_by(w.len() as u64);
-        Ok(*self.wal_writer.write(&w)?.wal_position())
+        Ok(*self.index_writer.write(&w)?.wal_position())
     }
 
     fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(bool, Option<WalEntry>)> {
@@ -670,8 +679,8 @@ impl Db {
         Ok((mapped, entry.map(WalEntry::from_bytes)))
     }
 
-    fn read_report_entry(&self, position: WalPosition) -> DbResult<Option<WalEntry>> {
-        let (mapped, entry) = Self::read_entry(&self.wal, position)?;
+    fn read_report_entry(&self, wal: &Wal, position: WalPosition) -> DbResult<Option<WalEntry>> {
+        let (mapped, entry) = Self::read_entry(wal, position)?;
         if let Some(ref entry) = entry {
             self.report_read(entry, mapped);
         }
@@ -863,7 +872,7 @@ impl Loader for Db {
     type Error = DbError;
 
     fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> DbResult<IndexTable> {
-        let entry = self.read_report_entry(position)?;
+        let entry = self.read_report_entry(&self.indexes, position)?;
         Self::read_index(
             ks,
             entry.unwrap_or_else(|| {
@@ -877,7 +886,7 @@ impl Loader for Db {
 
     fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
         Ok(self
-            .wal
+            .indexes
             .random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 

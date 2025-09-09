@@ -251,6 +251,18 @@ impl WalLayout {
         );
     }
 
+    /// Returns next position to write to after a previously allocated valid wal position.
+    fn next_after_wal_position(&self, wal_position: WalPosition) -> u64 {
+        assert!(wal_position.is_valid());
+        let len_aligned = self.align(wal_position.len as u64);
+        assert!(
+            len_aligned <= self.frag_size,
+            "Entry({len_aligned}) is larger then frag_size({})",
+            self.frag_size
+        );
+        wal_position.offset + len_aligned
+    }
+
     /// Allocate the next position.
     /// Block should not cross the map boundary defined by the self.frag_size
     fn next_position(&self, mut pos: u64, len_aligned: u64) -> u64 {
@@ -632,6 +644,21 @@ impl Wal {
             map,
         };
         Ok(iterator)
+    }
+
+    /// Returns wal writer positions after a given valid write position.
+    /// If None is given as position, the returned writer writes from the beginning of the wal.
+    pub fn writer_after(
+        self: &Arc<Self>,
+        position: Option<WalPosition>,
+    ) -> Result<WalWriter, WalError> {
+        let position = if let Some(position) = position {
+            self.layout.next_after_wal_position(position)
+        } else {
+            0
+        };
+        let iterator = self.wal_iterator(position)?;
+        Ok(iterator.into_writer())
     }
 
     /// Ensure the file is written to disk (blocking call).
@@ -1374,6 +1401,40 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_writer_after() {
+        let dir = tempdir::TempDir::new("test-writer-after").unwrap();
+        let layout = WalLayout {
+            frag_size: 4096,
+            max_maps: 16,
+            direct_io: false,
+            wal_file_size: 1024 << 12, // 4MB
+            kind: WalKind::Replay,
+        };
+
+        let pos1 = {
+            let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
+            let writer = wal.writer_after(None).unwrap();
+            *writer
+                .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
+                .unwrap()
+                .wal_position()
+        };
+
+        let pos2 = {
+            let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
+            let writer = wal.writer_after(Some(pos1)).unwrap();
+            *writer
+                .write(&PreparedWalWrite::new(&vec![4, 5, 6]))
+                .unwrap()
+                .wal_position()
+        };
+
+        let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
+        assert_eq!(&[1, 2, 3], wal.read(pos1).unwrap().as_ref());
+        assert_eq!(&[4, 5, 6], wal.read(pos2).unwrap().as_ref());
     }
 
     #[track_caller]
