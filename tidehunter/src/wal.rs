@@ -176,13 +176,15 @@ impl WalWriter {
         self.wal_tracker.last_processed()
     }
 
-    /// Deletes WAL files that have been fully processed by the relocation process up to the watermark position
+    /// Deletes WAL files that have been fully processed by the relocation process up to the watermark position.
+    ///
+    /// Given watermark positions will be preserved.
     pub fn gc(&self, watermark: u64) -> io::Result<()> {
         let wal_files = self.wal.files.load();
         let mut new_min_file_id = None;
         for idx in 0..wal_files.files.len() {
             let file_id = WalFileId(wal_files.min_file_id.0 + idx as u64);
-            if (file_id.0 + 1) * self.wal.layout.wal_file_size > watermark {
+            if (file_id.0 + 1) * self.wal.layout.wal_file_size >= watermark {
                 break;
             }
             let path = self.wal.layout.wal_file_name(&wal_files.base_path, file_id);

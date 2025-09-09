@@ -647,6 +647,14 @@ impl Db {
             crs.p90_index_position(),
             snapshot_unload_threshold_override,
         )?;
+        // todo remove this sleep.
+        // We need a way to ensure that in-flight index reads do not read files we are removing
+        thread::sleep(Duration::from_millis(100));
+        let min_index_position = snapshot.data.iter_valid_val_positions().min();
+        if let Some(min_index_position) = min_index_position {
+            self.index_writer.gc(min_index_position.offset())?;
+        }
+        self.indexes.fsync()?;
         self.wal.fsync()?;
         crs.store(snapshot.data, snapshot.replay_from, &self.metrics);
         Ok(snapshot.replay_from)
