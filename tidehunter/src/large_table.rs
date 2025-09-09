@@ -1026,6 +1026,7 @@ impl LargeTableEntry {
         snapshot_unload_threshold_override: Option<u64>,
     ) -> Result<(), L::Error> {
         if !self.state.is_dirty() {
+            self.last_processed = loader.last_processed_wal_position();
             return Ok(());
         }
         if self.pending_last_processed.is_some() {
