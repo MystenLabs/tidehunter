@@ -1307,6 +1307,41 @@ impl<T: Copy> LargeTableContainer<T> {
     }
 }
 
+impl LargeTableContainer<SnapshotEntryData> {
+    pub fn iter_valid_val_positions(&self) -> impl Iterator<Item = WalPosition> + '_ {
+        self.iter_cells().filter_map(|entry| entry.position.valid())
+    }
+
+    /// Returns a given percentile across valid wal positions in the container.
+    ///
+    /// In other words, for a given pct,
+    /// returns WalPosition so that pct% of wal positions in the container
+    /// are above the returned WalPosition.
+    ///
+    /// Returns None if the container is empty or does not contain any valid wal positions.
+    #[allow(dead_code)]
+    pub fn pct_wal_position(&self, pct: usize) -> Option<WalPosition> {
+        // Collect all valid WAL positions
+        let mut positions: Vec<WalPosition> = self.iter_valid_val_positions().collect();
+
+        if positions.is_empty() {
+            return None;
+        }
+
+        // Sort positions in descending order (higher positions first)
+        positions.sort_by(|a, b| b.cmp(a));
+
+        // Calculate the index for the percentile
+        // pct% of positions should be above the returned position
+        let index = (positions.len() * pct) / 100;
+
+        // Clamp index to valid range
+        let index = index.min(positions.len() - 1);
+
+        Some(positions[index])
+    }
+}
+
 impl Default for LargeTableEntryState {
     fn default() -> Self {
         Self::Empty
@@ -1766,5 +1801,101 @@ mod tests {
             assert_eq!(key.as_ref(), 50_u64.to_be_bytes()); // Should skip over the deleted 40
             assert_eq!(pos, WalPosition::test_value(5));
         }
+    }
+
+    #[test]
+    fn test_pct_wal_position() {
+        // Create a container with various WAL positions
+        let container = LargeTableContainer(vec![vec![vec![
+            (
+                CellId::Integer(0),
+                SnapshotEntryData {
+                    position: WalPosition::test_value(100),
+                    last_processed: 100,
+                },
+            ),
+            (
+                CellId::Integer(1),
+                SnapshotEntryData {
+                    position: WalPosition::test_value(200),
+                    last_processed: 200,
+                },
+            ),
+            (
+                CellId::Integer(2),
+                SnapshotEntryData {
+                    position: WalPosition::test_value(300),
+                    last_processed: 300,
+                },
+            ),
+            (
+                CellId::Integer(3),
+                SnapshotEntryData {
+                    position: WalPosition::test_value(400),
+                    last_processed: 400,
+                },
+            ),
+            (
+                CellId::Integer(4),
+                SnapshotEntryData {
+                    position: WalPosition::test_value(500),
+                    last_processed: 500,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect()]]);
+
+        // Test various percentiles
+        // 0% - all positions are above this, should return the highest position
+        assert_eq!(
+            container.pct_wal_position(0),
+            Some(WalPosition::test_value(500))
+        );
+
+        // 20% - 20% of positions (1 out of 5) should be above this
+        // Positions sorted: [500, 400, 300, 200, 100]
+        // Index = 5 * 20 / 100 = 1, so position at index 1 is 400
+        assert_eq!(
+            container.pct_wal_position(20),
+            Some(WalPosition::test_value(400))
+        );
+
+        // 50% - 50% of positions should be above this (median)
+        // Index = 5 * 50 / 100 = 2, so position at index 2 is 300
+        assert_eq!(
+            container.pct_wal_position(50),
+            Some(WalPosition::test_value(300))
+        );
+
+        // 80% - 80% of positions should be above this
+        // Index = 5 * 80 / 100 = 4, so position at index 4 is 100
+        assert_eq!(
+            container.pct_wal_position(80),
+            Some(WalPosition::test_value(100))
+        );
+
+        // 100% - all positions should be above this, but clamped to last valid index
+        // Index = 5 * 100 / 100 = 5, clamped to 4, so position is 100
+        assert_eq!(
+            container.pct_wal_position(100),
+            Some(WalPosition::test_value(100))
+        );
+
+        // Test with empty container
+        let empty_container = LargeTableContainer::<SnapshotEntryData>(vec![]);
+        assert_eq!(empty_container.pct_wal_position(50), None);
+
+        // Test with container having only invalid positions
+        let invalid_container = LargeTableContainer(vec![vec![vec![(
+            CellId::Integer(0),
+            SnapshotEntryData {
+                position: WalPosition::INVALID,
+                last_processed: 0,
+            },
+        )]
+        .into_iter()
+        .collect()]]);
+        assert_eq!(invalid_container.pct_wal_position(50), None);
     }
 }

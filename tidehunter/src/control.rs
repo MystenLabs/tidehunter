@@ -72,10 +72,7 @@ impl ControlRegion {
     }
 
     pub fn last_index_wal_position(&self) -> Option<WalPosition> {
-        self.snapshot
-            .iter_cells()
-            .filter_map(|entry| entry.position.valid())
-            .max()
+        self.snapshot.iter_valid_val_positions().max()
     }
 }
 
