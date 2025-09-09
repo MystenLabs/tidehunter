@@ -644,6 +644,7 @@ impl Db {
         let snapshot = self.large_table.snapshot(
             current_wal_position,
             self,
+            crs.p90_index_position(),
             snapshot_unload_threshold_override,
         )?;
         self.wal.fsync()?;

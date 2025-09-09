@@ -220,7 +220,7 @@ impl LargeTable {
         if loader.flush_supported() && self.too_many_dirty(entry) {
             // Drop the guard before flushing to ensure last_processed is updated
             drop(guard);
-            entry.unload_if_ks_enabled(&self.flusher, loader);
+            entry.unload_if_ks_enabled(&self.flusher, loader)?;
         }
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
@@ -453,6 +453,8 @@ impl LargeTable {
         &self,
         tail_position: u64,
         loader: &L,
+        // All entries below this wal positions will be relocated
+        force_relocate_below: Option<WalPosition>,
         snapshot_unload_threshold_override: Option<u64>,
     ) -> Result<LargeTableSnapshot, L::Error> {
         assert!(loader.flush_supported());
@@ -468,6 +470,7 @@ impl LargeTable {
                 ks_table,
                 tail_position,
                 loader,
+                force_relocate_below,
                 snapshot_unload_threshold_override,
             )?;
             data.push(ks_data);
@@ -531,6 +534,7 @@ impl LargeTable {
         ks_table: &KsTable,
         tail_position: u64,
         loader: &L,
+        force_relocate_below: Option<WalPosition>,
         snapshot_unload_threshold_override: Option<u64>,
     ) -> Result<
         (
@@ -551,6 +555,7 @@ impl LargeTable {
                     loader,
                     &self.config,
                     tail_position,
+                    force_relocate_below,
                     snapshot_unload_threshold_override,
                 )?;
                 let position = entry.state.wal_position();
@@ -1023,14 +1028,29 @@ impl LargeTableEntry {
         loader: &L,
         config: &Config,
         tail_position: u64,
+        force_relocate_below: Option<WalPosition>,
         snapshot_unload_threshold_override: Option<u64>,
     ) -> Result<(), L::Error> {
-        if !self.state.is_dirty() {
-            self.last_processed = loader.last_processed_wal_position();
-            return Ok(());
-        }
         if self.pending_last_processed.is_some() {
             // todo metric / log?
+            return Ok(());
+        }
+        let forced_relocation = if let (Some(index_wal_position), Some(force_relocate_below)) =
+            (self.state.wal_position().valid(), force_relocate_below)
+        {
+            index_wal_position < force_relocate_below
+        } else {
+            false
+        };
+        if forced_relocation {
+            self.context
+                .metrics
+                .snapshot_forced_relocation
+                .with_label_values(&[self.context.name()])
+                .inc();
+        }
+        if !self.state.is_dirty() {
+            self.last_processed = loader.last_processed_wal_position();
             return Ok(());
         }
         let position = self.last_processed;
@@ -1040,25 +1060,38 @@ impl LargeTableEntry {
         let threshold =
             snapshot_unload_threshold_override.unwrap_or(config.snapshot_unload_threshold);
         // todo this needs to be fixed for ks with self.context.ks_config.unloading_disabled()
-        if distance >= threshold && !self.context.ks_config.unloading_disabled() {
+        if (forced_relocation || distance >= threshold)
+            && !self.context.ks_config.unloading_disabled()
+        {
             self.context
                 .metrics
                 .snapshot_force_unload
                 .with_label_values(&[self.context.name()])
                 .inc();
-            self.sync_flush(loader);
+            self.sync_flush(loader, forced_relocation)?;
         }
         Ok(())
     }
 
-    /// Performs a synchronous flush regardless of the config setting
+    /// Performs a synchronous flush regardless of the config setting.
+    /// If forced_relocation is set, the flush happens even for clean state
     /// Caller is responsible for checking to things:
     /// * ks_config.unloading_disabled is false
     /// * pending_last_processed is None
-    fn sync_flush<L: Loader>(&mut self, loader: &L) {
+    fn sync_flush<L: Loader>(
+        &mut self,
+        loader: &L,
+        forced_relocation: bool,
+    ) -> Result<(), L::Error> {
         let flush_kind = match self.flush_kind() {
             Some(kind) => kind,
-            None => return, // Not in a flushable state
+            None => {
+                if !forced_relocation {
+                    return Ok(()); // Not in a flushable state and relocation was not requested
+                }
+                self.maybe_load(loader)?;
+                FlushKind::FlushLoaded(self.data.clone_shared())
+            }
         };
 
         let last_processed = loader.last_processed_wal_position();
@@ -1074,15 +1107,20 @@ impl LargeTableEntry {
         };
         self.last_processed = last_processed;
         self.clear_after_flush(position, last_processed);
+        Ok(())
     }
 
-    fn unload_if_ks_enabled<L: Loader>(&mut self, flusher: &IndexFlusher, loader: &L) {
+    fn unload_if_ks_enabled<L: Loader>(
+        &mut self,
+        flusher: &IndexFlusher,
+        loader: &L,
+    ) -> Result<(), L::Error> {
         if self.context.ks_config.unloading_disabled() {
-            return;
+            return Ok(());
         }
         if self.pending_last_processed.is_none() {
             if self.context.config.sync_flush {
-                self.sync_flush(loader);
+                self.sync_flush(loader, false)?;
             } else {
                 // Perform async flush - store the captured value for later
                 let flush_kind = self
@@ -1092,6 +1130,7 @@ impl LargeTableEntry {
                 flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
             }
         }
+        Ok(())
     }
 
     fn clear_after_flush(&mut self, position: WalPosition, last_processed: u64) {
@@ -1319,7 +1358,6 @@ impl LargeTableContainer<SnapshotEntryData> {
     /// are above the returned WalPosition.
     ///
     /// Returns None if the container is empty or does not contain any valid wal positions.
-    #[allow(dead_code)]
     pub fn pct_wal_position(&self, pct: usize) -> Option<WalPosition> {
         // Collect all valid WAL positions
         let mut positions: Vec<WalPosition> = self.iter_valid_val_positions().collect();

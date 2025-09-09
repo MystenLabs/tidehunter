@@ -40,6 +40,7 @@ pub struct Metrics {
 
     pub snapshot_lock_time_mcs: Histogram,
     pub snapshot_force_unload: IntCounterVec,
+    pub snapshot_forced_relocation: IntCounterVec,
     pub snapshot_written_bytes: IntCounter,
     pub rebuild_control_region_time_mcs: Histogram,
     pub bloom_filter_restore_time_mcs: IntCounterVec,
@@ -152,6 +153,11 @@ impl Metrics {
                 registry
             ),
             snapshot_force_unload: counter_vec!("snapshot_force_unload", &["ks"], registry),
+            snapshot_forced_relocation: counter_vec!(
+                "snapshot_forced_relocation",
+                &["ks"],
+                registry
+            ),
             snapshot_written_bytes: counter!("snapshot_written_bytes", registry),
             rebuild_control_region_time_mcs: histogram!(
                 "rebuild_control_region_time_mcs",

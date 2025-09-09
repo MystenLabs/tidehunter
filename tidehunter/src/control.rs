@@ -17,6 +17,7 @@ pub(crate) struct ControlRegion {
 pub(crate) struct ControlRegionStore {
     path: PathBuf,
     last_position: u64,
+    p90_index_position: Option<WalPosition>,
 }
 
 impl ControlRegion {
@@ -81,6 +82,7 @@ impl ControlRegionStore {
         Self {
             path,
             last_position,
+            p90_index_position: None, // todo we can load it from path actually
         }
     }
     pub fn store(
@@ -89,6 +91,7 @@ impl ControlRegionStore {
         last_position: u64,
         metrics: &Metrics,
     ) {
+        let p90_index_position = snapshot.pct_wal_position(90);
         let control_region = ControlRegion::new(snapshot, last_position);
         let serialized =
             bincode::serialize(&control_region).expect("Failed to serialize control region");
@@ -99,6 +102,7 @@ impl ControlRegionStore {
             .inc_by(serialized.len() as u64);
         fs::rename(&temp_file, &self.path).expect("Failed to rename control region file");
         self.last_position = last_position;
+        self.p90_index_position = p90_index_position;
     }
 
     /// The path to the control region file
@@ -108,5 +112,9 @@ impl ControlRegionStore {
 
     pub fn last_position(&self) -> u64 {
         self.last_position
+    }
+
+    pub fn p90_index_position(&self) -> Option<WalPosition> {
+        self.p90_index_position
     }
 }
