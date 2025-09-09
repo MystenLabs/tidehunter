@@ -199,6 +199,11 @@ impl WalWriter {
             let mut maps = self.wal.maps.write();
             maps.retain(|map_id, _| *map_id >= threshold);
         }
+        self.wal
+            .metrics
+            .gc_position
+            .with_label_values(&[self.wal.layout.kind.name()])
+            .set(watermark as i64);
         Ok(())
     }
 }
@@ -667,6 +672,15 @@ impl Wal {
     /// Ensure the file is written to disk (blocking call).
     pub fn fsync(&self) -> io::Result<()> {
         self.files.load().current_file().sync_all()
+    }
+
+    /// Get the minimum WAL position based on the oldest WAL file
+    pub fn min_wal_position(&self) -> u64 {
+        self.files.load().min_file_id.0 * self.layout.wal_file_size
+    }
+
+    pub fn wal_file_size(&self) -> u64 {
+        self.layout.wal_file_size
     }
 
     /// Returns the file descriptor of the wal file

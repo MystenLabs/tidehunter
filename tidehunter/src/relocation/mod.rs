@@ -7,7 +7,6 @@ use crate::WalPosition;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
 mod watermark;
-use crate::index::index_format::IndexFormat;
 pub use watermark::RelocationWatermarks;
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
@@ -37,6 +36,7 @@ pub(crate) struct RelocationDriver {
 
 impl RelocationDriver {
     const NUM_ITERATIONS_IN_BATCH: usize = 1000;
+    const NUM_ITERATIONS_TILL_SAVE: usize = 100000;
 
     pub fn start(
         db: Weak<Db>,
@@ -75,6 +75,19 @@ impl RelocationDriver {
         }
     }
 
+    fn save_progress(&mut self, db: &Db, watermark_only: bool) -> DbResult<()> {
+        self.watermarks.save(&self.metrics)?;
+        if watermark_only {
+            return Ok(());
+        }
+        let gc_watermark = std::cmp::min(
+            self.watermarks.get_relocation_progress(),
+            db.control_region_store.lock().last_position(),
+        );
+        db.wal_writer.gc(gc_watermark)?;
+        Ok(())
+    }
+
     fn relocation_run(&mut self) -> DbResult<()> {
         let Some(db) = self.db.upgrade() else {
             return Ok(());
@@ -94,8 +107,15 @@ impl RelocationDriver {
         }
 
         for i in 0..usize::MAX {
-            if i % Self::NUM_ITERATIONS_IN_BATCH == 0 && self.should_cancel_relocation() {
-                break;
+            if i % Self::NUM_ITERATIONS_IN_BATCH == 0 {
+                if self.should_cancel_relocation() {
+                    break;
+                }
+                if i % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
+                    let has_wal_files_to_drop = self.watermarks.get_relocation_progress()
+                        > (db.wal.wal_file_size() + db.wal.min_wal_position());
+                    self.save_progress(&db, !has_wal_files_to_drop)?;
+                }
             }
             let entry = wal_iterator.next();
             if matches!(entry, Err(WalError::Crc(_))) {
@@ -129,32 +149,11 @@ impl RelocationDriver {
                         }
                     }
                 }
-                WalEntry::Index(ks, bytes) => {
-                    let ksd = db.key_shape.ks(ks);
-                    let index = ksd.index_format().deserialize_index(ksd, bytes);
-                    if let Some((key, _)) = index.next_entry(None, false) {
-                        if let Some(last_pos) = db.large_table.get_index_position(ksd, &key) {
-                            if last_pos == position {
-                                // For now, we stop the relocation process if we encounter an index entry
-                                // that has not been overwritten yet.
-                                // TODO: Add support for relocating index entries.
-                                break;
-                            }
-                        }
-                    }
-                }
+                WalEntry::Index(..) => unreachable!("relocation must never process index entries"),
                 WalEntry::Remove(..) | WalEntry::BatchStart(..) => {}
             }
         }
-        self.watermarks.save()?;
-        let watermark = std::cmp::min(
-            self.watermarks.get_relocation_progress(),
-            db.control_region_store.lock().last_position(),
-        );
-        db.wal_writer.gc(watermark)?;
-        self.metrics
-            .relocation_position
-            .set(self.watermarks.get_relocation_progress() as i64);
+        self.save_progress(&db, false)?;
         Ok(())
     }
 

@@ -53,6 +53,7 @@ pub struct Metrics {
     pub flush_pending: IntGauge,
 
     pub relocation_position: IntGauge,
+    pub gc_position: IntGaugeVec,
     pub relocation_kept: IntCounterVec,
     pub relocation_removed: IntCounterVec,
 
@@ -178,6 +179,7 @@ impl Metrics {
             flush_pending: gauge!("flush_pending", registry),
 
             relocation_position: gauge!("relocation_position", registry),
+            gc_position: gauge_vec!("gc_position", &["kind"], registry),
             relocation_kept: counter_vec!("relocation_kept", &["ks"], registry),
             relocation_removed: counter_vec!("relocation_removed", &["ks"], registry),
 

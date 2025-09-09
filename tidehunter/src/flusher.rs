@@ -179,6 +179,7 @@ impl IndexFlusherThread {
             FlushKind::Barrier(_) => return None,
         };
 
+        merged_index.retain_above_position(loader.min_wal_position());
         Self::run_compactor(ctx, &mut merged_index);
 
         // Always flush everything to disk to avoid data loss
