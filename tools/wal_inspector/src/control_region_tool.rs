@@ -1,4 +1,6 @@
+use crate::utils::format_bytes;
 use anyhow::Result;
+use std::fs;
 use std::path::PathBuf;
 use tidehunter::control::ControlRegion;
 use tidehunter::db::{Db, CONTROL_REGION_FILE};
@@ -18,10 +20,34 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
     let control_region = ControlRegion::read(&control_path, &key_shape)
         .map_err(|e| anyhow::anyhow!("Failed to read control region: {}", e))?;
 
-    // Gather statistics
+    // Calculate total size of all index WAL files
+    let mut total_index_wal_size = 0u64;
+    let index_prefix = format!("{}_", WalKind::Index.name());
+
+    if let Ok(entries) = fs::read_dir(&db_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with(&index_prefix) {
+                        if let Some(id_str) = file_name.strip_prefix(&index_prefix) {
+                            if u64::from_str_radix(id_str, 16).is_ok() {
+                                if let Ok(metadata) = fs::metadata(&path) {
+                                    total_index_wal_size += metadata.len();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Gather statistics and calculate total size occupied by WAL positions
     let snapshot = control_region.snapshot();
     let mut total_entries = 0;
     let mut ks_stats = Vec::new();
+    let mut total_position_size = 0u64;
 
     // Collect all valid positions with their keyspace for sorting
     let mut all_positions = Vec::new();
@@ -36,6 +62,7 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
 
                 if let Some(pos) = entry.position.valid() {
                     all_positions.push((pos, ks_idx));
+                    total_position_size += pos.len() as u64;
                 }
             }
         }
@@ -62,6 +89,22 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
     println!("Entry Statistics:");
     println!("  Total entries: {}", total_entries);
     println!("  Valid WAL positions: {}", all_positions.len());
+    println!();
+
+    // Print index space usage statistics
+    println!("Index Space Usage:");
+    println!(
+        "  Total index WAL files size: {}",
+        format_bytes(total_index_wal_size as usize)
+    );
+    println!(
+        "  Total size occupied by positions: {}",
+        format_bytes(total_position_size as usize)
+    );
+    if total_index_wal_size > 0 {
+        let usage_percentage = (total_position_size as f64 / total_index_wal_size as f64) * 100.0;
+        println!("  Usage percentage: {:.2}%", usage_percentage);
+    }
     println!();
 
     // Print keyspace breakdown if verbose

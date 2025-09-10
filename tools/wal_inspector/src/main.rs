@@ -8,6 +8,7 @@ use tidehunter::key_shape::KeyShape;
 mod control_region_tool;
 mod force_snapshot;
 mod stat;
+mod utils;
 mod verify;
 
 /// Context containing database configuration and metadata for inspector commands
