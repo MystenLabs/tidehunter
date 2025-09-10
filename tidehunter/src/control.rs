@@ -8,7 +8,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct ControlRegion {
+#[doc(hidden)] // Used by tools/wal_inspector for control region inspection
+pub struct ControlRegion {
     /// 0 when wal is empty or nothing has been processed
     last_position: u64,
     snapshot: LargeTableContainer<SnapshotEntryData>,
@@ -38,21 +39,22 @@ impl ControlRegion {
     }
 
     pub fn read_or_create(path: &Path, key_shape: &KeyShape) -> Self {
-        let bytes = fs::read(path);
-        let control_region: ControlRegion = match bytes {
+        match Self::read(path, key_shape) {
+            Ok(control_region) => control_region,
+            Err(err) if err.kind() == ErrorKind::NotFound => ControlRegion::new_empty(key_shape),
             Err(err) => {
-                if err.kind() == ErrorKind::NotFound {
-                    return ControlRegion::new_empty(key_shape);
-                } else {
-                    panic!("{1}: {:?}", err, "Failed to read control region file")
-                }
+                panic!("Failed to read control region file: {:?}", err)
             }
-            Ok(bytes) => {
-                bincode::deserialize(&bytes).expect("Failed to deserialize control region")
-            }
-        };
+        }
+    }
+
+    #[doc(hidden)] // Used by tools/wal_inspector for control region inspection
+    pub fn read(path: &Path, key_shape: &KeyShape) -> std::io::Result<Self> {
+        let bytes = fs::read(path)?;
+        let control_region: ControlRegion = bincode::deserialize(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         control_region.verify_shape(key_shape);
-        control_region
+        Ok(control_region)
     }
 
     fn verify_shape(&self, key_shape: &KeyShape) {

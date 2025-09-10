@@ -76,7 +76,8 @@ pub(crate) type RowContainer<T> = BTreeMap<CellId, T>;
 
 /// Snapshot data for a single entry containing both WAL position and last processed position
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
-pub(crate) struct SnapshotEntryData {
+#[doc(hidden)] // Used by tools/wal_inspector for control region inspection
+pub struct SnapshotEntryData {
     pub position: WalPosition,
     pub last_processed: u64,
 }
@@ -93,7 +94,8 @@ impl SnapshotEntryData {
 
 /// ks -> row -> cell
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct LargeTableContainer<T>(pub Vec<Vec<RowContainer<T>>>);
+#[doc(hidden)] // Used by tools/wal_inspector for control region inspection
+pub struct LargeTableContainer<T>(pub Vec<Vec<RowContainer<T>>>);
 
 pub(crate) struct LargeTableSnapshot {
     pub data: LargeTableContainer<SnapshotEntryData>,

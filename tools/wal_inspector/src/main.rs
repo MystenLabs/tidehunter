@@ -5,6 +5,7 @@ use tidehunter::config::Config;
 use tidehunter::db::Db;
 use tidehunter::key_shape::KeyShape;
 
+mod control_region_tool;
 mod force_snapshot;
 mod stat;
 mod verify;
@@ -95,6 +96,20 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// Inspect control region and display statistics
+    ControlRegion {
+        /// Path to the database directory
+        #[arg(short = 'd', long)]
+        db_path: PathBuf,
+
+        /// Number of lowest WAL positions to display
+        #[arg(short = 'n', long, default_value = "10")]
+        num_positions: usize,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -113,5 +128,10 @@ fn main() -> Result<()> {
             let context = InspectorContext::load(db_path, verbose)?;
             force_snapshot::force_snapshot_command(&context)
         }
+        Commands::ControlRegion {
+            db_path,
+            num_positions,
+            verbose,
+        } => control_region_tool::control_region_command(db_path, num_positions, verbose),
     }
 }

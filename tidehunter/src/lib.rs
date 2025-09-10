@@ -2,7 +2,8 @@ pub mod batch;
 mod cell;
 pub mod config;
 mod context;
-mod control;
+#[doc(hidden)] // Used by tools/wal_inspector for control region inspection
+pub mod control;
 mod crc;
 pub mod db;
 #[cfg(test)]
@@ -12,7 +13,8 @@ mod flusher;
 pub mod index;
 pub mod iterators;
 pub mod key_shape;
-mod large_table;
+#[doc(hidden)] // Used by tools/wal_inspector for control region inspection
+pub mod large_table;
 pub mod lookup;
 mod math;
 pub mod metrics;
