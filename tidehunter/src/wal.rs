@@ -348,13 +348,15 @@ impl Wal {
         if let Some(map) = self.get_map(map) {
             let offset = offset as usize;
             let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
-            let data = map
-                .data
-                .slice(header_end + inner_offset..header_end + pos.len());
+            // End of the frame within the map: offset + total frame length (includes header)
+            let frame_end = offset + pos.len();
+            let data = map.data.slice(header_end + inner_offset..frame_end);
             Ok(WalRandomRead::Mapped(data))
         } else {
             let header_end = pos.offset + CrcFrame::CRC_HEADER_LENGTH as u64;
-            let range = (header_end + inner_offset as u64)..(header_end + pos.len() as u64);
+            // End of the frame within the file: pos.offset + total frame length (includes header)
+            let frame_end = pos.offset + pos.len() as u64;
+            let range = (header_end + inner_offset as u64)..frame_end;
             Ok(WalRandomRead::File(FileRange::new(
                 self.file_reader(),
                 range,
