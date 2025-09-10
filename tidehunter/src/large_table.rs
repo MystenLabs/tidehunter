@@ -1844,45 +1844,18 @@ mod tests {
     #[test]
     fn test_pct_wal_position() {
         // Create a container with various WAL positions
-        let container = LargeTableContainer(vec![vec![vec![
-            (
-                CellId::Integer(0),
+        let mut entries = RowContainer::new();
+        for i in 0..5 {
+            let position_value = (i + 1) * 100;
+            entries.insert(
+                CellId::Integer(i),
                 SnapshotEntryData {
-                    position: WalPosition::test_value(100),
-                    last_processed: 100,
+                    position: WalPosition::test_value(position_value as u64),
+                    last_processed: position_value as u64,
                 },
-            ),
-            (
-                CellId::Integer(1),
-                SnapshotEntryData {
-                    position: WalPosition::test_value(200),
-                    last_processed: 200,
-                },
-            ),
-            (
-                CellId::Integer(2),
-                SnapshotEntryData {
-                    position: WalPosition::test_value(300),
-                    last_processed: 300,
-                },
-            ),
-            (
-                CellId::Integer(3),
-                SnapshotEntryData {
-                    position: WalPosition::test_value(400),
-                    last_processed: 400,
-                },
-            ),
-            (
-                CellId::Integer(4),
-                SnapshotEntryData {
-                    position: WalPosition::test_value(500),
-                    last_processed: 500,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect()]]);
+            );
+        }
+        let container = LargeTableContainer(vec![vec![entries]]);
 
         // Test various percentiles
         // 0% - all positions are above this, should return the highest position
