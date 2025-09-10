@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{io, thread};
 
 pub struct Db {
@@ -204,6 +204,9 @@ impl Db {
     }
 
     fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
+        let start = Instant::now();
+        let mut last_snapshot = Duration::ZERO;
+        const SNAPSHOT_EVERY_SECS: u64 = 3600;
         loop {
             // Check if database is still alive periodically (every second) to allow faster shutdown
             for _ in 0..60 {
@@ -218,7 +221,15 @@ impl Db {
             // todo when we get to wal position wrapping around this will need to be fixed
             let current_wal_position = db.wal_writer.position();
             let written = current_wal_position.checked_sub(position).unwrap();
-            if written > db.config.snapshot_written_bytes() {
+            let now = start.elapsed();
+            let timed_snapshot =
+                if now.saturating_sub(last_snapshot).as_secs() >= SNAPSHOT_EVERY_SECS {
+                    last_snapshot = now;
+                    true
+                } else {
+                    false
+                };
+            if timed_snapshot || written > db.config.snapshot_written_bytes() {
                 // todo taint storage instance on failure?
                 let snapshot_position = db
                     .rebuild_control_region_from(current_wal_position)
