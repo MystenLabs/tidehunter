@@ -1026,3 +1026,118 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_offset_computation_bug {
+    use super::*;
+    use crate::db::WalEntry;
+    use crate::key_shape::KeySpace;
+    use crate::lookup::RandomRead;
+    use crate::metrics::Metrics;
+    use bytes::BytesMut;
+
+    fn test_layout(direct_io: bool) -> WalLayout {
+        WalLayout {
+            frag_size: 64 * 1024,
+            max_maps: 2,
+            direct_io,
+        }
+    }
+
+    fn write_index_entry(wal: &Arc<Wal>, index_len: usize) -> (WalPosition, Bytes) {
+        // Create a writer
+        let wal_iter = wal.wal_iterator(0).expect("wal_iterator failed");
+        let writer = wal_iter.into_writer();
+
+        // Prepare deterministic index bytes
+        let mut bm = BytesMut::with_capacity(index_len);
+        for i in 0..index_len {
+            bm.extend_from_slice(&[(i % 251) as u8]);
+        }
+        let index_bytes: Bytes = bm.to_vec().into();
+
+        // Write a single Index entry
+        let w = PreparedWalWrite::new(&WalEntry::Index(KeySpace(0), index_bytes.clone()));
+        let guard = writer.write(&w).expect("wal write failed");
+        (*guard.wal_position(), index_bytes)
+    }
+
+    #[test]
+    /*
+     * Verifies the mapped RandomRead (mmap-backed) exposes exactly the
+     * index payload bytes. We write a single Index frame, then request a
+     * random reader at the payload start (skipping the 8-byte CRC header and
+     * the 2-byte index prefix). The reader length must equal
+     * pos.len() - CRC_HEADER_LENGTH - INDEX_PREFIX_SIZE and reading that
+     * range must match the original serialized index bytes.
+     */
+    fn random_reader_mapped_len_is_payload_minus_header_and_prefix() {
+        let tmp = tempdir::TempDir::new("wal_random_reader_mapped").unwrap();
+        let wal_path = tmp.path().join("wal");
+        let layout = test_layout(false);
+        let wal = Wal::open(&wal_path, layout.clone(), Metrics::new()).unwrap();
+
+        // Write an index entry and obtain its WalPosition
+        let index_len = 4096;
+        let (pos, index_bytes) = write_index_entry(&wal, index_len);
+
+        // Obtain random reader with inner offset equal to index prefix (type + ks)
+        let reader = wal
+            .random_reader_at(pos, WalEntry::INDEX_PREFIX_SIZE)
+            .expect("random_reader_at failed");
+
+        // Expected length is total frame len - CRC header - inner prefix
+        let expected_len = pos.len() - CrcFrame::CRC_HEADER_LENGTH - WalEntry::INDEX_PREFIX_SIZE;
+        assert_eq!(expected_len, index_bytes.len());
+
+        assert_eq!(reader.kind_str(), "mapped");
+        assert_eq!(reader.len(), expected_len, "RandomRead len is incorrect");
+
+        // Reading exactly expected_len bytes should match the original index bytes
+        let slice = reader.read(0..expected_len);
+        assert_eq!(slice.as_ref(), index_bytes.as_ref());
+    }
+
+    #[test]
+    /*
+     * Forces the syscall (FileRange) code path and truncates the WAL file
+     * to the exact end of the written frame. The test ensures the syscall
+     * reader reports the exact payload length (excluding CRC header and
+     * index prefix) and that reading that exact number of bytes returns the
+     * original index bytes.
+     */
+    fn random_reader_syscall_len_and_bytes_match_payload() {
+        let tmp = tempdir::TempDir::new("wal_random_reader_syscall").unwrap();
+        let wal_path = tmp.path().join("wal");
+        let layout = test_layout(false);
+        let wal = Wal::open(&wal_path, layout.clone(), Metrics::new()).unwrap();
+
+        // Write an index entry
+        let index_len = 1024;
+        let (pos, index_bytes) = write_index_entry(&wal, index_len);
+
+        // Drop maps by reopening WAL (fresh instance, no mappings)
+        drop(wal);
+        let wal2 = Wal::open(&wal_path, layout, Metrics::new()).unwrap();
+
+        // Force file size to be exactly at the end of this frame
+        let exact_len = pos.offset() + pos.len() as u64;
+        wal2.file().set_len(exact_len).unwrap();
+
+        // Get a FileRange-based reader (since no maps exist in wal2)
+        let reader = wal2
+            .random_reader_at(pos, WalEntry::INDEX_PREFIX_SIZE)
+            .expect("random_reader_at failed");
+        assert_eq!(reader.kind_str(), "syscall");
+
+        // Expected payload length (without CRC header and without index prefix)
+        let expected_len = pos.len() - CrcFrame::CRC_HEADER_LENGTH - WalEntry::INDEX_PREFIX_SIZE;
+
+        // The reader must advertise the exact payload length
+        assert_eq!(reader.len(), expected_len, "RandomRead len is incorrect");
+
+        // Reading exactly expected_len bytes should match the original index bytes
+        let slice = reader.read(0..expected_len);
+        assert_eq!(slice.as_ref(), index_bytes.as_ref());
+    }
+}
