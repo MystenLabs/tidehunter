@@ -39,3 +39,7 @@ pub mod test_utils {
     pub use crate::metrics::Metrics;
     pub use crate::wal::{list_wal_files_with_sizes, Wal, WalError, WalIterator, WalLayout};
 }
+
+// Re-export for tools
+#[doc(hidden)] // Used by tools/wal_inspector for control region inspection
+pub use wal::{WalKind, WalLayout};

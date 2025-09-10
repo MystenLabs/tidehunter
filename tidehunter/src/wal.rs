@@ -294,8 +294,9 @@ impl WalLayout {
         start..end
     }
 
+    #[doc(hidden)] // Used by tools/wal_inspector for control region inspection
     #[inline]
-    fn locate_file(&self, offset: u64) -> WalFileId {
+    pub fn locate_file(&self, offset: u64) -> WalFileId {
         WalFileId(offset / self.wal_file_size)
     }
 
