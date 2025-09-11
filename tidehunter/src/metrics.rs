@@ -131,6 +131,12 @@ impl MetricIntGauge {
             }
         }
     }
+    pub fn get(&self) -> i64 {
+        match &self.0 {
+            Maybe::Real(inner) => inner.get(),
+            Maybe::Noop => 0,
+        }
+    }
 }
 
 #[derive(Clone)]
