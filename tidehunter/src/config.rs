@@ -34,7 +34,9 @@ pub struct Config {
     pub metrics_enabled: bool,
 }
 
-fn default_metrics_enabled() -> bool { true }
+fn default_metrics_enabled() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
