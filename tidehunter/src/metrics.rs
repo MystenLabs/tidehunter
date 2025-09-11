@@ -420,7 +420,10 @@ impl Drop for McsCounterTimer {
     }
 }
 
-pub fn print_histogram_stats(_histogram: &MetricHistogram) {
-    // Keep simple to avoid tight coupling with prometheus Debug impl
-    println!("Histogram stats requested");
+pub fn print_histogram_stats(histogram: &MetricHistogram) {
+    if is_enabled() {
+        if let Some(inner) = &histogram.inner {
+            println!("Histogram stats: {:?}", inner);
+        }
+    }
 }
