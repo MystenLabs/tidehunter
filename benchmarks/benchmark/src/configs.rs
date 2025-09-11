@@ -303,7 +303,10 @@ pub struct StressArgs {
     no_snapshot: Option<bool>,
     #[arg(long, help = "Use direct IO")]
     direct_io: Option<bool>,
-    #[arg(long, help = "Enable metrics across all backends (Tidehunter, RocksDB, BlobDB)")]
+    #[arg(
+        long,
+        help = "Enable metrics across all backends (Tidehunter, RocksDB, BlobDB)"
+    )]
     metrics_enabled: Option<bool>,
     #[arg(long, short = 'p', help = "Path for storage temp dir")]
     path: Option<String>,

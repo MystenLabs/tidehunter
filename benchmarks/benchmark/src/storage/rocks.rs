@@ -26,8 +26,10 @@ impl RocksStorage {
             // Enable integrated BlobDB with sensible defaults
             Self::enable_blobdb(&mut opts);
         }
-        // Enable or disable RocksDB statistics based on unified metrics flag
-        Self::configure_statistics(&mut opts, metrics_enabled);
+        // Enable or disable RocksDB statistics based on flag
+        if metrics_enabled {
+            opts.enable_statistics();
+        }
 
         std::fs::create_dir_all(path).unwrap();
         let db = DB::open(&opts, path).unwrap();
@@ -122,17 +124,6 @@ impl RocksStorage {
         opt.set_blob_compression_type(rocksdb::DBCompressionType::Zstd);
         // Readahead for compaction over blob files (0 disables)
         opt.set_blob_compaction_readahead_size(0);
-    }
-
-    fn configure_statistics(opt: &mut Options, enabled: bool) {
-        if enabled {
-            // Collect comprehensive statistics for both RocksDB and BlobDB modes
-            opt.enable_statistics();
-            // Periodically dump stats to LOG for visibility during long runs
-            opt.set_stats_dump_period_sec(60);
-        } else {
-            // No-op: statistics are disabled by default
-        }
     }
 }
 
