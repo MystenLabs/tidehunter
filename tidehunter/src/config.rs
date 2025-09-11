@@ -30,8 +30,11 @@ pub struct Config {
     #[serde(default)]
     pub relocation_strategy: RelocationStrategy,
     /// Enable Tidehunter runtime metrics collection
+    #[serde(default = "default_metrics_enabled")]
     pub metrics_enabled: bool,
 }
+
+fn default_metrics_enabled() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
