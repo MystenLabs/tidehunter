@@ -54,8 +54,6 @@ impl Db {
         config: Arc<Config>,
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
-        // Respect runtime metrics toggle from configuration
-        crate::metrics::set_enabled(config.metrics_enabled());
         let path = path.canonicalize()?;
         Self::maybe_create_shape_file(&path, &key_shape)?;
         Self::maybe_create_config_file(&path, &config)?;
