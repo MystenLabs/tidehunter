@@ -1,3 +1,4 @@
+use crate::metrics::Metrics;
 use crate::WalPosition;
 use bytes::Buf;
 use std::fs::{rename, File, OpenOptions};
@@ -37,7 +38,7 @@ impl RelocationWatermarks {
         })
     }
 
-    pub fn save(&self) -> Result<(), io::Error> {
+    pub fn save(&self, metrics: &Metrics) -> Result<(), io::Error> {
         let target_path = Self::relocation_file_path(&self.path);
         let tmp_path = target_path.with_extension("tmp");
         let mut file = OpenOptions::new()
@@ -49,6 +50,9 @@ impl RelocationWatermarks {
         file.sync_all()?;
         drop(file);
         rename(&tmp_path, &target_path)?;
+        metrics
+            .relocation_position
+            .set(self.relocation_progress as i64);
         Ok(())
     }
 

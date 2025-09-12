@@ -364,11 +364,6 @@ impl LargeTable {
         Ok(self.report_lookup_result(ks, result, "lookup"))
     }
 
-    pub(crate) fn get_index_position(&self, ks: &KeySpaceDesc, k: &[u8]) -> Option<WalPosition> {
-        let (mut row, cell) = self.row(ks, k);
-        row.try_entry_mut(&cell).map(|e| e.state.wal_position())
-    }
-
     /// Checks if the update is potentially stale and the operation needs to be canceled.
     /// This can happen if there are multiple concurrent updates for the same key.
     /// Returns true if the update is outdated and should be skipped
@@ -866,6 +861,8 @@ pub trait Loader {
     /// This position represents the highest WAL offset where all operations up to and
     /// including that offset have been successfully processed and their guards dropped.
     fn last_processed_wal_position(&self) -> u64;
+
+    fn min_wal_position(&self) -> u64;
 }
 
 impl LargeTableEntry {
@@ -1601,6 +1598,10 @@ mod tests {
 
             fn last_processed_wal_position(&self) -> u64 {
                 // Return a test value for mock
+                0
+            }
+
+            fn min_wal_position(&self) -> u64 {
                 0
             }
         }

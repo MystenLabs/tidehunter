@@ -886,6 +886,10 @@ impl Loader for Wal {
         // This is only used during flush which Wal doesn't support
         0
     }
+
+    fn min_wal_position(&self) -> u64 {
+        self.min_wal_position()
+    }
 }
 
 impl Loader for Db {
@@ -920,6 +924,10 @@ impl Loader for Db {
 
     fn last_processed_wal_position(&self) -> u64 {
         self.wal_writer.last_processed()
+    }
+
+    fn min_wal_position(&self) -> u64 {
+        self.wal.min_wal_position()
     }
 }
 
