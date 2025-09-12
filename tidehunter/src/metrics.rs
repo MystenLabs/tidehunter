@@ -276,10 +276,6 @@ impl Metrics {
         Self::new_in_enabled(registry, true)
     }
 
-    pub fn new_enabled(enabled: bool) -> Arc<Self> {
-        Self::new_in_enabled(&Registry::default(), enabled)
-    }
-
     pub fn new_in_enabled(registry: &Registry, enabled: bool) -> Arc<Self> {
         let index_size_buckets = exponential_buckets(100., 2., 20).unwrap();
         let snapshot_buckets = exponential_buckets(500., 2., 12).unwrap();
