@@ -245,7 +245,7 @@ impl Db {
         key_shape: &KeyShape,
     ) -> Result<(ControlRegionStore, ControlRegion), DbError> {
         let control_region = ControlRegion::read_or_create(&path, key_shape);
-        let control_region_store = ControlRegionStore::new(path, control_region.last_position());
+        let control_region_store = ControlRegionStore::new(path, &control_region);
         Ok((control_region_store, control_region))
     }
 

@@ -80,13 +80,14 @@ impl ControlRegion {
 }
 
 impl ControlRegionStore {
-    pub fn new(path: PathBuf, last_position: u64) -> Self {
+    pub fn new(path: PathBuf, control_region: &ControlRegion) -> Self {
         Self {
             path,
-            last_position,
-            p90_index_position: None, // todo we can load it from path actually
+            last_position: control_region.last_position,
+            p90_index_position: control_region.snapshot.pct_wal_position(90),
         }
     }
+
     pub fn store(
         &mut self,
         snapshot: LargeTableContainer<SnapshotEntryData>,
