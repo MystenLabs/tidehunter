@@ -1048,7 +1048,7 @@ impl LargeTableEntry {
                 .with_label_values(&[self.context.name()])
                 .inc();
         }
-        if !self.state.is_dirty() {
+        if !forced_relocation && !self.state.is_dirty() {
             self.last_processed = loader.last_processed_wal_position();
             return Ok(());
         }
