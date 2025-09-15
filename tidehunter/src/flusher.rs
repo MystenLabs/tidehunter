@@ -207,9 +207,7 @@ impl IndexFlusherThread {
 }
 
 #[cfg(test)]
-pub(crate) struct SendGuard(
-    #[allow(dead_code)] parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>,
-);
+pub struct SendGuard(#[allow(dead_code)] parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>);
 
 #[cfg(test)]
 // Rather than enable send_guard feature globally in parking_lot,
