@@ -56,6 +56,7 @@ pub struct Metrics {
     pub gc_position: IntGaugeVec,
     pub relocation_kept: IntCounterVec,
     pub relocation_removed: IntCounterVec,
+    pub relocation_bloom_filter_build_time_mcs: IntCounter,
 
     pub memory_estimate: IntGaugeVec,
     pub value_cache_size: IntGaugeVec,
@@ -182,6 +183,10 @@ impl Metrics {
             gc_position: gauge_vec!("gc_position", &["kind"], registry),
             relocation_kept: counter_vec!("relocation_kept", &["ks"], registry),
             relocation_removed: counter_vec!("relocation_removed", &["ks"], registry),
+            relocation_bloom_filter_build_time_mcs: counter!(
+                "relocation_bloom_filter_build_time_mcs",
+                registry
+            ),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),
             value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry),

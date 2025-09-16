@@ -30,7 +30,7 @@ pub struct KeyShapeBuilder {
     key_spaces: Vec<KeySpaceDesc>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct KeySpace(pub(crate) u8);
 
 #[doc(hidden)]
@@ -62,6 +62,7 @@ pub struct KeySpaceConfig {
     unloaded_iterator: bool,
     #[serde(skip)]
     relocation_filter: Option<Arc<Box<dyn RelocationFilter>>>,
+    relocation_bloom_filter: Option<BloomFilterParams>,
 }
 
 /// This enum allows customizing the key used in the index.
@@ -418,6 +419,10 @@ impl KeySpaceDesc {
         self.config.unloaded_iterator
     }
 
+    pub(crate) fn relocation_bloom_filter(&self) -> Option<&BloomFilterParams> {
+        self.config.relocation_bloom_filter.as_ref()
+    }
+
     #[doc(hidden)] // Used by tools/wal_inspector to display keyspace names
     pub fn name(&self) -> &str {
         &self.name
@@ -476,6 +481,11 @@ impl KeySpaceConfig {
 
     pub fn with_unloaded_iterator(mut self, enabled: bool) -> Self {
         self.unloaded_iterator = enabled;
+        self
+    }
+
+    pub fn with_relocation_bloom_filter(mut self, rate: f32, count: u32) -> Self {
+        self.relocation_bloom_filter = Some(BloomFilterParams { rate, count });
         self
     }
 }

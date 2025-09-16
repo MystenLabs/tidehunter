@@ -834,6 +834,55 @@ impl LargeTable {
         }
         true
     }
+
+    pub(crate) fn bloom_key(key: &[u8], pos: WalPosition) -> Vec<u8> {
+        let mut result = Vec::with_capacity(key.len() + 8);
+        result.extend_from_slice(key);
+        result.extend_from_slice(&pos.offset().to_le_bytes());
+        result
+    }
+
+    pub(crate) fn build_index_bloom_filters<L: Loader>(
+        &self,
+        loader: &L,
+    ) -> Result<HashMap<KeySpace, BloomFilter>, L::Error> {
+        let now = Instant::now();
+        let mut filters = HashMap::new();
+        for ks_table in self.table.iter() {
+            let ksd = &ks_table.ks;
+            let Some(bloom_params) = ksd.relocation_bloom_filter() else {
+                continue;
+            };
+            let mut bloom = BloomFilter::with_rate(bloom_params.rate, bloom_params.count);
+            for mutex in ks_table.rows.mutexes() {
+                let row = mutex.lock();
+                for entry in row.entries.iter() {
+                    for (key, pos) in entry.data.iter() {
+                        bloom.insert(&Self::bloom_key(key, pos));
+                    }
+                    if let LargeTableEntryState::Unloaded(position)
+                    | LargeTableEntryState::DirtyUnloaded(position) = &entry.state
+                    {
+                        if position.is_valid() {
+                            let index_table = loader.load(ksd, *position)?;
+                            for (key, pos) in index_table.iter() {
+                                if entry.data.get(key).is_none() {
+                                    bloom.insert(&Self::bloom_key(key, pos));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            filters.insert(ksd.id(), bloom);
+        }
+        if !filters.is_empty() {
+            self.metrics
+                .relocation_bloom_filter_build_time_mcs
+                .inc_by(now.elapsed().as_micros() as u64);
+        }
+        Ok(filters)
+    }
 }
 
 impl Row {
