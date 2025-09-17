@@ -174,6 +174,12 @@ impl IndexTable {
         self.data.is_empty()
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&Bytes, WalPosition)> + '_ {
+        self.data
+            .iter()
+            .filter_map(|(k, v)| v.into_wal_position().valid().map(|pos| (k, pos)))
+    }
+
     pub fn keys(&self) -> Keys<Bytes, IndexWalPosition> {
         self.data.keys()
     }

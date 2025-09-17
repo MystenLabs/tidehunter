@@ -2262,6 +2262,86 @@ fn test_relocation_point_deletes() {
     assert_eq!(relocation_removed(&metrics, "k"), 100);
 }
 
+#[test]
+fn test_relocation_with_bloom_filter_indexing() {
+    let dir = tempdir::TempDir::new("test_relocation_bloom_indexing").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+
+    let ksc_with_bloom = KeySpaceConfig::new().with_relocation_bloom_filter(0.01, 1000);
+    let ks_with_bloom =
+        ksb.add_key_space_config("with_bloom", 8, 1, KeyType::uniform(1), ksc_with_bloom);
+
+    let ksc_no_bloom = KeySpaceConfig::new();
+    let ks_no_bloom = ksb.add_key_space_config("no_bloom", 8, 1, KeyType::uniform(1), ksc_no_bloom);
+
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        force_unload_config(&config),
+        metrics.clone(),
+    )
+    .unwrap();
+
+    // initial insert
+    for key in 0..100u64 {
+        db.insert(ks_with_bloom, key.to_be_bytes().to_vec(), vec![1, 2, 3])
+            .unwrap();
+        db.insert(ks_no_bloom, key.to_be_bytes().to_vec(), vec![4, 5, 6])
+            .unwrap();
+    }
+    // partial modify
+    for key in 0..50u64 {
+        db.insert(ks_with_bloom, key.to_be_bytes().to_vec(), vec![7, 8, 9])
+            .unwrap();
+        db.insert(ks_no_bloom, key.to_be_bytes().to_vec(), vec![10, 11, 12])
+            .unwrap();
+    }
+    // partial remove
+    for key in 25..75u64 {
+        db.remove(ks_with_bloom, key.to_be_bytes().to_vec())
+            .unwrap();
+        db.remove(ks_no_bloom, key.to_be_bytes().to_vec()).unwrap();
+    }
+    db.rebuild_control_region().unwrap();
+    let bloom_build_time_before = metrics.relocation_bloom_filter_build_time_mcs.get();
+    db.start_blocking_relocation();
+
+    let bloom_build_time_after = metrics.relocation_bloom_filter_build_time_mcs.get();
+    assert!(bloom_build_time_after > bloom_build_time_before);
+    let removed_with_bloom = relocation_removed(&metrics, "with_bloom");
+    let removed_no_bloom = relocation_removed(&metrics, "no_bloom");
+    assert_eq!(removed_with_bloom, 100);
+    assert_eq!(removed_no_bloom, removed_with_bloom);
+
+    for key in 0..25u64 {
+        assert_eq!(
+            db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(),
+            Some(vec![7, 8, 9].into())
+        );
+        assert_eq!(
+            db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(),
+            Some(vec![10, 11, 12].into())
+        );
+    }
+    for key in 25..75u64 {
+        assert_eq!(db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(), None);
+        assert_eq!(db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(), None);
+    }
+    for key in 75..100u64 {
+        assert_eq!(
+            db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(),
+            Some(vec![1, 2, 3].into())
+        );
+        assert_eq!(
+            db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(),
+            Some(vec![4, 5, 6].into())
+        );
+    }
+}
+
 fn list_wal_files(path: &Path) -> Vec<String> {
     std::fs::read_dir(path)
         .unwrap()

@@ -1,11 +1,14 @@
 use crate::db::{Db, DbResult, WalEntry};
-use crate::key_shape::KeySpaceDesc;
-use crate::large_table::GetResult;
+use crate::key_shape::{KeySpace, KeySpaceDesc};
+use crate::large_table::{GetResult, LargeTable};
 use crate::metrics::Metrics;
 use crate::wal::WalError;
 use crate::WalPosition;
+use bloom::{BloomFilter, ASMS};
+use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
+
 mod watermark;
 pub use watermark::RelocationWatermarks;
 
@@ -106,6 +109,8 @@ impl RelocationDriver {
             }
         }
 
+        let bloom_filters = db.large_table.build_index_bloom_filters(db.as_ref())?;
+
         for i in 0..usize::MAX {
             if i % Self::NUM_ITERATIONS_IN_BATCH == 0 {
                 if self.should_cancel_relocation() {
@@ -129,7 +134,14 @@ impl RelocationDriver {
             match WalEntry::from_bytes(raw_entry) {
                 WalEntry::Record(ks, key, value) => {
                     let ksd = db.key_shape.ks(ks);
-                    match self.should_keep_entry(&db, ksd, &key, &value, position)? {
+                    match self.should_keep_entry(
+                        &db,
+                        &bloom_filters,
+                        ksd,
+                        &key,
+                        &value,
+                        position,
+                    )? {
                         Decision::StopRelocation => break,
                         Decision::Remove => {
                             // TODO: handle LRU entries
@@ -160,6 +172,7 @@ impl RelocationDriver {
     fn should_keep_entry(
         &self,
         db: &Arc<Db>,
+        bloom_filters: &HashMap<KeySpace, BloomFilter>,
         ks: &KeySpaceDesc,
         key: &[u8],
         value: &[u8],
@@ -169,6 +182,13 @@ impl RelocationDriver {
             return Ok(filter(key, value));
         }
         let reduced_key = ks.reduce_key(key);
+
+        if let Some(bloom) = bloom_filters.get(&ks.id()) {
+            if !bloom.contains(&LargeTable::bloom_key(&reduced_key, position)) {
+                return Ok(Decision::Remove);
+            }
+        }
+
         let decision = match db.large_table.get(ks, &reduced_key, db.as_ref(), true)? {
             GetResult::NotFound => Decision::Remove,
             GetResult::Value(..) => unreachable!("getter was called with skip cache"),
