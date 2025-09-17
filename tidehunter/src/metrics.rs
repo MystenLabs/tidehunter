@@ -1,3 +1,4 @@
+use crate::config::Config;
 use prometheus::{
     exponential_buckets, linear_buckets, Histogram as PromHistogram,
     HistogramVec as PromHistogramVec, IntCounter as PromIntCounter,
@@ -274,6 +275,10 @@ impl Metrics {
 
     pub fn new_in(registry: &Registry) -> Arc<Self> {
         Self::new_in_enabled(registry, true)
+    }
+
+    pub fn from_config_registry(registry: &Registry, config: &Config) -> Arc<Self> {
+        Self::new_in_enabled(registry, config.metrics_enabled())
     }
 
     pub fn new_in_enabled(registry: &Registry, enabled: bool) -> Arc<Self> {

@@ -53,9 +53,8 @@ impl TidehunterStorage {
         path: &Path,
         (key_shape, ks): (KeyShape, KeySpace),
     ) -> Arc<Self> {
-        let metrics_enabled = config.metrics_enabled();
         let config = Arc::new(config);
-        let metrics = Metrics::new_in_enabled(registry, metrics_enabled);
+        let metrics = Metrics::from_config_registry(registry, &config);
         let db = Db::open(path, key_shape, config, metrics).unwrap();
         let this = Self { db, ks };
         Arc::new(this)
