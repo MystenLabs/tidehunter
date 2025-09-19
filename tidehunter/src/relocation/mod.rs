@@ -1,19 +1,23 @@
-use crate::cell::CellId;
 use crate::db::{Db, DbResult, WalEntry};
 use crate::key_shape::{KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable};
 use crate::metrics::Metrics;
 use crate::wal::WalError;
 use crate::WalPosition;
+use crate::{
+    cell::{CellId, CellIdBytesContainer},
+    large_table::LargeTableEntry,
+};
 use bloom::{BloomFilter, ASMS};
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use smallvec::SmallVec;
+use std::collections::{btree_map, HashMap};
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
 
 mod watermark;
-pub use watermark::{RelocationWatermarks, CellBasedWatermark};
+pub use watermark::{CellBasedWatermark, RelocationWatermarks};
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
@@ -94,10 +98,8 @@ pub struct CellIterator<'a> {
     current_keyspace: usize,
     current_row: usize,
     current_cell_index: usize,
-    // TODO: Add support for PrefixedUniform iteration in Phase 2
-    #[allow(dead_code)]
-    current_tree_iter: Option<std::collections::btree_map::Keys<'a, crate::cell::CellIdBytesContainer, crate::large_table::LargeTableEntry>>,
-    current_tree_position: Option<crate::cell::CellIdBytesContainer>,
+    current_tree_iter: Option<btree_map::Keys<'a, CellIdBytesContainer, LargeTableEntry>>,
+    current_tree_position: Option<CellIdBytesContainer>,
 }
 
 impl<'a> CellIterator<'a> {
@@ -118,7 +120,6 @@ impl<'a> CellIterator<'a> {
         iter.current_row = watermark.row_index;
         iter.current_cell_index = watermark.cell_index;
         if let Some(ref cell_bytes) = watermark.cell_bytes {
-            use smallvec::SmallVec;
             iter.current_tree_position = Some(SmallVec::from_slice(cell_bytes));
         }
         iter
@@ -129,8 +130,12 @@ impl<'a> CellIterator<'a> {
             keyspace_id: self.current_keyspace as u8,
             row_index: self.current_row,
             cell_index: self.current_cell_index,
-            cell_bytes: self.current_tree_position.as_ref().map(|bytes| bytes.to_vec()),
+            cell_bytes: self
+                .current_tree_position
+                .as_ref()
+                .map(|bytes| bytes.to_vec()),
             highest_wal_position: 0, // Will be updated during processing
+            upper_limit: 0, // Will be set during relocation
         }
     }
 
@@ -238,10 +243,24 @@ impl RelocationDriver {
         if watermark_only {
             return Ok(());
         }
-        let gc_watermark = std::cmp::min(
-            self.watermarks.get_relocation_progress(),
-            db.control_region_store.lock().last_position(),
-        );
+
+        // For cell-based relocation, use the minimum of highest_wal_position seen and upper_limit
+        // This ensures we never GC WAL segments beyond the safe boundary
+        let gc_watermark = if self.watermarks.get_cell_progress().upper_limit > 0 {
+            // Cell-based relocation is active
+            let cell_watermark = self.watermarks.get_cell_progress();
+            std::cmp::min(
+                std::cmp::min(cell_watermark.highest_wal_position, cell_watermark.upper_limit),
+                db.control_region_store.lock().last_position(),
+            )
+        } else {
+            // WAL-based relocation
+            std::cmp::min(
+                self.watermarks.get_relocation_progress(),
+                db.control_region_store.lock().last_position(),
+            )
+        };
+
         db.wal_writer.gc(gc_watermark)?;
         Ok(())
     }
@@ -258,10 +277,15 @@ impl RelocationDriver {
             return Ok(());
         };
 
+        // Capture the upper WAL limit to avoid race conditions
+        // Only process entries written before this point
+        let upper_limit = db.wal_writer.position();
+
         // Create iterator starting from saved progress
-        let mut cell_iter = if self.watermarks.get_cell_progress().keyspace_id == 0 &&
-                               self.watermarks.get_cell_progress().row_index == 0 &&
-                               self.watermarks.get_cell_progress().cell_index == 0 {
+        let mut cell_iter = if self.watermarks.get_cell_progress().keyspace_id == 0
+            && self.watermarks.get_cell_progress().row_index == 0
+            && self.watermarks.get_cell_progress().cell_index == 0
+        {
             // Starting from beginning
             CellIterator::new(&db)
         } else {
@@ -270,6 +294,7 @@ impl RelocationDriver {
         };
 
         let mut cells_processed = 0;
+        let mut highest_wal_position = 0u64;
 
         // Build bloom filters for optimization (same as WAL-based relocation)
         let bloom_filters = db.large_table.build_index_bloom_filters(db.as_ref())?;
@@ -284,7 +309,9 @@ impl RelocationDriver {
                 }
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
-                    let current_pos = cell_iter.current_position();
+                    let mut current_pos = cell_iter.current_position();
+                    current_pos.upper_limit = upper_limit;
+                    current_pos.highest_wal_position = highest_wal_position;
                     self.watermarks.set_cell_progress(current_pos);
                     self.save_progress(&db, true)?; // Save watermark only
                 }
@@ -300,13 +327,15 @@ impl RelocationDriver {
             // Process each cell
             let context = self.process_single_cell(&cell_ref, &db, &bloom_filters)?;
 
+            // Track the highest WAL position seen
+            if context.highest_wal_position.offset() > highest_wal_position {
+                highest_wal_position = context.highest_wal_position.offset();
+            }
+
             // Relocate entries if any were marked for keeping
             if !context.entries_to_relocate.is_empty() {
-                let successful = self.relocate_entries(
-                    context.entries_to_relocate,
-                    cell_ref.keyspace_id,
-                    &db,
-                )?;
+                let successful =
+                    self.relocate_entries(context.entries_to_relocate, cell_ref.keyspace_id, &db)?;
                 // Track successful relocations with existing metrics (same as WAL-based)
                 self.metrics
                     .relocation_kept
@@ -323,8 +352,10 @@ impl RelocationDriver {
             cells_processed += 1;
         }
 
-        // Save final progress
-        let final_pos = cell_iter.current_position();
+        // Save final progress with upper_limit and highest WAL position
+        let mut final_pos = cell_iter.current_position();
+        final_pos.upper_limit = upper_limit;
+        final_pos.highest_wal_position = highest_wal_position;
         self.watermarks.set_cell_progress(final_pos);
         self.save_progress(&db, false)?;
 
@@ -475,7 +506,9 @@ impl RelocationDriver {
         let mut pairs = Vec::new(); // TODO: optimize allocation
         let key_positions = {
             let mutex_index = cell_ref.keyspace_desc.mutex_for_cell(&cell_ref.cell_id);
-            let mut row = db.large_table.row_by_mutex(&cell_ref.keyspace_desc, mutex_index);
+            let mut row = db
+                .large_table
+                .row_by_mutex(&cell_ref.keyspace_desc, mutex_index);
 
             let entry = match row.try_entry_mut(&cell_ref.cell_id) {
                 Some(entry) => entry,
@@ -567,7 +600,8 @@ impl RelocationDriver {
         entries: Vec<(Bytes, Bytes, WalPosition)>,
         keyspace: KeySpace,
         db: &Arc<Db>,
-    ) -> DbResult<u64> { // Returns successful_inserts
+    ) -> DbResult<u64> {
+        // Returns successful_inserts
         let mut successful_inserts = 0;
 
         for (key, value, _original_position) in entries {

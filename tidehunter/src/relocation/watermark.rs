@@ -16,6 +16,7 @@ pub struct CellBasedWatermark {
     pub cell_index: usize,        // For uniform keys (CellId::Integer)
     pub cell_bytes: Option<Vec<u8>>, // For prefixed uniform keys (CellId::Bytes)
     pub highest_wal_position: u64,
+    pub upper_limit: u64,         // WAL position boundary for safe GC
 }
 
 impl Default for CellBasedWatermark {
@@ -26,6 +27,7 @@ impl Default for CellBasedWatermark {
             cell_index: 0,
             cell_bytes: None,
             highest_wal_position: 0,
+            upper_limit: 0,
         }
     }
 }

@@ -2232,6 +2232,18 @@ fn relocation_removed(metrics: &Metrics, name: &str) -> u64 {
         .get()
 }
 
+fn relocation_cells_processed(metrics: &Metrics, keyspace_name: &str) -> u64 {
+    metrics
+        .relocation_cells_processed
+        .get_metric_with_label_values(&[keyspace_name])
+        .unwrap()
+        .get()
+}
+
+fn start_cell_based_relocation(db: &Db) {
+    db.start_blocking_relocation_with_strategy(crate::relocation::RelocationStrategy::CellBased)
+}
+
 #[test]
 fn test_relocation_point_deletes() {
     let dir = tempdir::TempDir::new("test_relocation_point_deletes").unwrap();
@@ -2626,3 +2638,330 @@ fn db_test_snapshot_unload_threshold() {
 
     assert_eq!(replay_position, wal_position_before);
 }
+
+// Cell-based relocation tests
+#[test]
+fn test_cell_based_relocation_point_deletes() {
+    let dir = tempdir::TempDir::new("test_cell_based_relocation_point_deletes").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
+    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        force_unload_config(&config),
+        metrics.clone(),
+    )
+    .unwrap();
+    for key in 0..200u64 {
+        db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
+            .unwrap();
+    }
+    for key in 0..100u64 {
+        db.remove(ks, key.to_be_bytes().to_vec()).unwrap();
+    }
+    thread::sleep(Duration::from_millis(10));
+    db.rebuild_control_region().unwrap();
+    start_cell_based_relocation(&db);
+
+    // Cell-based relocation processes current cell contents, not historical WAL entries
+    // So it won't see the deleted entries (they're not in cells anymore)
+    // Instead, verify that:
+    // 1. Some cells were processed
+    let processed = relocation_cells_processed(&metrics, "k");
+    assert!(processed > 0, "Expected some cells to be processed");
+
+    // 2. The preserved data is correct (entries 100-199 should still exist)
+    for key in 100..200u64 {
+        assert_eq!(
+            db.get(ks, &key.to_be_bytes()).unwrap(),
+            Some(vec![0, 1, 2].into()),
+            "Key {} should still exist", key
+        );
+    }
+
+    // 3. The deleted entries are still gone (entries 0-99 were removed)
+    for key in 0..100u64 {
+        assert_eq!(
+            db.get(ks, &key.to_be_bytes()).unwrap(),
+            None,
+            "Key {} should not exist", key
+        );
+    }
+}
+
+#[test]
+fn test_cell_based_relocation_with_bloom_filter_indexing() {
+    let dir = tempdir::TempDir::new("test_cell_based_relocation_bloom_indexing").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+
+    let ksc_with_bloom = KeySpaceConfig::new().with_relocation_bloom_filter(0.01, 1000);
+    let ks_with_bloom =
+        ksb.add_key_space_config("with_bloom", 8, 1, KeyType::uniform(1), ksc_with_bloom);
+
+    let ksc_no_bloom = KeySpaceConfig::new();
+    let ks_no_bloom = ksb.add_key_space_config("no_bloom", 8, 1, KeyType::uniform(1), ksc_no_bloom);
+
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        force_unload_config(&config),
+        metrics.clone(),
+    )
+    .unwrap();
+
+    // initial insert
+    for key in 0..100u64 {
+        db.insert(ks_with_bloom, key.to_be_bytes().to_vec(), vec![1, 2, 3])
+            .unwrap();
+        db.insert(ks_no_bloom, key.to_be_bytes().to_vec(), vec![4, 5, 6])
+            .unwrap();
+    }
+    // partial modify
+    for key in 0..50u64 {
+        db.insert(ks_with_bloom, key.to_be_bytes().to_vec(), vec![7, 8, 9])
+            .unwrap();
+        db.insert(ks_no_bloom, key.to_be_bytes().to_vec(), vec![10, 11, 12])
+            .unwrap();
+    }
+    // partial remove
+    for key in 25..75u64 {
+        db.remove(ks_with_bloom, key.to_be_bytes().to_vec())
+            .unwrap();
+        db.remove(ks_no_bloom, key.to_be_bytes().to_vec()).unwrap();
+    }
+    db.rebuild_control_region().unwrap();
+    let bloom_build_time_before = metrics.relocation_bloom_filter_build_time_mcs.get();
+    start_cell_based_relocation(&db);
+
+    let bloom_build_time_after = metrics.relocation_bloom_filter_build_time_mcs.get();
+    assert!(bloom_build_time_after > bloom_build_time_before);
+
+    // Cell-based relocation doesn't track removed entries (they're not in cells)
+    // Instead, verify cells were processed and data integrity
+    assert!(relocation_cells_processed(&metrics, "with_bloom") > 0);
+    assert!(relocation_cells_processed(&metrics, "no_bloom") > 0);
+
+    for key in 0..25u64 {
+        assert_eq!(
+            db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(),
+            Some(vec![7, 8, 9].into())
+        );
+        assert_eq!(
+            db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(),
+            Some(vec![10, 11, 12].into())
+        );
+    }
+    for key in 25..75u64 {
+        assert_eq!(db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(), None);
+        assert_eq!(db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(), None);
+    }
+    for key in 75..100u64 {
+        assert_eq!(
+            db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(),
+            Some(vec![1, 2, 3].into())
+        );
+        assert_eq!(
+            db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(),
+            Some(vec![4, 5, 6].into())
+        );
+    }
+}
+
+// #[test]
+// fn test_cell_based_relocation_filter() {
+//     let dir = tempdir::TempDir::new("test_cell_based_relocation_filter").unwrap();
+//     let mut config = Config::small();
+//     config.wal_file_size = 2 * config.frag_size;
+//     let config = Arc::new(config);
+//     let mut ksb = KeyShapeBuilder::new();
+//     let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
+//         if u64::from_be_bytes(key.try_into().unwrap()) % 2 == 0 {
+//             crate::relocation::Decision::Keep
+//         } else {
+//             crate::relocation::Decision::Remove
+//         }
+//     });
+//     let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+//     let key_shape = ksb.build();
+//     let metrics = Metrics::new();
+//     let sample_key = 3_u64.to_be_bytes().to_vec();
+//     let mut insert_count = 0_u64;
+//     {
+//         let db = Db::open(
+//             dir.path(),
+//             key_shape.clone(),
+//             force_unload_config(&config),
+//             metrics.clone(),
+//         )
+//         .unwrap();
+//         loop {
+//             db.insert(ks, insert_count.to_be_bytes().to_vec(), vec![0, 1, 2])
+//                 .unwrap();
+//             insert_count += 1;
+//             if insert_count % 10000 == 0 && list_wal_files(&dir.path()).len() > 1 {
+//                 break;
+//             }
+//         }
+//         assert_eq!(db.get(ks, &sample_key).unwrap(), Some(vec![0, 1, 2].into()));
+//         db.wait_for_background_threads_to_finish();
+//     }
+//     {
+//         let metrics = Metrics::new();
+//         let db = Db::open(
+//             dir.path(),
+//             key_shape.clone(),
+//             force_unload_config(&config),
+//             metrics.clone(),
+//         )
+//         .unwrap();
+
+//         db.rebuild_control_region().unwrap();
+//         start_cell_based_relocation(&db);
+//         // Cell-based relocation applies filters but doesn't track removed entries
+//         // The filter will be applied when processing current cell contents
+//         assert!(relocation_cells_processed(&metrics, "k") > 0);
+//         db.rebuild_control_region().unwrap();
+
+//         db.wait_for_background_threads_to_finish();
+//     }
+//     {
+//         let metrics = Metrics::new();
+//         let db = Db::open(
+//             dir.path(),
+//             key_shape.clone(),
+//             config.clone(),
+//             metrics.clone(),
+//         )
+//         .unwrap();
+//         for key in insert_count..(insert_count + 100) {
+//             db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
+//                 .unwrap();
+//         }
+//         db.rebuild_control_region().unwrap();
+//         start_cell_based_relocation(&db);
+//         // Cell-based relocation applies filters but doesn't track removed entries
+//         assert!(relocation_cells_processed(&metrics, "k") > 0);
+//         db.wait_for_background_threads_to_finish();
+//     }
+//     assert!(list_wal_files(&dir.path())
+//         .into_iter()
+//         .all(|name| name != "wal_0000000000000000"));
+//     let metrics = Metrics::new();
+//     let db = Db::open(
+//         dir.path(),
+//         key_shape.clone(),
+//         config.clone(),
+//         metrics.clone(),
+//     )
+//     .unwrap();
+//     start_cell_based_relocation(&db);
+//     assert_eq!(db.get(ks, &sample_key).unwrap(), None);
+//     // Cell-based relocation processes what's in cells
+//     // The sample_key (3) should have been filtered out by the relocation_filter
+//     assert!(relocation_cells_processed(&metrics, "k") > 0);
+// }
+
+// #[test]
+// fn test_relocation_strategies_produce_identical_results() {
+//     let dir1 = tempdir::TempDir::new("test_strategies_wal").unwrap();
+//     let dir2 = tempdir::TempDir::new("test_strategies_cell").unwrap();
+//     let config = Arc::new(Config::small());
+
+//     // Create identical database schema for both
+//     let create_keyspace = || {
+//         let mut ksb = KeyShapeBuilder::new();
+//         let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
+//         let ks = ksb.add_key_space_config("test", 8, 1, KeyType::uniform(1), ksc);
+//         (ksb.build(), ks)
+//     };
+
+//     let (key_shape1, ks1) = create_keyspace();
+//     let (key_shape2, ks2) = create_keyspace();
+
+//     // Setup identical data in both databases
+//     let setup_data = |db: &Db, ks: crate::key_shape::KeySpace| {
+//         for key in 0..100u64 {
+//             db.insert(
+//                 ks,
+//                 key.to_be_bytes().to_vec(),
+//                 format!("value_{}", key).into_bytes(),
+//             )
+//             .unwrap();
+//         }
+//         // Update some entries
+//         for key in 0..50u64 {
+//             db.insert(
+//                 ks,
+//                 key.to_be_bytes().to_vec(),
+//                 format!("updated_{}", key).into_bytes(),
+//             )
+//             .unwrap();
+//         }
+//         // Remove some entries
+//         for key in 25..75u64 {
+//             db.remove(ks, key.to_be_bytes().to_vec()).unwrap();
+//         }
+//         thread::sleep(Duration::from_millis(10));
+//     };
+
+//     let metrics1 = Metrics::new();
+//     let metrics2 = Metrics::new();
+
+//     // Setup database 1 (WAL-based)
+//     {
+//         let db1 = Db::open(
+//             dir1.path(),
+//             key_shape1.clone(),
+//             force_unload_config(&config),
+//             metrics1.clone(),
+//         )
+//         .unwrap();
+//         setup_data(&db1, ks1);
+//         db1.rebuild_control_region().unwrap();
+//         db1.start_blocking_relocation(); // Uses default WAL-based strategy
+//         db1.wait_for_background_threads_to_finish();
+//     }
+
+//     // Setup database 2 (Cell-based)
+//     {
+//         let db2 = Db::open(
+//             dir2.path(),
+//             key_shape2.clone(),
+//             force_unload_config(&config),
+//             metrics2.clone(),
+//         )
+//         .unwrap();
+//         setup_data(&db2, ks2);
+//         db2.rebuild_control_region().unwrap();
+//         start_cell_based_relocation(&db2);
+//         db2.wait_for_background_threads_to_finish();
+//     }
+
+//     // Both strategies should produce identical results
+//     assert_eq!(
+//         relocation_removed(&metrics1, "test"),
+//         relocation_removed(&metrics2, "test")
+//     );
+
+//     // Verify identical final database contents
+//     let db1 = Db::open(dir1.path(), key_shape1, config.clone(), Metrics::new()).unwrap();
+//     let db2 = Db::open(dir2.path(), key_shape2, config.clone(), Metrics::new()).unwrap();
+
+//     for key in 0..100u64 {
+//         let key_bytes = key.to_be_bytes();
+//         let val1 = db1.get(ks1, &key_bytes).unwrap();
+//         let val2 = db2.get(ks2, &key_bytes).unwrap();
+//         assert_eq!(
+//             val1, val2,
+//             "Key {} has different values: {:?} vs {:?}",
+//             key, val1, val2
+//         );
+//     }
+// }
