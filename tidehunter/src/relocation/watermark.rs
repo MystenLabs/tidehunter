@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub const RELOCATION_FILE: &str = "rel";
 pub const CELL_RELOCATION_FILE: &str = "rel_cell";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CellBasedWatermark {
     pub keyspace_id: u8,
     pub row_index: usize,
@@ -17,19 +17,6 @@ pub struct CellBasedWatermark {
     pub cell_bytes: Option<Vec<u8>>, // For prefixed uniform keys (CellId::Bytes)
     pub highest_wal_position: u64,
     pub upper_limit: u64, // WAL position boundary for safe GC
-}
-
-impl Default for CellBasedWatermark {
-    fn default() -> Self {
-        Self {
-            keyspace_id: 0,
-            row_index: 0,
-            cell_index: 0,
-            cell_bytes: None,
-            highest_wal_position: 0,
-            upper_limit: 0,
-        }
-    }
 }
 
 pub struct RelocationWatermarks {
