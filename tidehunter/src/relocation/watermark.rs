@@ -13,10 +13,10 @@ pub const CELL_RELOCATION_FILE: &str = "rel_cell";
 pub struct CellBasedWatermark {
     pub keyspace_id: u8,
     pub row_index: usize,
-    pub cell_index: usize,        // For uniform keys (CellId::Integer)
+    pub cell_index: usize,           // For uniform keys (CellId::Integer)
     pub cell_bytes: Option<Vec<u8>>, // For prefixed uniform keys (CellId::Bytes)
     pub highest_wal_position: u64,
-    pub upper_limit: u64,         // WAL position boundary for safe GC
+    pub upper_limit: u64, // WAL position boundary for safe GC
 }
 
 impl Default for CellBasedWatermark {
@@ -86,7 +86,10 @@ impl RelocationWatermarks {
         file.read_to_end(&mut buffer)?;
 
         bincode::deserialize(&buffer).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize cell watermark: {}", e))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to deserialize cell watermark: {}", e),
+            )
         })
     }
 
@@ -119,7 +122,10 @@ impl RelocationWatermarks {
         let tmp_path = target_path.with_extension("tmp");
 
         let serialized = bincode::serialize(&self.cell_progress).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("Failed to serialize cell watermark: {}", e))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to serialize cell watermark: {}", e),
+            )
         })?;
 
         let mut file = OpenOptions::new()

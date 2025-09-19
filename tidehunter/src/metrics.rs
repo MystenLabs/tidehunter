@@ -193,7 +193,11 @@ impl Metrics {
             ),
 
             // Cell-based relocation metrics
-            relocation_cells_processed: counter_vec!("relocation_cells_processed", &["ks"], registry),
+            relocation_cells_processed: counter_vec!(
+                "relocation_cells_processed",
+                &["ks"],
+                registry
+            ),
             relocation_current_keyspace: gauge!("relocation_current_keyspace", registry),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),

@@ -1,4 +1,6 @@
 use super::super::*;
+use crate::batch::WriteBatch;
+use crate::config::Config;
 use crate::crc::CrcFrame;
 use crate::failpoints::FailPoint;
 use crate::index::index_format::IndexFormatType;
@@ -6,8 +8,8 @@ use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{KeyIndexing, KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
 use crate::metrics::Metrics;
 use crate::relocation::Decision;
-use crate::{batch::WriteBatch, relocation::Decision::Keep};
-use crate::{config::Config, relocation::Decision::Remove};
+use crate::relocation::Decision::Keep;
+use crate::relocation::Decision::Remove;
 use minibytes::Bytes;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};

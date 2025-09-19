@@ -696,7 +696,10 @@ impl Db {
         Ok(*self.index_writer.write(&w)?.wal_position())
     }
 
-    pub(crate) fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(bool, Option<WalEntry>)> {
+    pub(crate) fn read_entry(
+        wal: &Wal,
+        position: WalPosition,
+    ) -> DbResult<(bool, Option<WalEntry>)> {
         let (mapped, entry) = wal.read_unmapped(position)?;
         Ok((mapped, entry.map(WalEntry::from_bytes)))
     }
@@ -781,9 +784,7 @@ impl Db {
         &self,
         strategy: RelocationStrategy,
     ) -> Result<(), mpsc::SendError<RelocationCommand>> {
-        self.relocator
-            .0
-            .send(RelocationCommand::Start(strategy))
+        self.relocator.0.send(RelocationCommand::Start(strategy))
     }
 
     #[cfg(test)]
