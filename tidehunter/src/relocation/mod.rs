@@ -1,5 +1,6 @@
+use crate::cell::CellId;
 use crate::db::{Db, DbResult, WalEntry};
-use crate::key_shape::{KeySpace, KeySpaceDesc};
+use crate::key_shape::{KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable};
 use crate::metrics::Metrics;
 use crate::wal::WalError;
@@ -11,7 +12,7 @@ use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
 
 mod watermark;
-pub use watermark::RelocationWatermarks;
+pub use watermark::{RelocationWatermarks, CellBasedWatermark};
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
@@ -44,6 +45,113 @@ pub enum Decision {
 
 pub trait RelocationFilter: Fn(&[u8], &[u8]) -> Decision + Send + Sync + 'static {}
 impl<F> RelocationFilter for F where F: Fn(&[u8], &[u8]) -> Decision + Send + Sync + 'static {}
+
+#[derive(Clone)]
+pub struct CellReference {
+    pub keyspace_id: KeySpace,
+    pub keyspace_desc: KeySpaceDesc,
+    // TODO: These fields will be used in Phase 2 for actual cell processing
+    #[allow(dead_code)]
+    pub row_index: usize,
+    #[allow(dead_code)]
+    pub cell_id: CellId,
+}
+
+pub struct CellIterator<'a> {
+    db: &'a Db,
+    current_keyspace: usize,
+    current_row: usize,
+    current_cell_index: usize,
+    // TODO: Add support for PrefixedUniform iteration in Phase 2
+    #[allow(dead_code)]
+    current_tree_iter: Option<std::collections::btree_map::Keys<'a, crate::cell::CellIdBytesContainer, crate::large_table::LargeTableEntry>>,
+    current_tree_position: Option<crate::cell::CellIdBytesContainer>,
+}
+
+impl<'a> CellIterator<'a> {
+    pub fn new(db: &'a Db) -> Self {
+        Self {
+            db,
+            current_keyspace: 0,
+            current_row: 0,
+            current_cell_index: 0,
+            current_tree_iter: None,
+            current_tree_position: None,
+        }
+    }
+
+    pub fn from_watermark(db: &'a Db, watermark: &CellBasedWatermark) -> Self {
+        let mut iter = Self::new(db);
+        iter.current_keyspace = watermark.keyspace_id as usize;
+        iter.current_row = watermark.row_index;
+        iter.current_cell_index = watermark.cell_index;
+        if let Some(ref cell_bytes) = watermark.cell_bytes {
+            use smallvec::SmallVec;
+            iter.current_tree_position = Some(SmallVec::from_slice(cell_bytes));
+        }
+        iter
+    }
+
+    pub fn current_position(&self) -> CellBasedWatermark {
+        CellBasedWatermark {
+            keyspace_id: self.current_keyspace as u8,
+            row_index: self.current_row,
+            cell_index: self.current_cell_index,
+            cell_bytes: self.current_tree_position.as_ref().map(|bytes| bytes.to_vec()),
+            highest_wal_position: 0, // Will be updated during processing
+        }
+    }
+
+    pub fn next_cell(&mut self) -> Option<CellReference> {
+        loop {
+            if self.current_keyspace >= self.db.key_shape.num_ks() {
+                return None;
+            }
+
+            let ks_desc = self.db.key_shape.ks(KeySpace(self.current_keyspace as u8));
+
+            if self.current_row >= ks_desc.num_mutexes() {
+                // Move to next keyspace
+                self.current_keyspace += 1;
+                self.current_row = 0;
+                self.current_cell_index = 0;
+                self.current_tree_iter = None;
+                self.current_tree_position = None;
+                continue;
+            }
+
+            match ks_desc.key_type() {
+                KeyType::Uniform(config) => {
+                    // For uniform keys, we iterate through array indices
+                    let cells_per_mutex = config.cells_per_mutex();
+                    if self.current_cell_index >= cells_per_mutex {
+                        // Move to next row
+                        self.current_row += 1;
+                        self.current_cell_index = 0;
+                        continue;
+                    }
+
+                    let cell_ref = CellReference {
+                        keyspace_id: KeySpace(self.current_keyspace as u8),
+                        keyspace_desc: ks_desc.clone(),
+                        row_index: self.current_row,
+                        cell_id: CellId::Integer(self.current_cell_index),
+                    };
+
+                    self.current_cell_index += 1;
+                    return Some(cell_ref);
+                }
+                KeyType::PrefixedUniform(_) => {
+                    // For prefixed uniform keys, we need to iterate through the BTreeMap
+                    // This is more complex and would require accessing the actual row data
+                    // For now, let's move to the next row
+                    self.current_row += 1;
+                    continue;
+                }
+            }
+        }
+    }
+}
 
 pub(crate) struct RelocationDriver {
     db: Weak<Db>,
@@ -114,8 +222,66 @@ impl RelocationDriver {
     }
 
     fn cell_based_relocation(&mut self) -> DbResult<()> {
-        // TODO: Implement cell-based relocation
-        todo!("Cell-based relocation not yet implemented")
+        let Some(db) = self.db.upgrade() else {
+            return Ok(());
+        };
+
+        // Create iterator starting from saved progress
+        let mut cell_iter = if self.watermarks.get_cell_progress().keyspace_id == 0 &&
+                               self.watermarks.get_cell_progress().row_index == 0 &&
+                               self.watermarks.get_cell_progress().cell_index == 0 {
+            // Starting from beginning
+            CellIterator::new(&db)
+        } else {
+            // Resume from saved position
+            CellIterator::from_watermark(&db, self.watermarks.get_cell_progress())
+        };
+
+        let mut cells_processed = 0;
+        let save_interval = 100; // Save progress every 100 cells
+
+        let mut current_ks_id = None;
+
+        while let Some(cell_ref) = cell_iter.next_cell() {
+            // Check for cancellation periodically
+            if cells_processed % 10 == 0 {
+                if self.should_cancel_relocation() {
+                    break;
+                }
+            }
+
+            // Update current keyspace metric when it changes
+            let ks_id = cell_ref.keyspace_id.as_usize();
+            if current_ks_id != Some(ks_id) {
+                current_ks_id = Some(ks_id);
+                self.metrics.relocation_current_keyspace.set(ks_id as i64);
+            }
+
+            // TODO: Process the cell entries (Phase 2)
+            // For now, just update progress
+
+            // Track cells processed
+            self.metrics
+                .relocation_cells_processed
+                .with_label_values(&[cell_ref.keyspace_desc.name()])
+                .inc();
+
+            cells_processed += 1;
+
+            // Save progress periodically
+            if cells_processed % save_interval == 0 {
+                let current_pos = cell_iter.current_position();
+                self.watermarks.set_cell_progress(current_pos);
+                self.save_progress(&db, true)?; // Save watermark only
+            }
+        }
+
+        // Save final progress
+        let final_pos = cell_iter.current_position();
+        self.watermarks.set_cell_progress(final_pos);
+        self.save_progress(&db, false)?;
+
+        Ok(())
     }
 
     fn wal_based_relocation(&mut self) -> DbResult<()> {
