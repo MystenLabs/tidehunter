@@ -61,7 +61,7 @@ struct KsTable {
     rows: ShardedMutex<Row>,
 }
 
-struct Row {
+pub(crate) struct Row {
     value_lru: Option<LruCache<Bytes, Bytes>>,
     context: KsContext,
     entries: Entries,
@@ -426,7 +426,7 @@ impl LargeTable {
         (row, cell)
     }
 
-    fn row_by_mutex(&self, ks: &KeySpaceDesc, mutex: usize) -> MutexGuard<'_, Row> {
+    pub(crate) fn row_by_mutex(&self, ks: &KeySpaceDesc, mutex: usize) -> MutexGuard<'_, Row> {
         let ks_table = self.ks_table(ks);
         ks_table.lock(
             mutex,

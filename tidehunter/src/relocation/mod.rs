@@ -6,6 +6,7 @@ use crate::metrics::Metrics;
 use crate::wal::WalError;
 use crate::WalPosition;
 use bloom::{BloomFilter, ASMS};
+use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
@@ -50,11 +51,42 @@ impl<F> RelocationFilter for F where F: Fn(&[u8], &[u8]) -> Decision + Send + Sy
 pub struct CellReference {
     pub keyspace_id: KeySpace,
     pub keyspace_desc: KeySpaceDesc,
-    // TODO: These fields will be used in Phase 2 for actual cell processing
-    #[allow(dead_code)]
     pub row_index: usize,
-    #[allow(dead_code)]
     pub cell_id: CellId,
+}
+
+#[derive(Debug)]
+struct CellProcessingContext {
+    entries_to_relocate: Vec<(Bytes, Bytes, WalPosition)>, // key, value, original position
+    highest_wal_position: WalPosition,
+    entries_removed: u64,
+    entries_kept: u64,
+}
+
+impl CellProcessingContext {
+    fn new() -> Self {
+        Self {
+            entries_to_relocate: Vec::new(),
+            highest_wal_position: WalPosition::INVALID,
+            entries_removed: 0,
+            entries_kept: 0,
+        }
+    }
+
+    fn add_entry_to_relocate(&mut self, key: Bytes, value: Bytes, position: WalPosition) {
+        self.entries_to_relocate.push((key, value, position));
+        self.entries_kept += 1;
+        if position.offset() > self.highest_wal_position.offset() {
+            self.highest_wal_position = position;
+        }
+    }
+
+    fn mark_entry_removed(&mut self, position: WalPosition) {
+        self.entries_removed += 1;
+        if position.offset() > self.highest_wal_position.offset() {
+            self.highest_wal_position = position;
+        }
+    }
 }
 
 pub struct CellIterator<'a> {
@@ -238,15 +270,23 @@ impl RelocationDriver {
         };
 
         let mut cells_processed = 0;
-        let save_interval = 100; // Save progress every 100 cells
+
+        // Build bloom filters for optimization (same as WAL-based relocation)
+        let bloom_filters = db.large_table.build_index_bloom_filters(db.as_ref())?;
 
         let mut current_ks_id = None;
 
         while let Some(cell_ref) = cell_iter.next_cell() {
             // Check for cancellation periodically
-            if cells_processed % 10 == 0 {
+            if cells_processed % Self::NUM_ITERATIONS_IN_BATCH == 0 {
                 if self.should_cancel_relocation() {
                     break;
+                }
+                // Save progress periodically
+                if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
+                    let current_pos = cell_iter.current_position();
+                    self.watermarks.set_cell_progress(current_pos);
+                    self.save_progress(&db, true)?; // Save watermark only
                 }
             }
 
@@ -257,8 +297,22 @@ impl RelocationDriver {
                 self.metrics.relocation_current_keyspace.set(ks_id as i64);
             }
 
-            // TODO: Process the cell entries (Phase 2)
-            // For now, just update progress
+            // Process each cell
+            let context = self.process_single_cell(&cell_ref, &db, &bloom_filters)?;
+
+            // Relocate entries if any were marked for keeping
+            if !context.entries_to_relocate.is_empty() {
+                let successful = self.relocate_entries(
+                    context.entries_to_relocate,
+                    cell_ref.keyspace_id,
+                    &db,
+                )?;
+                // Track successful relocations with existing metrics (same as WAL-based)
+                self.metrics
+                    .relocation_kept
+                    .with_label_values(&[cell_ref.keyspace_desc.name()])
+                    .inc_by(successful);
+            }
 
             // Track cells processed
             self.metrics
@@ -267,13 +321,6 @@ impl RelocationDriver {
                 .inc();
 
             cells_processed += 1;
-
-            // Save progress periodically
-            if cells_processed % save_interval == 0 {
-                let current_pos = cell_iter.current_position();
-                self.watermarks.set_cell_progress(current_pos);
-                self.save_progress(&db, true)?; // Save watermark only
-            }
         }
 
         // Save final progress
@@ -412,5 +459,124 @@ impl RelocationDriver {
                 Ok(RelocationCommand::StartBlocking(_, cb)) => cb.send(()).unwrap(),
             }
         }
+    }
+
+    /// Process a single cell: collect keys, read values from WAL, make decisions
+    fn process_single_cell(
+        &self,
+        cell_ref: &CellReference,
+        db: &Arc<Db>,
+        bloom_filters: &HashMap<KeySpace, BloomFilter>,
+    ) -> DbResult<CellProcessingContext> {
+        let mut context = CellProcessingContext::new();
+        let mut removed_count = 0;
+
+        // Phase A: Collect keys and positions under lock
+        let mut pairs = Vec::new(); // TODO: optimize allocation
+        let key_positions = {
+            let mutex_index = cell_ref.keyspace_desc.mutex_for_cell(&cell_ref.cell_id);
+            let mut row = db.large_table.row_by_mutex(&cell_ref.keyspace_desc, mutex_index);
+
+            let entry = match row.try_entry_mut(&cell_ref.cell_id) {
+                Some(entry) => entry,
+                None => {
+                    // Cell doesn't exist or is empty
+                    return Ok(context);
+                }
+            };
+
+            // Load the entry if it's unloaded
+            entry.maybe_load(db.as_ref())?;
+
+            // Collect all key-position pairs
+            for (key, position) in entry.data.iter() {
+                pairs.push((key.clone(), position));
+            }
+            pairs
+        }; // Lock is released here
+
+        // Phase B: Read values from WAL and make decisions (no lock held)
+        for (key, position) in key_positions {
+            // Read the actual value from WAL
+            let value = match self.read_value_from_wal(&db.wal, position)? {
+                Some(val) => val,
+                None => {
+                    // Entry might have been deleted or corrupted, skip it
+                    context.mark_entry_removed(position);
+                    removed_count += 1;
+                    continue;
+                }
+            };
+
+            let decision = self.should_keep_entry(
+                db,
+                bloom_filters,
+                &cell_ref.keyspace_desc,
+                &key,
+                &value,
+                position,
+            )?;
+
+            match decision {
+                Decision::Keep => {
+                    context.add_entry_to_relocate(key, value, position);
+                }
+                Decision::Remove => {
+                    context.mark_entry_removed(position);
+                    removed_count += 1;
+                }
+                Decision::StopRelocation => {
+                    break;
+                }
+            }
+        }
+
+        // Track removed entries with existing metrics (same as WAL-based)
+        if removed_count > 0 {
+            self.metrics
+                .relocation_removed
+                .with_label_values(&[cell_ref.keyspace_desc.name()])
+                .inc_by(removed_count);
+        }
+
+        Ok(context)
+    }
+
+    /// Read value from WAL at given position
+    fn read_value_from_wal(
+        &self,
+        wal: &crate::wal::Wal,
+        position: WalPosition,
+    ) -> DbResult<Option<Bytes>> {
+        let (_, entry) = crate::db::Db::read_entry(wal, position)?;
+
+        match entry {
+            Some(WalEntry::Record(_, _, value)) => Ok(Some(value)),
+            Some(WalEntry::Remove(_, _)) => Ok(None), // Entry was removed
+            Some(WalEntry::Index(_, _)) | Some(WalEntry::BatchStart(_)) => {
+                // These shouldn't be in the regular WAL positions we're reading
+                Ok(None)
+            }
+            None => Ok(None), // Entry not found or corrupted
+        }
+    }
+
+    /// Relocate entries following the same pattern as WAL-based relocation
+    fn relocate_entries(
+        &self,
+        entries: Vec<(Bytes, Bytes, WalPosition)>,
+        keyspace: KeySpace,
+        db: &Arc<Db>,
+    ) -> DbResult<u64> { // Returns successful_inserts
+        let mut successful_inserts = 0;
+
+        for (key, value, _original_position) in entries {
+            // TODO: handle potential races with concurrent writes to the same key
+            // (same TODO as WAL-based relocation - consistency with existing approach)
+            db.insert(keyspace, key.to_vec(), value.to_vec())?;
+            successful_inserts += 1;
+        }
+
+        Ok(successful_inserts)
     }
 }
