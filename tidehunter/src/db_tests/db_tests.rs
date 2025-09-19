@@ -2885,3 +2885,98 @@ fn test_cell_based_relocation_filter() {
     // Verify all data is still accessible regardless of whether relocation occurred
     assert_eq!(db.get(ks, &sample_key).unwrap(), Some(vec![0, 1, 2].into()));
 }
+
+#[test]
+fn test_relocation_strategies_produce_identical_results() {
+    let dir1 = tempdir::TempDir::new("test_wal_strategy").unwrap();
+    let dir2 = tempdir::TempDir::new("test_cell_strategy").unwrap();
+    let config = Arc::new(Config::small());
+
+    // Create identical keyspace configurations
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
+    let ks = ksb.add_key_space_config("test", 8, 1, KeyType::uniform(1), ksc);
+    let key_shape = ksb.build();
+
+    let metrics_wal = Metrics::new();
+    let metrics_cell = Metrics::new();
+
+    // Create identical databases with identical operations
+    let (db_wal, db_cell) = {
+        let db_wal = Db::open(
+            dir1.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics_wal.clone(),
+        )
+        .unwrap();
+        let db_cell = Db::open(
+            dir2.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics_cell.clone(),
+        )
+        .unwrap();
+
+        // Apply identical operations to both databases
+        for key in 0..1000u64 {
+            let value = format!("value_{}", key).into_bytes();
+            db_wal
+                .insert(ks, key.to_be_bytes().to_vec(), value.clone())
+                .unwrap();
+            db_cell
+                .insert(ks, key.to_be_bytes().to_vec(), value)
+                .unwrap();
+        }
+
+        // Update some entries
+        for key in (0..500u64).step_by(2) {
+            let value = format!("updated_value_{}", key).into_bytes();
+            db_wal
+                .insert(ks, key.to_be_bytes().to_vec(), value.clone())
+                .unwrap();
+            db_cell
+                .insert(ks, key.to_be_bytes().to_vec(), value)
+                .unwrap();
+        }
+
+        // Delete some entries
+        for key in (100..200u64).step_by(3) {
+            db_wal.remove(ks, key.to_be_bytes().to_vec()).unwrap();
+            db_cell.remove(ks, key.to_be_bytes().to_vec()).unwrap();
+        }
+
+        (db_wal, db_cell)
+    };
+
+    // Run different relocation strategies
+    db_wal.rebuild_control_region().unwrap();
+    db_cell.rebuild_control_region().unwrap();
+
+    db_wal.start_blocking_relocation(); // Default WAL-based
+    start_cell_based_relocation(&db_cell);
+
+    // Compare final database contents key by key
+    for key in 0..1000u64 {
+        let key_bytes = key.to_be_bytes().to_vec();
+        let val_wal = db_wal.get(ks, &key_bytes).unwrap();
+        let val_cell = db_cell.get(ks, &key_bytes).unwrap();
+
+        assert_eq!(val_wal, val_cell, "Databases differ for key {}", key);
+    }
+
+    // Verify both processed data (metrics may differ but both should have done work)
+    let wal_removed = relocation_removed(&metrics_wal, "test");
+    let cell_processed = relocation_cells_processed(&metrics_cell, "test");
+
+    // WAL-based counts removed entries, cell-based counts processed cells
+    // Both should be > 0 indicating work was done
+    assert!(
+        wal_removed > 0,
+        "WAL-based should have processed removed entries"
+    );
+    assert!(
+        cell_processed > 0,
+        "Cell-based should have processed some cells"
+    );
+}
