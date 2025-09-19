@@ -2980,3 +2980,299 @@ fn test_relocation_strategies_produce_identical_results() {
         "Cell-based should have processed some cells"
     );
 }
+
+#[test]
+fn test_both_strategies_handle_concurrent_writes() {
+    // Test both strategies handle concurrent writes safely
+
+    let test_concurrent_strategy = |strategy_name: &str, use_cell_based: bool| {
+        let dir = tempdir::TempDir::new(&format!("test_concurrent_{strategy_name}")).unwrap();
+        let config = Arc::new(Config::small());
+        let mut ksb = KeyShapeBuilder::new();
+        let ksc = KeySpaceConfig::new();
+        let ks = ksb.add_key_space_config("concurrent", 8, 1, KeyType::uniform(1), ksc);
+        let key_shape = ksb.build();
+        let metrics = Metrics::new();
+
+        let db = Arc::new(Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap());
+
+        // Pre-populate data
+        for i in 0..1000u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), vec![1, 2, 3])
+                .unwrap();
+        }
+
+        let skip_stale_before = metrics
+            .skip_stale_update
+            .get_metric_with_label_values(&["concurrent", "insert"])
+            .unwrap()
+            .get();
+
+        // Start concurrent writers
+        let mut handles = vec![];
+        let db_clone = Arc::clone(&db);
+
+        // Writer thread - continuously updates keys
+        let writer_handle = thread::spawn(move || {
+            let mut successful_writes = 0;
+            for round in 0..100 {
+                for i in (0..100u64).step_by(5) {
+                    let key = i.to_be_bytes().to_vec();
+                    let value = vec![round as u8, (round >> 8) as u8, i as u8];
+                    match db_clone.insert(ks, key, value) {
+                        Ok(_) => successful_writes += 1,
+                        Err(_) => {} // Some concurrent access failures are expected
+                    }
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            successful_writes
+        });
+        handles.push(writer_handle);
+
+        // Start relocation while writers are active
+        db.rebuild_control_region().unwrap();
+        if use_cell_based {
+            start_cell_based_relocation(&db);
+        } else {
+            db.start_blocking_relocation();
+        }
+
+        // Wait for writers to finish and collect successful write counts
+        let mut total_successful_writes = 0;
+        for handle in handles {
+            let successful_writes = handle.join().unwrap();
+            total_successful_writes += successful_writes;
+        }
+
+        let skip_stale_after = metrics
+            .skip_stale_update
+            .get_metric_with_label_values(&["concurrent", "insert"])
+            .unwrap()
+            .get();
+
+        // Return the database, keyspace, metrics, and successful write count for verification
+        (
+            db,
+            ks,
+            skip_stale_after - skip_stale_before,
+            total_successful_writes,
+        )
+    };
+
+    let (db_wal, ks_wal, _wal_stale_updates, wal_successful_writes) =
+        test_concurrent_strategy("wal", false);
+    let (db_cell, ks_cell, _cell_stale_updates, cell_successful_writes) =
+        test_concurrent_strategy("cell", true);
+
+    // Test 1: Both strategies should complete without crashing (we got here)
+
+    // Test 2: Both strategies should have completed some successful writes
+    assert!(
+        wal_successful_writes > 0,
+        "WAL strategy should have completed some writes, got {}",
+        wal_successful_writes
+    );
+    assert!(
+        cell_successful_writes > 0,
+        "Cell strategy should have completed some writes, got {}",
+        cell_successful_writes
+    );
+
+    assert_eq!(
+        wal_successful_writes, cell_successful_writes,
+        "Both strategies should complete the same number of writes: WAL={}, Cell={}",
+        wal_successful_writes, cell_successful_writes
+    );
+
+    // Test 3: Verify data consistency - all keys should have valid values after concurrent writes
+    for i in (0..100u64).step_by(5) {
+        let wal_value = db_wal.get(ks_wal, &i.to_be_bytes()).unwrap().unwrap();
+        let cell_value = db_cell.get(ks_cell, &i.to_be_bytes()).unwrap().unwrap();
+
+        // Values should be 3 bytes: [round, round>>8, key]
+        assert_eq!(
+            wal_value.len(),
+            3,
+            "WAL strategy produced invalid value length for key {}",
+            i
+        );
+        assert_eq!(
+            cell_value.len(),
+            3,
+            "Cell strategy produced invalid value length for key {}",
+            i
+        );
+        assert_eq!(
+            wal_value[2], i as u8,
+            "WAL strategy corrupted key data for key {}",
+            i
+        );
+        assert_eq!(
+            cell_value[2], i as u8,
+            "Cell strategy corrupted key data for key {}",
+            i
+        );
+    }
+}
+
+#[test]
+fn test_cell_based_relocation_progress_tracking() {
+    let dir = tempdir::TempDir::new("test_cell_progress_tracking").unwrap();
+    let config = Arc::new(Config::small());
+
+    // Create multiple keyspaces to ensure cross-keyspace progress tracking
+    let mut ksb = KeyShapeBuilder::new();
+    let ks1 = ksb.add_key_space_config("ks1", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    let ks2 = ksb.add_key_space_config("ks2", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+
+    // Populate data across multiple keyspaces
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+
+        for ks in [ks1, ks2] {
+            for key in 0..500u64 {
+                db.insert(ks, key.to_be_bytes().to_vec(), vec![1, 2, 3])
+                    .unwrap();
+            }
+        }
+        db.wait_for_background_threads_to_finish();
+    }
+
+    // Test that watermark files are created and progress is tracked
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        db.rebuild_control_region().unwrap();
+        start_cell_based_relocation(&db);
+
+        // Verify some progress was made
+        let processed_ks1 = relocation_cells_processed(&metrics, "ks1");
+        let processed_ks2 = relocation_cells_processed(&metrics, "ks2");
+        assert!(
+            processed_ks1 > 0 || processed_ks2 > 0,
+            "Expected some cells to be processed"
+        );
+
+        db.wait_for_background_threads_to_finish();
+    }
+
+    // Verify watermark files exist
+    let cell_watermark_file = dir.path().join("rel_cell");
+    assert!(
+        cell_watermark_file.exists(),
+        "Cell watermark file should be created"
+    );
+}
+
+#[test]
+fn test_cell_based_relocation_empty_and_sparse_cells() {
+    let dir = tempdir::TempDir::new("test_sparse_cells").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new();
+    let ks = ksb.add_key_space_config("sparse", 8, 4, KeyType::uniform(128), ksc); // 128 cells per mutex (power of 2)
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+
+    // Create very sparse data - only populate every 10th cell
+    for cell_idx in (0..128).step_by(10) {
+        for key_in_cell in 0..5u64 {
+            let key = (cell_idx as u64 * 1000) + key_in_cell; // Ensure keys land in specific cells
+            db.insert(ks, key.to_be_bytes().to_vec(), vec![cell_idx as u8])
+                .unwrap();
+        }
+    }
+
+    db.rebuild_control_region().unwrap();
+    start_cell_based_relocation(&db);
+
+    // Should handle empty cells gracefully - no crashes, reasonable metrics
+    let processed = relocation_cells_processed(&metrics, "sparse");
+
+    // Cell-based relocation should process some cells and complete successfully
+    // The exact number depends on implementation details, but it should be reasonable
+    assert!(processed > 0, "Expected some cells to be processed");
+    assert!(
+        processed < 10000,
+        "Processed cell count should be reasonable"
+    );
+
+    // Verify data integrity for populated cells
+    for cell_idx in (0..128).step_by(10) {
+        for key_in_cell in 0..5u64 {
+            let key = (cell_idx as u64 * 1000) + key_in_cell;
+            let expected_value = Some(vec![cell_idx as u8].into());
+            assert_eq!(db.get(ks, &key.to_be_bytes()).unwrap(), expected_value);
+        }
+    }
+}
+
+#[test]
+fn test_cell_based_relocation_large_cells() {
+    let dir = tempdir::TempDir::new("test_large_cells").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new();
+    // Use fewer cells so we can pack more entries per cell
+    let ks = ksb.add_key_space_config("dense", 8, 2, KeyType::uniform(2), ksc); // Only 2 cells per mutex
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+
+    // Fill cells with many entries each
+    let entries_per_cell = 1000u64;
+    for cell_idx in 0..2u64 {
+        for entry_idx in 0..entries_per_cell {
+            let key = (cell_idx * entries_per_cell) + entry_idx;
+            let value = format!("large_value_{}_{}", cell_idx, entry_idx).into_bytes();
+            db.insert(ks, key.to_be_bytes().to_vec(), value).unwrap();
+        }
+    }
+
+    db.rebuild_control_region().unwrap();
+
+    let start_time = std::time::Instant::now();
+    start_cell_based_relocation(&db);
+    let elapsed = start_time.elapsed();
+
+    // Verify large cells were processed successfully
+    let processed = relocation_cells_processed(&metrics, "dense");
+    assert!(processed > 0, "Should have processed some cells");
+
+    // Basic performance check - should complete in reasonable time
+    assert!(
+        elapsed.as_secs() < 30,
+        "Large cell processing should complete in reasonable time"
+    );
+
+    // Verify data integrity after processing
+    for cell_idx in 0..2u64 {
+        for entry_idx in (0..entries_per_cell).step_by(100) {
+            // Sample every 100th entry
+            let key = (cell_idx * entries_per_cell) + entry_idx;
+            let expected = format!("large_value_{}_{}", cell_idx, entry_idx).into_bytes();
+            assert_eq!(
+                db.get(ks, &key.to_be_bytes()).unwrap(),
+                Some(expected.into())
+            );
+        }
+    }
+}
