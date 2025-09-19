@@ -135,7 +135,7 @@ impl<'a> CellIterator<'a> {
                 .as_ref()
                 .map(|bytes| bytes.to_vec()),
             highest_wal_position: 0, // Will be updated during processing
-            upper_limit: 0, // Will be set during relocation
+            upper_limit: 0,          // Will be set during relocation
         }
     }
 
@@ -182,8 +182,7 @@ impl<'a> CellIterator<'a> {
                     // For prefixed uniform keys, we need to iterate through the BTreeMap
                     // This is more complex and would require accessing the actual row data
                     // For now, let's move to the next row
-                    self.current_row += 1;
-                    continue;
+                    todo!("PrefixedUniform key type iteration not implemented yet");
                 }
             }
         }
@@ -250,7 +249,10 @@ impl RelocationDriver {
             // Cell-based relocation is active
             let cell_watermark = self.watermarks.get_cell_progress();
             std::cmp::min(
-                std::cmp::min(cell_watermark.highest_wal_position, cell_watermark.upper_limit),
+                std::cmp::min(
+                    cell_watermark.highest_wal_position,
+                    cell_watermark.upper_limit,
+                ),
                 db.control_region_store.lock().last_position(),
             )
         } else {

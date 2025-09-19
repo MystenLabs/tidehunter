@@ -2679,7 +2679,8 @@ fn test_cell_based_relocation_point_deletes() {
         assert_eq!(
             db.get(ks, &key.to_be_bytes()).unwrap(),
             Some(vec![0, 1, 2].into()),
-            "Key {} should still exist", key
+            "Key {} should still exist",
+            key
         );
     }
 
@@ -2688,7 +2689,8 @@ fn test_cell_based_relocation_point_deletes() {
         assert_eq!(
             db.get(ks, &key.to_be_bytes()).unwrap(),
             None,
-            "Key {} should not exist", key
+            "Key {} should not exist",
+            key
         );
     }
 }
