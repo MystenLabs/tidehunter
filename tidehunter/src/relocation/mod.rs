@@ -55,7 +55,6 @@ impl<F> RelocationFilter for F where F: Fn(&[u8], &[u8]) -> Decision + Send + Sy
 pub struct CellReference {
     pub keyspace_id: KeySpace,
     pub keyspace_desc: KeySpaceDesc,
-    pub row_index: usize,
     pub cell_id: CellId,
 }
 
@@ -171,7 +170,6 @@ impl<'a> CellIterator<'a> {
                     let cell_ref = CellReference {
                         keyspace_id: KeySpace(self.current_keyspace as u8),
                         keyspace_desc: ks_desc.clone(),
-                        row_index: self.current_row,
                         cell_id: CellId::Integer(self.current_cell_index),
                     };
 
