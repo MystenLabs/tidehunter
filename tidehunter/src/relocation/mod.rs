@@ -5,6 +5,7 @@ use crate::metrics::Metrics;
 use crate::wal::WalError;
 use crate::WalPosition;
 use bloom::{BloomFilter, ASMS};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
@@ -14,11 +15,25 @@ pub use watermark::RelocationWatermarks;
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelocationStrategy {
+    /// Original WAL-based sequential relocation
+    WalBased,
+    /// New cell-based relocation that processes entire cells atomically
+    CellBased,
+}
+
+impl Default for RelocationStrategy {
+    fn default() -> Self {
+        Self::WalBased // Default to existing behavior for backward compatibility
+    }
+}
+
 pub enum RelocationCommand {
-    Start,
+    Start(RelocationStrategy),
     Cancel(mpsc::Sender<()>),
     #[cfg(test)]
-    StartBlocking(mpsc::Sender<()>),
+    StartBlocking(RelocationStrategy, mpsc::Sender<()>),
 }
 
 pub enum Decision {
@@ -62,16 +77,16 @@ impl RelocationDriver {
     pub fn run(mut self) {
         while let Ok(command) = self.receiver.recv() {
             match command {
-                RelocationCommand::Start => {
+                RelocationCommand::Start(strategy) => {
                     // TODO: better error handling and retries
-                    self.relocation_run().expect("relocation error");
+                    self.relocation_run(strategy).expect("relocation error");
                 }
                 RelocationCommand::Cancel(callback) => {
                     callback.send(()).expect("failed to send ");
                 }
                 #[cfg(test)]
-                RelocationCommand::StartBlocking(cb) => {
-                    self.relocation_run().unwrap();
+                RelocationCommand::StartBlocking(strategy, cb) => {
+                    self.relocation_run(strategy).unwrap();
                     cb.send(()).unwrap()
                 }
             }
@@ -91,7 +106,19 @@ impl RelocationDriver {
         Ok(())
     }
 
-    fn relocation_run(&mut self) -> DbResult<()> {
+    fn relocation_run(&mut self, strategy: RelocationStrategy) -> DbResult<()> {
+        match strategy {
+            RelocationStrategy::WalBased => self.wal_based_relocation(),
+            RelocationStrategy::CellBased => self.cell_based_relocation(),
+        }
+    }
+
+    fn cell_based_relocation(&mut self) -> DbResult<()> {
+        // TODO: Implement cell-based relocation
+        todo!("Cell-based relocation not yet implemented")
+    }
+
+    fn wal_based_relocation(&mut self) -> DbResult<()> {
         let Some(db) = self.db.upgrade() else {
             return Ok(());
         };
@@ -207,7 +234,7 @@ impl RelocationDriver {
         loop {
             match self.receiver.try_recv() {
                 // consume and ignore all Start commands while relocation is in progress
-                Ok(RelocationCommand::Start) => {}
+                Ok(RelocationCommand::Start(_)) => {}
                 Ok(RelocationCommand::Cancel(cb)) => {
                     cb.send(())
                         .expect("Failed to send cancel relocation command");
@@ -216,7 +243,7 @@ impl RelocationDriver {
                 Err(mpsc::TryRecvError::Empty) => return false,
                 Err(mpsc::TryRecvError::Disconnected) => return true,
                 #[cfg(test)]
-                Ok(RelocationCommand::StartBlocking(cb)) => cb.send(()).unwrap(),
+                Ok(RelocationCommand::StartBlocking(_, cb)) => cb.send(()).unwrap(),
             }
         }
     }
