@@ -179,7 +179,6 @@ impl<'a> CellIterator<'a> {
                 KeyType::PrefixedUniform(_) => {
                     // For prefixed uniform keys, we need to iterate through the BTreeMap
                     // This is more complex and would require accessing the actual row data
-                    // For now, let's move to the next row
                     todo!("PrefixedUniform key type iteration not implemented yet");
                 }
             }
