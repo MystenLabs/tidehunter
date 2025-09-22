@@ -22,6 +22,7 @@ lru = "0.12.2"
 blake2 = { version = "0.10.6" }
 libc = {workspace = true}
 typenum = "1.16.0"
+strum = { version = "0.26", features = ["derive"] }
 
 [dev-dependencies]
 tempdir = "0.3.7"
