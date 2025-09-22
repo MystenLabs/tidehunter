@@ -26,10 +26,16 @@ pub struct KsContextInner {
     pub large_table_contention: Histogram,
     // Operation metrics indexed by DbOpKind
     db_op_metrics: [Histogram; DbOpKind::COUNT],
-    // WAL written bytes metrics indexed by WalWriteKind
-    wal_written_metrics: [IntCounter; WalWriteKind::COUNT],
+    // WAL written bytes metrics indexed by WalEntryKind
+    wal_written_metrics: [IntCounter; WalEntryKind::COUNT],
     // Lookup result metrics indexed by [LookupResult][LookupSource]
     lookup_result_metrics: [[IntCounter; LookupSource::COUNT]; LookupResult::COUNT], // 2 for Found/NotFound
+    // Lookup timing metrics indexed by ReadType
+    lookup_mcs_metrics: [Histogram; ReadType::COUNT],
+    // Read metrics indexed by [WalEntryKind][ReadType]
+    read_metrics: [[IntCounter; ReadType::COUNT]; WalEntryKind::COUNT],
+    // Read bytes metrics indexed by [WalEntryKind][ReadType]
+    read_bytes_metrics: [[IntCounter; ReadType::COUNT]; WalEntryKind::COUNT],
 }
 
 #[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
@@ -43,15 +49,6 @@ pub enum DbOpKind {
     NextEntry,
     NextCell,
     UpdateFlushedIndex,
-}
-
-#[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
-#[repr(usize)]
-#[strum(serialize_all = "snake_case")]
-pub enum WalWriteKind {
-    Record,
-    Tombstone,
-    Index,
 }
 
 #[derive(Clone, Copy, Debug, EnumCount, AsRefStr, FromRepr)]
@@ -73,6 +70,23 @@ pub enum LookupSource {
     Prefix,
 }
 
+#[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
+#[repr(usize)]
+#[strum(serialize_all = "snake_case")]
+pub enum WalEntryKind {
+    Record,
+    Tombstone,
+    Index,
+}
+
+#[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
+#[repr(usize)]
+#[strum(serialize_all = "snake_case")]
+pub enum ReadType {
+    Mapped,
+    Syscall,
+}
+
 impl KsContext {
     pub fn new(config: Arc<Config>, ks_config: KeySpaceDesc, metrics: Arc<Metrics>) -> Self {
         let ks_name = ks_config.name();
@@ -85,7 +99,7 @@ impl KsContext {
         });
 
         let wal_written_metrics = array::from_fn(|i| {
-            let kind = WalWriteKind::from_repr(i).expect("Invalid WalWriteKind index");
+            let kind = WalEntryKind::from_repr(i).expect("Invalid WalEntryKind index");
             metrics
                 .wal_written_bytes_type
                 .with_label_values(&[kind.as_ref(), ks_name])
@@ -105,6 +119,33 @@ impl KsContext {
             })
         });
 
+        let lookup_mcs_metrics = array::from_fn(|i| {
+            let read_type = ReadType::from_repr(i).expect("Invalid ReadType index");
+            metrics
+                .lookup_mcs
+                .with_label_values(&[read_type.as_ref(), ks_name])
+        });
+
+        let read_metrics = array::from_fn(|kind_idx| {
+            let kind = WalEntryKind::from_repr(kind_idx).expect("Invalid WalEntryKind index");
+            array::from_fn(|read_idx| {
+                let read_type = ReadType::from_repr(read_idx).expect("Invalid ReadType index");
+                metrics
+                    .read
+                    .with_label_values(&[ks_name, kind.as_ref(), read_type.as_ref()])
+            })
+        });
+
+        let read_bytes_metrics = array::from_fn(|kind_idx| {
+            let kind = WalEntryKind::from_repr(kind_idx).expect("Invalid WalEntryKind index");
+            array::from_fn(|read_idx| {
+                let read_type = ReadType::from_repr(read_idx).expect("Invalid ReadType index");
+                metrics
+                    .read_bytes
+                    .with_label_values(&[ks_name, kind.as_ref(), read_type.as_ref()])
+            })
+        });
+
         let inner = KsContextInner {
             config,
             ks_config,
@@ -114,6 +155,9 @@ impl KsContext {
             db_op_metrics,
             wal_written_metrics,
             lookup_result_metrics,
+            lookup_mcs_metrics,
+            read_metrics,
+            read_bytes_metrics,
         };
 
         Self {
@@ -125,12 +169,24 @@ impl KsContext {
         self.db_op_metrics[op as usize].clone().mcs_timer()
     }
 
-    pub fn inc_wal_written(&self, kind: WalWriteKind, bytes: u64) {
+    pub fn inc_wal_written(&self, kind: WalEntryKind, bytes: u64) {
         self.wal_written_metrics[kind as usize].inc_by(bytes);
     }
 
     pub fn inc_lookup_result(&self, result: LookupResult, source: LookupSource) {
         self.lookup_result_metrics[result as usize][source as usize].inc();
+    }
+
+    pub fn lookup_mcs_histogram(&self, read_type: ReadType) -> &Histogram {
+        &self.lookup_mcs_metrics[read_type as usize]
+    }
+
+    pub fn inc_read(&self, kind: WalEntryKind, read_type: ReadType) {
+        self.read_metrics[kind as usize][read_type as usize].inc();
+    }
+
+    pub fn inc_read_bytes(&self, kind: WalEntryKind, read_type: ReadType, bytes: u64) {
+        self.read_bytes_metrics[kind as usize][read_type as usize].inc_by(bytes);
     }
 
     pub fn name(&self) -> &str {

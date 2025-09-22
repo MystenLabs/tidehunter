@@ -1,7 +1,7 @@
 use crate::batch::{Update, WriteBatch};
 use crate::cell::CellId;
 use crate::config::Config;
-use crate::context::{DbOpKind, KsContext, KsContextVec, WalWriteKind};
+use crate::context::{DbOpKind, KsContext, KsContextVec, ReadType, WalEntryKind};
 use crate::control::{ControlRegion, ControlRegionStore};
 use crate::crc::IntoBytesFixed;
 use crate::flusher::IndexFlusher;
@@ -257,7 +257,7 @@ impl Db {
         let v = v.into();
         context.ks_config.check_key(&k);
         let w = PreparedWalWrite::new(&WalEntry::Record(context.id(), k.clone(), v.clone()));
-        context.inc_wal_written(WalWriteKind::Record, w.len() as u64);
+        context.inc_wal_written(WalEntryKind::Record, w.len() as u64);
         let guard = self.wal_writer.write(&w)?;
         self.metrics
             .wal_written_bytes
@@ -274,7 +274,7 @@ impl Db {
         let k = k.into();
         context.ks_config.check_key(&k);
         let w = PreparedWalWrite::new(&WalEntry::Remove(context.id(), k.clone()));
-        context.inc_wal_written(WalWriteKind::Tombstone, w.len() as u64);
+        context.inc_wal_written(WalEntryKind::Tombstone, w.len() as u64);
         let guard = self.wal_writer.write(&w)?;
         let reduced_key = context.ks_config.reduced_key_bytes(k);
         self.large_table.remove(context, reduced_key, guard, self)
@@ -355,11 +355,11 @@ impl Db {
             let wal_kind = match update {
                 Update::Record(..) => {
                     num_inserts += 1;
-                    WalWriteKind::Record
+                    WalEntryKind::Record
                 }
                 Update::Remove(..) => {
                     num_deletes += 1;
-                    WalWriteKind::Tombstone
+                    WalEntryKind::Tombstone
                 }
             };
             context.inc_wal_written(wal_kind, prepared_writes[idx].len() as u64);
@@ -518,20 +518,19 @@ impl Db {
 
     fn report_read(&self, entry: &WalEntry, mapped: bool) {
         let (kind, ks) = match entry {
-            WalEntry::Record(ks, _, _) => ("record", self.key_shape.ks(*ks).name()),
-            WalEntry::Index(ks, _) => ("index", self.key_shape.ks(*ks).name()),
-            WalEntry::Remove(ks, _) => ("tombstone", self.key_shape.ks(*ks).name()),
+            WalEntry::Record(ks, _, _) => (WalEntryKind::Record, *ks),
+            WalEntry::Index(ks, _) => (WalEntryKind::Index, *ks),
+            WalEntry::Remove(ks, _) => (WalEntryKind::Tombstone, *ks),
             WalEntry::BatchStart(_) => return,
         };
-        let mapped = if mapped { "mapped" } else { "unmapped" };
-        self.metrics
-            .read
-            .with_label_values(&[ks, kind, mapped])
-            .inc();
-        self.metrics
-            .read_bytes
-            .with_label_values(&[ks, kind, mapped])
-            .inc_by(entry.len() as u64);
+        let read_type = if mapped {
+            ReadType::Mapped
+        } else {
+            ReadType::Syscall
+        };
+        let context = self.large_table.ks_context(ks);
+        context.inc_read(kind, read_type);
+        context.inc_read_bytes(kind, read_type, entry.len() as u64);
     }
 
     fn replay_wal(
@@ -658,7 +657,7 @@ impl Db {
             .with_label_values(&[context.name()])
             .inc_by(index.len() as u64);
         let w = PreparedWalWrite::new(&WalEntry::Index(ks, index));
-        context.inc_wal_written(WalWriteKind::Index, w.len() as u64);
+        context.inc_wal_written(WalEntryKind::Index, w.len() as u64);
         Ok(*self.index_writer.write(&w)?.wal_position())
     }
 

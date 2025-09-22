@@ -1,3 +1,4 @@
+use crate::context::ReadType;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::file_reader::{align_size, set_direct_options, FileReader};
 use crate::lookup::{FileRange, RandomRead};
@@ -863,10 +864,10 @@ impl WalIterator {
 }
 
 impl WalRandomRead {
-    pub fn kind_str(&self) -> &'static str {
+    pub fn read_type(&self) -> ReadType {
         match self {
-            WalRandomRead::Mapped(_) => "mapped",
-            WalRandomRead::File(_) => "syscall",
+            WalRandomRead::Mapped(_) => ReadType::Mapped,
+            WalRandomRead::File(_) => ReadType::Syscall,
         }
     }
 }

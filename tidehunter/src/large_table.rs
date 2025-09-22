@@ -353,9 +353,8 @@ impl LargeTable {
             ks.index_format()
                 .lookup_unloaded(ks, &index_reader, k, &self.metrics)
         });
-        self.metrics
-            .lookup_mcs
-            .with_label_values(&[index_reader.kind_str(), ks.name()])
+        context
+            .lookup_mcs_histogram(index_reader.read_type())
             .observe(now.elapsed().as_micros() as f64);
         Ok(context.report_lookup_result(result, LookupSource::Lookup))
     }
