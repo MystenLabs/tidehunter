@@ -4,8 +4,9 @@ use crate::large_table::GetResult;
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal::WalPosition;
 use prometheus::{Histogram, IntCounter, IntGauge};
+use std::array;
 use std::sync::Arc;
-use strum::{AsRefStr, EnumCount, EnumIter, FromRepr, IntoEnumIterator};
+use strum::{AsRefStr, EnumCount, EnumIter, FromRepr};
 
 #[derive(Clone)]
 pub struct KsContext {
@@ -14,11 +15,11 @@ pub struct KsContext {
     pub metrics: Arc<Metrics>,
     pub loaded_key_bytes: IntGauge,
     // Operation metrics indexed by DbOpKind
-    db_op_metrics: Vec<Histogram>,
+    db_op_metrics: [Histogram; DbOpKind::COUNT],
     // WAL written bytes metrics indexed by WalWriteKind
-    wal_written_metrics: Vec<IntCounter>,
+    wal_written_metrics: [IntCounter; WalWriteKind::COUNT],
     // Lookup result metrics indexed by [LookupResult][LookupSource]
-    lookup_result_metrics: [Vec<IntCounter>; 2], // 2 for Found/NotFound
+    lookup_result_metrics: [[IntCounter; LookupSource::COUNT]; LookupResult::COUNT], // 2 for Found/NotFound
 }
 
 #[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
@@ -43,7 +44,7 @@ pub enum WalWriteKind {
     Index,
 }
 
-#[derive(Clone, Copy, Debug, AsRefStr)]
+#[derive(Clone, Copy, Debug, EnumCount, AsRefStr, FromRepr)]
 #[repr(usize)]
 #[strum(serialize_all = "snake_case")]
 pub enum LookupResult {
@@ -67,40 +68,31 @@ impl KsContext {
         let ks_name = ks_config.name();
         let loaded_key_bytes = metrics.loaded_key_bytes.with_label_values(&[ks_name]);
 
-        let db_op_metrics = DbOpKind::iter()
-            .map(|op| metrics.db_op_mcs.with_label_values(&[op.as_ref(), ks_name]))
-            .collect();
+        let db_op_metrics = array::from_fn(|i| {
+            let op = DbOpKind::from_repr(i).expect("Invalid DbOpKind index");
+            metrics.db_op_mcs.with_label_values(&[op.as_ref(), ks_name])
+        });
 
-        let wal_written_metrics = WalWriteKind::iter()
-            .map(|kind| {
-                metrics
-                    .wal_written_bytes_type
-                    .with_label_values(&[kind.as_ref(), ks_name])
-            })
-            .collect();
+        let wal_written_metrics = array::from_fn(|i| {
+            let kind = WalWriteKind::from_repr(i).expect("Invalid WalWriteKind index");
+            metrics
+                .wal_written_bytes_type
+                .with_label_values(&[kind.as_ref(), ks_name])
+        });
 
         // Initialize lookup result metrics as a 2D array [result][source]
-        let found_metrics: Vec<_> = LookupSource::iter()
-            .map(|source| {
+        let lookup_result_metrics = array::from_fn(|result_idx| {
+            let result = LookupResult::from_repr(result_idx).expect("Invalid LookupResult index");
+            array::from_fn(|source_idx| {
+                let source =
+                    LookupSource::from_repr(source_idx).expect("Invalid LookupSource index");
                 metrics.lookup_result.with_label_values(&[
                     ks_name,
-                    LookupResult::Found.as_ref(),
+                    result.as_ref(),
                     source.as_ref(),
                 ])
             })
-            .collect();
-
-        let not_found_metrics: Vec<_> = LookupSource::iter()
-            .map(|source| {
-                metrics.lookup_result.with_label_values(&[
-                    ks_name,
-                    LookupResult::NotFound.as_ref(),
-                    source.as_ref(),
-                ])
-            })
-            .collect();
-
-        let lookup_result_metrics = [found_metrics, not_found_metrics];
+        });
 
         Self {
             config,
