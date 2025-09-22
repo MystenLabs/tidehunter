@@ -3,7 +3,7 @@ use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::metrics::{Metrics, TimerExt};
 use prometheus::{Histogram, IntCounter, IntGauge};
 use std::sync::Arc;
-use strum::{EnumCount, EnumIter, IntoEnumIterator};
+use strum::{AsRefStr, EnumCount, EnumIter, FromRepr, IntoEnumIterator};
 
 #[derive(Clone)]
 pub struct KsContext {
@@ -17,48 +17,26 @@ pub struct KsContext {
     wal_written_metrics: Vec<IntCounter>,
 }
 
-#[derive(Clone, Copy, Debug, EnumIter, EnumCount)]
+#[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
 #[repr(usize)]
+#[strum(serialize_all = "snake_case")]
 pub enum DbOpKind {
-    Insert = 0,
-    Remove = 1,
-    Get = 2,
-    Exists = 3,
-    NextEntry = 4,
-    NextCell = 5,
-    UpdateFlushedIndex = 6,
+    Insert,
+    Remove,
+    Get,
+    Exists,
+    NextEntry,
+    NextCell,
+    UpdateFlushedIndex,
 }
 
-impl DbOpKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            DbOpKind::Insert => "insert",
-            DbOpKind::Remove => "remove",
-            DbOpKind::Get => "get",
-            DbOpKind::Exists => "exists",
-            DbOpKind::NextEntry => "next_entry",
-            DbOpKind::NextCell => "next_cell",
-            DbOpKind::UpdateFlushedIndex => "update_flushed_index",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, EnumIter, EnumCount)]
+#[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
 #[repr(usize)]
+#[strum(serialize_all = "snake_case")]
 pub enum WalWriteKind {
-    Record = 0,
-    Tombstone = 1,
-    Index = 2,
-}
-
-impl WalWriteKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            WalWriteKind::Record => "record",
-            WalWriteKind::Tombstone => "tombstone",
-            WalWriteKind::Index => "index",
-        }
-    }
+    Record,
+    Tombstone,
+    Index,
 }
 
 impl KsContext {
@@ -66,19 +44,17 @@ impl KsContext {
         let ks_name = ks_config.name();
         let loaded_key_bytes = metrics.loaded_key_bytes.with_label_values(&[ks_name]);
 
-        let mut db_op_metrics = Vec::with_capacity(DbOpKind::COUNT);
-        for op in DbOpKind::iter() {
-            db_op_metrics.push(metrics.db_op_mcs.with_label_values(&[op.as_str(), ks_name]));
-        }
+        let db_op_metrics = DbOpKind::iter()
+            .map(|op| metrics.db_op_mcs.with_label_values(&[op.as_ref(), ks_name]))
+            .collect();
 
-        let mut wal_written_metrics = Vec::with_capacity(WalWriteKind::COUNT);
-        for kind in WalWriteKind::iter() {
-            wal_written_metrics.push(
+        let wal_written_metrics = WalWriteKind::iter()
+            .map(|kind| {
                 metrics
                     .wal_written_bytes_type
-                    .with_label_values(&[kind.as_str(), ks_name]),
-            );
-        }
+                    .with_label_values(&[kind.as_ref(), ks_name])
+            })
+            .collect();
 
         Self {
             config,
