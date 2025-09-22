@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::key_shape::{KeySpace, KeySpaceDesc};
+use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::GetResult;
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal::WalPosition;
@@ -14,11 +14,16 @@ pub struct KsContext {
     inner: Arc<KsContextInner>,
 }
 
+pub struct KsContextVec {
+    contexts: Vec<KsContext>,
+}
+
 pub struct KsContextInner {
     pub config: Arc<Config>,
     pub ks_config: KeySpaceDesc,
     pub metrics: Arc<Metrics>,
     pub loaded_key_bytes: IntGauge,
+    pub large_table_contention: Histogram,
     // Operation metrics indexed by DbOpKind
     db_op_metrics: [Histogram; DbOpKind::COUNT],
     // WAL written bytes metrics indexed by WalWriteKind
@@ -72,6 +77,7 @@ impl KsContext {
     pub fn new(config: Arc<Config>, ks_config: KeySpaceDesc, metrics: Arc<Metrics>) -> Self {
         let ks_name = ks_config.name();
         let loaded_key_bytes = metrics.loaded_key_bytes.with_label_values(&[ks_name]);
+        let large_table_contention = metrics.large_table_contention.with_label_values(&[ks_name]);
 
         let db_op_metrics = array::from_fn(|i| {
             let op = DbOpKind::from_repr(i).expect("Invalid DbOpKind index");
@@ -104,6 +110,7 @@ impl KsContext {
             ks_config,
             metrics,
             loaded_key_bytes,
+            large_table_contention,
             db_op_metrics,
             wal_written_metrics,
             lookup_result_metrics,
@@ -168,5 +175,20 @@ impl Deref for KsContext {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl KsContextVec {
+    pub fn new(key_shape: &KeyShape, config: Arc<Config>, metrics: Arc<Metrics>) -> Self {
+        let contexts = key_shape
+            .iter_ks()
+            .map(|ks_desc| KsContext::new(config.clone(), ks_desc.clone(), metrics.clone()))
+            .collect();
+
+        Self { contexts }
+    }
+
+    pub fn ks_context(&self, ks: KeySpace) -> &KsContext {
+        &self.contexts[ks.as_usize()]
     }
 }

@@ -1,7 +1,7 @@
 use crate::batch::{Update, WriteBatch};
 use crate::cell::CellId;
 use crate::config::Config;
-use crate::context::{DbOpKind, KsContext, WalWriteKind};
+use crate::context::{DbOpKind, KsContext, KsContextVec, WalWriteKind};
 use crate::control::{ControlRegion, ControlRegionStore};
 use crate::crc::IntoBytesFixed;
 use crate::flusher::IndexFlusher;
@@ -77,9 +77,10 @@ impl Db {
             metrics.clone(),
             indexes.as_ref(),
         );
+        let contexts = KsContextVec::new(&key_shape, config.clone(), metrics.clone());
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer =
-            Self::replay_wal(&key_shape, &large_table, wal_iterator, &indexes, &metrics)?;
+            Self::replay_wal(&contexts, &large_table, wal_iterator, &indexes, &metrics)?;
         let last_index_position = control_region.last_index_wal_position();
         let index_writer = indexes.writer_after(last_index_position)?;
         let control_region_store = Mutex::new(control_region_store);
@@ -263,7 +264,7 @@ impl Db {
             .set(guard.wal_position().offset() as i64);
         let reduced_key = context.ks_config.reduced_key_bytes(k);
         self.large_table
-            .insert(&context.ks_config, reduced_key, guard, &v, self)?;
+            .insert(context, reduced_key, guard, &v, self)?;
         Ok(())
     }
 
@@ -276,8 +277,7 @@ impl Db {
         context.inc_wal_written(WalWriteKind::Tombstone, w.len() as u64);
         let guard = self.wal_writer.write(&w)?;
         let reduced_key = context.ks_config.reduced_key_bytes(k);
-        self.large_table
-            .remove(&context.ks_config, reduced_key, guard, self)
+        self.large_table.remove(context, reduced_key, guard, self)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -297,11 +297,8 @@ impl Db {
                 let Some(value) = value else {
                     return Ok(None);
                 };
-                self.large_table.update_lru(
-                    &context.ks_config,
-                    reduced_key.to_vec().into(),
-                    value.clone(),
-                );
+                self.large_table
+                    .update_lru(context, reduced_key.to_vec().into(), value.clone());
                 Ok(Some(value))
             }
             GetResult::NotFound => Ok(None),
@@ -384,15 +381,15 @@ impl Db {
             .mcs_timer();
 
         for (update, guard) in update_writes {
-            let ks = self.key_shape.ks(update.ks());
-            let reduced_key = update.reduced_key(ks);
+            let context = self.ks_context(update.ks());
+            let reduced_key = update.reduced_key(&context.ks_config);
             last_position = *guard.wal_position();
             match update {
                 Update::Record(_, _, value) => {
                     self.large_table
-                        .insert(ks, reduced_key, guard, value, self)?
+                        .insert(context, reduced_key, guard, value, self)?
                 }
-                Update::Remove(..) => self.large_table.remove(ks, reduced_key, guard, self)?,
+                Update::Remove(..) => self.large_table.remove(context, reduced_key, guard, self)?,
             }
         }
         if last_position != WalPosition::INVALID {
@@ -453,7 +450,7 @@ impl Db {
         let context = self.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::NextEntry);
         let Some(result) = self.large_table.next_entry(
-            &context.ks_config,
+            context,
             cell,
             prev_key,
             self,
@@ -473,13 +470,13 @@ impl Db {
     /// Returns the next cell in the large table
     pub(crate) fn next_cell(
         &self,
-        ks: &KeySpaceDesc,
+        ks: &KeySpaceDesc, // todo pass context instead of KeySpaceDesc here
         cell: &CellId,
         reverse: bool,
     ) -> Option<CellId> {
         let context = self.ks_context(ks.id());
         let _timer = context.db_op_timer(DbOpKind::NextCell);
-        self.large_table.next_cell(ks, cell, reverse)
+        self.large_table.next_cell(context, cell, reverse)
     }
 
     pub(crate) fn update_flushed_index(
@@ -492,7 +489,7 @@ impl Db {
         let context = self.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::UpdateFlushedIndex);
         self.large_table
-            .update_flushed_index(&context.ks_config, &cell, original_index, position)
+            .update_flushed_index(context, &cell, original_index, position)
     }
 
     fn read_record_check_key(&self, k: &[u8], position: WalPosition) -> DbResult<Option<Bytes>> {
@@ -538,7 +535,7 @@ impl Db {
     }
 
     fn replay_wal(
-        key_shape: &KeyShape,
+        contexts: &KsContextVec,
         large_table: &LargeTable,
         mut wal_iterator: WalIterator,
         indexes: &Wal,
@@ -570,20 +567,20 @@ impl Db {
             match entry {
                 WalEntry::Record(ks, k, v) => {
                     metrics.replayed_wal_records.inc();
-                    let ks = key_shape.ks(ks);
-                    let reduced_key = ks.reduced_key_bytes(k);
+                    let context = contexts.ks_context(ks);
+                    let reduced_key = context.ks_config.reduced_key_bytes(k);
                     let guard = crate::wal_tracker::WalGuard::replay_guard(position);
-                    large_table.insert(ks, reduced_key, guard, &v, indexes)?;
+                    large_table.insert(context, reduced_key, guard, &v, indexes)?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
                 }
                 WalEntry::Remove(ks, k) => {
                     metrics.replayed_wal_records.inc();
-                    let ks = key_shape.ks(ks);
-                    let reduced_key = ks.reduced_key_bytes(k);
+                    let context = contexts.ks_context(ks);
+                    let reduced_key = context.ks_config.reduced_key_bytes(k);
                     let guard = crate::wal_tracker::WalGuard::replay_guard(position);
-                    large_table.remove(ks, reduced_key, guard, indexes)?;
+                    large_table.remove(context, reduced_key, guard, indexes)?;
                 }
                 WalEntry::BatchStart(size) => {
                     batch = VecDeque::with_capacity(size as usize);
