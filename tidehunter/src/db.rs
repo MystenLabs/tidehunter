@@ -444,12 +444,8 @@ impl Db {
         self.key_shape.ks(ks)
     }
 
-    pub(crate) fn ks_context(&self, ks: KeySpace) -> KsContext {
-        KsContext::new(
-            self.config.clone(),
-            self.ks(ks).clone(),
-            self.metrics.clone(),
-        )
+    pub(crate) fn ks_context(&self, ks: KeySpace) -> &KsContext {
+        self.large_table.ks_context(ks)
     }
 
     /// Returns the next entry in the database, after the specified previous key.

@@ -142,7 +142,7 @@ impl IndexFlusherThread {
 
             let ks_context = db.ks_context(command.ks);
             if let Some((original_index, position)) =
-                Self::handle_command(&*db, &command, &ks_context)
+                Self::handle_command(&*db, &command, ks_context)
             {
                 db.update_flushed_index(command.ks, command.cell, original_index, position);
             }

@@ -57,7 +57,7 @@ enum LargeTableEntryState {
 }
 
 struct KsTable {
-    ks: KeySpaceDesc,
+    context: KsContext,
     rows: ShardedMutex<Row>,
 }
 
@@ -130,8 +130,8 @@ impl LargeTable {
                     );
                 }
                 let mut bloom_filter_restore_time = 0;
+                let context = KsContext::new(config.clone(), ks.clone(), metrics.clone());
                 let rows = ks_snapshot.iter().map(|row_snapshot| {
-                    let context = KsContext::new(config.clone(), ks.clone(), metrics.clone());
                     let entries = row_snapshot.iter().map(|(cell, entry_data)| {
                         let bloom_filter = context.ks_config.bloom_filter().map(|opts| {
                             let mut filter = BloomFilter::with_rate(opts.rate, opts.count);
@@ -168,7 +168,7 @@ impl LargeTable {
                     let value_lru = ks.value_cache_size().map(LruCache::new);
                     Row {
                         entries,
-                        context,
+                        context: context.clone(),
                         value_lru,
                     }
                 });
@@ -179,10 +179,7 @@ impl LargeTable {
                         .with_label_values(&[ks.name()])
                         .inc_by(bloom_filter_restore_time as u64);
                 }
-                KsTable {
-                    ks: ks.clone(),
-                    rows,
-                }
+                KsTable { context, rows }
             })
             .collect();
         Self {
@@ -192,6 +189,10 @@ impl LargeTable {
             metrics,
             fp: Default::default(),
         }
+    }
+
+    pub(crate) fn ks_context(&self, ks: KeySpace) -> &KsContext {
+        &self.table[ks.as_usize()].context
     }
 
     pub fn insert<L: Loader>(
@@ -577,7 +578,7 @@ impl LargeTable {
         let metric = self
             .metrics
             .index_distance_from_tail
-            .with_label_values(&[ks_table.ks.name()]);
+            .with_label_values(&[ks_table.context.name()]);
         match replay_from {
             None => metric.set(0),
             Some(0) => metric.set(-1), // 0 indicates replay from beginning
@@ -845,7 +846,7 @@ impl LargeTable {
         let now = Instant::now();
         let mut filters = HashMap::new();
         for ks_table in self.table.iter() {
-            let ksd = &ks_table.ks;
+            let ksd = &ks_table.context.ks_config;
             let Some(bloom_params) = ksd.relocation_bloom_filter() else {
                 continue;
             };
