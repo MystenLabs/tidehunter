@@ -301,36 +301,35 @@ impl LargeTable {
 
     pub fn get<L: Loader>(
         &self,
-        ks: &KeySpaceDesc,
+        context: &KsContext,
         k: &[u8],
         loader: &L,
         skip_lru_cache: bool,
     ) -> Result<GetResult, L::Error> {
+        let ks = &context.ks_config;
         let (mut row, cell) = self.row(ks, k);
         if let (Some(value_lru), false) = (&mut row.value_lru, skip_lru_cache) {
             if let Some(value) = value_lru.get(k) {
-                let context = self.ks_context(ks.id());
                 context.inc_lookup_result(LookupResult::Found, LookupSource::Lru);
                 return Ok(GetResult::Value(value.clone()));
             }
         }
         let entry = row.try_entry_mut(&cell);
         let Some(entry) = entry else {
-            return Ok(self.report_lookup_result(ks, None, LookupSource::Prefix));
+            return Ok(context.report_lookup_result(None, LookupSource::Prefix));
         };
         if entry.bloom_filter_not_found(k) {
-            return Ok(self.report_lookup_result(ks, None, LookupSource::Bloom));
+            return Ok(context.report_lookup_result(None, LookupSource::Bloom));
         }
         let index_position = match entry.state {
             LargeTableEntryState::Empty => {
-                return Ok(self.report_lookup_result(ks, None, LookupSource::Cache))
+                return Ok(context.report_lookup_result(None, LookupSource::Cache))
             }
             LargeTableEntryState::Loaded(_) => {
-                return Ok(self.report_lookup_result(ks, entry.get(k), LookupSource::Cache))
+                return Ok(context.report_lookup_result(entry.get(k), LookupSource::Cache))
             }
             LargeTableEntryState::DirtyLoaded(_) => {
-                return Ok(self.report_lookup_result(
-                    ks,
+                return Ok(context.report_lookup_result(
                     entry.get(k).and_then(WalPosition::valid),
                     LookupSource::Cache,
                 ))
@@ -338,7 +337,7 @@ impl LargeTable {
             LargeTableEntryState::DirtyUnloaded(position) => {
                 // optimization: in dirty unloaded state we might not need to load entry
                 if let Some(found) = entry.get(k) {
-                    return Ok(self.report_lookup_result(ks, found.valid(), LookupSource::Cache));
+                    return Ok(context.report_lookup_result(found.valid(), LookupSource::Cache));
                 }
                 position
             }
@@ -358,7 +357,7 @@ impl LargeTable {
             .lookup_mcs
             .with_label_values(&[index_reader.kind_str(), ks.name()])
             .observe(now.elapsed().as_micros() as f64);
-        Ok(self.report_lookup_result(ks, result, LookupSource::Lookup))
+        Ok(context.report_lookup_result(result, LookupSource::Lookup))
     }
 
     /// Checks if the update is potentially stale and the operation needs to be canceled.
@@ -375,25 +374,6 @@ impl LargeTable {
             last_position > wal_position
         } else {
             false
-        }
-    }
-
-    fn report_lookup_result(
-        &self,
-        ks: &KeySpaceDesc,
-        v: Option<WalPosition>,
-        source: LookupSource,
-    ) -> GetResult {
-        let context = self.ks_context(ks.id());
-        let result = if v.is_some() {
-            LookupResult::Found
-        } else {
-            LookupResult::NotFound
-        };
-        context.inc_lookup_result(result, source);
-        match v {
-            None => GetResult::NotFound,
-            Some(w) => GetResult::WalPosition(w),
         }
     }
 

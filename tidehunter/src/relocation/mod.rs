@@ -189,7 +189,11 @@ impl RelocationDriver {
             }
         }
 
-        let decision = match db.large_table.get(ks, &reduced_key, db.as_ref(), true)? {
+        let context = db.ks_context(ks.id());
+        let decision = match db
+            .large_table
+            .get(context, &reduced_key, db.as_ref(), true)?
+        {
             GetResult::NotFound => Decision::Remove,
             GetResult::Value(..) => unreachable!("getter was called with skip cache"),
             GetResult::WalPosition(last_pos) => {

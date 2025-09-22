@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::key_shape::{KeySpace, KeySpaceDesc};
+use crate::large_table::GetResult;
 use crate::metrics::{Metrics, TimerExt};
+use crate::wal::WalPosition;
 use prometheus::{Histogram, IntCounter, IntGauge};
 use std::sync::Arc;
 use strum::{AsRefStr, EnumCount, EnumIter, FromRepr, IntoEnumIterator};
@@ -144,5 +146,18 @@ impl KsContext {
     /// Returns fixed key size or None if variable keys are configured for this key space.
     pub fn index_key_size(&self) -> Option<usize> {
         self.ks_config.index_key_size()
+    }
+
+    pub fn report_lookup_result(&self, v: Option<WalPosition>, source: LookupSource) -> GetResult {
+        let result = if v.is_some() {
+            LookupResult::Found
+        } else {
+            LookupResult::NotFound
+        };
+        self.inc_lookup_result(result, source);
+        match v {
+            None => GetResult::NotFound,
+            Some(w) => GetResult::WalPosition(w),
+        }
     }
 }

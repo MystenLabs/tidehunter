@@ -286,7 +286,7 @@ impl Db {
         let reduced_key = context.ks_config.reduce_key(k);
         match self
             .large_table
-            .get(&context.ks_config, reduced_key.as_ref(), self, false)?
+            .get(context, reduced_key.as_ref(), self, false)?
         {
             GetResult::Value(value) => {
                 // todo check collision ?
@@ -315,7 +315,7 @@ impl Db {
         let reduced_key = context.ks_config.reduce_key(k);
         Ok(self
             .large_table
-            .get(&context.ks_config, reduced_key.as_ref(), self, false)?
+            .get(context, reduced_key.as_ref(), self, false)?
             .is_found())
     }
 
