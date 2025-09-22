@@ -458,9 +458,8 @@ impl Wal {
     /// If mapping exists, it is still used for reading
     /// if mapping does not exist the read syscall is used instead.
     ///
-    /// Returns (false, _) if read syscall was used
-    /// Returns (true, _) if mapping was used
-    pub fn read_unmapped(&self, pos: WalPosition) -> Result<(bool, Option<Bytes>), WalError> {
+    /// This method returns what type of read was used along with bytes read.
+    pub fn read_unmapped(&self, pos: WalPosition) -> Result<(ReadType, Option<Bytes>), WalError> {
         assert_ne!(
             pos,
             WalPosition::INVALID,
@@ -470,7 +469,7 @@ impl Wal {
         if let Some(map) = self.get_map(map) {
             // using CrcFrame::read_from_slice to avoid holding the larger byte array
             Ok((
-                true,
+                ReadType::Mapped,
                 Some(
                     CrcFrame::read_from_slice(&map.data, offset as usize)?
                         .to_vec()
@@ -486,7 +485,7 @@ impl Wal {
             let mut buf = FileReader::io_buffer_bytes(buffer_size, self.layout.direct_io);
             let files = self.files.load();
             let Some(file) = files.get_checked(self.layout.locate_file(pos.offset)) else {
-                return Ok((false, None));
+                return Ok((ReadType::Syscall, None));
             };
             file.read_exact_at(&mut buf, self.layout.offset_in_wal_file(pos.offset))?;
             let mut bytes = Bytes::from(bytes::Bytes::from(buf));
@@ -494,7 +493,10 @@ impl Wal {
                 // Direct IO buffer can be larger then needed
                 bytes = bytes.slice(..pos.len());
             }
-            Ok((false, Some(CrcFrame::read_from_bytes(&bytes, 0)?)))
+            Ok((
+                ReadType::Syscall,
+                Some(CrcFrame::read_from_bytes(&bytes, 0)?),
+            ))
         }
     }
 

@@ -516,17 +516,12 @@ impl Db {
         }
     }
 
-    fn report_read(&self, entry: &WalEntry, mapped: bool) {
+    fn report_read(&self, entry: &WalEntry, read_type: ReadType) {
         let (kind, ks) = match entry {
             WalEntry::Record(ks, _, _) => (WalEntryKind::Record, *ks),
             WalEntry::Index(ks, _) => (WalEntryKind::Index, *ks),
             WalEntry::Remove(ks, _) => (WalEntryKind::Tombstone, *ks),
             WalEntry::BatchStart(_) => return,
-        };
-        let read_type = if mapped {
-            ReadType::Mapped
-        } else {
-            ReadType::Syscall
         };
         let context = self.large_table.ks_context(ks);
         context.inc_read(kind, read_type);
@@ -661,15 +656,15 @@ impl Db {
         Ok(*self.index_writer.write(&w)?.wal_position())
     }
 
-    fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(bool, Option<WalEntry>)> {
-        let (mapped, entry) = wal.read_unmapped(position)?;
-        Ok((mapped, entry.map(WalEntry::from_bytes)))
+    fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(ReadType, Option<WalEntry>)> {
+        let (read_type, entry) = wal.read_unmapped(position)?;
+        Ok((read_type, entry.map(WalEntry::from_bytes)))
     }
 
     fn read_report_entry(&self, wal: &Wal, position: WalPosition) -> DbResult<Option<WalEntry>> {
-        let (mapped, entry) = Self::read_entry(wal, position)?;
+        let (read_type, entry) = Self::read_entry(wal, position)?;
         if let Some(ref entry) = entry {
-            self.report_read(entry, mapped);
+            self.report_read(entry, read_type);
         }
         Ok(entry)
     }
