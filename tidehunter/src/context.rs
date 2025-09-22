@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::metrics::Metrics;
+use prometheus::IntGauge;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -8,9 +9,22 @@ pub struct KsContext {
     pub config: Arc<Config>,
     pub ks_config: KeySpaceDesc,
     pub metrics: Arc<Metrics>,
+    pub loaded_key_bytes: IntGauge,
 }
 
 impl KsContext {
+    pub fn new(config: Arc<Config>, ks_config: KeySpaceDesc, metrics: Arc<Metrics>) -> Self {
+        let loaded_key_bytes = metrics
+            .loaded_key_bytes
+            .with_label_values(&[ks_config.name()]);
+        Self {
+            config,
+            ks_config,
+            metrics,
+            loaded_key_bytes,
+        }
+    }
+
     pub fn name(&self) -> &str {
         self.ks_config.name()
     }

@@ -445,11 +445,11 @@ impl Db {
     }
 
     pub(crate) fn ks_context(&self, ks: KeySpace) -> KsContext {
-        KsContext {
-            config: self.config.clone(),
-            ks_config: self.ks(ks).clone(),
-            metrics: self.metrics.clone(),
-        }
+        KsContext::new(
+            self.config.clone(),
+            self.ks(ks).clone(),
+            self.metrics.clone(),
+        )
     }
 
     /// Returns the next entry in the database, after the specified previous key.

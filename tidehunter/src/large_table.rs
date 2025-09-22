@@ -131,11 +131,7 @@ impl LargeTable {
                 }
                 let mut bloom_filter_restore_time = 0;
                 let rows = ks_snapshot.iter().map(|row_snapshot| {
-                    let context = KsContext {
-                        ks_config: ks.clone(),
-                        config: config.clone(),
-                        metrics: metrics.clone(),
-                    };
+                    let context = KsContext::new(config.clone(), ks.clone(), metrics.clone());
                     let entries = row_snapshot.iter().map(|(cell, entry_data)| {
                         let bloom_filter = context.ks_config.bloom_filter().map(|opts| {
                             let mut filter = BloomFilter::with_rate(opts.rate, opts.count);
@@ -1003,11 +999,7 @@ impl LargeTableEntry {
         // Report the total number of keys * key size as the metric
         let num_keys = self.data.len() as i64;
         let key_size = self.context.index_key_size().unwrap_or(64) as i64;
-        self.context
-            .metrics
-            .loaded_key_bytes
-            .with_label_values(&[self.context.name()])
-            .set(num_keys * key_size);
+        self.context.loaded_key_bytes.set(num_keys * key_size);
     }
 
     fn insert_bloom_filter(&mut self, key: &[u8]) {
@@ -1607,11 +1599,7 @@ mod tests {
         let (shape, ks_id) = KeyShape::new_single_config(8, 1, KeyType::uniform(1), config);
 
         let ks = shape.ks(ks_id);
-        let context = KsContext {
-            ks_config: ks.clone(),
-            config: Arc::new(Config::small()),
-            metrics: metrics.clone(),
-        };
+        let context = KsContext::new(Arc::new(Config::small()), ks.clone(), metrics.clone());
 
         // A cell ID to use in our tests
         let cell_id = CellId::Integer(0);
