@@ -15,6 +15,8 @@ pub struct KsContext {
     db_op_metrics: Vec<Histogram>,
     // WAL written bytes metrics indexed by WalWriteKind
     wal_written_metrics: Vec<IntCounter>,
+    // Lookup result metrics indexed by [LookupResult][LookupSource]
+    lookup_result_metrics: [Vec<IntCounter>; 2], // 2 for Found/NotFound
 }
 
 #[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
@@ -39,6 +41,25 @@ pub enum WalWriteKind {
     Index,
 }
 
+#[derive(Clone, Copy, Debug, AsRefStr)]
+#[repr(usize)]
+#[strum(serialize_all = "snake_case")]
+pub enum LookupResult {
+    Found,
+    NotFound,
+}
+
+#[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
+#[repr(usize)]
+#[strum(serialize_all = "snake_case")]
+pub enum LookupSource {
+    Lru,
+    Bloom,
+    Cache,
+    Lookup,
+    Prefix,
+}
+
 impl KsContext {
     pub fn new(config: Arc<Config>, ks_config: KeySpaceDesc, metrics: Arc<Metrics>) -> Self {
         let ks_name = ks_config.name();
@@ -56,6 +77,29 @@ impl KsContext {
             })
             .collect();
 
+        // Initialize lookup result metrics as a 2D array [result][source]
+        let found_metrics: Vec<_> = LookupSource::iter()
+            .map(|source| {
+                metrics.lookup_result.with_label_values(&[
+                    ks_name,
+                    LookupResult::Found.as_ref(),
+                    source.as_ref(),
+                ])
+            })
+            .collect();
+
+        let not_found_metrics: Vec<_> = LookupSource::iter()
+            .map(|source| {
+                metrics.lookup_result.with_label_values(&[
+                    ks_name,
+                    LookupResult::NotFound.as_ref(),
+                    source.as_ref(),
+                ])
+            })
+            .collect();
+
+        let lookup_result_metrics = [found_metrics, not_found_metrics];
+
         Self {
             config,
             ks_config,
@@ -63,6 +107,7 @@ impl KsContext {
             loaded_key_bytes,
             db_op_metrics,
             wal_written_metrics,
+            lookup_result_metrics,
         }
     }
 
@@ -72,6 +117,10 @@ impl KsContext {
 
     pub fn inc_wal_written(&self, kind: WalWriteKind, bytes: u64) {
         self.wal_written_metrics[kind as usize].inc_by(bytes);
+    }
+
+    pub fn inc_lookup_result(&self, result: LookupResult, source: LookupSource) {
+        self.lookup_result_metrics[result as usize][source as usize].inc();
     }
 
     pub fn name(&self) -> &str {
