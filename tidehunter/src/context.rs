@@ -5,11 +5,16 @@ use crate::metrics::{Metrics, TimerExt};
 use crate::wal::WalPosition;
 use prometheus::{Histogram, IntCounter, IntGauge};
 use std::array;
+use std::ops::Deref;
 use std::sync::Arc;
 use strum::{AsRefStr, EnumCount, EnumIter, FromRepr};
 
 #[derive(Clone)]
 pub struct KsContext {
+    inner: Arc<KsContextInner>,
+}
+
+pub struct KsContextInner {
     pub config: Arc<Config>,
     pub ks_config: KeySpaceDesc,
     pub metrics: Arc<Metrics>,
@@ -94,7 +99,7 @@ impl KsContext {
             })
         });
 
-        Self {
+        let inner = KsContextInner {
             config,
             ks_config,
             metrics,
@@ -102,6 +107,10 @@ impl KsContext {
             db_op_metrics,
             wal_written_metrics,
             lookup_result_metrics,
+        };
+
+        Self {
+            inner: Arc::new(inner),
         }
     }
 
@@ -151,5 +160,13 @@ impl KsContext {
             None => GetResult::NotFound,
             Some(w) => GetResult::WalPosition(w),
         }
+    }
+}
+
+impl Deref for KsContext {
+    type Target = KsContextInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
