@@ -28,11 +28,17 @@ tempdir = "0.3.7"
 hex-literal = "1.0.0"
 parking_lot = {workspace = true, features = ["arc_lock"]}
 hex = "0.4.3"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 tokio = ["dep:tokio"]
 test_methods = []
 test-utils = []
+
+[[bench]]
+name = "large_table_benchmarks"
+harness = false
+required-features = ["test-utils"]
 
 [lints.clippy]
 len_without_is_empty = "allow"
