@@ -129,6 +129,41 @@ jobs:
           echo "Finished at: $(date)" >> ./results/summary.md
           echo '```' >> ./results/summary.md
 
+      - name: Run general benchmark (4K values, Zipf=2.0, 100% reads)
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'benchmark' || github.event_name != 'workflow_dispatch'
+        run: |
+          rm -rf /opt/sui/db/tidehunter-benchmarks/*
+          echo "## General Benchmark (4K Values, Zipf=2.0, 100% Reads)" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+          echo "Started at: $(date)" >> ./results/summary.md
+          START_TIME=$(date +%s)
+          cargo run --release -p benchmark -- \
+            --parameters-path .github/benchmark-config-4k-zipf2.yml > ./results/benchmark_4k_zipf2_${{ env.TIMESTAMP }}.txt
+          cat ./results/benchmark_4k_zipf2_${{ env.TIMESTAMP }}.txt >> ./results/summary.md
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Total time: $DURATION seconds" >> ./results/summary.md
+          echo "Finished at: $(date)" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+
+      - name: Run general benchmark (4K values, Zipf=2.0, 100% reads, Metrics Enabled)
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'benchmark' || github.event_name != 'workflow_dispatch'
+        run: |
+          rm -rf /opt/sui/db/tidehunter-benchmarks/*
+          echo "## General Benchmark (4K Values, Zipf=2.0, 100% Reads, Metrics Enabled)" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+          echo "Started at: $(date)" >> ./results/summary.md
+          START_TIME=$(date +%s)
+          cargo run --release -p benchmark -- \
+            --parameters-path .github/benchmark-config-4k-zipf2.yml \
+            --metrics-enabled true > ./results/benchmark_4k_zipf2_metrics_${{ env.TIMESTAMP }}.txt
+          cat ./results/benchmark_4k_zipf2_metrics_${{ env.TIMESTAMP }}.txt >> ./results/summary.md
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Total time: $DURATION seconds" >> ./results/summary.md
+          echo "Finished at: $(date)" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
