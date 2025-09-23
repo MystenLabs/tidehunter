@@ -92,7 +92,7 @@ impl CellProcessingContext {
 pub struct CellIterator<'a> {
     db: &'a Db,
     /// Current keyspace being iterated (0-based index)
-    current_keyspace: usize,
+    current_keyspace: KeySpace,
     /// Current cell position within the keyspace (None = start of keyspace)
     current_cell: Option<CellId>,
 }
@@ -101,21 +101,21 @@ impl<'a> CellIterator<'a> {
     pub fn new(db: &'a Db) -> Self {
         Self {
             db,
-            current_keyspace: 0,
+            current_keyspace: KeySpace::default(),
             current_cell: None,
         }
     }
 
     pub fn from_watermark(db: &'a Db, watermark: &CellBasedWatermark) -> Self {
         let mut iter = Self::new(db);
-        iter.current_keyspace = watermark.keyspace_id as usize;
+        iter.current_keyspace = watermark.keyspace;
         iter.current_cell = watermark.cell_id.clone();
         iter
     }
 
     pub fn current_position(&self) -> CellBasedWatermark {
         CellBasedWatermark {
-            keyspace_id: self.current_keyspace as u8,
+            keyspace: self.current_keyspace,
             cell_id: self.current_cell.clone(),
             highest_wal_position: 0, // Will be updated during processing
             upper_limit: 0,          // Will be set during relocation
@@ -124,11 +124,11 @@ impl<'a> CellIterator<'a> {
 
     pub fn next_cell(&mut self) -> Option<CellReference> {
         loop {
-            if self.current_keyspace >= self.db.key_shape.num_ks() {
+            if self.current_keyspace.as_usize() >= self.db.key_shape.num_ks() {
                 return None;
             }
 
-            let ks_desc = self.db.key_shape.ks(KeySpace(self.current_keyspace as u8));
+            let ks_desc = self.db.key_shape.ks(self.current_keyspace);
             let context = self.db.ks_context(ks_desc.id());
 
             let next_cell = match &self.current_cell {
@@ -146,7 +146,7 @@ impl<'a> CellIterator<'a> {
                 }
                 None => {
                     // Move to next keyspace
-                    self.current_keyspace += 1;
+                    self.current_keyspace.increment();
                     self.current_cell = None;
                 }
             }
@@ -249,7 +249,7 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.position();
 
         // Create iterator starting from saved progress
-        let mut cell_iter = if self.watermarks.get_cell_progress().keyspace_id == 0
+        let mut cell_iter = if self.watermarks.get_cell_progress().keyspace == KeySpace::default()
             && self.watermarks.get_cell_progress().cell_id.is_none()
         {
             // Starting from beginning

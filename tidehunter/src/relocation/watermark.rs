@@ -1,6 +1,6 @@
-use crate::cell::CellId;
 use crate::metrics::Metrics;
 use crate::WalPosition;
+use crate::{cell::CellId, key_shape::KeySpace};
 use bytes::Buf;
 use serde::{Deserialize, Serialize};
 use std::fs::{rename, File, OpenOptions};
@@ -12,7 +12,7 @@ pub const CELL_RELOCATION_FILE: &str = "rel_cell";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CellBasedWatermark {
-    pub keyspace_id: u8,
+    pub keyspace: KeySpace,
     pub cell_id: Option<CellId>, // Current cell position (None = start from beginning)
     pub highest_wal_position: u64,
     pub upper_limit: u64, // WAL position boundary for safe GC
