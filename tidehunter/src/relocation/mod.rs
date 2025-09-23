@@ -53,7 +53,6 @@ impl<F> RelocationFilter for F where F: Fn(&[u8], &[u8]) -> Decision + Send + Sy
 
 #[derive(Clone)]
 pub struct CellReference {
-    pub keyspace_id: KeySpace,
     pub keyspace_desc: KeySpaceDesc,
     pub cell_id: CellId,
 }
@@ -168,7 +167,6 @@ impl<'a> CellIterator<'a> {
                     }
 
                     let cell_ref = CellReference {
-                        keyspace_id: KeySpace(self.current_keyspace as u8),
                         keyspace_desc: ks_desc.clone(),
                         cell_id: CellId::Integer(self.current_cell_index),
                     };
@@ -317,7 +315,7 @@ impl RelocationDriver {
             }
 
             // Update current keyspace metric when it changes
-            let ks_id = cell_ref.keyspace_id.as_usize();
+            let ks_id = cell_ref.keyspace_desc.id().as_usize();
             if current_ks_id != Some(ks_id) {
                 current_ks_id = Some(ks_id);
                 self.metrics.relocation_current_keyspace.set(ks_id as i64);
@@ -333,8 +331,11 @@ impl RelocationDriver {
 
             // Relocate entries if any were marked for keeping
             if !context.entries_to_relocate.is_empty() {
-                let successful =
-                    self.relocate_entries(context.entries_to_relocate, cell_ref.keyspace_id, &db)?;
+                let successful = self.relocate_entries(
+                    context.entries_to_relocate,
+                    cell_ref.keyspace_desc.id(),
+                    &db,
+                )?;
                 // Track successful relocations with existing metrics (same as WAL-based)
                 self.metrics
                     .relocation_kept
@@ -511,7 +512,7 @@ impl RelocationDriver {
             let mutex_index = cell_ref.keyspace_desc.mutex_for_cell(&cell_ref.cell_id);
             let mut row = db
                 .large_table
-                .row_by_mutex(db.ks_context(cell_ref.keyspace_id), mutex_index);
+                .row_by_mutex(db.ks_context(cell_ref.keyspace_desc.id()), mutex_index);
 
             let entry = match row.try_entry_mut(&cell_ref.cell_id) {
                 Some(entry) => entry,
