@@ -8,7 +8,6 @@ use crate::WalPosition;
 use bloom::{BloomFilter, ASMS};
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
@@ -110,30 +109,14 @@ impl<'a> CellIterator<'a> {
     pub fn from_watermark(db: &'a Db, watermark: &CellBasedWatermark) -> Self {
         let mut iter = Self::new(db);
         iter.current_keyspace = watermark.keyspace_id as usize;
-
-        // Convert watermark cell position back to our simplified state
-        iter.current_cell = if let Some(ref cell_bytes) = watermark.cell_bytes {
-            Some(CellId::Bytes(SmallVec::from_slice(cell_bytes)))
-        } else if watermark.cell_index > 0 {
-            Some(CellId::Integer(watermark.cell_index))
-        } else {
-            None // Start from beginning of keyspace
-        };
-
+        iter.current_cell = watermark.cell_id.clone();
         iter
     }
 
     pub fn current_position(&self) -> CellBasedWatermark {
-        let (cell_index, cell_bytes) = match &self.current_cell {
-            Some(CellId::Integer(idx)) => (*idx, None),
-            Some(CellId::Bytes(bytes)) => (0, Some(bytes.to_vec())),
-            None => (0, None),
-        };
-
         CellBasedWatermark {
             keyspace_id: self.current_keyspace as u8,
-            cell_index,
-            cell_bytes,
+            cell_id: self.current_cell.clone(),
             highest_wal_position: 0, // Will be updated during processing
             upper_limit: 0,          // Will be set during relocation
         }
@@ -267,8 +250,7 @@ impl RelocationDriver {
 
         // Create iterator starting from saved progress
         let mut cell_iter = if self.watermarks.get_cell_progress().keyspace_id == 0
-            && self.watermarks.get_cell_progress().cell_index == 0
-            && self.watermarks.get_cell_progress().cell_bytes.is_none()
+            && self.watermarks.get_cell_progress().cell_id.is_none()
         {
             // Starting from beginning
             CellIterator::new(&db)
