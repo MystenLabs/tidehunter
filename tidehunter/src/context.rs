@@ -1,9 +1,8 @@
 use crate::config::Config;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::GetResult;
-use crate::metrics::{Metrics, TimerExt};
+use crate::metrics::{MetricHistogram, MetricIntCounter, MetricIntGauge, Metrics, TimerExt};
 use crate::wal::WalPosition;
-use prometheus::{Histogram, IntCounter, IntGauge};
 use std::array;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -22,20 +21,20 @@ pub struct KsContextInner {
     pub config: Arc<Config>,
     pub ks_config: KeySpaceDesc,
     pub metrics: Arc<Metrics>,
-    pub loaded_key_bytes: IntGauge,
-    pub large_table_contention: Histogram,
+    pub loaded_key_bytes: MetricIntGauge,
+    pub large_table_contention: MetricHistogram,
     // Operation metrics indexed by DbOpKind
-    db_op_metrics: [Histogram; DbOpKind::COUNT],
+    db_op_metrics: [MetricHistogram; DbOpKind::COUNT],
     // WAL written bytes metrics indexed by WalEntryKind
-    wal_written_metrics: [IntCounter; WalEntryKind::COUNT],
+    wal_written_metrics: [MetricIntCounter; WalEntryKind::COUNT],
     // Lookup result metrics indexed by [LookupResult][LookupSource]
-    lookup_result_metrics: [[IntCounter; LookupSource::COUNT]; LookupResult::COUNT], // 2 for Found/NotFound
+    lookup_result_metrics: [[MetricIntCounter; LookupSource::COUNT]; LookupResult::COUNT], // 2 for Found/NotFound
     // Lookup timing metrics indexed by ReadType
-    lookup_mcs_metrics: [Histogram; ReadType::COUNT],
+    lookup_mcs_metrics: [MetricHistogram; ReadType::COUNT],
     // Read metrics indexed by [WalEntryKind][ReadType]
-    read_metrics: [[IntCounter; ReadType::COUNT]; WalEntryKind::COUNT],
+    read_metrics: [[MetricIntCounter; ReadType::COUNT]; WalEntryKind::COUNT],
     // Read bytes metrics indexed by [WalEntryKind][ReadType]
-    read_bytes_metrics: [[IntCounter; ReadType::COUNT]; WalEntryKind::COUNT],
+    read_bytes_metrics: [[MetricIntCounter; ReadType::COUNT]; WalEntryKind::COUNT],
 }
 
 #[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
@@ -177,7 +176,7 @@ impl KsContext {
         self.lookup_result_metrics[result as usize][source as usize].inc();
     }
 
-    pub fn lookup_mcs_histogram(&self, read_type: ReadType) -> &Histogram {
+    pub fn lookup_mcs_histogram(&self, read_type: ReadType) -> &MetricHistogram {
         &self.lookup_mcs_metrics[read_type as usize]
     }
 
