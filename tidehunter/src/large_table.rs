@@ -404,7 +404,7 @@ impl LargeTable {
         (row, cell)
     }
 
-    pub(crate) fn row_by_mutex(&self, context: &KsContext, mutex: usize) -> MutexGuard<'_, Row> {
+    fn row_by_mutex(&self, context: &KsContext, mutex: usize) -> MutexGuard<'_, Row> {
         let ks_table = self.ks_table(&context.ks_config);
         ks_table.lock(mutex, &context.large_table_contention)
     }
