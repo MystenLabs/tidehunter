@@ -1,7 +1,7 @@
 use crate::batch::{Update, WriteBatch};
 use crate::cell::CellId;
 use crate::config::Config;
-use crate::context::KsContext;
+use crate::context::{DbOpKind, KsContext, KsContextVec, ReadType, WalEntryKind};
 use crate::control::{ControlRegion, ControlRegionStore};
 use crate::crc::IntoBytesFixed;
 use crate::flusher::IndexFlusher;
@@ -79,9 +79,10 @@ impl Db {
             metrics.clone(),
             indexes.as_ref(),
         );
+        let contexts = KsContextVec::new(&key_shape, config.clone(), metrics.clone());
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer =
-            Self::replay_wal(&key_shape, &large_table, wal_iterator, &indexes, &metrics)?;
+            Self::replay_wal(&contexts, &large_table, wal_iterator, &indexes, &metrics)?;
         let last_index_position = control_region.last_index_wal_position();
         let index_writer = indexes.writer_after(last_index_position)?;
         let control_region_store = Mutex::new(control_region_store);
@@ -252,59 +253,42 @@ impl Db {
     }
 
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["insert", ks.name()])
-            .mcs_timer();
+        let context = self.ks_context(ks);
+        let _timer = context.db_op_timer(DbOpKind::Insert);
         let k = k.into();
         let v = v.into();
-        ks.check_key(&k);
-        let w = PreparedWalWrite::new(&WalEntry::Record(ks.id(), k.clone(), v.clone()));
-        self.metrics
-            .wal_written_bytes_type
-            .with_label_values(&["record", ks.name()])
-            .inc_by(w.len() as u64);
+        context.ks_config.check_key(&k);
+        let w = PreparedWalWrite::new(&WalEntry::Record(context.id(), k.clone(), v.clone()));
+        context.inc_wal_written(WalEntryKind::Record, w.len() as u64);
         let guard = self.wal_writer.write(&w)?;
         self.metrics
             .wal_written_bytes
             .set(guard.wal_position().offset() as i64);
-        let reduced_key = ks.reduced_key_bytes(k);
-        self.large_table.insert(ks, reduced_key, guard, &v, self)?;
+        let reduced_key = context.ks_config.reduced_key_bytes(k);
+        self.large_table
+            .insert(context, reduced_key, guard, &v, self)?;
         Ok(())
     }
 
     pub fn remove(&self, ks: KeySpace, k: impl Into<Bytes>) -> DbResult<()> {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["remove", ks.name()])
-            .mcs_timer();
+        let context = self.ks_context(ks);
+        let _timer = context.db_op_timer(DbOpKind::Remove);
         let k = k.into();
-        ks.check_key(&k);
-        let w = PreparedWalWrite::new(&WalEntry::Remove(ks.id(), k.clone()));
-        self.metrics
-            .wal_written_bytes_type
-            .with_label_values(&["tombstone", ks.name()])
-            .inc_by(w.len() as u64);
+        context.ks_config.check_key(&k);
+        let w = PreparedWalWrite::new(&WalEntry::Remove(context.id(), k.clone()));
+        context.inc_wal_written(WalEntryKind::Tombstone, w.len() as u64);
         let guard = self.wal_writer.write(&w)?;
-        let reduced_key = ks.reduced_key_bytes(k);
-        self.large_table.remove(ks, reduced_key, guard, self)
+        let reduced_key = context.ks_config.reduced_key_bytes(k);
+        self.large_table.remove(context, reduced_key, guard, self)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["get", ks.name()])
-            .mcs_timer();
-        let reduced_key = ks.reduce_key(k);
+        let context = self.ks_context(ks);
+        let _timer = context.db_op_timer(DbOpKind::Get);
+        let reduced_key = context.ks_config.reduce_key(k);
         match self
             .large_table
-            .get(ks, reduced_key.as_ref(), self, false)?
+            .get(context, reduced_key.as_ref(), self, false)?
         {
             GetResult::Value(value) => {
                 // todo check collision ?
@@ -316,7 +300,7 @@ impl Db {
                     return Ok(None);
                 };
                 self.large_table
-                    .update_lru(ks, reduced_key.to_vec().into(), value.clone());
+                    .update_lru(context, reduced_key.to_vec().into(), value.clone());
                 Ok(Some(value))
             }
             GetResult::NotFound => Ok(None),
@@ -324,17 +308,13 @@ impl Db {
     }
 
     pub fn exists(&self, ks: KeySpace, k: &[u8]) -> DbResult<bool> {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["exists", ks.name()])
-            .mcs_timer();
+        let context = self.ks_context(ks);
+        let _timer = context.db_op_timer(DbOpKind::Exists);
         // todo check collision ?
-        let reduced_key = ks.reduce_key(k);
+        let reduced_key = context.ks_config.reduce_key(k);
         Ok(self
             .large_table
-            .get(ks, reduced_key.as_ref(), self, false)?
+            .get(context, reduced_key.as_ref(), self, false)?
             .is_found())
     }
 
@@ -373,20 +353,18 @@ impl Db {
 
         for (idx, (update, guard)) in updates.iter().zip(guards_iter).enumerate() {
             let ks = update.ks();
-            let label = match update {
+            let context = self.ks_context(ks);
+            let wal_kind = match update {
                 Update::Record(..) => {
                     num_inserts += 1;
-                    "record"
+                    WalEntryKind::Record
                 }
                 Update::Remove(..) => {
                     num_deletes += 1;
-                    "tombstone"
+                    WalEntryKind::Tombstone
                 }
             };
-            self.metrics
-                .wal_written_bytes_type
-                .with_label_values(&[label, self.key_shape.ks(ks).name()])
-                .inc_by(prepared_writes[idx].len() as u64);
+            context.inc_wal_written(wal_kind, prepared_writes[idx].len() as u64);
             update_writes.push((update, guard));
         }
         drop(_write_timer);
@@ -405,15 +383,15 @@ impl Db {
             .mcs_timer();
 
         for (update, guard) in update_writes {
-            let ks = self.key_shape.ks(update.ks());
-            let reduced_key = update.reduced_key(ks);
+            let context = self.ks_context(update.ks());
+            let reduced_key = update.reduced_key(&context.ks_config);
             last_position = *guard.wal_position();
             match update {
                 Update::Record(_, _, value) => {
                     self.large_table
-                        .insert(ks, reduced_key, guard, value, self)?
+                        .insert(context, reduced_key, guard, value, self)?
                 }
-                Update::Remove(..) => self.large_table.remove(ks, reduced_key, guard, self)?,
+                Update::Remove(..) => self.large_table.remove(context, reduced_key, guard, self)?,
             }
         }
         if last_position != WalPosition::INVALID {
@@ -446,12 +424,8 @@ impl Db {
         self.key_shape.ks(ks)
     }
 
-    pub(crate) fn ks_context(&self, ks: KeySpace) -> KsContext {
-        KsContext {
-            config: self.config.clone(),
-            ks_config: self.ks(ks).clone(),
-            metrics: self.metrics.clone(),
-        }
+    pub(crate) fn ks_context(&self, ks: KeySpace) -> &KsContext {
+        self.large_table.ks_context(ks)
     }
 
     /// Returns the next entry in the database, after the specified previous key.
@@ -475,15 +449,16 @@ impl Db {
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> DbResult<Option<IteratorResult<Bytes>>> {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["next_entry", ks.name()])
-            .mcs_timer();
-        let Some(result) =
-            self.large_table
-                .next_entry(ks, cell, prev_key, self, end_cell_exclusive, reverse)?
+        let context = self.ks_context(ks);
+        let _timer = context.db_op_timer(DbOpKind::NextEntry);
+        let Some(result) = self.large_table.next_entry(
+            context,
+            cell,
+            prev_key,
+            self,
+            end_cell_exclusive,
+            reverse,
+        )?
         else {
             return Ok(None);
         };
@@ -497,16 +472,13 @@ impl Db {
     /// Returns the next cell in the large table
     pub(crate) fn next_cell(
         &self,
-        ks: &KeySpaceDesc,
+        ks: &KeySpaceDesc, // todo pass context instead of KeySpaceDesc here
         cell: &CellId,
         reverse: bool,
     ) -> Option<CellId> {
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["next_cell", ks.name()])
-            .mcs_timer();
-        self.large_table.next_cell(ks, cell, reverse)
+        let context = self.ks_context(ks.id());
+        let _timer = context.db_op_timer(DbOpKind::NextCell);
+        self.large_table.next_cell(context, cell, reverse)
     }
 
     pub(crate) fn update_flushed_index(
@@ -516,14 +488,10 @@ impl Db {
         original_index: Arc<IndexTable>,
         position: WalPosition,
     ) {
-        let ks = self.key_shape.ks(ks);
-        let _timer = self
-            .metrics
-            .db_op_mcs
-            .with_label_values(&["update_flushed_index", ks.name()])
-            .mcs_timer();
+        let context = self.ks_context(ks);
+        let _timer = context.db_op_timer(DbOpKind::UpdateFlushedIndex);
         self.large_table
-            .update_flushed_index(ks, &cell, original_index, position)
+            .update_flushed_index(context, &cell, original_index, position)
     }
 
     fn read_record_check_key(&self, k: &[u8], position: WalPosition) -> DbResult<Option<Bytes>> {
@@ -550,26 +518,20 @@ impl Db {
         }
     }
 
-    fn report_read(&self, entry: &WalEntry, mapped: bool) {
+    fn report_read(&self, entry: &WalEntry, read_type: ReadType) {
         let (kind, ks) = match entry {
-            WalEntry::Record(ks, _, _) => ("record", self.key_shape.ks(*ks).name()),
-            WalEntry::Index(ks, _) => ("index", self.key_shape.ks(*ks).name()),
-            WalEntry::Remove(ks, _) => ("tombstone", self.key_shape.ks(*ks).name()),
+            WalEntry::Record(ks, _, _) => (WalEntryKind::Record, *ks),
+            WalEntry::Index(ks, _) => (WalEntryKind::Index, *ks),
+            WalEntry::Remove(ks, _) => (WalEntryKind::Tombstone, *ks),
             WalEntry::BatchStart(_) => return,
         };
-        let mapped = if mapped { "mapped" } else { "unmapped" };
-        self.metrics
-            .read
-            .with_label_values(&[ks, kind, mapped])
-            .inc();
-        self.metrics
-            .read_bytes
-            .with_label_values(&[ks, kind, mapped])
-            .inc_by(entry.len() as u64);
+        let context = self.large_table.ks_context(ks);
+        context.inc_read(kind, read_type);
+        context.inc_read_bytes(kind, read_type, entry.len() as u64);
     }
 
     fn replay_wal(
-        key_shape: &KeyShape,
+        contexts: &KsContextVec,
         large_table: &LargeTable,
         mut wal_iterator: WalIterator,
         indexes: &Wal,
@@ -601,20 +563,20 @@ impl Db {
             match entry {
                 WalEntry::Record(ks, k, v) => {
                     metrics.replayed_wal_records.inc();
-                    let ks = key_shape.ks(ks);
-                    let reduced_key = ks.reduced_key_bytes(k);
+                    let context = contexts.ks_context(ks);
+                    let reduced_key = context.ks_config.reduced_key_bytes(k);
                     let guard = crate::wal_tracker::WalGuard::replay_guard(position);
-                    large_table.insert(ks, reduced_key, guard, &v, indexes)?;
+                    large_table.insert(context, reduced_key, guard, &v, indexes)?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
                 }
                 WalEntry::Remove(ks, k) => {
                     metrics.replayed_wal_records.inc();
-                    let ks = key_shape.ks(ks);
-                    let reduced_key = ks.reduced_key_bytes(k);
+                    let context = contexts.ks_context(ks);
+                    let reduced_key = context.ks_config.reduced_key_bytes(k);
                     let guard = crate::wal_tracker::WalGuard::replay_guard(position);
-                    large_table.remove(ks, reduced_key, guard, indexes)?;
+                    large_table.remove(context, reduced_key, guard, indexes)?;
                 }
                 WalEntry::BatchStart(size) => {
                     batch = VecDeque::with_capacity(size as usize);
@@ -674,40 +636,40 @@ impl Db {
     }
 
     fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {
-        let ksd = self.key_shape.ks(ks);
+        let context = self.ks_context(ks);
         self.metrics
             .flush_count
-            .with_label_values(&[ksd.name()])
+            .with_label_values(&[context.name()])
             .inc();
         self.metrics
             .flushed_keys
-            .with_label_values(&[ksd.name()])
+            .with_label_values(&[context.name()])
             .inc_by(index.len() as u64);
-        let index = ksd.index_format().serialize_index(index, ksd);
+        let index = context
+            .ks_config
+            .index_format()
+            .serialize_index(index, &context.ks_config);
         self.metrics
             .flushed_bytes
-            .with_label_values(&[ksd.name()])
+            .with_label_values(&[context.name()])
             .inc_by(index.len() as u64);
         let w = PreparedWalWrite::new(&WalEntry::Index(ks, index));
-        self.metrics
-            .wal_written_bytes_type
-            .with_label_values(&["index", ksd.name()])
-            .inc_by(w.len() as u64);
+        context.inc_wal_written(WalEntryKind::Index, w.len() as u64);
         Ok(*self.index_writer.write(&w)?.wal_position())
     }
 
     pub(crate) fn read_entry(
         wal: &Wal,
         position: WalPosition,
-    ) -> DbResult<(bool, Option<WalEntry>)> {
-        let (mapped, entry) = wal.read_unmapped(position)?;
-        Ok((mapped, entry.map(WalEntry::from_bytes)))
+    ) -> DbResult<(ReadType, Option<WalEntry>)> {
+        let (read_type, entry) = wal.read_unmapped(position)?;
+        Ok((read_type, entry.map(WalEntry::from_bytes)))
     }
 
     fn read_report_entry(&self, wal: &Wal, position: WalPosition) -> DbResult<Option<WalEntry>> {
-        let (mapped, entry) = Self::read_entry(wal, position)?;
+        let (read_type, entry) = Self::read_entry(wal, position)?;
         if let Some(ref entry) = entry {
-            self.report_read(entry, mapped);
+            self.report_read(entry, read_type);
         }
         Ok(entry)
     }

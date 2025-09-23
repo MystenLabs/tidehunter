@@ -459,7 +459,11 @@ impl RelocationDriver {
             }
         }
 
-        let decision = match db.large_table.get(ks, &reduced_key, db.as_ref(), true)? {
+        let context = db.ks_context(ks.id());
+        let decision = match db
+            .large_table
+            .get(context, &reduced_key, db.as_ref(), true)?
+        {
             GetResult::NotFound => Decision::Remove,
             GetResult::Value(..) => unreachable!("getter was called with skip cache"),
             GetResult::WalPosition(last_pos) => {
@@ -507,7 +511,7 @@ impl RelocationDriver {
             let mutex_index = cell_ref.keyspace_desc.mutex_for_cell(&cell_ref.cell_id);
             let mut row = db
                 .large_table
-                .row_by_mutex(&cell_ref.keyspace_desc, mutex_index);
+                .row_by_mutex(db.ks_context(cell_ref.keyspace_id), mutex_index);
 
             let entry = match row.try_entry_mut(&cell_ref.cell_id) {
                 Some(entry) => entry,

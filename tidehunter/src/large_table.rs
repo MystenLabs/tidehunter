@@ -1,6 +1,6 @@
 use crate::cell::{CellId, CellIdBytesContainer};
 use crate::config::Config;
-use crate::context::KsContext;
+use crate::context::{KsContext, LookupResult, LookupSource};
 use crate::flusher::{FlushKind, FlusherCommand, IndexFlusher, IndexFlusherThread};
 use crate::index::index_format::Direction;
 use crate::index::index_format::IndexFormat;
@@ -57,7 +57,7 @@ enum LargeTableEntryState {
 }
 
 struct KsTable {
-    ks: KeySpaceDesc,
+    context: KsContext,
     rows: ShardedMutex<Row>,
 }
 
@@ -130,12 +130,8 @@ impl LargeTable {
                     );
                 }
                 let mut bloom_filter_restore_time = 0;
+                let context = KsContext::new(config.clone(), ks.clone(), metrics.clone());
                 let rows = ks_snapshot.iter().map(|row_snapshot| {
-                    let context = KsContext {
-                        ks_config: ks.clone(),
-                        config: config.clone(),
-                        metrics: metrics.clone(),
-                    };
                     let entries = row_snapshot.iter().map(|(cell, entry_data)| {
                         let bloom_filter = context.ks_config.bloom_filter().map(|opts| {
                             let mut filter = BloomFilter::with_rate(opts.rate, opts.count);
@@ -172,7 +168,7 @@ impl LargeTable {
                     let value_lru = ks.value_cache_size().map(LruCache::new);
                     Row {
                         entries,
-                        context,
+                        context: context.clone(),
                         value_lru,
                     }
                 });
@@ -183,10 +179,7 @@ impl LargeTable {
                         .with_label_values(&[ks.name()])
                         .inc_by(bloom_filter_restore_time as u64);
                 }
-                KsTable {
-                    ks: ks.clone(),
-                    rows,
-                }
+                KsTable { context, rows }
             })
             .collect();
         Self {
@@ -198,9 +191,13 @@ impl LargeTable {
         }
     }
 
+    pub(crate) fn ks_context(&self, ks: KeySpace) -> &KsContext {
+        &self.table[ks.as_usize()].context
+    }
+
     pub fn insert<L: Loader>(
         &self,
-        ks: &KeySpaceDesc,
+        context: &KsContext,
         k: Bytes,
         guard: crate::wal_tracker::WalGuard,
         value: &Bytes,
@@ -208,12 +205,12 @@ impl LargeTable {
     ) -> Result<(), L::Error> {
         self.fp.fp_insert_before_lock();
         let v = *guard.wal_position();
-        let (mut row, cell) = self.row(ks, &k);
+        let (mut row, cell) = self.row(context, &k);
         let entry = row.entry_mut(&cell);
         if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
-                .with_label_values(&[ks.name(), "insert"])
+                .with_label_values(&[context.name(), "insert"])
                 .inc();
             return Ok(());
         }
@@ -227,7 +224,7 @@ impl LargeTable {
         if let Some(value_lru) = &mut row.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
             let previous = value_lru.push(k, value.clone());
-            self.update_lru_metric(ks, previous, delta);
+            self.update_lru_metric(context, previous, delta);
         }
         self.metrics
             .max_index_size
@@ -250,46 +247,46 @@ impl LargeTable {
 
     pub fn remove<L: Loader>(
         &self,
-        ks: &KeySpaceDesc,
+        context: &KsContext,
         k: Bytes,
         guard: crate::wal_tracker::WalGuard,
         _loader: &L,
     ) -> Result<(), L::Error> {
         self.fp.fp_remove_before_lock();
         let v = *guard.wal_position();
-        let (mut row, cell) = self.row(ks, &k);
+        let (mut row, cell) = self.row(context, &k);
         let entry = row.entry_mut(&cell);
         if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
-                .with_label_values(&[ks.name(), "remove"])
+                .with_label_values(&[context.name(), "remove"])
                 .inc();
             return Ok(());
         }
         entry.remove(k.clone(), v);
         if let Some(value_lru) = &mut row.value_lru {
             let previous = value_lru.pop(&k);
-            self.update_lru_metric(ks, previous.map(|v| (k, v)), 0);
+            self.update_lru_metric(context, previous.map(|v| (k, v)), 0);
         }
         Ok(())
     }
 
-    pub fn update_lru(&self, ks: &KeySpaceDesc, key: Bytes, value: Bytes) {
-        if ks.value_cache_size().is_none() {
+    pub fn update_lru(&self, context: &KsContext, key: Bytes, value: Bytes) {
+        if context.ks_config.value_cache_size().is_none() {
             return;
         }
-        let (mut row, _cell) = self.row(ks, &key);
+        let (mut row, _cell) = self.row(context, &key);
         let Some(value_lru) = &mut row.value_lru else {
             unreachable!()
         };
         let delta: i64 = (key.len() + value.len()) as i64;
         let previous = value_lru.push(key, value);
-        self.update_lru_metric(ks, previous, delta);
+        self.update_lru_metric(context, previous, delta);
     }
 
     fn update_lru_metric(
         &self,
-        ks: &KeySpaceDesc,
+        context: &KsContext,
         previous: Option<(Bytes, Bytes)>,
         mut delta: i64,
     ) {
@@ -298,50 +295,49 @@ impl LargeTable {
         }
         self.metrics
             .value_cache_size
-            .with_label_values(&[ks.name()])
+            .with_label_values(&[context.name()])
             .add(delta);
     }
 
     pub fn get<L: Loader>(
         &self,
-        ks: &KeySpaceDesc,
+        context: &KsContext,
         k: &[u8],
         loader: &L,
         skip_lru_cache: bool,
     ) -> Result<GetResult, L::Error> {
-        let (mut row, cell) = self.row(ks, k);
+        let ks = &context.ks_config;
+        let (mut row, cell) = self.row(context, k);
         if let (Some(value_lru), false) = (&mut row.value_lru, skip_lru_cache) {
             if let Some(value) = value_lru.get(k) {
-                self.metrics
-                    .lookup_result
-                    .with_label_values(&[ks.name(), "found", "lru"])
-                    .inc();
+                context.inc_lookup_result(LookupResult::Found, LookupSource::Lru);
                 return Ok(GetResult::Value(value.clone()));
             }
         }
         let entry = row.try_entry_mut(&cell);
         let Some(entry) = entry else {
-            return Ok(self.report_lookup_result(ks, None, "prefix"));
+            return Ok(context.report_lookup_result(None, LookupSource::Prefix));
         };
         if entry.bloom_filter_not_found(k) {
-            return Ok(self.report_lookup_result(ks, None, "bloom"));
+            return Ok(context.report_lookup_result(None, LookupSource::Bloom));
         }
         let index_position = match entry.state {
-            LargeTableEntryState::Empty => return Ok(self.report_lookup_result(ks, None, "cache")),
+            LargeTableEntryState::Empty => {
+                return Ok(context.report_lookup_result(None, LookupSource::Cache))
+            }
             LargeTableEntryState::Loaded(_) => {
-                return Ok(self.report_lookup_result(ks, entry.get(k), "cache"))
+                return Ok(context.report_lookup_result(entry.get(k), LookupSource::Cache))
             }
             LargeTableEntryState::DirtyLoaded(_) => {
-                return Ok(self.report_lookup_result(
-                    ks,
+                return Ok(context.report_lookup_result(
                     entry.get(k).and_then(WalPosition::valid),
-                    "cache",
+                    LookupSource::Cache,
                 ))
             }
             LargeTableEntryState::DirtyUnloaded(position) => {
                 // optimization: in dirty unloaded state we might not need to load entry
                 if let Some(found) = entry.get(k) {
-                    return Ok(self.report_lookup_result(ks, found.valid(), "cache"));
+                    return Ok(context.report_lookup_result(found.valid(), LookupSource::Cache));
                 }
                 position
             }
@@ -357,11 +353,10 @@ impl LargeTable {
             ks.index_format()
                 .lookup_unloaded(ks, &index_reader, k, &self.metrics)
         });
-        self.metrics
-            .lookup_mcs
-            .with_label_values(&[index_reader.kind_str(), ks.name()])
+        context
+            .lookup_mcs_histogram(index_reader.read_type())
             .observe(now.elapsed().as_micros() as f64);
-        Ok(self.report_lookup_result(ks, result, "lookup"))
+        Ok(context.report_lookup_result(result, LookupSource::Lookup))
     }
 
     /// Checks if the update is potentially stale and the operation needs to be canceled.
@@ -378,23 +373,6 @@ impl LargeTable {
             last_position > wal_position
         } else {
             false
-        }
-    }
-
-    fn report_lookup_result(
-        &self,
-        ks: &KeySpaceDesc,
-        v: Option<WalPosition>,
-        source: &str,
-    ) -> GetResult {
-        let found = if v.is_some() { "found" } else { "not_found" };
-        self.metrics
-            .lookup_result
-            .with_label_values(&[ks.name(), found, source])
-            .inc();
-        match v {
-            None => GetResult::NotFound,
-            Some(w) => GetResult::WalPosition(w),
         }
     }
 
@@ -419,22 +397,16 @@ impl LargeTable {
         }
     }
 
-    fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, CellId) {
-        let cell = ks.cell_id(k);
-        let mutex = ks.mutex_for_cell(&cell);
-        let row = self.row_by_mutex(ks, mutex);
+    fn row(&self, context: &KsContext, k: &[u8]) -> (MutexGuard<'_, Row>, CellId) {
+        let cell = context.ks_config.cell_id(k);
+        let mutex = context.ks_config.mutex_for_cell(&cell);
+        let row = self.row_by_mutex(context, mutex);
         (row, cell)
     }
 
-    pub(crate) fn row_by_mutex(&self, ks: &KeySpaceDesc, mutex: usize) -> MutexGuard<'_, Row> {
-        let ks_table = self.ks_table(ks);
-        ks_table.lock(
-            mutex,
-            &self
-                .metrics
-                .large_table_contention
-                .with_label_values(&[ks.name()]),
-        )
+    pub(crate) fn row_by_mutex(&self, context: &KsContext, mutex: usize) -> MutexGuard<'_, Row> {
+        let ks_table = self.ks_table(&context.ks_config);
+        ks_table.lock(mutex, &context.large_table_contention)
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
@@ -581,7 +553,7 @@ impl LargeTable {
         let metric = self
             .metrics
             .index_distance_from_tail
-            .with_label_values(&[ks_table.ks.name()]);
+            .with_label_values(&[ks_table.context.name()]);
         match replay_from {
             None => metric.set(0),
             Some(0) => metric.set(-1), // 0 indicates replay from beginning
@@ -599,24 +571,18 @@ impl LargeTable {
     /// See Db::next_entry for documentation.
     pub(crate) fn next_entry<L: Loader>(
         &self,
-        ks: &KeySpaceDesc,
+        context: &KsContext,
         mut cell: CellId,
         mut prev_key: Option<Bytes>,
         loader: &L,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> Result<Option<IteratorResult<WalPosition>>, L::Error> {
-        let ks_table = self.ks_table(ks);
+        let ks_table = self.ks_table(&context.ks_config);
         loop {
             let next_in_cell = {
-                let row = ks.mutex_for_cell(&cell);
-                let mut row = ks_table.lock(
-                    row,
-                    &self
-                        .metrics
-                        .large_table_contention
-                        .with_label_values(&[ks.name()]),
-                );
+                let row = context.ks_config.mutex_for_cell(&cell);
+                let mut row = ks_table.lock(row, &context.large_table_contention);
                 Self::next_in_cell(loader, &mut row, &cell, prev_key, reverse)?
                 // drop row mutex as required by Self::next_cell called below
             };
@@ -628,7 +594,7 @@ impl LargeTable {
                 }));
             } else {
                 prev_key = None;
-                let Some(next_cell) = self.next_cell(ks, &cell, reverse) else {
+                let Some(next_cell) = self.next_cell(context, &cell, reverse) else {
                     return Ok(None);
                 };
                 if let Some(end_cell_exclusive) = end_cell_exclusive {
@@ -741,7 +707,8 @@ impl LargeTable {
 
     /// See Db::next_cell for documentation
     /// This function acquires row mutexes, should not be called by code that might hold row mutex
-    pub fn next_cell(&self, ks: &KeySpaceDesc, cell: &CellId, reverse: bool) -> Option<CellId> {
+    pub fn next_cell(&self, context: &KsContext, cell: &CellId, reverse: bool) -> Option<CellId> {
+        let ks = &context.ks_config;
         match (ks.key_type(), cell) {
             (KeyType::Uniform(config), CellId::Integer(cell)) => {
                 config.next_cell(ks, *cell, reverse)
@@ -749,7 +716,7 @@ impl LargeTable {
             (KeyType::PrefixedUniform(_), CellId::Bytes(bytes)) => {
                 let mut mutex = ks.mutex_for_cell(cell);
                 loop {
-                    let row = self.row_by_mutex(ks, mutex);
+                    let row = self.row_by_mutex(context, mutex);
                     if let Some(next) = row.entries.next_tree_cell(bytes, reverse) {
                         return Some(CellId::Bytes(next.clone()));
                     };
@@ -789,20 +756,14 @@ impl LargeTable {
 
     pub fn update_flushed_index(
         &self,
-        ks: &KeySpaceDesc,
+        context: &KsContext,
         cell: &CellId,
         original_index: Arc<IndexTable>,
         position: WalPosition,
     ) {
-        let row = ks.mutex_for_cell(cell);
-        let ks_table = self.ks_table(ks);
-        let mut row = ks_table.lock(
-            row,
-            &self
-                .metrics
-                .large_table_contention
-                .with_label_values(&[ks.name()]),
-        );
+        let row = context.ks_config.mutex_for_cell(cell);
+        let ks_table = self.ks_table(&context.ks_config);
+        let mut row = ks_table.lock(row, &context.large_table_contention);
         let entry = row.entry_mut(cell);
         entry.update_flushed_index(original_index, position);
     }
@@ -849,7 +810,7 @@ impl LargeTable {
         let now = Instant::now();
         let mut filters = HashMap::new();
         for ks_table in self.table.iter() {
-            let ksd = &ks_table.ks;
+            let ksd = &ks_table.context.ks_config;
             let Some(bloom_params) = ksd.relocation_bloom_filter() else {
                 continue;
             };
@@ -1003,11 +964,7 @@ impl LargeTableEntry {
         // Report the total number of keys * key size as the metric
         let num_keys = self.data.len() as i64;
         let key_size = self.context.index_key_size().unwrap_or(64) as i64;
-        self.context
-            .metrics
-            .loaded_key_bytes
-            .with_label_values(&[self.context.name()])
-            .set(num_keys * key_size);
+        self.context.loaded_key_bytes.set(num_keys * key_size);
     }
 
     fn insert_bloom_filter(&mut self, key: &[u8]) {
@@ -1585,9 +1542,9 @@ mod tests {
             Metrics::new(),
             wal.as_ref(),
         );
-        let (mut row, cell) = l.row(ks.ks(a), &[]);
+        let (mut row, cell) = l.row(l.ks_context(a), &[]);
         assert_eq!(row.entry_mut(&cell).context.name(), "a");
-        let (mut row, cell) = l.row(ks.ks(b), &[5, 2, 3, 4]);
+        let (mut row, cell) = l.row(l.ks_context(b), &[5, 2, 3, 4]);
         assert_eq!(row.entry_mut(&cell).context.name(), "b");
     }
 
@@ -1607,11 +1564,7 @@ mod tests {
         let (shape, ks_id) = KeyShape::new_single_config(8, 1, KeyType::uniform(1), config);
 
         let ks = shape.ks(ks_id);
-        let context = KsContext {
-            ks_config: ks.clone(),
-            config: Arc::new(Config::small()),
-            metrics: metrics.clone(),
-        };
+        let context = KsContext::new(Arc::new(Config::small()), ks.clone(), metrics.clone());
 
         // A cell ID to use in our tests
         let cell_id = CellId::Integer(0);
