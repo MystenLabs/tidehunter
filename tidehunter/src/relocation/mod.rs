@@ -505,7 +505,7 @@ impl RelocationDriver {
                 db,
                 bloom_filters,
                 &cell_ref.keyspace_desc,
-                &key,
+                key,
                 &value,
                 position,
             )?;
