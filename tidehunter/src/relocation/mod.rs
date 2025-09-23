@@ -509,8 +509,8 @@ impl RelocationDriver {
         // Phase B: Read values from WAL and make decisions (no lock held, efficient iteration)
         for (key, position) in index.iter() {
             // Read the actual value from WAL
-            let value = match self.read_value_from_wal(&db.wal, position)? {
-                Some(val) => val,
+            let value = match db.read_record(position)? {
+                Some((_, val)) => val,
                 None => {
                     // Entry might have been deleted or corrupted, skip it
                     context.mark_entry_removed(position);
@@ -551,25 +551,6 @@ impl RelocationDriver {
         }
 
         Ok(context)
-    }
-
-    /// Read value from WAL at given position
-    fn read_value_from_wal(
-        &self,
-        wal: &crate::wal::Wal,
-        position: WalPosition,
-    ) -> DbResult<Option<Bytes>> {
-        let (_, entry) = crate::db::Db::read_entry(wal, position)?;
-
-        match entry {
-            Some(WalEntry::Record(_, _, value)) => Ok(Some(value)),
-            Some(WalEntry::Remove(_, _)) => Ok(None), // Entry was removed
-            Some(WalEntry::Index(_, _)) | Some(WalEntry::BatchStart(_)) => {
-                // These shouldn't be in the regular WAL positions we're reading
-                Ok(None)
-            }
-            None => Ok(None), // Entry not found or corrupted
-        }
     }
 
     /// Relocate entries following the same pattern as WAL-based relocation

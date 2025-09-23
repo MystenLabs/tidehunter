@@ -506,7 +506,7 @@ impl Db {
         }
     }
 
-    fn read_record(&self, position: WalPosition) -> DbResult<Option<(Bytes, Bytes)>> {
+    pub fn read_record(&self, position: WalPosition) -> DbResult<Option<(Bytes, Bytes)>> {
         let entry = self.read_report_entry(&self.wal, position)?;
         let Some(entry) = entry else {
             return Ok(None);
