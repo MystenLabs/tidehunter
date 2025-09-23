@@ -1,18 +1,15 @@
 use crate::db::{Db, DbResult, WalEntry};
-use crate::key_shape::{KeySpace, KeySpaceDesc, KeyType};
+use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::large_table::{GetResult, LargeTable};
 use crate::metrics::Metrics;
 use crate::wal::WalError;
 use crate::WalPosition;
-use crate::{
-    cell::{CellId, CellIdBytesContainer},
-    large_table::LargeTableEntry,
-};
+use crate::cell::CellId;
 use bloom::{BloomFilter, ASMS};
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::collections::{btree_map, HashMap};
+use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
 
@@ -94,10 +91,7 @@ impl CellProcessingContext {
 pub struct CellIterator<'a> {
     db: &'a Db,
     current_keyspace: usize,
-    current_row: usize,
-    current_cell_index: usize,
-    current_tree_iter: Option<btree_map::Keys<'a, CellIdBytesContainer, LargeTableEntry>>,
-    current_tree_position: Option<CellIdBytesContainer>,
+    current_cell: Option<CellId>,
 }
 
 impl<'a> CellIterator<'a> {
@@ -105,33 +99,38 @@ impl<'a> CellIterator<'a> {
         Self {
             db,
             current_keyspace: 0,
-            current_row: 0,
-            current_cell_index: 0,
-            current_tree_iter: None,
-            current_tree_position: None,
+            current_cell: None,
         }
     }
 
     pub fn from_watermark(db: &'a Db, watermark: &CellBasedWatermark) -> Self {
         let mut iter = Self::new(db);
         iter.current_keyspace = watermark.keyspace_id as usize;
-        iter.current_row = watermark.row_index;
-        iter.current_cell_index = watermark.cell_index;
-        if let Some(ref cell_bytes) = watermark.cell_bytes {
-            iter.current_tree_position = Some(SmallVec::from_slice(cell_bytes));
-        }
+
+        // Convert watermark cell position back to our simplified state
+        iter.current_cell = if let Some(ref cell_bytes) = watermark.cell_bytes {
+            Some(CellId::Bytes(SmallVec::from_slice(cell_bytes)))
+        } else if watermark.cell_index > 0 {
+            Some(CellId::Integer(watermark.cell_index))
+        } else {
+            None // Start from beginning of keyspace
+        };
+
         iter
     }
 
     pub fn current_position(&self) -> CellBasedWatermark {
+        let (cell_index, cell_bytes) = match &self.current_cell {
+            Some(CellId::Integer(idx)) => (*idx, None),
+            Some(CellId::Bytes(bytes)) => (0, Some(bytes.to_vec())),
+            None => (0, None),
+        };
+
         CellBasedWatermark {
             keyspace_id: self.current_keyspace as u8,
-            row_index: self.current_row,
-            cell_index: self.current_cell_index,
-            cell_bytes: self
-                .current_tree_position
-                .as_ref()
-                .map(|bytes| bytes.to_vec()),
+            row_index: 0, // No longer used but kept for backward compatibility
+            cell_index,
+            cell_bytes,
             highest_wal_position: 0, // Will be updated during processing
             upper_limit: 0,          // Will be set during relocation
         }
@@ -144,40 +143,25 @@ impl<'a> CellIterator<'a> {
             }
 
             let ks_desc = self.db.key_shape.ks(KeySpace(self.current_keyspace as u8));
+            let context = self.db.ks_context(ks_desc.id());
 
-            if self.current_row >= ks_desc.num_mutexes() {
-                // Move to next keyspace
-                self.current_keyspace += 1;
-                self.current_row = 0;
-                self.current_cell_index = 0;
-                self.current_tree_iter = None;
-                self.current_tree_position = None;
-                continue;
-            }
+            let next_cell = match &self.current_cell {
+                None => Some(ks_desc.first_cell()),
+                Some(cell) => self.db.large_table.next_cell(context, cell, false)
+            };
 
-            match ks_desc.key_type() {
-                KeyType::Uniform(config) => {
-                    // For uniform keys, we iterate through array indices
-                    let cells_per_mutex = config.cells_per_mutex();
-                    if self.current_cell_index >= cells_per_mutex {
-                        // Move to next row
-                        self.current_row += 1;
-                        self.current_cell_index = 0;
-                        continue;
-                    }
-
-                    let cell_ref = CellReference {
+            match next_cell {
+                Some(cell) => {
+                    self.current_cell = Some(cell.clone());
+                    return Some(CellReference {
                         keyspace_desc: ks_desc.clone(),
-                        cell_id: CellId::Integer(self.current_cell_index),
-                    };
-
-                    self.current_cell_index += 1;
-                    return Some(cell_ref);
+                        cell_id: cell,
+                    });
                 }
-                KeyType::PrefixedUniform(_) => {
-                    // For prefixed uniform keys, we need to iterate through the BTreeMap
-                    // This is more complex and would require accessing the actual row data
-                    todo!("PrefixedUniform key type iteration not implemented yet");
+                None => {
+                    // Move to next keyspace
+                    self.current_keyspace += 1;
+                    self.current_cell = None;
                 }
             }
         }
