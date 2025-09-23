@@ -88,9 +88,13 @@ impl CellProcessingContext {
     }
 }
 
+/// Iterator for traversing all cells across all keyspaces in the database.
+/// Supports all key types including uniform and prefixed uniform keys.
 pub struct CellIterator<'a> {
     db: &'a Db,
+    /// Current keyspace being iterated (0-based index)
     current_keyspace: usize,
+    /// Current cell position within the keyspace (None = start of keyspace)
     current_cell: Option<CellId>,
 }
 
@@ -128,7 +132,6 @@ impl<'a> CellIterator<'a> {
 
         CellBasedWatermark {
             keyspace_id: self.current_keyspace as u8,
-            row_index: 0, // No longer used but kept for backward compatibility
             cell_index,
             cell_bytes,
             highest_wal_position: 0, // Will be updated during processing
@@ -264,8 +267,8 @@ impl RelocationDriver {
 
         // Create iterator starting from saved progress
         let mut cell_iter = if self.watermarks.get_cell_progress().keyspace_id == 0
-            && self.watermarks.get_cell_progress().row_index == 0
             && self.watermarks.get_cell_progress().cell_index == 0
+            && self.watermarks.get_cell_progress().cell_bytes.is_none()
         {
             // Starting from beginning
             CellIterator::new(&db)

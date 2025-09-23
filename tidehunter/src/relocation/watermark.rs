@@ -12,7 +12,6 @@ pub const CELL_RELOCATION_FILE: &str = "rel_cell";
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CellBasedWatermark {
     pub keyspace_id: u8,
-    pub row_index: usize,
     pub cell_index: usize,           // For uniform keys (CellId::Integer)
     pub cell_bytes: Option<Vec<u8>>, // For prefixed uniform keys (CellId::Bytes)
     pub highest_wal_position: u64,
