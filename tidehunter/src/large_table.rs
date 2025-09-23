@@ -61,7 +61,7 @@ struct KsTable {
     rows: ShardedMutex<Row>,
 }
 
-pub(crate) struct Row {
+struct Row {
     value_lru: Option<LruCache<Bytes, Bytes>>,
     context: KsContext,
     entries: Entries,
