@@ -8,6 +8,7 @@ db_parameters:
   direct_io: false
   num_flusher_threads: 12
   sync_flush: false
+  wal_file_size: 10737418240
   metrics_enabled: false
 
 stress_client_parameters:
