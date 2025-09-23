@@ -1,10 +1,10 @@
+use crate::cell::CellId;
 use crate::db::{Db, DbResult, WalEntry};
 use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::large_table::{GetResult, LargeTable};
 use crate::metrics::Metrics;
 use crate::wal::WalError;
 use crate::WalPosition;
-use crate::cell::CellId;
 use bloom::{BloomFilter, ASMS};
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -150,7 +150,7 @@ impl<'a> CellIterator<'a> {
 
             let next_cell = match &self.current_cell {
                 None => Some(ks_desc.first_cell()),
-                Some(cell) => self.db.large_table.next_cell(context, cell, false)
+                Some(cell) => self.db.large_table.next_cell(context, cell, false),
             };
 
             match next_cell {
@@ -493,34 +493,21 @@ impl RelocationDriver {
         let mut context = CellProcessingContext::new();
         let mut removed_count = 0;
 
-        // Phase A: Collect keys and positions under lock
-        let mut pairs = Vec::new(); // TODO: optimize allocation
-        let key_positions = {
-            let mutex_index = cell_ref.keyspace_desc.mutex_for_cell(&cell_ref.cell_id);
-            let mut row = db
-                .large_table
-                .row_by_mutex(db.ks_context(cell_ref.keyspace_desc.id()), mutex_index);
-
-            let entry = match row.try_entry_mut(&cell_ref.cell_id) {
-                Some(entry) => entry,
-                None => {
-                    // Cell doesn't exist or is empty
-                    return Ok(context);
-                }
-            };
-
-            // Load the entry if it's unloaded
-            entry.maybe_load(db.as_ref())?;
-
-            // Collect all key-position pairs
-            for (key, position) in entry.data.iter() {
-                pairs.push((key.clone(), position));
+        // Phase A: Get shared reference to cell index
+        let index = match db.large_table.get_cell_index(
+            db.ks_context(cell_ref.keyspace_desc.id()),
+            &cell_ref.cell_id,
+            db.as_ref(),
+        )? {
+            Some(index) => index,
+            None => {
+                // Cell doesn't exist or is empty
+                return Ok(context);
             }
-            pairs
-        }; // Lock is released here
+        };
 
-        // Phase B: Read values from WAL and make decisions (no lock held)
-        for (key, position) in key_positions {
+        // Phase B: Read values from WAL and make decisions (no lock held, efficient iteration)
+        for (key, position) in index.iter() {
             // Read the actual value from WAL
             let value = match self.read_value_from_wal(&db.wal, position)? {
                 Some(val) => val,
@@ -543,7 +530,7 @@ impl RelocationDriver {
 
             match decision {
                 Decision::Keep => {
-                    context.add_entry_to_relocate(key, value, position);
+                    context.add_entry_to_relocate(key.clone(), value, position);
                 }
                 Decision::Remove => {
                     context.mark_entry_removed(position);
