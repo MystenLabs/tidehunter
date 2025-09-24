@@ -233,7 +233,7 @@ impl RelocationDriver {
             }
 
             // Process each cell
-            let context = self.process_single_cell(&cell_ref, &db, &bloom_filters)?;
+            let context = self.process_single_cell(&cell_ref, &db, upper_limit, &bloom_filters)?;
 
             // Track the highest WAL position seen
             if context.highest_wal_position.offset() > highest_wal_position {
@@ -428,6 +428,7 @@ impl RelocationDriver {
         &self,
         cell_ref: &CellReference,
         db: &Arc<Db>,
+        upper_limit: u64,
         bloom_filters: &HashMap<KeySpace, BloomFilter>,
     ) -> DbResult<CellProcessingContext> {
         let mut context = CellProcessingContext::new();
@@ -461,6 +462,10 @@ impl RelocationDriver {
         // - Skip WAL value reads when key-only decisions are possible
         // - Fall back to current value-based approach when needed
         for (key, position) in index.iter() {
+            if position.offset() >= upper_limit {
+                continue;
+            }
+
             // Read the actual value from WAL
             let value = match db.read_record(position)? {
                 Some((_, val)) => val,
