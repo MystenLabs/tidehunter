@@ -30,7 +30,7 @@ pub struct KeyShapeBuilder {
     key_spaces: Vec<KeySpaceDesc>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct KeySpace(pub(crate) u8);
 
 #[doc(hidden)]
@@ -558,6 +558,10 @@ impl KeyShape {
 }
 
 impl KeySpace {
+    pub(crate) fn first() -> Self {
+        KeySpace(0)
+    }
+
     pub(crate) fn as_usize(&self) -> usize {
         self.0 as usize
     }

@@ -101,7 +101,7 @@ impl<'a> CellIterator<'a> {
     pub fn new(db: &'a Db) -> Self {
         Self {
             db,
-            current_keyspace: KeySpace::default(),
+            current_keyspace: KeySpace::first(),
             current_cell: None,
         }
     }
@@ -249,7 +249,7 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.position();
 
         // Create iterator starting from saved progress
-        let mut cell_iter = if self.watermarks.get_cell_progress().keyspace == KeySpace::default()
+        let mut cell_iter = if self.watermarks.get_cell_progress().keyspace == KeySpace::first()
             && self.watermarks.get_cell_progress().cell_id.is_none()
         {
             // Starting from beginning
