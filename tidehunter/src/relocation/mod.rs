@@ -490,6 +490,19 @@ impl RelocationDriver {
         };
 
         // Phase B: Read values from WAL and make decisions (no lock held, efficient iteration)
+        // TODO(#74): Optimization needed - add support for making relocation decisions without loading values
+        // This would be beneficial in two scenarios:
+        // 1. Applications without pruner callbacks - relocation just moves non-deleted entries
+        // 2. Applications that can make decisions based on key only, without needing the value
+        //
+        // This strategy is most useful for applications that don't need values for decision making.
+        // For applications like Sui that require values (similar to current behavior),
+        // WAL-based relocation remains the better choice.
+        //
+        // Implementation could involve:
+        // - Optional key-only decision callback in RelocationFilter trait
+        // - Skip WAL value reads when key-only decisions are possible
+        // - Fall back to current value-based approach when needed
         for (key, position) in index.iter() {
             // Read the actual value from WAL
             let value = match db.read_record(position)? {
