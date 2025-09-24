@@ -1,4 +1,3 @@
-use crate::cell::CellId;
 use crate::db::{Db, DbResult, WalEntry};
 use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::large_table::{GetResult, LargeTable};
@@ -13,7 +12,10 @@ use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
 
 mod watermark;
+mod cell_reference;
+
 pub use watermark::{CellBasedWatermark, RelocationWatermarks};
+pub use cell_reference::CellReference;
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
@@ -47,11 +49,6 @@ pub enum Decision {
 pub trait RelocationFilter: Fn(&[u8], &[u8]) -> Decision + Send + Sync + 'static {}
 impl<F> RelocationFilter for F where F: Fn(&[u8], &[u8]) -> Decision + Send + Sync + 'static {}
 
-#[derive(Clone)]
-pub struct CellReference {
-    pub keyspace_desc: KeySpaceDesc,
-    pub cell_id: CellId,
-}
 
 #[derive(Debug)]
 struct CellProcessingContext {
@@ -87,72 +84,6 @@ impl CellProcessingContext {
     }
 }
 
-/// Iterator for traversing all cells across all keyspaces in the database.
-/// Supports all key types including uniform and prefixed uniform keys.
-pub struct CellIterator<'a> {
-    db: &'a Db,
-    /// Current keyspace being iterated (0-based index)
-    current_keyspace: KeySpace,
-    /// Current cell position within the keyspace (None = start of keyspace)
-    current_cell: Option<CellId>,
-}
-
-impl<'a> CellIterator<'a> {
-    pub fn new(db: &'a Db) -> Self {
-        Self {
-            db,
-            current_keyspace: KeySpace::first(),
-            current_cell: None,
-        }
-    }
-
-    pub fn from_watermark(db: &'a Db, watermark: &CellBasedWatermark) -> Self {
-        let mut iter = Self::new(db);
-        iter.current_keyspace = watermark.keyspace;
-        iter.current_cell = watermark.cell_id.clone();
-        iter
-    }
-
-    pub fn current_position(&self) -> CellBasedWatermark {
-        CellBasedWatermark {
-            keyspace: self.current_keyspace,
-            cell_id: self.current_cell.clone(),
-            highest_wal_position: 0, // Will be updated during processing
-            upper_limit: 0,          // Will be set during relocation
-        }
-    }
-
-    pub fn next_cell(&mut self) -> Option<CellReference> {
-        loop {
-            if self.current_keyspace.as_usize() >= self.db.key_shape.num_ks() {
-                return None;
-            }
-
-            let context = self.db.ks_context(self.current_keyspace);
-            let ks_desc = &(*context).ks_config;
-
-            let next_cell = match &self.current_cell {
-                None => Some(ks_desc.first_cell()),
-                Some(cell) => self.db.large_table.next_cell(context, cell, false),
-            };
-
-            match next_cell {
-                Some(cell) => {
-                    self.current_cell = Some(cell.clone());
-                    return Some(CellReference {
-                        keyspace_desc: ks_desc.clone(),
-                        cell_id: cell,
-                    });
-                }
-                None => {
-                    // Move to next keyspace
-                    self.current_keyspace.increment();
-                    self.current_cell = None;
-                }
-            }
-        }
-    }
-}
 
 pub(crate) struct RelocationDriver {
     db: Weak<Db>,
@@ -249,15 +180,23 @@ impl RelocationDriver {
         // and made its way into the large table
         let upper_limit = db.wal_writer.last_processed();
 
-        // Create iterator starting from saved progress
-        let mut cell_iter = if self.watermarks.get_cell_progress().keyspace == KeySpace::first()
+        // Get starting cell reference from saved progress
+        let mut current_cell_ref = if self.watermarks.get_cell_progress().keyspace == KeySpace::first()
             && self.watermarks.get_cell_progress().cell_id.is_none()
         {
             // Starting from beginning
-            CellIterator::new(&db)
+            CellReference::first(&db, KeySpace::first())
         } else {
             // Resume from saved position
-            CellIterator::from_watermark(&db, self.watermarks.get_cell_progress())
+            let watermark = self.watermarks.get_cell_progress();
+            if let Some(cell_id) = &watermark.cell_id {
+                Some(CellReference {
+                    keyspace_desc: db.key_shape.ks(watermark.keyspace).clone(),
+                    cell_id: cell_id.clone(),
+                })
+            } else {
+                CellReference::first(&db, watermark.keyspace)
+            }
         };
 
         let mut cells_processed = 0;
@@ -268,7 +207,7 @@ impl RelocationDriver {
 
         let mut current_ks_id = None;
 
-        while let Some(cell_ref) = cell_iter.next_cell() {
+        while let Some(cell_ref) = current_cell_ref.take() {
             // Check for cancellation periodically
             if cells_processed % Self::NUM_ITERATIONS_IN_BATCH == 0 {
                 if self.should_cancel_relocation() {
@@ -276,9 +215,12 @@ impl RelocationDriver {
                 }
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
-                    let mut current_pos = cell_iter.current_position();
-                    current_pos.upper_limit = upper_limit;
-                    current_pos.highest_wal_position = highest_wal_position;
+                    let current_pos = CellBasedWatermark {
+                        keyspace: cell_ref.keyspace_desc.id(),
+                        cell_id: Some(cell_ref.cell_id.clone()),
+                        upper_limit,
+                        highest_wal_position,
+                    };
                     self.watermarks.set_cell_progress(current_pos);
                     self.save_progress(&db, true)?; // Save watermark only
                 }
@@ -320,12 +262,28 @@ impl RelocationDriver {
                 .inc();
 
             cells_processed += 1;
+
+            // Get next cell reference
+            current_cell_ref = cell_ref.next(&db);
         }
 
         // Save final progress with upper_limit and highest WAL position
-        let mut final_pos = cell_iter.current_position();
-        final_pos.upper_limit = upper_limit;
-        final_pos.highest_wal_position = highest_wal_position;
+        let final_pos = if let Some(ref cell_ref) = current_cell_ref {
+            CellBasedWatermark {
+                keyspace: cell_ref.keyspace_desc.id(),
+                cell_id: Some(cell_ref.cell_id.clone()),
+                upper_limit,
+                highest_wal_position,
+            }
+        } else {
+            // Reached the end - use a placeholder indicating completion
+            CellBasedWatermark {
+                keyspace: KeySpace::first(),
+                cell_id: None,
+                upper_limit,
+                highest_wal_position,
+            }
+        };
         self.watermarks.set_cell_progress(final_pos);
         self.save_progress(&db, false)?;
 
