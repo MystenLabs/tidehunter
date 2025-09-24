@@ -426,6 +426,8 @@ impl LargeTable {
         };
 
         // Load the entry if it's unloaded
+        // TODO: doing this will mean all entries will be loaded in memory during relocation
+        // and at some point we might want to find a way to avoid it
         entry.maybe_load(loader)?;
 
         // Return shared reference to the index data

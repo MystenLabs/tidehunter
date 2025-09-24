@@ -19,9 +19,9 @@ pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelocationStrategy {
-    /// Original WAL-based sequential relocation
+    /// WAL-based sequential relocation
     WalBased,
-    /// New cell-based relocation that processes entire cells atomically
+    /// Cell-based relocation that processes entire cells atomically
     CellBased,
 }
 
