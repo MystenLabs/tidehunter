@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
 
-mod watermark;
 mod cell_reference;
+mod watermark;
 
-pub use watermark::{CellBasedWatermark, RelocationWatermarks};
 pub use cell_reference::CellReference;
+pub use watermark::{CellBasedWatermark, RelocationWatermarks};
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
@@ -48,7 +48,6 @@ pub enum Decision {
 
 pub trait RelocationFilter: Fn(&[u8], &[u8]) -> Decision + Send + Sync + 'static {}
 impl<F> RelocationFilter for F where F: Fn(&[u8], &[u8]) -> Decision + Send + Sync + 'static {}
-
 
 #[derive(Debug)]
 struct CellProcessingContext {
@@ -83,7 +82,6 @@ impl CellProcessingContext {
         }
     }
 }
-
 
 pub(crate) struct RelocationDriver {
     db: Weak<Db>,
@@ -181,7 +179,8 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.last_processed();
 
         // Get starting cell reference from saved progress
-        let mut current_cell_ref = if self.watermarks.get_cell_progress().keyspace == KeySpace::first()
+        let mut current_cell_ref = if self.watermarks.get_cell_progress().keyspace
+            == KeySpace::first()
             && self.watermarks.get_cell_progress().cell_id.is_none()
         {
             // Starting from beginning
