@@ -121,7 +121,8 @@ jobs:
             --write-threads 72 \
             --mixed-threads 72 \
             --write-size 512 \
-            --key-len 32 > ./results/benchmark_${{ env.TIMESTAMP }}.txt
+            --key-len 32 \
+            --path /opt/sui/db/tidehunter-benchmarks > ./results/benchmark_${{ env.TIMESTAMP }}.txt
           cat ./results/benchmark_${{ env.TIMESTAMP }}.txt >> ./results/summary.md
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
