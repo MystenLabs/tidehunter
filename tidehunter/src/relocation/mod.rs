@@ -61,7 +61,7 @@ impl CellProcessingContext {
     fn new() -> Self {
         Self {
             entries_to_relocate: Vec::new(),
-            highest_wal_position: WalPosition::INVALID,
+            highest_wal_position: WalPosition::new(0, 0),
             entries_removed: 0,
             entries_kept: 0,
         }

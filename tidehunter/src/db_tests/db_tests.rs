@@ -3278,3 +3278,100 @@ fn test_cell_based_relocation_large_cells() {
         }
     }
 }
+
+#[test]
+fn test_watermark_highest_wal_position_tracking() {
+    let dir = tempdir::TempDir::new("test_watermark_wal_position").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    let ks = ksb.add_key_space_config("test", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+
+    // Insert multiple entries to create WAL entries at different positions
+    for key in 0..50u64 {
+        db.insert(ks, key.to_be_bytes().to_vec(), vec![1, 2, 3])
+            .unwrap();
+    }
+
+    // Get the initial WAL position to verify we have data to process
+    let initial_wal_position = db.wal_writer.position();
+    assert!(initial_wal_position > 0, "Database should have WAL entries");
+
+    // Ensure data is persisted and control region is built
+    db.rebuild_control_region().unwrap();
+
+    // Run cell-based relocation
+    start_cell_based_relocation(&db);
+
+    // Verify some cells were processed - this confirms relocation completed successfully
+    let processed = relocation_cells_processed(&metrics, "test");
+    assert!(processed > 0, "Should have processed some cells");
+
+    // Verify data integrity - all data should still be accessible after relocation
+    for key in 0..50u64 {
+        assert_eq!(
+            db.get(ks, &key.to_be_bytes()).unwrap(),
+            Some(vec![1, 2, 3].into()),
+            "Key {} should still exist after relocation",
+            key
+        );
+    }
+
+    // Wait for background threads to finish - this consumes the db
+    db.wait_for_background_threads_to_finish();
+
+    // Now the key test: load watermarks from disk and ensure it is as expected
+    let watermarks = RelocationWatermarks::load(dir.path()).unwrap();
+    let cell_watermark = watermarks.get_cell_progress();
+
+    // The correct value should be the highest WAL position of entries that were processed
+    assert_eq!(
+        cell_watermark.upper_limit, initial_wal_position,
+        "Upper limit should equal initial WAL position (this defines the processing boundary)"
+    );
+
+    // The highest_wal_position should be the actual highest position among processed entries
+    // It should be:
+    // 1. Greater than 0 (we processed some entries)
+    // 2. Less than or equal to upper_limit (can't process beyond the safe boundary)
+    // 3. Close to upper_limit (most entries should be processed in a simple sequential insert scenario)
+    assert!(
+        cell_watermark.highest_wal_position > 0,
+        "Watermark highest_wal_position ({}) should be greater than 0",
+        cell_watermark.highest_wal_position
+    );
+    assert!(
+        cell_watermark.highest_wal_position <= cell_watermark.upper_limit,
+        "Watermark highest_wal_position ({}) should not exceed upper_limit ({})",
+        cell_watermark.highest_wal_position,
+        cell_watermark.upper_limit
+    );
+
+    // Precise correctness check: highest_wal_position should be close to upper_limit
+    let gap = cell_watermark.upper_limit - cell_watermark.highest_wal_position;
+    assert!(
+        gap <= 100,
+        "Gap between highest_wal_position ({}) and upper_limit ({}) is too large ({}), suggests incomplete processing",
+        cell_watermark.highest_wal_position, cell_watermark.upper_limit, gap
+    );
+
+    // The exact value cannot be computed with precision because:
+    // 1. Cell-based relocation only processes entries that have been ingested into the large table
+    // 2. There's a delay between WAL writes and large table ingestion
+    // 3. The "upper_limit" represents the safe boundary, but not all entries up to that
+    //    point may have been ingested into cells yet
+    // 4. Our rebuild_control_region() call ensures most entries are ingested, but timing varies
+    //
+    // However, we can assert a deterministic bound: in our controlled test scenario with
+    // sequential inserts followed by rebuild_control_region(), we expect high ingestion rate.
+    assert!(
+        cell_watermark.highest_wal_position >= initial_wal_position * 9 / 10,
+        "Watermark highest_wal_position ({}) should be at least 90% of initial WAL position ({}) \
+         - if this fails, it suggests ingestion issues, not the bug we're testing",
+        cell_watermark.highest_wal_position,
+        initial_wal_position
+    );
+}
