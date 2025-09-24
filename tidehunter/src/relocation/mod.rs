@@ -128,8 +128,8 @@ impl<'a> CellIterator<'a> {
                 return None;
             }
 
-            let ks_desc = self.db.key_shape.ks(self.current_keyspace);
-            let context = self.db.ks_context(ks_desc.id());
+            let context = self.db.ks_context(self.current_keyspace);
+            let ks_desc = &(*context).ks_config;
 
             let next_cell = match &self.current_cell {
                 None => Some(ks_desc.first_cell()),
@@ -245,8 +245,9 @@ impl RelocationDriver {
         };
 
         // Capture the upper WAL limit to avoid race conditions
-        // Only process entries written before this point
-        let upper_limit = db.wal_writer.position();
+        // Only process entries written before this point. This is the last position that was written
+        // and made its way into the large table
+        let upper_limit = db.wal_writer.last_processed();
 
         // Create iterator starting from saved progress
         let mut cell_iter = if self.watermarks.get_cell_progress().keyspace == KeySpace::first()

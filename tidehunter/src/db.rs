@@ -658,10 +658,7 @@ impl Db {
         Ok(*self.index_writer.write(&w)?.wal_position())
     }
 
-    pub(crate) fn read_entry(
-        wal: &Wal,
-        position: WalPosition,
-    ) -> DbResult<(ReadType, Option<WalEntry>)> {
+    fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(ReadType, Option<WalEntry>)> {
         let (read_type, entry) = wal.read_unmapped(position)?;
         Ok((read_type, entry.map(WalEntry::from_bytes)))
     }
