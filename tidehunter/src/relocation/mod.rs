@@ -200,10 +200,6 @@ impl RelocationDriver {
 
         let mut cells_processed = 0;
         let mut highest_wal_position = 0u64;
-
-        // Build bloom filters for optimization (same as WAL-based relocation)
-        let bloom_filters = db.large_table.build_index_bloom_filters(db.as_ref())?;
-
         let mut current_ks_id = None;
 
         while let Some(cell_ref) = current_cell_ref.take() {
@@ -233,7 +229,7 @@ impl RelocationDriver {
             }
 
             // Process each cell
-            let context = self.process_single_cell(&cell_ref, &db, upper_limit, &bloom_filters)?;
+            let context = self.process_single_cell(&cell_ref, &db, upper_limit)?;
 
             // Track the highest WAL position seen
             if context.highest_wal_position.offset() > highest_wal_position {
@@ -429,7 +425,6 @@ impl RelocationDriver {
         cell_ref: &CellReference,
         db: &Arc<Db>,
         upper_limit: u64,
-        bloom_filters: &HashMap<KeySpace, BloomFilter>,
     ) -> DbResult<CellProcessingContext> {
         let mut context = CellProcessingContext::new();
         let mut removed_count = 0;
@@ -477,14 +472,12 @@ impl RelocationDriver {
                 }
             };
 
-            let decision = self.should_keep_entry(
-                db,
-                bloom_filters,
-                &cell_ref.keyspace_desc,
-                key,
-                &value,
-                position,
-            )?;
+            // Simplified decision logic for cell-based relocation. Since we're iterating through
+            // current index entries, we only need to check the relocation filter
+            let decision = cell_ref
+                .keyspace_desc
+                .relocation_filter()
+                .map_or(Decision::Keep, |filter| filter(key, &value));
 
             match decision {
                 Decision::Keep => {

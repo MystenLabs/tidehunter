@@ -17,7 +17,7 @@ impl CellReference {
         }
 
         let context = db.ks_context(keyspace);
-        let ks_desc = &(*context).ks_config;
+        let ks_desc = &context.ks_config;
         let first_cell = ks_desc.first_cell();
 
         Some(CellReference {

@@ -2745,7 +2745,8 @@ fn test_cell_based_relocation_with_bloom_filter_indexing() {
     start_cell_based_relocation(&db);
 
     let bloom_build_time_after = metrics.relocation_bloom_filter_build_time_mcs.get();
-    assert!(bloom_build_time_after > bloom_build_time_before);
+    // Cell-based relocation optimization: bloom filters are NOT built since we iterate through indexes directly
+    assert_eq!(bloom_build_time_after, bloom_build_time_before);
 
     // Cell-based relocation doesn't track removed entries (they're not in cells)
     // Instead, verify cells were processed and data integrity
