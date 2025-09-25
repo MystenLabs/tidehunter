@@ -35,7 +35,7 @@ pub struct Config {
 }
 
 fn default_metrics_enabled() -> bool {
-    false
+    true
 }
 
 impl Default for Config {
@@ -52,7 +52,7 @@ impl Default for Config {
             sync_flush: false,
             wal_file_size: 10 * (1 << 30), // 10Gb
             relocation_strategy: RelocationStrategy::default(),
-            metrics_enabled: false,
+            metrics_enabled: true,
         }
     }
 }
@@ -71,7 +71,7 @@ impl Config {
             sync_flush: false,
             wal_file_size: 4 * 1024 * 1024,
             relocation_strategy: RelocationStrategy::default(),
-            metrics_enabled: false,
+            metrics_enabled: true,
         }
     }
 
