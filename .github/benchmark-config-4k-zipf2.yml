@@ -24,7 +24,6 @@ stress_client_parameters:
   key_layout: Uniform
   tldr: ""
   preserve: false
-  path: "/opt/sui/db/tidehunter-benchmarks"
   read_mode: Exists
   backend: Tidehunter
   read_percentage: 100
