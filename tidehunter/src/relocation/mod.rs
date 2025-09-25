@@ -14,6 +14,9 @@ use std::thread::JoinHandle;
 mod cell_reference;
 mod watermark;
 
+#[cfg(test)]
+mod relocation_tests;
+
 pub use cell_reference::CellReference;
 pub use watermark::{CellBasedWatermark, RelocationWatermarks};
 
