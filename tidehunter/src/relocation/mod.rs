@@ -193,7 +193,7 @@ impl RelocationDriver {
             let watermark = self.watermarks.get_cell_progress();
             if let Some(cell_id) = &watermark.cell_id {
                 Some(CellReference {
-                    keyspace_desc: db.key_shape.ks(watermark.keyspace).clone(),
+                    keyspace: watermark.keyspace,
                     cell_id: cell_id.clone(),
                 })
             } else {
@@ -214,7 +214,7 @@ impl RelocationDriver {
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
                     let current_pos = CellBasedWatermark {
-                        keyspace: cell_ref.keyspace_desc.id(),
+                        keyspace: cell_ref.keyspace,
                         cell_id: Some(cell_ref.cell_id.clone()),
                         upper_limit,
                         highest_wal_position,
@@ -225,7 +225,7 @@ impl RelocationDriver {
             }
 
             // Update current keyspace metric when it changes
-            let ks_id = cell_ref.keyspace_desc.id().as_usize();
+            let ks_id = cell_ref.keyspace.as_usize();
             if current_ks_id != Some(ks_id) {
                 current_ks_id = Some(ks_id);
                 self.metrics.relocation_current_keyspace.set(ks_id as i64);
@@ -240,23 +240,21 @@ impl RelocationDriver {
             }
 
             // Relocate entries if any were marked for keeping
+            let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
             if !context.entries_to_relocate.is_empty() {
-                let successful = self.relocate_entries(
-                    context.entries_to_relocate,
-                    cell_ref.keyspace_desc.id(),
-                    &db,
-                )?;
+                let successful =
+                    self.relocate_entries(context.entries_to_relocate, cell_ref.keyspace, &db)?;
                 // Track successful relocations with existing metrics (same as WAL-based)
                 self.metrics
                     .relocation_kept
-                    .with_label_values(&[cell_ref.keyspace_desc.name()])
+                    .with_label_values(&[keyspace_desc.name()])
                     .inc_by(successful);
             }
 
             // Track cells processed
             self.metrics
                 .relocation_cells_processed
-                .with_label_values(&[cell_ref.keyspace_desc.name()])
+                .with_label_values(&[keyspace_desc.name()])
                 .inc();
 
             cells_processed += 1;
@@ -268,7 +266,7 @@ impl RelocationDriver {
         // Save final progress with upper_limit and highest WAL position
         let final_pos = if let Some(ref cell_ref) = current_cell_ref {
             CellBasedWatermark {
-                keyspace: cell_ref.keyspace_desc.id(),
+                keyspace: cell_ref.keyspace,
                 cell_id: Some(cell_ref.cell_id.clone()),
                 upper_limit,
                 highest_wal_position,
@@ -434,7 +432,7 @@ impl RelocationDriver {
 
         // Phase A: Get shared reference to cell index
         let index = match db.large_table.get_cell_index(
-            db.ks_context(cell_ref.keyspace_desc.id()),
+            db.ks_context(cell_ref.keyspace),
             &cell_ref.cell_id,
             db.as_ref(),
         )? {
@@ -459,6 +457,7 @@ impl RelocationDriver {
         // - Optional key-only decision callback in RelocationFilter trait
         // - Skip WAL value reads when key-only decisions are possible
         // - Fall back to current value-based approach when needed
+        let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
         for (key, position) in index.iter() {
             if position.offset() >= upper_limit {
                 continue;
@@ -477,8 +476,7 @@ impl RelocationDriver {
 
             // Simplified decision logic for cell-based relocation. Since we're iterating through
             // current index entries, we only need to check the relocation filter
-            let decision = cell_ref
-                .keyspace_desc
+            let decision = keyspace_desc
                 .relocation_filter()
                 .map_or(Decision::Keep, |filter| filter(key, &value));
 
@@ -500,7 +498,7 @@ impl RelocationDriver {
         if removed_count > 0 {
             self.metrics
                 .relocation_removed
-                .with_label_values(&[cell_ref.keyspace_desc.name()])
+                .with_label_values(&[keyspace_desc.name()])
                 .inc_by(removed_count);
         }
 

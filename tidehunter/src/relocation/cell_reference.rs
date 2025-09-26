@@ -1,11 +1,11 @@
 use crate::cell::CellId;
 use crate::db::Db;
-use crate::key_shape::{KeySpace, KeySpaceDesc};
+use crate::key_shape::KeySpace;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CellReference {
-    pub keyspace_desc: KeySpaceDesc,
+    pub keyspace: KeySpace,
     pub cell_id: CellId,
 }
 
@@ -21,25 +21,25 @@ impl CellReference {
         let first_cell = ks_desc.first_cell();
 
         Some(CellReference {
-            keyspace_desc: ks_desc.clone(),
+            keyspace,
             cell_id: first_cell,
         })
     }
 
     /// Get the next cell reference, handling keyspace boundaries
     pub fn next(&self, db: &Db) -> Option<Self> {
-        let context = db.ks_context(self.keyspace_desc.id());
+        let context = db.ks_context(self.keyspace);
 
         // Try to get next cell in current keyspace
         if let Some(next_cell) = db.large_table.next_cell(context, &self.cell_id, false) {
             return Some(CellReference {
-                keyspace_desc: self.keyspace_desc.clone(),
+                keyspace: self.keyspace.clone(),
                 cell_id: next_cell,
             });
         }
 
         // No more cells in current keyspace, move to next keyspace
-        let mut next_keyspace = self.keyspace_desc.id();
+        let mut next_keyspace = self.keyspace;
         next_keyspace.increment();
 
         Self::first(db, next_keyspace)
