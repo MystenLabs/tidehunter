@@ -3,7 +3,7 @@ use crate::db::Db;
 use crate::key_shape::KeySpace;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CellReference {
     pub keyspace: KeySpace,
     pub cell_id: CellId,

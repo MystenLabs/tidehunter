@@ -182,24 +182,14 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.last_processed();
 
         // Get starting cell reference from saved progress
-        let mut current_cell_ref = if self.watermarks.get_cell_progress().keyspace
-            == KeySpace::first()
-            && self.watermarks.get_cell_progress().cell_id.is_none()
-        {
-            // Starting from beginning
-            CellReference::first(&db, KeySpace::first())
-        } else {
-            // Resume from saved position
-            let watermark = self.watermarks.get_cell_progress();
-            if let Some(cell_id) = &watermark.cell_id {
-                Some(CellReference {
-                    keyspace: watermark.keyspace,
-                    cell_id: cell_id.clone(),
-                })
+        let mut current_cell_ref =
+            if let Some(ref cell_ref) = self.watermarks.get_cell_progress().cell_ref {
+                // Resume from saved position
+                Some(cell_ref.clone())
             } else {
-                CellReference::first(&db, watermark.keyspace)
-            }
-        };
+                // Starting from beginning
+                CellReference::first(&db, KeySpace::first())
+            };
 
         let mut cells_processed = 0;
         let mut highest_wal_position = 0u64;
@@ -214,8 +204,7 @@ impl RelocationDriver {
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
                     let current_pos = CellBasedWatermark {
-                        keyspace: cell_ref.keyspace,
-                        cell_id: Some(cell_ref.cell_id.clone()),
+                        cell_ref: Some(cell_ref.clone()),
                         upper_limit,
                         highest_wal_position,
                     };
@@ -264,21 +253,10 @@ impl RelocationDriver {
         }
 
         // Save final progress with upper_limit and highest WAL position
-        let final_pos = if let Some(ref cell_ref) = current_cell_ref {
-            CellBasedWatermark {
-                keyspace: cell_ref.keyspace,
-                cell_id: Some(cell_ref.cell_id.clone()),
-                upper_limit,
-                highest_wal_position,
-            }
-        } else {
-            // Reached the end - use a placeholder indicating completion
-            CellBasedWatermark {
-                keyspace: KeySpace::first(),
-                cell_id: None,
-                upper_limit,
-                highest_wal_position,
-            }
+        let final_pos = CellBasedWatermark {
+            cell_ref: current_cell_ref.clone(),
+            upper_limit,
+            highest_wal_position,
         };
         self.watermarks.set_cell_progress(final_pos);
         self.save_progress(&db, false)?;
