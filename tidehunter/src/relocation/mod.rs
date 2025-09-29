@@ -96,7 +96,7 @@ impl RelocationDriver {
             return Ok(());
         };
         // TODO: handle potentially uninitialized positions at the end of the WAL
-        let upper_limit = db.wal_writer.position();
+        let upper_limit = db.wal_writer.last_processed();
         let start_position = self.watermarks.get_relocation_progress();
         let mut wal_iterator = db.wal.wal_iterator(start_position)?;
 
@@ -156,8 +156,8 @@ impl RelocationDriver {
                                 .relocation_kept
                                 .with_label_values(&[ksd.name()])
                                 .inc();
-                            // TODO: handle potential races with concurrent writes to the same key
-                            db.insert(ks, key, value)?
+                            // TODO: handle potential races with concurrent writes for WAL replay
+                            db.apply_insert(ks, key, value, Some(upper_limit))?
                         }
                     }
                 }

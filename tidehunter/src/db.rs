@@ -251,6 +251,16 @@ impl Db {
     }
 
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
+        self.apply_insert(ks, k, v, None)
+    }
+
+    pub fn apply_insert(
+        &self,
+        ks: KeySpace,
+        k: impl Into<Bytes>,
+        v: impl Into<Bytes>,
+        relocation_pos: Option<u64>,
+    ) -> DbResult<()> {
         let context = self.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::Insert);
         let k = k.into();
@@ -264,7 +274,7 @@ impl Db {
             .set(guard.wal_position().offset() as i64);
         let reduced_key = context.ks_config.reduced_key_bytes(k);
         self.large_table
-            .insert(context, reduced_key, guard, &v, self)?;
+            .insert(context, reduced_key, guard, &v, relocation_pos, self)?;
         Ok(())
     }
 
@@ -387,7 +397,7 @@ impl Db {
             match update {
                 Update::Record(_, _, value) => {
                     self.large_table
-                        .insert(context, reduced_key, guard, value, self)?
+                        .insert(context, reduced_key, guard, value, None, self)?
                 }
                 Update::Remove(..) => self.large_table.remove(context, reduced_key, guard, self)?,
             }
@@ -564,7 +574,7 @@ impl Db {
                     let context = contexts.ks_context(ks);
                     let reduced_key = context.ks_config.reduced_key_bytes(k);
                     let guard = crate::wal_tracker::WalGuard::replay_guard(position);
-                    large_table.insert(context, reduced_key, guard, &v, indexes)?;
+                    large_table.insert(context, reduced_key, guard, &v, None, indexes)?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
