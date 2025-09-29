@@ -18,7 +18,7 @@ pub struct ControlRegion {
 pub(crate) struct ControlRegionStore {
     path: PathBuf,
     last_position: u64,
-    p90_index_position: Option<WalPosition>,
+    force_relocation_position: Option<WalPosition>,
 }
 
 impl ControlRegion {
@@ -79,12 +79,16 @@ impl ControlRegion {
     }
 }
 
+const FORCE_RELOCATION_PCT: usize = 99;
+
 impl ControlRegionStore {
     pub fn new(path: PathBuf, control_region: &ControlRegion) -> Self {
         Self {
             path,
             last_position: control_region.last_position,
-            p90_index_position: control_region.snapshot.pct_wal_position(90),
+            force_relocation_position: control_region
+                .snapshot
+                .pct_wal_position(FORCE_RELOCATION_PCT),
         }
     }
 
@@ -94,7 +98,7 @@ impl ControlRegionStore {
         last_position: u64,
         metrics: &Metrics,
     ) {
-        let p90_index_position = snapshot.pct_wal_position(90);
+        let force_relocation_position = snapshot.pct_wal_position(FORCE_RELOCATION_PCT);
         let control_region = ControlRegion::new(snapshot, last_position);
         let serialized =
             bincode::serialize(&control_region).expect("Failed to serialize control region");
@@ -105,7 +109,7 @@ impl ControlRegionStore {
             .inc_by(serialized.len() as u64);
         fs::rename(&temp_file, &self.path).expect("Failed to rename control region file");
         self.last_position = last_position;
-        self.p90_index_position = p90_index_position;
+        self.force_relocation_position = force_relocation_position;
     }
 
     /// The path to the control region file
@@ -117,7 +121,7 @@ impl ControlRegionStore {
         self.last_position
     }
 
-    pub fn p90_index_position(&self) -> Option<WalPosition> {
-        self.p90_index_position
+    pub fn force_relocation_position(&self) -> Option<WalPosition> {
+        self.force_relocation_position
     }
 }

@@ -630,7 +630,7 @@ impl Db {
         let snapshot = self.large_table.snapshot(
             current_wal_position,
             self,
-            crs.p90_index_position(),
+            crs.force_relocation_position(),
             snapshot_unload_threshold_override,
         )?;
         // todo remove this sleep.
