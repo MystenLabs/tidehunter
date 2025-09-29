@@ -201,20 +201,21 @@ impl LargeTable {
         k: Bytes,
         guard: crate::wal_tracker::WalGuard,
         value: &Bytes,
+        relocation_pos: Option<u64>,
         loader: &L,
     ) -> Result<(), L::Error> {
         self.fp.fp_insert_before_lock();
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
         let entry = row.entry_mut(&cell);
-        if self.skip_stale_update(entry, &k, v) {
+        if entry.data.skip_stale_update(&k, v) {
             self.metrics
                 .skip_stale_update
                 .with_label_values(&[context.name(), "insert"])
                 .inc();
             return Ok(());
         }
-        entry.insert(k.clone(), v);
+        entry.insert(k.clone(), v, relocation_pos);
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
             // Drop the guard before flushing to ensure last_processed is updated
@@ -256,7 +257,7 @@ impl LargeTable {
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
         let entry = row.entry_mut(&cell);
-        if self.skip_stale_update(entry, &k, v) {
+        if entry.data.skip_stale_update(&k, v) {
             self.metrics
                 .skip_stale_update
                 .with_label_values(&[context.name(), "remove"])
@@ -357,23 +358,6 @@ impl LargeTable {
             .lookup_mcs_histogram(index_reader.read_type())
             .observe(now.elapsed().as_micros() as f64);
         Ok(context.report_lookup_result(result, LookupSource::Lookup))
-    }
-
-    /// Checks if the update is potentially stale and the operation needs to be canceled.
-    /// This can happen if there are multiple concurrent updates for the same key.
-    /// Returns true if the update is outdated and should be skipped
-    fn skip_stale_update(
-        &self,
-        entry: &LargeTableEntry,
-        key: &Bytes,
-        wal_position: WalPosition,
-    ) -> bool {
-        // check the existing loaded WAL position first, if present
-        if let Some(last_position) = entry.data.get_update_position(key) {
-            last_position > wal_position
-        } else {
-            false
-        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -947,10 +931,15 @@ impl LargeTableEntry {
         entry
     }
 
-    pub fn insert(&mut self, k: Bytes, v: WalPosition) {
+    pub fn insert(&mut self, k: Bytes, v: WalPosition, relocation_pos: Option<u64>) {
         self.state.mark_dirty();
         self.insert_bloom_filter(&k);
-        self.data.make_mut().insert(k, v);
+        match relocation_pos {
+            Some(offset) => self.data.make_mut().relocation_insert(k, v, offset),
+            None => {
+                self.data.make_mut().insert(k, v);
+            }
+        }
         self.report_loaded_keys_count();
     }
 

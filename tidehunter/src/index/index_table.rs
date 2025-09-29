@@ -27,6 +27,7 @@ enum IndexEntryKind {
     Clean,
     Modified,
     Removed,
+    Relocated,
 }
 
 // Compile time check to ensure IndexWalPosition consumes the same amount of memory as WalPosition
@@ -41,10 +42,25 @@ impl IndexTable {
         self.checked_insert(k, IndexWalPosition::new_removed(v))
     }
 
+    /// Insert for relocation entry
+    /// Verifies that the new position is the latest and that it doesn’t overwrite any
+    /// organic insert since the start of relocation.
+    pub fn relocation_insert(&mut self, k: Bytes, pos: WalPosition, relocation_start: u64) {
+        let Entry::Occupied(mut entry) = self.data.entry(k) else {
+            return;
+        };
+        let pos = IndexWalPosition::new_relocated(pos);
+        let previous = *entry.get();
+        if pos.offset >= previous.offset
+            && (previous.is_relocated() || previous.offset <= relocation_start)
+        {
+            entry.insert(pos);
+        }
+    }
+
     fn checked_insert(&mut self, k: Bytes, v: IndexWalPosition) -> Option<WalPosition> {
         // Only update index entry if new entry has higher wal position then the previous entry
         // See test_concurrent_single_value_update for details how this is tested
-        // todo handle this comparison correctly when we have data relocation
         // todo might want a separate test with snapshot enabled
         match self.data.entry(k) {
             Entry::Vacant(va) => {
@@ -54,7 +70,7 @@ impl IndexTable {
             Entry::Occupied(mut oc) => {
                 let previous = *oc.get();
                 assert!(
-                    previous.offset < v.offset,
+                    previous.offset < v.offset || previous.is_relocated(),
                     "Index WAL position must be increasing"
                 );
                 oc.insert(v);
@@ -128,6 +144,16 @@ impl IndexTable {
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
         self.data.get(k).map(|p| p.into_wal_position())
+    }
+
+    /// Checks if the update is potentially stale and the operation needs to be canceled.
+    /// This can happen if there are multiple concurrent updates for the same key.
+    /// Returns true if the update is outdated and should be skipped
+    pub fn skip_stale_update(&self, key: &[u8], wal_position: WalPosition) -> bool {
+        match self.data.get(key) {
+            Some(previous) => !previous.is_relocated() && previous.offset > wal_position.offset(),
+            None => false,
+        }
     }
 
     /// similar to `get`, but returns the position of the modification operation for both deletes and inserts
@@ -256,7 +282,7 @@ impl IndexTable {
     pub fn clean_self(&mut self) {
         self.data.retain(|_k, v| match v.kind {
             IndexEntryKind::Clean => true,
-            IndexEntryKind::Modified => {
+            IndexEntryKind::Modified | IndexEntryKind::Relocated => {
                 *v = v.as_clean_modified();
                 true
             }
@@ -303,6 +329,15 @@ impl IndexWalPosition {
         }
     }
 
+    fn new_relocated(w: WalPosition) -> Self {
+        debug_assert_ne!(w, WalPosition::INVALID);
+        Self {
+            offset: w.offset(),
+            len: w.len_u32(),
+            kind: IndexEntryKind::Relocated,
+        }
+    }
+
     fn new_removed(w: WalPosition) -> Self {
         debug_assert_ne!(w, WalPosition::INVALID);
         Self {
@@ -316,7 +351,7 @@ impl IndexWalPosition {
     /// If the index wal position is removed, returns WalPosition::INVALID.
     fn into_wal_position(self) -> WalPosition {
         match self.kind {
-            IndexEntryKind::Clean | IndexEntryKind::Modified => {
+            IndexEntryKind::Clean | IndexEntryKind::Modified | IndexEntryKind::Relocated => {
                 WalPosition::new(self.offset, self.len)
             }
             IndexEntryKind::Removed => WalPosition::INVALID,
@@ -341,10 +376,14 @@ impl IndexWalPosition {
         self.kind == IndexEntryKind::Clean
     }
 
+    pub fn is_relocated(&self) -> bool {
+        self.kind == IndexEntryKind::Relocated
+    }
+
     /// Change modified entry into clean entry.
     pub fn as_clean_modified(mut self) -> Self {
         match self.kind {
-            IndexEntryKind::Clean | IndexEntryKind::Modified => {}
+            IndexEntryKind::Clean | IndexEntryKind::Modified | IndexEntryKind::Relocated => {}
             IndexEntryKind::Removed => {
                 panic!("Can't call as_clean_modified on IndexEntryKind::Removed")
             }
@@ -572,5 +611,45 @@ mod tests {
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 6]));
         assert_eq!(next.1, WalPosition::test_value(3));
+    }
+
+    #[test]
+    fn test_relocation_insert_priority() {
+        let mut table = IndexTable::default();
+        let key = Bytes::from(vec![1, 2, 3, 4]);
+        let relocation_start = 500;
+
+        // organic write followed by relocation write
+        table.insert(key.clone(), WalPosition::test_value(1000));
+        table.relocation_insert(key.clone(), WalPosition::test_value(100), relocation_start);
+        assert_eq!(table.get(&key), Some(WalPosition::test_value(1000)));
+
+        // relocated entry followed by organic - organic wins
+        let key2 = Bytes::from(vec![5, 6, 7, 8]);
+        table.relocation_insert(key2.clone(), WalPosition::test_value(200), relocation_start);
+        table.insert(key2.clone(), WalPosition::test_value(1100));
+        assert_eq!(table.get(&key2), Some(WalPosition::test_value(1100)));
+
+        // two relocated entries - higher position wins
+        let key3 = Bytes::from(vec![9, 10, 11, 12]);
+        table.insert(key3.clone(), WalPosition::test_value(250));
+        table.relocation_insert(key3.clone(), WalPosition::test_value(300), relocation_start);
+        assert_eq!(table.get(&key3), Some(WalPosition::test_value(300)));
+        table.relocation_insert(key3.clone(), WalPosition::test_value(400), relocation_start);
+        assert_eq!(table.get(&key3), Some(WalPosition::test_value(400)));
+
+        // old entry before relocation_start gets replaced by relocation
+        let key4 = Bytes::from(vec![13, 14, 15, 16]);
+        table.insert(key4.clone(), WalPosition::test_value(100));
+        table.relocation_insert(key4.clone(), WalPosition::test_value(600), relocation_start);
+        assert_eq!(table.get(&key4), Some(WalPosition::test_value(600)));
+
+        // deleted and flushed entry - relocation skipped
+        let key5 = Bytes::from(vec![17, 18, 19, 20]);
+        table.insert(key5.clone(), WalPosition::test_value(700));
+        table.remove(key5.clone(), WalPosition::test_value(800));
+        table.clean_self();
+        table.relocation_insert(key5.clone(), WalPosition::test_value(150), relocation_start);
+        assert_eq!(table.get(&key5), None);
     }
 }
