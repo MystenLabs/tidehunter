@@ -137,6 +137,11 @@ pub fn main() {
             let storage = RocksStorage::open(&path, true);
             Arc::new(storage)
         }
+        Backend::Lmdb => {
+            use crate::storage::lmdb::LmdbStorage;
+            let storage = LmdbStorage::open(&path);
+            Arc::new(storage)
+        }
     };
     let stress = Stress {
         storage,

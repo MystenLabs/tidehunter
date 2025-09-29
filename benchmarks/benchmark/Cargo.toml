@@ -32,3 +32,5 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_yaml = "0.9.33"
 fdlimit = "0.2.1"
 rand_distr = "0.4"
+lmdb-rkv = "0.14"
+lmdb-rkv-sys = "0.11"
