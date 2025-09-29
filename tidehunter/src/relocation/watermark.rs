@@ -10,21 +10,11 @@ use std::path::{Path, PathBuf};
 pub const RELOCATION_FILE: &str = "rel";
 pub const CELL_RELOCATION_FILE: &str = "rel_cell";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CellBasedWatermark {
     pub cell_ref: Option<CellReference>, // Current cell position (None = start from beginning)
     pub highest_wal_position: u64,
     pub upper_limit: u64, // WAL position boundary for safe GC
-}
-
-impl Default for CellBasedWatermark {
-    fn default() -> Self {
-        Self {
-            cell_ref: None,
-            highest_wal_position: 0,
-            upper_limit: 0,
-        }
-    }
 }
 
 pub struct RelocationWatermarks {

@@ -33,7 +33,7 @@ impl CellReference {
         // Try to get next cell in current keyspace
         if let Some(next_cell) = db.large_table.next_cell(context, &self.cell_id, false) {
             return Some(CellReference {
-                keyspace: self.keyspace.clone(),
+                keyspace: self.keyspace,
                 cell_id: next_cell,
             });
         }
