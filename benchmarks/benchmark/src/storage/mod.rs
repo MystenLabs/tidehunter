@@ -1,3 +1,4 @@
+pub mod lmdb;
 pub mod rocks;
 pub mod tidehunter;
 
