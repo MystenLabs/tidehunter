@@ -715,7 +715,7 @@ fn test_both_strategies_handle_concurrent_writes() {
         assert_eq!(
             index_value.len(),
             3,
-            "Cell strategy produced invalid value length for key {}",
+            "Index strategy produced invalid value length for key {}",
             i
         );
         assert_eq!(
@@ -725,7 +725,7 @@ fn test_both_strategies_handle_concurrent_writes() {
         );
         assert_eq!(
             index_value[2], i as u8,
-            "Cell strategy corrupted key data for key {}",
+            "Index strategy corrupted key data for key {}",
             i
         );
     }
@@ -790,7 +790,7 @@ fn test_index_based_relocation_progress_tracking() {
     let index_watermark_file = dir.path().join("rel_index");
     assert!(
         index_watermark_file.exists(),
-        "Cell watermark file should be created"
+        "Index watermark file should be created"
     );
 }
 
