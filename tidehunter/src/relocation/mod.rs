@@ -140,7 +140,7 @@ impl RelocationDriver {
         strategy: RelocationStrategy,
         watermark_only: bool,
     ) -> DbResult<()> {
-        self.watermarks.save(&self.metrics)?;
+        self.watermarks.save(strategy, &self.metrics)?;
         if watermark_only {
             return Ok(());
         }

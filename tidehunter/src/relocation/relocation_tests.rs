@@ -786,11 +786,11 @@ fn test_index_based_relocation_progress_tracking() {
         db.wait_for_background_threads_to_finish();
     }
 
-    // Verify watermark files exist
-    let index_watermark_file = dir.path().join("rel_index");
+    // Verify watermark file exists
+    let watermark_file = dir.path().join("rel");
     assert!(
-        index_watermark_file.exists(),
-        "Index watermark file should be created"
+        watermark_file.exists(),
+        "Watermark file should be created"
     );
 }
 
