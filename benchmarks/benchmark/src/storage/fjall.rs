@@ -13,16 +13,24 @@ impl FjallStorage {
     pub fn open(path: &Path) -> Arc<Self> {
         std::fs::create_dir_all(path).unwrap();
 
-        // Configure Fjall with default settings
-        // Fjall will automatically handle key-value separation for large values
-        let config = Config::new(path);
+        // Configure Fjall with high-performance settings for benchmarking
+        let config = Config::new(path)
+            .max_write_buffer_size(u64::MAX)           // Unbounded write buffers (officially documented)
+            .cache_size(16 * 1024 * 1024 * 1024)      // 16 GiB cache for reads
+            .max_journaling_size(2 * 1024 * 1024 * 1024)  // 2 GiB journal size
+            .fsync_ms(None);                           // No periodic fsync for benchmarks
 
         // Open the keyspace
         let keyspace = config.open().unwrap();
 
-        // Create a single partition for all key-value pairs
+        // Create a single partition with optimized settings
+        let partition_opts = PartitionCreateOptions::default()
+            .max_memtable_size(256 * 1024 * 1024)     // 256 MiB memtable per partition
+            .block_size(16 * 1024)                    // 16 KiB blocks for better get_lt performance
+            .manual_journal_persist(true);             // Manual persistence control
+
         let partition = keyspace
-            .open_partition("benchmark", PartitionCreateOptions::default())
+            .open_partition("benchmark", partition_opts)
             .unwrap();
 
         Arc::new(Self {

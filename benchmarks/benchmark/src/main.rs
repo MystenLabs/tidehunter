@@ -359,7 +359,7 @@ impl Stress {
         let start_lock = Arc::new(RwLock::new(()));
         let start_w = start_lock.write();
         let manual_stop = Arc::new(AtomicBool::new(false));
-        let latency = AtomicHistogram::new(12, 26).unwrap();
+        let latency = AtomicHistogram::new(12, 32).unwrap();
         let latency = Arc::new(latency);
         let latency_errors = Arc::new(AtomicUsize::default());
         for index in 0..n {
@@ -448,7 +448,7 @@ impl StressThread {
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             self.db.insert(key.into(), value.into());
-            let latency = timer.elapsed().as_micros();
+            let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
             self.benchmark_metrics
                 .bench_writes
                 .with_label_values(&[self.db.name()])
@@ -546,7 +546,7 @@ impl StressThread {
                         // see comment above for get mode.
                     }
                 }
-                let latency = timer.elapsed().as_micros();
+                let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
                 self.benchmark_metrics
                     .bench_reads
                     .with_label_values(&[self.db.name()])
@@ -573,7 +573,7 @@ impl StressThread {
                 let (key, value) = self.key_value(pos);
                 let timer = Instant::now();
                 self.db.insert(key.into(), value.into());
-                let latency = timer.elapsed().as_micros();
+                let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
                 self.benchmark_metrics
                     .bench_writes
                     .with_label_values(&[self.db.name()])
