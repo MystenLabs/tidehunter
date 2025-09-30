@@ -160,7 +160,6 @@ fn test_relocation_with_bloom_filter_indexing() {
     }
 }
 
-#[ignore] // flaky test
 #[test]
 fn test_relocation_filter() {
     let dir = tempdir::TempDir::new("test_relocation_filter").unwrap();
@@ -179,7 +178,8 @@ fn test_relocation_filter() {
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let sample_key = 3_u64.to_be_bytes().to_vec();
-    let mut insert_count = 0_u64;
+    let insert_count = 10000_u64;
+    let value = vec![3; 1000];
     {
         let db = Db::open(
             dir.path(),
@@ -188,15 +188,11 @@ fn test_relocation_filter() {
             metrics.clone(),
         )
         .unwrap();
-        loop {
-            db.insert(ks, insert_count.to_be_bytes().to_vec(), vec![0, 1, 2])
+        for i in 0..insert_count {
+            db.insert(ks, i.to_be_bytes().to_vec(), value.clone())
                 .unwrap();
-            insert_count += 1;
-            if insert_count % 10000 == 0 && list_wal_files(&dir.path()).len() > 1 {
-                break;
-            }
         }
-        assert_eq!(db.get(ks, &sample_key).unwrap(), Some(vec![0, 1, 2].into()));
+        assert_eq!(db.get(ks, &sample_key).unwrap(), Some(value.into()));
         db.wait_for_background_threads_to_finish();
     }
     {
