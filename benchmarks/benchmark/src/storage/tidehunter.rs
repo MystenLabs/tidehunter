@@ -13,7 +13,7 @@ pub struct TidehunterStorage {
     ks: KeySpace,
 }
 
-impl Storage for Arc<TidehunterStorage> {
+impl Storage for TidehunterStorage {
     fn insert(&self, k: Bytes, v: Bytes) {
         self.db.insert(self.ks, k, v).unwrap()
     }

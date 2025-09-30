@@ -127,20 +127,25 @@ pub fn main() {
             } else {
                 report!(report, "Periodic snapshot **disabled**");
             }
-            Arc::new(storage)
+            storage as Arc<dyn Storage>
         }
         Backend::Rocksdb => {
             let storage = RocksStorage::open(&path, false);
-            Arc::new(storage)
+            storage as Arc<dyn Storage>
         }
         Backend::Blobdb => {
             let storage = RocksStorage::open(&path, true);
-            Arc::new(storage)
+            storage as Arc<dyn Storage>
         }
         Backend::Lmdb => {
             use crate::storage::lmdb::LmdbStorage;
             let storage = LmdbStorage::open(&path);
-            Arc::new(storage)
+            storage as Arc<dyn Storage>
+        }
+        Backend::Fjall => {
+            use crate::storage::fjall::FjallStorage;
+            let storage = FjallStorage::open(&path);
+            storage as Arc<dyn Storage>
         }
     };
     let stress = Stress {

@@ -32,7 +32,7 @@ impl LmdbStorage {
     }
 }
 
-impl Storage for Arc<LmdbStorage> {
+impl Storage for LmdbStorage {
     fn insert(&self, k: Bytes, v: Bytes) {
         let mut txn = self.env.begin_rw_txn().unwrap();
         txn.put(self.db, &k, &v, WriteFlags::empty()).unwrap();
