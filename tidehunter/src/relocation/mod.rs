@@ -165,17 +165,17 @@ impl RelocationDriver {
     }
 
     fn relocation_run(&mut self, strategy: RelocationStrategy) -> DbResult<()> {
-        match strategy {
-            RelocationStrategy::WalBased => self.wal_based_relocation(),
-            RelocationStrategy::CellBased => self.cell_based_relocation(),
-        }
-    }
-
-    fn cell_based_relocation(&mut self) -> DbResult<()> {
         let Some(db) = self.db.upgrade() else {
             return Ok(());
         };
 
+        match strategy {
+            RelocationStrategy::WalBased => self.wal_based_relocation(db),
+            RelocationStrategy::CellBased => self.cell_based_relocation(db),
+        }
+    }
+
+    fn cell_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
         // Capture the upper WAL limit to avoid race conditions
         // Only process entries written before this point. This is the last position that was written
         // and made its way into the large table
@@ -264,10 +264,7 @@ impl RelocationDriver {
         Ok(())
     }
 
-    fn wal_based_relocation(&mut self) -> DbResult<()> {
-        let Some(db) = self.db.upgrade() else {
-            return Ok(());
-        };
+    fn wal_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
         // TODO: handle potentially uninitialized positions at the end of the WAL
         let upper_limit = db.wal_writer.position();
         let start_position = self.watermarks.get_relocation_progress();
