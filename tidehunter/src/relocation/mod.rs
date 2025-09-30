@@ -18,7 +18,7 @@ mod watermark;
 mod relocation_tests;
 
 pub use cell_reference::CellReference;
-pub use watermark::{CellBasedWatermark, RelocationWatermarks};
+pub use watermark::{IndexBasedWatermark, RelocationWatermarks};
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
@@ -26,8 +26,8 @@ pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 pub enum RelocationStrategy {
     /// WAL-based sequential relocation
     WalBased,
-    /// Cell-based relocation that processes entire cells atomically
-    CellBased,
+    /// Index-based relocation that processes entire cells atomically
+    IndexBased,
 }
 
 impl Default for RelocationStrategy {
@@ -147,13 +147,13 @@ impl RelocationDriver {
 
         // Compute strategy-specific watermark, then apply common min with last_position
         let strategy_watermark = match strategy {
-            RelocationStrategy::CellBased => {
-                // For cell-based relocation, use the minimum of highest_wal_position and upper_limit
+            RelocationStrategy::IndexBased => {
+                // For index-based relocation, use the minimum of highest_wal_position and upper_limit
                 // This ensures we never GC WAL segments beyond the safe boundary
-                let cell_watermark = self.watermarks.get_cell_progress();
+                let index_watermark = self.watermarks.get_index_progress();
                 std::cmp::min(
-                    cell_watermark.highest_wal_position,
-                    cell_watermark.upper_limit,
+                    index_watermark.highest_wal_position,
+                    index_watermark.upper_limit,
                 )
             }
             RelocationStrategy::WalBased => self.watermarks.get_relocation_progress(),
@@ -175,11 +175,11 @@ impl RelocationDriver {
 
         match strategy {
             RelocationStrategy::WalBased => self.wal_based_relocation(db),
-            RelocationStrategy::CellBased => self.cell_based_relocation(db),
+            RelocationStrategy::IndexBased => self.index_based_relocation(db),
         }
     }
 
-    fn cell_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
+    fn index_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
         // Capture the upper WAL limit to avoid race conditions
         // Only process entries written before this point. This is the last position that was written
         // and made its way into the large table
@@ -187,7 +187,7 @@ impl RelocationDriver {
 
         // Get starting cell reference from saved progress
         let mut current_cell_ref =
-            if let Some(ref cell_ref) = self.watermarks.get_cell_progress().cell_ref {
+            if let Some(ref cell_ref) = self.watermarks.get_index_progress().cell_ref {
                 // Resume from saved position
                 Some(cell_ref.clone())
             } else {
@@ -207,13 +207,13 @@ impl RelocationDriver {
                 }
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
-                    let current_pos = CellBasedWatermark {
+                    let current_pos = IndexBasedWatermark {
                         cell_ref: Some(cell_ref.clone()),
                         upper_limit,
                         highest_wal_position,
                     };
-                    self.watermarks.set_cell_progress(current_pos);
-                    self.save_progress(&db, RelocationStrategy::CellBased, true)?;
+                    self.watermarks.set_index_progress(current_pos);
+                    self.save_progress(&db, RelocationStrategy::IndexBased, true)?;
                     // Save watermark only
                 }
             }
@@ -258,13 +258,13 @@ impl RelocationDriver {
         }
 
         // Save final progress with upper_limit and highest WAL position
-        let final_pos = CellBasedWatermark {
+        let final_pos = IndexBasedWatermark {
             cell_ref: current_cell_ref.clone(),
             upper_limit,
             highest_wal_position,
         };
-        self.watermarks.set_cell_progress(final_pos);
-        self.save_progress(&db, RelocationStrategy::CellBased, false)?;
+        self.watermarks.set_index_progress(final_pos);
+        self.save_progress(&db, RelocationStrategy::IndexBased, false)?;
 
         Ok(())
     }
@@ -454,7 +454,7 @@ impl RelocationDriver {
                 }
             };
 
-            // Simplified decision logic for cell-based relocation. Since we're iterating through
+            // Simplified decision logic for index-based relocation. Since we're iterating through
             // current index entries, we only need to check the relocation filter
             let decision = keyspace_desc
                 .relocation_filter()

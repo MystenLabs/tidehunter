@@ -8,10 +8,10 @@ use std::io::{self, Error, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const RELOCATION_FILE: &str = "rel";
-pub const CELL_RELOCATION_FILE: &str = "rel_cell";
+pub const INDEX_RELOCATION_FILE: &str = "rel_index";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CellBasedWatermark {
+pub struct IndexBasedWatermark {
     pub cell_ref: Option<CellReference>, // Current cell position (None = start from beginning)
     pub highest_wal_position: u64,
     pub upper_limit: u64, // WAL position boundary for safe GC
@@ -21,8 +21,8 @@ pub struct RelocationWatermarks {
     path: PathBuf,
     /// Watermark that tracks internal relocation progress (for WAL-based strategy)
     relocation_progress: u64,
-    /// Watermark that tracks cell-based relocation progress
-    cell_progress: CellBasedWatermark,
+    /// Watermark that tracks index-based relocation progress
+    index_progress: IndexBasedWatermark,
 }
 
 impl RelocationWatermarks {
@@ -30,18 +30,18 @@ impl RelocationWatermarks {
         path.join(RELOCATION_FILE)
     }
 
-    fn cell_relocation_file_path(path: &Path) -> PathBuf {
-        path.join(CELL_RELOCATION_FILE)
+    fn index_relocation_file_path(path: &Path) -> PathBuf {
+        path.join(INDEX_RELOCATION_FILE)
     }
 
     pub fn load(path: &Path) -> Result<Self, Error> {
         let wal_progress = Self::load_wal_progress(path)?;
-        let cell_progress = Self::load_cell_progress(path)?;
+        let index_progress = Self::load_index_progress(path)?;
 
         Ok(Self {
             path: path.to_path_buf(),
             relocation_progress: wal_progress,
-            cell_progress,
+            index_progress,
         })
     }
 
@@ -59,11 +59,11 @@ impl RelocationWatermarks {
         Ok(buf.get_u64())
     }
 
-    fn load_cell_progress(path: &Path) -> Result<CellBasedWatermark, Error> {
-        let mut file = match File::open(Self::cell_relocation_file_path(path)) {
+    fn load_index_progress(path: &Path) -> Result<IndexBasedWatermark, Error> {
+        let mut file = match File::open(Self::index_relocation_file_path(path)) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(CellBasedWatermark::default());
+                return Ok(IndexBasedWatermark::default());
             }
             Err(e) => return Err(e),
         };
@@ -73,14 +73,14 @@ impl RelocationWatermarks {
         bincode::deserialize(&buffer).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Failed to deserialize cell watermark: {}", e),
+                format!("Failed to deserialize index watermark: {}", e),
             )
         })
     }
 
     pub fn save(&self, metrics: &Metrics) -> Result<(), io::Error> {
         self.save_wal_progress(metrics)?;
-        self.save_cell_progress(metrics)?;
+        self.save_index_progress(metrics)?;
         Ok(())
     }
 
@@ -102,14 +102,14 @@ impl RelocationWatermarks {
         Ok(())
     }
 
-    fn save_cell_progress(&self, _metrics: &Metrics) -> Result<(), io::Error> {
-        let target_path = Self::cell_relocation_file_path(&self.path);
+    fn save_index_progress(&self, _metrics: &Metrics) -> Result<(), io::Error> {
+        let target_path = Self::index_relocation_file_path(&self.path);
         let tmp_path = target_path.with_extension("tmp");
 
-        let serialized = bincode::serialize(&self.cell_progress).map_err(|e| {
+        let serialized = bincode::serialize(&self.index_progress).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Failed to serialize cell watermark: {}", e),
+                format!("Failed to serialize index watermark: {}", e),
             )
         })?;
 
@@ -133,11 +133,11 @@ impl RelocationWatermarks {
         self.relocation_progress
     }
 
-    pub fn get_cell_progress(&self) -> &CellBasedWatermark {
-        &self.cell_progress
+    pub fn get_index_progress(&self) -> &IndexBasedWatermark {
+        &self.index_progress
     }
 
-    pub fn set_cell_progress(&mut self, progress: CellBasedWatermark) {
-        self.cell_progress = progress;
+    pub fn set_index_progress(&mut self, progress: IndexBasedWatermark) {
+        self.index_progress = progress;
     }
 }
