@@ -134,31 +134,35 @@ impl RelocationDriver {
         }
     }
 
-    fn save_progress(&mut self, db: &Db, watermark_only: bool) -> DbResult<()> {
+    fn save_progress(
+        &mut self,
+        db: &Db,
+        strategy: RelocationStrategy,
+        watermark_only: bool,
+    ) -> DbResult<()> {
         self.watermarks.save(&self.metrics)?;
         if watermark_only {
             return Ok(());
         }
 
-        // For cell-based relocation, use the minimum of highest_wal_position seen and upper_limit
-        // This ensures we never GC WAL segments beyond the safe boundary
-        let gc_watermark = if self.watermarks.get_cell_progress().upper_limit > 0 {
-            // Cell-based relocation is active
-            let cell_watermark = self.watermarks.get_cell_progress();
-            std::cmp::min(
+        // Compute strategy-specific watermark, then apply common min with last_position
+        let strategy_watermark = match strategy {
+            RelocationStrategy::CellBased => {
+                // For cell-based relocation, use the minimum of highest_wal_position and upper_limit
+                // This ensures we never GC WAL segments beyond the safe boundary
+                let cell_watermark = self.watermarks.get_cell_progress();
                 std::cmp::min(
                     cell_watermark.highest_wal_position,
                     cell_watermark.upper_limit,
-                ),
-                db.control_region_store.lock().last_position(),
-            )
-        } else {
-            // WAL-based relocation
-            std::cmp::min(
-                self.watermarks.get_relocation_progress(),
-                db.control_region_store.lock().last_position(),
-            )
+                )
+            }
+            RelocationStrategy::WalBased => self.watermarks.get_relocation_progress(),
         };
+
+        let gc_watermark = std::cmp::min(
+            strategy_watermark,
+            db.control_region_store.lock().last_position(),
+        );
 
         db.wal_writer.gc(gc_watermark)?;
         Ok(())
@@ -209,7 +213,8 @@ impl RelocationDriver {
                         highest_wal_position,
                     };
                     self.watermarks.set_cell_progress(current_pos);
-                    self.save_progress(&db, true)?; // Save watermark only
+                    self.save_progress(&db, RelocationStrategy::CellBased, true)?;
+                    // Save watermark only
                 }
             }
 
@@ -259,7 +264,7 @@ impl RelocationDriver {
             highest_wal_position,
         };
         self.watermarks.set_cell_progress(final_pos);
-        self.save_progress(&db, false)?;
+        self.save_progress(&db, RelocationStrategy::CellBased, false)?;
 
         Ok(())
     }
@@ -289,7 +294,7 @@ impl RelocationDriver {
                 if i % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
                     let has_wal_files_to_drop = self.watermarks.get_relocation_progress()
                         > (db.wal.wal_file_size() + db.wal.min_wal_position());
-                    self.save_progress(&db, !has_wal_files_to_drop)?;
+                    self.save_progress(&db, RelocationStrategy::WalBased, !has_wal_files_to_drop)?;
                 }
             }
             let entry = wal_iterator.next();
@@ -335,7 +340,7 @@ impl RelocationDriver {
                 WalEntry::Remove(..) | WalEntry::BatchStart(..) => {}
             }
         }
-        self.save_progress(&db, false)?;
+        self.save_progress(&db, RelocationStrategy::WalBased, false)?;
         Ok(())
     }
 
