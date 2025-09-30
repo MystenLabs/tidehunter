@@ -58,6 +58,10 @@ pub struct Metrics {
     pub relocation_removed: IntCounterVec,
     pub relocation_bloom_filter_build_time_mcs: IntCounter,
 
+    // Cell-based relocation metrics
+    pub relocation_cells_processed: IntCounterVec,
+    pub relocation_current_keyspace: IntGauge,
+
     pub memory_estimate: IntGaugeVec,
     pub value_cache_size: IntGaugeVec,
 }
@@ -187,6 +191,14 @@ impl Metrics {
                 "relocation_bloom_filter_build_time_mcs",
                 registry
             ),
+
+            // Cell-based relocation metrics
+            relocation_cells_processed: counter_vec!(
+                "relocation_cells_processed",
+                &["ks"],
+                registry
+            ),
+            relocation_current_keyspace: gauge!("relocation_current_keyspace", registry),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),
             value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry),

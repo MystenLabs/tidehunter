@@ -12,7 +12,9 @@ use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
-use crate::relocation::{RelocationCommand, RelocationDriver, RelocationWatermarks, Relocator};
+use crate::relocation::{
+    RelocationCommand, RelocationDriver, RelocationStrategy, RelocationWatermarks, Relocator,
+};
 use crate::state_snapshot;
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalKind, WalPosition, WalRandomRead, WalWriter,
@@ -514,7 +516,7 @@ impl Db {
         }
     }
 
-    fn read_record(&self, position: WalPosition) -> DbResult<Option<(Bytes, Bytes)>> {
+    pub(crate) fn read_record(&self, position: WalPosition) -> DbResult<Option<(Bytes, Bytes)>> {
         let entry = self.read_report_entry(&self.wal, position)?;
         let Some(entry) = entry else {
             return Ok(None);
@@ -744,15 +746,27 @@ impl Db {
     }
 
     pub fn start_relocation(&self) -> Result<(), mpsc::SendError<RelocationCommand>> {
-        self.relocator.0.send(RelocationCommand::Start)
+        self.start_relocation_with_strategy(self.config.relocation_strategy)
+    }
+
+    pub fn start_relocation_with_strategy(
+        &self,
+        strategy: RelocationStrategy,
+    ) -> Result<(), mpsc::SendError<RelocationCommand>> {
+        self.relocator.0.send(RelocationCommand::Start(strategy))
     }
 
     #[cfg(test)]
     pub fn start_blocking_relocation(&self) {
+        self.start_blocking_relocation_with_strategy(self.config.relocation_strategy)
+    }
+
+    #[cfg(test)]
+    pub fn start_blocking_relocation_with_strategy(&self, strategy: RelocationStrategy) {
         let (sender, receiver) = mpsc::channel();
         self.relocator
             .0
-            .send(RelocationCommand::StartBlocking(sender))
+            .send(RelocationCommand::StartBlocking(strategy, sender))
             .unwrap();
         receiver.recv().unwrap();
     }

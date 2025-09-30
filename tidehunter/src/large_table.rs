@@ -393,6 +393,31 @@ impl LargeTable {
         ks_table.lock(mutex, &context.large_table_contention)
     }
 
+    /// Get a shared reference to the index for a specific cell.
+    /// Returns None if the cell doesn't exist.
+    pub fn get_cell_index<L: Loader>(
+        &self,
+        context: &KsContext,
+        cell_id: &CellId,
+        loader: &L,
+    ) -> Result<Option<Arc<IndexTable>>, L::Error> {
+        let mutex_index = context.ks_config.mutex_for_cell(cell_id);
+        let mut row = self.row_by_mutex(context, mutex_index);
+
+        let entry = match row.try_entry_mut(cell_id) {
+            Some(entry) => entry,
+            None => return Ok(None), // Cell doesn't exist
+        };
+
+        // Load the entry if it's unloaded
+        // TODO: doing this will mean all entries will be loaded in memory during relocation
+        // and at some point we might want to find a way to avoid it
+        entry.maybe_load(loader)?;
+
+        // Return shared reference to the index data
+        Ok(Some(entry.data.clone_shared()))
+    }
+
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
         &self
             .table

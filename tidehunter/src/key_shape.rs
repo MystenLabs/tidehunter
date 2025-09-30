@@ -558,8 +558,16 @@ impl KeyShape {
 }
 
 impl KeySpace {
+    pub(crate) fn first() -> Self {
+        KeySpace(0)
+    }
+
     pub(crate) fn as_usize(&self) -> usize {
         self.0 as usize
+    }
+
+    pub(crate) fn increment(&mut self) {
+        self.0 = self.0.wrapping_add(1);
     }
 
     #[cfg(test)]

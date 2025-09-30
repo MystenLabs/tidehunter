@@ -1,3 +1,4 @@
+use crate::relocation::RelocationStrategy;
 use crate::wal::{WalKind, WalLayout};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,9 @@ pub struct Config {
     pub sync_flush: bool,
     /// Maximum size of a single WAL file
     pub wal_file_size: u64,
+    /// Strategy to use for relocation (WalBased or CellBased)
+    #[serde(default)]
+    pub relocation_strategy: RelocationStrategy,
 }
 
 impl Default for Config {
@@ -40,6 +44,7 @@ impl Default for Config {
             num_flusher_threads: 1,
             sync_flush: false,
             wal_file_size: 10 * (1 << 30), // 10Gb
+            relocation_strategy: RelocationStrategy::default(),
         }
     }
 }
@@ -57,6 +62,7 @@ impl Config {
             num_flusher_threads: 1,
             sync_flush: false,
             wal_file_size: 4 * 1024 * 1024,
+            relocation_strategy: RelocationStrategy::default(),
         }
     }
 

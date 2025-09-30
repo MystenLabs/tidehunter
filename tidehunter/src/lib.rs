@@ -30,7 +30,7 @@ mod wal_tracker;
 pub use minibytes;
 
 pub use index::index_table::IndexWalPosition;
-pub use relocation::Decision;
+pub use relocation::{Decision, RelocationStrategy};
 pub use wal::WalPosition;
 
 #[cfg(feature = "test-utils")]
