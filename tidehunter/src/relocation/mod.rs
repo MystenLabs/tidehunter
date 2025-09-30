@@ -7,9 +7,9 @@ use crate::WalPosition;
 use bloom::{BloomFilter, ASMS};
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
+use std::{collections::HashMap, io};
 
 mod cell_reference;
 mod watermark;
@@ -162,8 +162,8 @@ impl RelocationDriver {
         };
 
         if watermark_strategy != strategy {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
                 format!(
                     "Relocation strategy mismatch: loaded watermarks are {:?} but commanded strategy is {:?}. \
                      Please delete the watermark file (rel) to start fresh with the new strategy.",

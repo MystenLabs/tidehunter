@@ -105,7 +105,7 @@ impl RelocationWatermarks {
                 metrics.relocation_position.set(*progress as i64);
             }
             WatermarkData::IndexBased { .. } => {
-                // Could add index-specific metrics here if needed
+                // TODO: Could add index-specific metrics here if needed
             }
         }
 
