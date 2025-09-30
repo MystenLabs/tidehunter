@@ -18,7 +18,8 @@ mod watermark;
 mod relocation_tests;
 
 pub use cell_reference::CellReference;
-pub use watermark::{IndexBasedWatermark, RelocationWatermarks};
+pub use watermark::RelocationWatermarks;
+pub(crate) use watermark::WatermarkData;
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
@@ -134,33 +135,14 @@ impl RelocationDriver {
         }
     }
 
-    fn save_progress(
-        &mut self,
-        db: &Db,
-        strategy: RelocationStrategy,
-        watermark_only: bool,
-    ) -> DbResult<()> {
-        self.watermarks.save(strategy, &self.metrics)?;
+    fn save_progress(&mut self, db: &Db, watermark_only: bool) -> DbResult<()> {
+        self.watermarks.save(&self.metrics)?;
         if watermark_only {
             return Ok(());
         }
 
-        // Compute strategy-specific watermark, then apply common min with last_position
-        let strategy_watermark = match strategy {
-            RelocationStrategy::IndexBased => {
-                // For index-based relocation, use the minimum of highest_wal_position and upper_limit
-                // This ensures we never GC WAL segments beyond the safe boundary
-                let index_watermark = self.watermarks.get_index_progress();
-                std::cmp::min(
-                    index_watermark.highest_wal_position,
-                    index_watermark.upper_limit,
-                )
-            }
-            RelocationStrategy::WalBased => self.watermarks.get_relocation_progress(),
-        };
-
         let gc_watermark = std::cmp::min(
-            strategy_watermark,
+            self.watermarks.gc_watermark(),
             db.control_region_store.lock().last_position(),
         );
 
@@ -172,6 +154,24 @@ impl RelocationDriver {
         let Some(db) = self.db.upgrade() else {
             return Ok(());
         };
+
+        // Validate that watermark strategy matches commanded strategy
+        let watermark_strategy = match &self.watermarks.data {
+            WatermarkData::WalBased { .. } => RelocationStrategy::WalBased,
+            WatermarkData::IndexBased { .. } => RelocationStrategy::IndexBased,
+        };
+
+        if watermark_strategy != strategy {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Relocation strategy mismatch: loaded watermarks are {:?} but commanded strategy is {:?}. \
+                     Please delete the watermark file (rel) to start fresh with the new strategy.",
+                    watermark_strategy, strategy
+                ),
+            )
+            .into());
+        }
 
         match strategy {
             RelocationStrategy::WalBased => self.wal_based_relocation(db),
@@ -186,14 +186,15 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.last_processed();
 
         // Get starting cell reference from saved progress
-        let mut current_cell_ref =
-            if let Some(ref cell_ref) = self.watermarks.get_index_progress().cell_ref {
-                // Resume from saved position
-                Some(cell_ref.clone())
-            } else {
-                // Starting from beginning
-                CellReference::first(&db, KeySpace::first())
-            };
+        // Strategy already validated in relocation_run()
+        let WatermarkData::IndexBased { cell_ref, .. } = &self.watermarks.data else {
+            unreachable!("Strategy mismatch should be caught in relocation_run()");
+        };
+
+        let mut current_cell_ref = match cell_ref {
+            Some(cr) => Some(cr.clone()), // Resume from saved position
+            None => CellReference::first(&db, KeySpace::first()), // Starting from beginning
+        };
 
         let mut cells_processed = 0;
         let mut highest_wal_position = 0u64;
@@ -207,13 +208,12 @@ impl RelocationDriver {
                 }
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
-                    let current_pos = IndexBasedWatermark {
+                    self.watermarks.data = WatermarkData::IndexBased {
                         cell_ref: Some(cell_ref.clone()),
-                        upper_limit,
                         highest_wal_position,
+                        upper_limit,
                     };
-                    self.watermarks.set_index_progress(current_pos);
-                    self.save_progress(&db, RelocationStrategy::IndexBased, true)?;
+                    self.save_progress(&db, true)?;
                     // Save watermark only
                 }
             }
@@ -258,13 +258,12 @@ impl RelocationDriver {
         }
 
         // Save final progress with upper_limit and highest WAL position
-        let final_pos = IndexBasedWatermark {
+        self.watermarks.data = WatermarkData::IndexBased {
             cell_ref: current_cell_ref.clone(),
-            upper_limit,
             highest_wal_position,
+            upper_limit,
         };
-        self.watermarks.set_index_progress(final_pos);
-        self.save_progress(&db, RelocationStrategy::IndexBased, false)?;
+        self.save_progress(&db, false)?;
 
         Ok(())
     }
@@ -272,7 +271,12 @@ impl RelocationDriver {
     fn wal_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
         // TODO: handle potentially uninitialized positions at the end of the WAL
         let upper_limit = db.wal_writer.last_processed();
-        let start_position = self.watermarks.get_relocation_progress();
+
+        // Strategy already validated in relocation_run()
+        let WatermarkData::WalBased { progress } = &self.watermarks.data else {
+            unreachable!("Strategy mismatch should be caught in relocation_run()");
+        };
+        let start_position = *progress;
         let mut wal_iterator = db.wal.wal_iterator(start_position)?;
 
         // Skip the first entry if we're resuming from a saved position
@@ -292,9 +296,12 @@ impl RelocationDriver {
                     break;
                 }
                 if i % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
-                    let has_wal_files_to_drop = self.watermarks.get_relocation_progress()
-                        > (db.wal.wal_file_size() + db.wal.min_wal_position());
-                    self.save_progress(&db, RelocationStrategy::WalBased, !has_wal_files_to_drop)?;
+                    let WatermarkData::WalBased { progress } = &self.watermarks.data else {
+                        unreachable!("Strategy validated in relocation_run()");
+                    };
+                    let has_wal_files_to_drop =
+                        *progress > (db.wal.wal_file_size() + db.wal.min_wal_position());
+                    self.save_progress(&db, !has_wal_files_to_drop)?;
                 }
             }
             let entry = wal_iterator.next();
@@ -305,7 +312,9 @@ impl RelocationDriver {
             if position.offset() >= upper_limit {
                 break;
             }
-            self.watermarks.set_relocation_progress(position);
+            self.watermarks.data = WatermarkData::WalBased {
+                progress: position.offset(),
+            };
             match WalEntry::from_bytes(raw_entry) {
                 WalEntry::Record(ks, key, value) => {
                     let ksd = db.key_shape.ks(ks);
@@ -340,7 +349,7 @@ impl RelocationDriver {
                 WalEntry::Remove(..) | WalEntry::BatchStart(..) => {}
             }
         }
-        self.save_progress(&db, RelocationStrategy::WalBased, false)?;
+        self.save_progress(&db, false)?;
         Ok(())
     }
 
