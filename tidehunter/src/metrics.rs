@@ -43,7 +43,7 @@ pub struct Metrics {
     pub snapshot_forced_relocation: IntCounterVec,
     pub snapshot_written_bytes: IntCounter,
     pub rebuild_control_region_time_mcs: Histogram,
-    pub bloom_filter_restore_time_mcs: IntCounterVec,
+    pub large_table_init_mcs: IntCounterVec,
 
     pub flush_time_mcs: IntCounterVec,
     pub flush_count: IntCounterVec,
@@ -170,11 +170,7 @@ impl Metrics {
                 rebuild_buckets,
                 registry
             ),
-            bloom_filter_restore_time_mcs: counter_vec!(
-                "bloom_filter_restore_time_mcs",
-                &["ks"],
-                registry
-            ),
+            large_table_init_mcs: counter_vec!("bloom_filter_restore_time_mcs", &["ks"], registry),
 
             flush_time_mcs: counter_vec!("flush_time_mcs", &["thread_id"], registry),
             flush_count: counter_vec!("flush_count", &["ks"], registry),
