@@ -39,6 +39,9 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 1440 # 24 hours
 
+    env:
+      BENCH_DATA_DIR: "/opt/sui/db/tidehunter-benchmarks"
+
     steps:
       - uses: actions/checkout@v3
         with:
@@ -65,9 +68,8 @@ jobs:
       - name: Generate index benchmark files
         if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'index' || github.event_name != 'workflow_dispatch'
         run: |
-          BENCH_DATA_DIR="/opt/sui/db/tidehunter-benchmarks"
-          sudo mkdir -p $BENCH_DATA_DIR
-          sudo chown $USER $BENCH_DATA_DIR
+          sudo mkdir -p "$BENCH_DATA_DIR"
+          sudo chown $USER "$BENCH_DATA_DIR"
 
           # Only generate if files don't exist
           if [ ! -f "$BENCH_DATA_DIR/bench-header-100GB-100K.dat" ] || [ ! -f "$BENCH_DATA_DIR/bench-uniform-file-100GB-100K.dat" ]; then
@@ -75,16 +77,16 @@ jobs:
             cargo run --release --manifest-path benchmarks/index_benchmark/Cargo.toml -- generate \
               --num-indices 25000 \
               --entries-per-index 1000000 \
-              --header-file $BENCH_DATA_DIR/bench-header-100GB-100K.dat \
-              --uniform-file $BENCH_DATA_DIR/bench-uniform-file-100GB-100K.dat
+              --header-file "$BENCH_DATA_DIR/bench-header-100GB-100K.dat" \
+              --uniform-file "$BENCH_DATA_DIR/bench-uniform-file-100GB-100K.dat"
           else
             echo "Using existing benchmark files from $BENCH_DATA_DIR"
           fi
 
           # Create symlinks to the data directory
           mkdir -p data
-          ln -sf $BENCH_DATA_DIR/bench-header-100GB-100K.dat data/
-          ln -sf $BENCH_DATA_DIR/bench-uniform-file-100GB-100K.dat data/
+          ln -sf "$BENCH_DATA_DIR/bench-header-100GB-100K.dat" data/
+          ln -sf "$BENCH_DATA_DIR/bench-uniform-file-100GB-100K.dat" data/
 
       - name: Run index_benchmark
         if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'index' || github.event_name != 'workflow_dispatch'
@@ -110,7 +112,7 @@ jobs:
       - name: Run general benchmark
         if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'benchmark' || github.event_name != 'workflow_dispatch'
         run: |
-          rm -rf /opt/sui/db/tidehunter-benchmarks/*
+          [ -n "$BENCH_DATA_DIR" ] && [ -d "$BENCH_DATA_DIR" ] && rm -rf "$BENCH_DATA_DIR"/*
           echo "## General Benchmark" >> ./results/summary.md
           echo '```' >> ./results/summary.md
           echo "Started at: $(date)" >> ./results/summary.md
@@ -121,8 +123,28 @@ jobs:
             --write-threads 72 \
             --mixed-threads 72 \
             --write-size 512 \
-            --key-len 32 > ./results/benchmark_${{ env.TIMESTAMP }}.txt
+            --key-len 32 \
+            --path "$BENCH_DATA_DIR" > ./results/benchmark_${{ env.TIMESTAMP }}.txt
           cat ./results/benchmark_${{ env.TIMESTAMP }}.txt >> ./results/summary.md
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Total time: $DURATION seconds" >> ./results/summary.md
+          echo "Finished at: $(date)" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+
+
+      - name: Run general benchmark (4K values, Zipf=2.0, 100% reads)
+        if: github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'benchmark' || github.event_name != 'workflow_dispatch'
+        run: |
+          [ -n "$BENCH_DATA_DIR" ] && [ -d "$BENCH_DATA_DIR" ] && rm -rf "$BENCH_DATA_DIR"/*
+          echo "## General Benchmark (4K Values, Zipf=2.0, 100% Reads)" >> ./results/summary.md
+          echo '```' >> ./results/summary.md
+          echo "Started at: $(date)" >> ./results/summary.md
+          START_TIME=$(date +%s)
+          cargo run --release -p benchmark -- \
+            --parameters-path .github/benchmark-config-4k-zipf2.yml \
+            --path "$BENCH_DATA_DIR" > ./results/benchmark_4k_zipf2_${{ env.TIMESTAMP }}.txt
+          cat ./results/benchmark_4k_zipf2_${{ env.TIMESTAMP }}.txt >> ./results/summary.md
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
           echo "Total time: $DURATION seconds" >> ./results/summary.md

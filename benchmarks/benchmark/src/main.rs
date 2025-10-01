@@ -130,11 +130,11 @@ pub fn main() {
             Arc::new(storage)
         }
         Backend::Rocksdb => {
-            let storage = RocksStorage::open(&path, false);
+            let storage = RocksStorage::open(&path, false, config.db_parameters.metrics_enabled);
             Arc::new(storage)
         }
         Backend::Blobdb => {
-            let storage = RocksStorage::open(&path, true);
+            let storage = RocksStorage::open(&path, true, config.db_parameters.metrics_enabled);
             Arc::new(storage)
         }
     };

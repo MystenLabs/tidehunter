@@ -1,0 +1,30 @@
+db_parameters:
+  frag_size: 1073741824
+  max_maps: 128
+  max_dirty_keys: 1024
+  snapshot_written_bytes: 68719476736
+  snapshot_unload_threshold: 137438953472
+  unload_jitter_pct: 30
+  direct_io: false
+  num_flusher_threads: 12
+  sync_flush: false
+  wal_file_size: 10737418240
+  metrics_enabled: true
+
+stress_client_parameters:
+  mixed_threads: 36
+  write_threads: 36
+  write_size: 4096
+  key_len: 32
+  writes: 6700000
+  operations: 50000000
+  background_writes: 0
+  no_snapshot: false
+  report: true
+  key_layout: Uniform
+  tldr: ""
+  preserve: false
+  read_mode: Exists
+  backend: Tidehunter
+  read_percentage: 100
+  zipf_exponent: 2.0

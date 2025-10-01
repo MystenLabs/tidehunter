@@ -29,6 +29,13 @@ pub struct Config {
     /// Strategy to use for relocation (WalBased or IndexBased)
     #[serde(default)]
     pub relocation_strategy: RelocationStrategy,
+    /// Enable Tidehunter runtime metrics collection
+    #[serde(default = "default_metrics_enabled")]
+    pub metrics_enabled: bool,
+}
+
+fn default_metrics_enabled() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -45,6 +52,7 @@ impl Default for Config {
             sync_flush: false,
             wal_file_size: 10 * (1 << 30), // 10Gb
             relocation_strategy: RelocationStrategy::default(),
+            metrics_enabled: true,
         }
     }
 }
@@ -63,6 +71,7 @@ impl Config {
             sync_flush: false,
             wal_file_size: 4 * 1024 * 1024,
             relocation_strategy: RelocationStrategy::default(),
+            metrics_enabled: true,
         }
     }
 
@@ -99,5 +108,9 @@ impl Config {
 
     pub fn direct_io(&self) -> bool {
         self.direct_io
+    }
+
+    pub fn metrics_enabled(&self) -> bool {
+        self.metrics_enabled
     }
 }

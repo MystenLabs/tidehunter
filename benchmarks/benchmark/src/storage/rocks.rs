@@ -16,7 +16,7 @@ enum RocksMode {
 }
 
 impl RocksStorage {
-    pub fn open(path: &Path, use_blob_store: bool) -> Arc<Self> {
+    pub fn open(path: &Path, use_blob_store: bool, metrics_enabled: bool) -> Arc<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -25,6 +25,10 @@ impl RocksStorage {
         if use_blob_store {
             // Enable integrated BlobDB with sensible defaults
             Self::enable_blobdb(&mut opts);
+        }
+        // Enable or disable RocksDB statistics based on flag
+        if metrics_enabled {
+            opts.enable_statistics();
         }
 
         std::fs::create_dir_all(path).unwrap();

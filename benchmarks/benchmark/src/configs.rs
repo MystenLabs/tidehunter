@@ -303,6 +303,11 @@ pub struct StressArgs {
     no_snapshot: Option<bool>,
     #[arg(long, help = "Use direct IO")]
     direct_io: Option<bool>,
+    #[arg(
+        long,
+        help = "Enable metrics across all backends (Tidehunter, RocksDB, BlobDB)"
+    )]
+    metrics_enabled: Option<bool>,
     #[arg(long, short = 'p', help = "Path for storage temp dir")]
     path: Option<String>,
     #[arg(long, help = "Print report file")]
@@ -356,6 +361,9 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     }
     if let Some(direct_io) = args.direct_io {
         config.db_parameters.direct_io = direct_io;
+    }
+    if let Some(metrics_enabled) = args.metrics_enabled {
+        config.db_parameters.metrics_enabled = metrics_enabled;
     }
     if let Some(path) = args.path {
         config.stress_client_parameters.path = Some(path);
