@@ -388,12 +388,7 @@ impl Metrics {
                 registry,
                 enabled
             ),
-            large_table_init_mcs: counter_vec!(
-                "large_table_init_mcs",
-                &["ks"],
-                registry,
-                enabled
-            ),
+            large_table_init_mcs: counter_vec!("large_table_init_mcs", &["ks"], registry, enabled),
 
             flush_time_mcs: counter_vec!("flush_time_mcs", &["thread_id"], registry, enabled),
             flush_count: counter_vec!("flush_count", &["ks"], registry, enabled),
