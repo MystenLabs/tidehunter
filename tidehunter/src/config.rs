@@ -26,7 +26,7 @@ pub struct Config {
     pub sync_flush: bool,
     /// Maximum size of a single WAL file
     pub wal_file_size: u64,
-    /// Strategy to use for relocation (WalBased or CellBased)
+    /// Strategy to use for relocation (WalBased or IndexBased)
     #[serde(default)]
     pub relocation_strategy: RelocationStrategy,
 }

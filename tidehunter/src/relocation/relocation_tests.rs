@@ -5,6 +5,7 @@ use crate::{
     db::Db,
     key_shape::{KeyShapeBuilder, KeyType},
     relocation::{Decision::Keep, RelocationWatermarks},
+    RelocationStrategy,
 };
 use crate::{key_shape::KeySpaceConfig, relocation::Decision::Remove};
 use crate::{metrics::Metrics, relocation::Decision};
@@ -31,8 +32,8 @@ fn relocation_cells_processed(metrics: &Metrics, keyspace_name: &str) -> u64 {
         .get()
 }
 
-fn start_cell_based_relocation(db: &Db) {
-    db.start_blocking_relocation_with_strategy(crate::relocation::RelocationStrategy::CellBased)
+fn start_index_based_relocation(db: &Db) {
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased)
 }
 
 fn list_wal_files(path: &Path) -> Vec<String> {
@@ -248,10 +249,10 @@ fn test_relocation_filter() {
     assert_eq!(relocation_removed(&metrics, "k"), 0);
 }
 
-// Cell-based relocation tests
+// Index-based relocation tests
 #[test]
-fn test_cell_based_relocation_point_deletes() {
-    let dir = tempdir::TempDir::new("test_cell_based_relocation_point_deletes").unwrap();
+fn test_index_based_relocation_point_deletes() {
+    let dir = tempdir::TempDir::new("test_index_based_relocation_point_deletes").unwrap();
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
@@ -274,9 +275,9 @@ fn test_cell_based_relocation_point_deletes() {
     }
     thread::sleep(Duration::from_millis(10));
     db.rebuild_control_region().unwrap();
-    start_cell_based_relocation(&db);
+    start_index_based_relocation(&db);
 
-    // Cell-based relocation processes current cell contents, not historical WAL entries
+    // Index-based relocation processes current cell contents, not historical WAL entries
     // So it won't see the deleted entries (they're not in cells anymore)
     // Instead, verify that:
     // 1. Some cells were processed
@@ -305,8 +306,8 @@ fn test_cell_based_relocation_point_deletes() {
 }
 
 #[test]
-fn test_cell_based_relocation_with_bloom_filter_indexing() {
-    let dir = tempdir::TempDir::new("test_cell_based_relocation_bloom_indexing").unwrap();
+fn test_index_based_relocation_with_bloom_filter_indexing() {
+    let dir = tempdir::TempDir::new("test_index_based_relocation_bloom_indexing").unwrap();
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
 
@@ -349,13 +350,13 @@ fn test_cell_based_relocation_with_bloom_filter_indexing() {
     }
     db.rebuild_control_region().unwrap();
     let bloom_build_time_before = metrics.relocation_bloom_filter_build_time_mcs.get();
-    start_cell_based_relocation(&db);
+    start_index_based_relocation(&db);
 
     let bloom_build_time_after = metrics.relocation_bloom_filter_build_time_mcs.get();
-    // Cell-based relocation optimization: bloom filters are NOT built since we iterate through indexes directly
+    // Index-based relocation optimization: bloom filters are NOT built since we iterate through indexes directly
     assert_eq!(bloom_build_time_after, bloom_build_time_before);
 
-    // Cell-based relocation doesn't track removed entries (they're not in cells)
+    // Index-based relocation doesn't track removed entries (they're not in cells)
     // Instead, verify cells were processed and data integrity
     assert!(relocation_cells_processed(&metrics, "with_bloom") > 0);
     assert!(relocation_cells_processed(&metrics, "no_bloom") > 0);
@@ -387,8 +388,8 @@ fn test_cell_based_relocation_with_bloom_filter_indexing() {
 }
 
 #[test]
-fn test_cell_based_relocation_filter() {
-    let dir = tempdir::TempDir::new("test_cell_based_relocation_filter").unwrap();
+fn test_index_based_relocation_filter() {
+    let dir = tempdir::TempDir::new("test_index_based_relocation_filter").unwrap();
     let mut config = Config::small();
     config.wal_file_size = 2 * config.frag_size;
     let config = Arc::new(config);
@@ -435,8 +436,8 @@ fn test_cell_based_relocation_filter() {
         .unwrap();
 
         db.rebuild_control_region().unwrap();
-        start_cell_based_relocation(&db);
-        // With force_unload_config, cell-based relocation may or may not process cells
+        start_index_based_relocation(&db);
+        // With force_unload_config, index-based relocation may or may not process cells
         // depending on whether they're loaded in memory. Either behavior is safe.
         // We just verify no crashes occurred (the function returned successfully)
         db.rebuild_control_region().unwrap();
@@ -457,8 +458,8 @@ fn test_cell_based_relocation_filter() {
                 .unwrap();
         }
         db.rebuild_control_region().unwrap();
-        start_cell_based_relocation(&db);
-        // With force_unload_config, cell-based relocation may or may not process cells
+        start_index_based_relocation(&db);
+        // With force_unload_config, index-based relocation may or may not process cells
         // depending on whether they're loaded in memory. Either behavior is safe.
         // We just verify no crashes occurred (the function returned successfully)
         db.wait_for_background_threads_to_finish();
@@ -490,7 +491,7 @@ fn test_cell_based_relocation_filter() {
         );
     }
 
-    start_cell_based_relocation(&db);
+    start_index_based_relocation(&db);
 
     // Verify all data is still accessible regardless of whether relocation occurred
     assert_eq!(db.get(ks, &sample_key).unwrap(), Some(vec![0, 1, 2].into()));
@@ -499,7 +500,7 @@ fn test_cell_based_relocation_filter() {
 #[test]
 fn test_relocation_strategies_produce_identical_results() {
     let dir1 = tempdir::TempDir::new("test_wal_strategy").unwrap();
-    let dir2 = tempdir::TempDir::new("test_cell_strategy").unwrap();
+    let dir2 = tempdir::TempDir::new("test_index_strategy").unwrap();
     let config = Arc::new(Config::small());
 
     // Create identical keyspace configurations
@@ -509,10 +510,10 @@ fn test_relocation_strategies_produce_identical_results() {
     let key_shape = ksb.build();
 
     let metrics_wal = Metrics::new();
-    let metrics_cell = Metrics::new();
+    let metrics_index = Metrics::new();
 
     // Create identical databases with identical operations
-    let (db_wal, db_cell) = {
+    let (db_wal, db_index) = {
         let db_wal = Db::open(
             dir1.path(),
             key_shape.clone(),
@@ -520,11 +521,11 @@ fn test_relocation_strategies_produce_identical_results() {
             metrics_wal.clone(),
         )
         .unwrap();
-        let db_cell = Db::open(
+        let db_index = Db::open(
             dir2.path(),
             key_shape.clone(),
             config.clone(),
-            metrics_cell.clone(),
+            metrics_index.clone(),
         )
         .unwrap();
 
@@ -534,7 +535,7 @@ fn test_relocation_strategies_produce_identical_results() {
             db_wal
                 .insert(ks, key.to_be_bytes().to_vec(), value.clone())
                 .unwrap();
-            db_cell
+            db_index
                 .insert(ks, key.to_be_bytes().to_vec(), value)
                 .unwrap();
         }
@@ -545,7 +546,7 @@ fn test_relocation_strategies_produce_identical_results() {
             db_wal
                 .insert(ks, key.to_be_bytes().to_vec(), value.clone())
                 .unwrap();
-            db_cell
+            db_index
                 .insert(ks, key.to_be_bytes().to_vec(), value)
                 .unwrap();
         }
@@ -553,41 +554,41 @@ fn test_relocation_strategies_produce_identical_results() {
         // Delete some entries
         for key in (100..200u64).step_by(3) {
             db_wal.remove(ks, key.to_be_bytes().to_vec()).unwrap();
-            db_cell.remove(ks, key.to_be_bytes().to_vec()).unwrap();
+            db_index.remove(ks, key.to_be_bytes().to_vec()).unwrap();
         }
 
-        (db_wal, db_cell)
+        (db_wal, db_index)
     };
 
     // Run different relocation strategies
     db_wal.rebuild_control_region().unwrap();
-    db_cell.rebuild_control_region().unwrap();
+    db_index.rebuild_control_region().unwrap();
 
     db_wal.start_blocking_relocation(); // Default WAL-based
-    start_cell_based_relocation(&db_cell);
+    start_index_based_relocation(&db_index);
 
     // Compare final database contents key by key
     for key in 0..1000u64 {
         let key_bytes = key.to_be_bytes().to_vec();
         let val_wal = db_wal.get(ks, &key_bytes).unwrap();
-        let val_cell = db_cell.get(ks, &key_bytes).unwrap();
+        let val_index = db_index.get(ks, &key_bytes).unwrap();
 
-        assert_eq!(val_wal, val_cell, "Databases differ for key {}", key);
+        assert_eq!(val_wal, val_index, "Databases differ for key {}", key);
     }
 
     // Verify both processed data (metrics may differ but both should have done work)
     let wal_removed = relocation_removed(&metrics_wal, "test");
-    let cell_processed = relocation_cells_processed(&metrics_cell, "test");
+    let index_processed = relocation_cells_processed(&metrics_index, "test");
 
-    // WAL-based counts removed entries, cell-based counts processed cells
+    // WAL-based counts removed entries, index-based counts processed cells
     // Both should be > 0 indicating work was done
     assert!(
         wal_removed > 0,
         "WAL-based should have processed removed entries"
     );
     assert!(
-        cell_processed > 0,
-        "Cell-based should have processed some cells"
+        index_processed > 0,
+        "Index-based should have processed some cells"
     );
 }
 
@@ -595,7 +596,7 @@ fn test_relocation_strategies_produce_identical_results() {
 fn test_both_strategies_handle_concurrent_writes() {
     // Test both strategies handle concurrent writes safely
 
-    let test_concurrent_strategy = |strategy_name: &str, use_cell_based: bool| {
+    let test_concurrent_strategy = |strategy_name: &str, use_index_based: bool| {
         let dir = tempdir::TempDir::new(&format!("test_concurrent_{strategy_name}")).unwrap();
         let config = Arc::new(Config::small());
         let mut ksb = KeyShapeBuilder::new();
@@ -642,8 +643,8 @@ fn test_both_strategies_handle_concurrent_writes() {
 
         // Start relocation while writers are active
         db.rebuild_control_region().unwrap();
-        if use_cell_based {
-            start_cell_based_relocation(&db);
+        if use_index_based {
+            start_index_based_relocation(&db);
         } else {
             db.start_blocking_relocation();
         }
@@ -672,8 +673,8 @@ fn test_both_strategies_handle_concurrent_writes() {
 
     let (db_wal, ks_wal, _wal_stale_updates, wal_successful_writes) =
         test_concurrent_strategy("wal", false);
-    let (db_cell, ks_cell, _cell_stale_updates, cell_successful_writes) =
-        test_concurrent_strategy("cell", true);
+    let (db_index, ks_index, _index_stale_updates, index_successful_writes) =
+        test_concurrent_strategy("index", true);
 
     // Test 1: Both strategies should complete without crashing (we got here)
 
@@ -684,21 +685,21 @@ fn test_both_strategies_handle_concurrent_writes() {
         wal_successful_writes
     );
     assert!(
-        cell_successful_writes > 0,
-        "Cell strategy should have completed some writes, got {}",
-        cell_successful_writes
+        index_successful_writes > 0,
+        "Index strategy should have completed some writes, got {}",
+        index_successful_writes
     );
 
     assert_eq!(
-        wal_successful_writes, cell_successful_writes,
-        "Both strategies should complete the same number of writes: WAL={}, Cell={}",
-        wal_successful_writes, cell_successful_writes
+        wal_successful_writes, index_successful_writes,
+        "Both strategies should complete the same number of writes: WAL={}, Index={}",
+        wal_successful_writes, index_successful_writes
     );
 
     // Test 3: Verify data consistency - all keys should have valid values after concurrent writes
     for i in (0..100u64).step_by(5) {
         let wal_value = db_wal.get(ks_wal, &i.to_be_bytes()).unwrap().unwrap();
-        let cell_value = db_cell.get(ks_cell, &i.to_be_bytes()).unwrap().unwrap();
+        let index_value = db_index.get(ks_index, &i.to_be_bytes()).unwrap().unwrap();
 
         // Values should be 3 bytes: [round, round>>8, key]
         assert_eq!(
@@ -708,9 +709,9 @@ fn test_both_strategies_handle_concurrent_writes() {
             i
         );
         assert_eq!(
-            cell_value.len(),
+            index_value.len(),
             3,
-            "Cell strategy produced invalid value length for key {}",
+            "Index strategy produced invalid value length for key {}",
             i
         );
         assert_eq!(
@@ -719,16 +720,16 @@ fn test_both_strategies_handle_concurrent_writes() {
             i
         );
         assert_eq!(
-            cell_value[2], i as u8,
-            "Cell strategy corrupted key data for key {}",
+            index_value[2], i as u8,
+            "Index strategy corrupted key data for key {}",
             i
         );
     }
 }
 
 #[test]
-fn test_cell_based_relocation_progress_tracking() {
-    let dir = tempdir::TempDir::new("test_cell_progress_tracking").unwrap();
+fn test_index_based_relocation_progress_tracking() {
+    let dir = tempdir::TempDir::new("test_index_progress_tracking").unwrap();
     let config = Arc::new(Config::small());
 
     // Create multiple keyspaces to ensure cross-keyspace progress tracking
@@ -768,7 +769,7 @@ fn test_cell_based_relocation_progress_tracking() {
         )
         .unwrap();
         db.rebuild_control_region().unwrap();
-        start_cell_based_relocation(&db);
+        start_index_based_relocation(&db);
 
         // Verify some progress was made
         let processed_ks1 = relocation_cells_processed(&metrics, "ks1");
@@ -782,15 +783,15 @@ fn test_cell_based_relocation_progress_tracking() {
     }
 
     // Verify watermark files exist
-    let cell_watermark_file = dir.path().join("rel_cell");
+    let index_watermark_file = dir.path().join("rel_index");
     assert!(
-        cell_watermark_file.exists(),
-        "Cell watermark file should be created"
+        index_watermark_file.exists(),
+        "Index watermark file should be created"
     );
 }
 
 #[test]
-fn test_cell_based_relocation_empty_and_sparse_cells() {
+fn test_index_based_relocation_empty_and_sparse_cells() {
     let dir = tempdir::TempDir::new("test_sparse_cells").unwrap();
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
@@ -811,12 +812,12 @@ fn test_cell_based_relocation_empty_and_sparse_cells() {
     }
 
     db.rebuild_control_region().unwrap();
-    start_cell_based_relocation(&db);
+    start_index_based_relocation(&db);
 
     // Should handle empty cells gracefully - no crashes, reasonable metrics
     let processed = relocation_cells_processed(&metrics, "sparse");
 
-    // Cell-based relocation should process some cells and complete successfully
+    // Index-based relocation should process some cells and complete successfully
     // The exact number depends on implementation details, but it should be reasonable
     assert!(processed > 0, "Expected some cells to be processed");
     assert!(
@@ -835,7 +836,7 @@ fn test_cell_based_relocation_empty_and_sparse_cells() {
 }
 
 #[test]
-fn test_cell_based_relocation_large_cells() {
+fn test_index_based_relocation_large_cells() {
     let dir = tempdir::TempDir::new("test_large_cells").unwrap();
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
@@ -860,7 +861,7 @@ fn test_cell_based_relocation_large_cells() {
     db.rebuild_control_region().unwrap();
 
     let start_time = std::time::Instant::now();
-    start_cell_based_relocation(&db);
+    start_index_based_relocation(&db);
     let elapsed = start_time.elapsed();
 
     // Verify large cells were processed successfully
@@ -911,8 +912,8 @@ fn test_watermark_highest_wal_position_tracking() {
     // Ensure data is persisted and control region is built
     db.rebuild_control_region().unwrap();
 
-    // Run cell-based relocation
-    start_cell_based_relocation(&db);
+    // Run index-based relocation
+    start_index_based_relocation(&db);
 
     // Verify some cells were processed - this confirms relocation completed successfully
     let processed = relocation_cells_processed(&metrics, "test");
@@ -933,11 +934,11 @@ fn test_watermark_highest_wal_position_tracking() {
 
     // Now the key test: load watermarks from disk and ensure it is as expected
     let watermarks = RelocationWatermarks::load(dir.path()).unwrap();
-    let cell_watermark = watermarks.get_cell_progress();
+    let index_watermark = watermarks.get_index_progress();
 
     // The correct value should be the highest WAL position of entries that were processed
     assert_eq!(
-        cell_watermark.upper_limit, initial_wal_position,
+        index_watermark.upper_limit, initial_wal_position,
         "Upper limit should equal initial WAL position (this defines the processing boundary)"
     );
 
@@ -947,27 +948,27 @@ fn test_watermark_highest_wal_position_tracking() {
     // 2. Less than or equal to upper_limit (can't process beyond the safe boundary)
     // 3. Close to upper_limit (most entries should be processed in a simple sequential insert scenario)
     assert!(
-        cell_watermark.highest_wal_position > 0,
+        index_watermark.highest_wal_position > 0,
         "Watermark highest_wal_position ({}) should be greater than 0",
-        cell_watermark.highest_wal_position
+        index_watermark.highest_wal_position
     );
     assert!(
-        cell_watermark.highest_wal_position <= cell_watermark.upper_limit,
+        index_watermark.highest_wal_position <= index_watermark.upper_limit,
         "Watermark highest_wal_position ({}) should not exceed upper_limit ({})",
-        cell_watermark.highest_wal_position,
-        cell_watermark.upper_limit
+        index_watermark.highest_wal_position,
+        index_watermark.upper_limit
     );
 
     // Precise correctness check: highest_wal_position should be close to upper_limit
-    let gap = cell_watermark.upper_limit - cell_watermark.highest_wal_position;
+    let gap = index_watermark.upper_limit - index_watermark.highest_wal_position;
     assert!(
         gap <= 100,
         "Gap between highest_wal_position ({}) and upper_limit ({}) is too large ({}), suggests incomplete processing",
-        cell_watermark.highest_wal_position, cell_watermark.upper_limit, gap
+        index_watermark.highest_wal_position, index_watermark.upper_limit, gap
     );
 
     // The exact value cannot be computed with precision because:
-    // 1. Cell-based relocation only processes entries that have been ingested into the large table
+    // 1. Index-based relocation only processes entries that have been ingested into the large table
     // 2. There's a delay between WAL writes and large table ingestion
     // 3. The "upper_limit" represents the safe boundary, but not all entries up to that
     //    point may have been ingested into cells yet
@@ -976,10 +977,10 @@ fn test_watermark_highest_wal_position_tracking() {
     // However, we can assert a deterministic bound: in our controlled test scenario with
     // sequential inserts followed by rebuild_control_region(), we expect high ingestion rate.
     assert!(
-        cell_watermark.highest_wal_position >= initial_wal_position * 9 / 10,
+        index_watermark.highest_wal_position >= initial_wal_position * 9 / 10,
         "Watermark highest_wal_position ({}) should be at least 90% of initial WAL position ({}) \
          - if this fails, it suggests ingestion issues, not the bug we're testing",
-        cell_watermark.highest_wal_position,
+        index_watermark.highest_wal_position,
         initial_wal_position
     );
 }

@@ -58,7 +58,7 @@ pub struct Metrics {
     pub relocation_removed: IntCounterVec,
     pub relocation_bloom_filter_build_time_mcs: IntCounter,
 
-    // Cell-based relocation metrics
+    // Index-based relocation metrics
     pub relocation_cells_processed: IntCounterVec,
     pub relocation_current_keyspace: IntGauge,
 
@@ -192,7 +192,7 @@ impl Metrics {
                 registry
             ),
 
-            // Cell-based relocation metrics
+            // Index-based relocation metrics
             relocation_cells_processed: counter_vec!(
                 "relocation_cells_processed",
                 &["ks"],
