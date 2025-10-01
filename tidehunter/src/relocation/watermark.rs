@@ -7,27 +7,31 @@ use std::path::{Path, PathBuf};
 
 pub const RELOCATION_FILE: &str = "rel";
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct WalWatermarkData {
+    pub progress: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct IndexWatermarkData {
+    pub cell_ref: Option<CellReference>,
+    pub highest_wal_position: u64,
+    pub upper_limit: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum WatermarkData {
-    WalBased {
-        progress: u64,
-    },
-    IndexBased {
-        cell_ref: Option<CellReference>,
-        highest_wal_position: u64,
-        upper_limit: u64,
-    },
+    WalBased(WalWatermarkData),
+    IndexBased(IndexWatermarkData),
 }
 
 impl WatermarkData {
     pub(crate) fn new(strategy: RelocationStrategy) -> Self {
         match strategy {
-            RelocationStrategy::WalBased => WatermarkData::WalBased { progress: 0 },
-            RelocationStrategy::IndexBased => WatermarkData::IndexBased {
-                cell_ref: None,
-                highest_wal_position: 0,
-                upper_limit: 0,
-            },
+            RelocationStrategy::WalBased => WatermarkData::WalBased(WalWatermarkData::default()),
+            RelocationStrategy::IndexBased => {
+                WatermarkData::IndexBased(IndexWatermarkData::default())
+            }
         }
     }
 }
@@ -101,10 +105,10 @@ impl RelocationWatermarks {
 
         // Update metrics based on strategy
         match &self.data {
-            WatermarkData::WalBased { progress } => {
+            WatermarkData::WalBased(WalWatermarkData { progress }) => {
                 metrics.relocation_position.set(*progress as i64);
             }
-            WatermarkData::IndexBased { .. } => {
+            WatermarkData::IndexBased(IndexWatermarkData { .. }) => {
                 // TODO: Could add index-specific metrics here if needed
             }
         }
@@ -114,12 +118,12 @@ impl RelocationWatermarks {
 
     pub fn gc_watermark(&self) -> u64 {
         match &self.data {
-            WatermarkData::WalBased { progress } => *progress,
-            WatermarkData::IndexBased {
+            WatermarkData::WalBased(WalWatermarkData { progress }) => *progress,
+            WatermarkData::IndexBased(IndexWatermarkData {
                 highest_wal_position,
                 upper_limit,
                 ..
-            } => std::cmp::min(*highest_wal_position, *upper_limit),
+            }) => std::cmp::min(*highest_wal_position, *upper_limit),
         }
     }
 }

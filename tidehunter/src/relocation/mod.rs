@@ -1,9 +1,15 @@
-use crate::db::{Db, DbResult, WalEntry};
-use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::large_table::{GetResult, LargeTable};
 use crate::metrics::Metrics;
 use crate::wal::WalError;
 use crate::WalPosition;
+use crate::{
+    db::{Db, DbResult, WalEntry},
+    relocation::watermark::IndexWatermarkData,
+};
+use crate::{
+    key_shape::{KeySpace, KeySpaceDesc},
+    relocation::watermark::WalWatermarkData,
+};
 use bloom::{BloomFilter, ASMS};
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -187,7 +193,8 @@ impl RelocationDriver {
 
         // Get starting cell reference from saved progress
         // Strategy already validated in relocation_run()
-        let WatermarkData::IndexBased { cell_ref, .. } = &self.watermarks.data else {
+        let WatermarkData::IndexBased(IndexWatermarkData { cell_ref, .. }) = &self.watermarks.data
+        else {
             unreachable!("Strategy mismatch should be caught in relocation_run()");
         };
 
@@ -208,11 +215,11 @@ impl RelocationDriver {
                 }
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
-                    self.watermarks.data = WatermarkData::IndexBased {
+                    self.watermarks.data = WatermarkData::IndexBased(IndexWatermarkData {
                         cell_ref: Some(cell_ref.clone()),
                         highest_wal_position,
                         upper_limit,
-                    };
+                    });
                     self.save_progress(&db, true)?;
                     // Save watermark only
                 }
@@ -258,11 +265,11 @@ impl RelocationDriver {
         }
 
         // Save final progress with upper_limit and highest WAL position
-        self.watermarks.data = WatermarkData::IndexBased {
+        self.watermarks.data = WatermarkData::IndexBased(IndexWatermarkData {
             cell_ref: current_cell_ref.clone(),
             highest_wal_position,
             upper_limit,
-        };
+        });
         self.save_progress(&db, false)?;
 
         Ok(())
@@ -273,7 +280,7 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.last_processed();
 
         // Strategy already validated in relocation_run()
-        let WatermarkData::WalBased { progress } = &self.watermarks.data else {
+        let WatermarkData::WalBased(WalWatermarkData { progress }) = &self.watermarks.data else {
             unreachable!("Strategy mismatch should be caught in relocation_run()");
         };
         let start_position = *progress;
@@ -296,7 +303,9 @@ impl RelocationDriver {
                     break;
                 }
                 if i % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
-                    let WatermarkData::WalBased { progress } = &self.watermarks.data else {
+                    let WatermarkData::WalBased(WalWatermarkData { progress }) =
+                        &self.watermarks.data
+                    else {
                         unreachable!("Strategy validated in relocation_run()");
                     };
                     let has_wal_files_to_drop =
@@ -312,9 +321,9 @@ impl RelocationDriver {
             if position.offset() >= upper_limit {
                 break;
             }
-            self.watermarks.data = WatermarkData::WalBased {
+            self.watermarks.data = WatermarkData::WalBased(WalWatermarkData {
                 progress: position.offset(),
-            };
+            });
             match WalEntry::from_bytes(raw_entry) {
                 WalEntry::Record(ks, key, value) => {
                     let ksd = db.key_shape.ks(ks);

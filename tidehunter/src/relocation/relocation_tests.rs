@@ -4,7 +4,9 @@ use crate::{
     config::Config,
     db::Db,
     key_shape::{KeyShapeBuilder, KeyType},
-    relocation::{Decision::Keep, RelocationWatermarks, WatermarkData},
+    relocation::{
+        watermark::IndexWatermarkData, Decision::Keep, RelocationWatermarks, WatermarkData,
+    },
     RelocationStrategy,
 };
 use crate::{key_shape::KeySpaceConfig, relocation::Decision::Remove};
@@ -939,11 +941,11 @@ fn test_watermark_highest_wal_position_tracking() {
 
     // The correct value should be the highest WAL position of entries that were processed
     let (highest_wal_position, upper_limit) = match &watermarks.data {
-        WatermarkData::IndexBased {
+        WatermarkData::IndexBased(IndexWatermarkData {
             highest_wal_position,
             upper_limit,
             ..
-        } => (*highest_wal_position, *upper_limit),
+        }) => (*highest_wal_position, *upper_limit),
         _ => panic!("Expected IndexBased watermark"),
     };
 
