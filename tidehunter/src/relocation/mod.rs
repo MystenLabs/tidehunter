@@ -204,7 +204,7 @@ impl RelocationDriver {
         let upper_limit = db.wal_writer.last_processed();
 
         // Get starting cell reference from saved progress
-        let mut current_cell_ref = match &watermark_data.cell_ref {
+        let mut current_cell_ref = match &watermark_data.next_to_process {
             Some(cr) => Some(cr.clone()), // Resume from saved position
             None => CellReference::first(&db, KeySpace::first()), // Starting from beginning
         };
@@ -222,7 +222,7 @@ impl RelocationDriver {
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
                     self.watermarks.data = WatermarkData::IndexBased(IndexWatermarkData {
-                        cell_ref: Some(cell_ref.clone()),
+                        next_to_process: Some(cell_ref.clone()),
                         highest_wal_position,
                         upper_limit,
                     });
@@ -272,7 +272,7 @@ impl RelocationDriver {
 
         // Save final progress with upper_limit and highest WAL position
         self.watermarks.data = WatermarkData::IndexBased(IndexWatermarkData {
-            cell_ref: current_cell_ref.clone(),
+            next_to_process: current_cell_ref.clone(),
             highest_wal_position,
             upper_limit,
         });

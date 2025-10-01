@@ -14,7 +14,7 @@ pub(crate) struct WalWatermarkData {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct IndexWatermarkData {
-    pub cell_ref: Option<CellReference>,
+    pub next_to_process: Option<CellReference>,
     pub highest_wal_position: u64,
     pub upper_limit: u64,
 }
