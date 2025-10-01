@@ -46,13 +46,16 @@ impl RelocationWatermarks {
         path.join(RELOCATION_FILE)
     }
 
-    pub fn load(path: &Path) -> Result<Option<Self>, Error> {
+    pub fn read_or_create(path: &Path, strategy: RelocationStrategy) -> Result<Self, Error> {
         let rel_path = Self::relocation_file_path(path);
 
         let mut file = match File::open(&rel_path) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(None);
+                return Ok(Self {
+                    path: path.to_path_buf(),
+                    data: WatermarkData::new(strategy),
+                });
             }
             Err(e) => return Err(e),
         };
@@ -67,17 +70,10 @@ impl RelocationWatermarks {
             )
         })?;
 
-        Ok(Some(Self {
+        Ok(Self {
             path: path.to_path_buf(),
             data,
-        }))
-    }
-
-    pub fn new(path: PathBuf, strategy: RelocationStrategy) -> Self {
-        Self {
-            path,
-            data: WatermarkData::new(strategy),
-        }
+        })
     }
 
     pub fn save(&self, metrics: &Metrics) -> Result<(), io::Error> {

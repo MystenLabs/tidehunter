@@ -937,7 +937,8 @@ fn test_watermark_highest_wal_position_tracking() {
     db.wait_for_background_threads_to_finish();
 
     // Now the key test: load watermarks from disk and ensure it is as expected
-    let watermarks = RelocationWatermarks::load(dir.path()).unwrap().unwrap();
+    let watermarks =
+        RelocationWatermarks::read_or_create(dir.path(), RelocationStrategy::IndexBased).unwrap();
 
     // The correct value should be the highest WAL position of entries that were processed
     let (highest_wal_position, upper_limit) = match &watermarks.data {
