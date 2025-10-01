@@ -13,9 +13,9 @@ use crate::{
 use bloom::{BloomFilter, ASMS};
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
-use std::{collections::HashMap, io};
 
 mod cell_reference;
 mod watermark;
@@ -168,37 +168,43 @@ impl RelocationDriver {
         };
 
         if watermark_strategy != strategy {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Relocation strategy mismatch: loaded watermarks are {:?} but commanded strategy is {:?}. \
-                     Please delete the watermark file (rel) to start fresh with the new strategy.",
-                    watermark_strategy, strategy
-                ),
-            )
-            .into());
+            panic!(
+                "Relocation strategy mismatch: loaded watermarks are {:?} but commanded strategy is {:?}. \
+                Please delete the watermark file (rel) to start fresh with the new strategy.",
+                watermark_strategy, strategy
+            );
         }
 
         match strategy {
-            RelocationStrategy::WalBased => self.wal_based_relocation(db),
-            RelocationStrategy::IndexBased => self.index_based_relocation(db),
+            RelocationStrategy::WalBased => {
+                let WatermarkData::WalBased(watermark_data) = &self.watermarks.data else {
+                    unreachable!("Strategy mismatch should be caught above");
+                };
+                let watermark_data = watermark_data.clone();
+                self.wal_based_relocation(db, &watermark_data)
+            }
+            RelocationStrategy::IndexBased => {
+                let WatermarkData::IndexBased(watermark_data) = &self.watermarks.data else {
+                    unreachable!("Strategy mismatch should be caught above");
+                };
+                let watermark_data = watermark_data.clone();
+                self.index_based_relocation(db, &watermark_data)
+            }
         }
     }
 
-    fn index_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
+    fn index_based_relocation(
+        &mut self,
+        db: Arc<Db>,
+        watermark_data: &IndexWatermarkData,
+    ) -> DbResult<()> {
         // Capture the upper WAL limit to avoid race conditions
         // Only process entries written before this point. This is the last position that was written
         // and made its way into the large table
         let upper_limit = db.wal_writer.last_processed();
 
         // Get starting cell reference from saved progress
-        // Strategy already validated in relocation_run()
-        let WatermarkData::IndexBased(IndexWatermarkData { cell_ref, .. }) = &self.watermarks.data
-        else {
-            unreachable!("Strategy mismatch should be caught in relocation_run()");
-        };
-
-        let mut current_cell_ref = match cell_ref {
+        let mut current_cell_ref = match &watermark_data.cell_ref {
             Some(cr) => Some(cr.clone()), // Resume from saved position
             None => CellReference::first(&db, KeySpace::first()), // Starting from beginning
         };
@@ -275,15 +281,16 @@ impl RelocationDriver {
         Ok(())
     }
 
-    fn wal_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
+    fn wal_based_relocation(
+        &mut self,
+        db: Arc<Db>,
+        watermark_data: &WalWatermarkData,
+    ) -> DbResult<()> {
         // TODO: handle potentially uninitialized positions at the end of the WAL
         let upper_limit = db.wal_writer.last_processed();
 
-        // Strategy already validated in relocation_run()
-        let WatermarkData::WalBased(WalWatermarkData { progress }) = &self.watermarks.data else {
-            unreachable!("Strategy mismatch should be caught in relocation_run()");
-        };
-        let start_position = *progress;
+        // Get starting position from saved progress
+        let start_position = watermark_data.progress;
         let mut wal_iterator = db.wal.wal_iterator(start_position)?;
 
         // Skip the first entry if we're resuming from a saved position
