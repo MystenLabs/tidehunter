@@ -2028,6 +2028,7 @@ dependencies = [
  "parking_lot",
  "prometheus",
  "rand 0.8.5",
+ "rayon",
  "serde",
  "serde_yaml",
  "smallvec",

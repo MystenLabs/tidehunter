@@ -19,6 +19,7 @@ use lru::LruCache;
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use rand::rngs::ThreadRng;
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
@@ -103,7 +104,7 @@ pub(crate) struct LargeTableSnapshot {
 }
 
 impl LargeTable {
-    pub(crate) fn from_unloaded<L: Loader>(
+    pub(crate) fn from_unloaded<L: Loader + Sync>(
         key_shape: &KeyShape,
         snapshot: &LargeTableContainer<SnapshotEntryData>,
         config: Arc<Config>,
@@ -116,10 +117,11 @@ impl LargeTable {
             key_shape.num_ks(),
             "Snapshot has different number of key spaces"
         );
-        let mut rng = ThreadRng::default();
         let table = key_shape
             .iter_ks()
-            .zip(snapshot.0.iter())
+            .zip(&snapshot.0)
+            .collect::<Vec<_>>()
+            .into_par_iter()
             .map(|(ks, ks_snapshot)| {
                 if ks_snapshot.len() != ks.num_mutexes() {
                     panic!(
@@ -129,14 +131,13 @@ impl LargeTable {
                         ks.num_mutexes()
                     );
                 }
-                let mut bloom_filter_restore_time = 0;
                 let context = KsContext::new(config.clone(), ks.clone(), metrics.clone());
-                let rows = ks_snapshot.iter().map(|row_snapshot| {
+                let bloom_filter_start = Instant::now();
+                let rows = ks_snapshot.par_iter().map(|row_snapshot| {
                     let entries = row_snapshot.iter().map(|(cell, entry_data)| {
                         let bloom_filter = context.ks_config.bloom_filter().map(|opts| {
                             let mut filter = BloomFilter::with_rate(opts.rate, opts.count);
                             if entry_data.position.is_valid() {
-                                let now = Instant::now();
                                 let data =
                                     loader.load(&context.ks_config, entry_data.position).expect(
                                         "Failed to load an index entry to reconstruct bloom filter",
@@ -144,11 +145,10 @@ impl LargeTable {
                                 for key in data.keys() {
                                     filter.insert(key);
                                 }
-                                bloom_filter_restore_time += now.elapsed().as_micros();
                             }
                             filter
                         });
-                        let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
+                        let unload_jitter = config.gen_dirty_keys_jitter(&mut ThreadRng::default());
                         LargeTableEntry::from_snapshot_data(
                             context.clone(),
                             cell.clone(),
@@ -172,13 +172,12 @@ impl LargeTable {
                         value_lru,
                     }
                 });
-                let rows = ShardedMutex::from_iterator(rows);
-                if bloom_filter_restore_time > 0 {
-                    metrics
-                        .bloom_filter_restore_time_mcs
-                        .with_label_values(&[ks.name()])
-                        .inc_by(bloom_filter_restore_time as u64);
-                }
+
+                let rows = ShardedMutex::from_parallel_iterator(rows);
+                metrics
+                    .large_table_init_mcs
+                    .with_label_values(&[ks.name()])
+                    .inc_by(bloom_filter_start.elapsed().as_micros() as u64);
                 KsTable { context, rows }
             })
             .collect();
