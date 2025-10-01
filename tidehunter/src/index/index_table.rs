@@ -275,6 +275,15 @@ impl IndexTable {
         &mut self.data
     }
 
+    /// Apply given update function to a value with a given key.
+    /// If the key does not exist, this function completes without calling the update function
+    pub fn apply_update(&mut self, key: &[u8], update: impl FnOnce(&mut IndexWalPosition)) {
+        let value = self.data.get_mut(key);
+        if let Some(value) = value {
+            update(value)
+        }
+    }
+
     #[cfg(test)]
     pub fn into_data(self) -> BTreeMap<Bytes, WalPosition> {
         self.data
@@ -323,6 +332,11 @@ impl IndexWalPosition {
         }
     }
 
+    pub fn replace_wal_position(&mut self, position: WalPosition) {
+        self.offset = position.offset();
+        self.len = position.len_u32();
+    }
+
     fn into_update_position(self) -> WalPosition {
         WalPosition::new(self.offset, self.len)
     }
@@ -351,6 +365,10 @@ impl IndexWalPosition {
         }
         self.kind = IndexEntryKind::Clean;
         self
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
     }
 }
 

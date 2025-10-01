@@ -1,3 +1,4 @@
+use crate::cell::CellId;
 use crate::db::{WalEntry, MAX_KEY_LEN};
 use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::wal::PreparedWalWrite;
@@ -7,6 +8,14 @@ pub struct WriteBatch {
     pub(crate) updates: Vec<Update>,
     pub(crate) prepared_writes: Vec<PreparedWalWrite>,
     pub(crate) tag: String,
+}
+
+pub(crate) struct RelocatedWriteBatch {
+    pub(crate) prepared_writes: Vec<PreparedWalWrite>,
+    pub(crate) keys: Vec<Bytes>,
+    pub(crate) last_processed: u64,
+    pub(crate) ks: KeySpace,
+    pub(crate) cell_id: CellId,
 }
 
 const MAX_BATCH_LEN: usize = 1_000_000;
@@ -56,6 +65,32 @@ impl WriteBatch {
             self.updates.len() < MAX_BATCH_LEN,
             "Batch exceeds max length {MAX_BATCH_LEN}"
         );
+    }
+}
+
+impl RelocatedWriteBatch {
+    pub fn new(ks: KeySpace, cell_id: CellId, last_processed: u64) -> Self {
+        Self {
+            last_processed,
+            keys: Default::default(),
+            prepared_writes: Default::default(),
+            ks,
+            cell_id,
+        }
+    }
+
+    pub fn write(&mut self, key: Bytes, value: Bytes) {
+        let write = PreparedWalWrite::new(&WalEntry::Record(self.ks, key.clone(), value.clone()));
+        self.prepared_writes.push(write);
+        self.keys.push(key);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.prepared_writes.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.prepared_writes.len()
     }
 }
 
