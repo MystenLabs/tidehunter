@@ -4,7 +4,9 @@ use crate::{
     config::Config,
     db::Db,
     key_shape::{KeyShapeBuilder, KeyType},
-    relocation::{Decision::Keep, RelocationWatermarks},
+    relocation::{
+        watermark::IndexWatermarkData, Decision::Keep, RelocationWatermarks, WatermarkData,
+    },
     RelocationStrategy,
 };
 use crate::{key_shape::KeySpaceConfig, relocation::Decision::Remove};
@@ -14,6 +16,12 @@ fn force_unload_config(config: &Config) -> Arc<Config> {
     let mut config2 = Config::clone(config);
     config2.snapshot_unload_threshold = 0;
     Arc::new(config2)
+}
+
+fn index_based_config() -> Arc<Config> {
+    let mut config = Config::small();
+    config.relocation_strategy = RelocationStrategy::IndexBased;
+    force_unload_config(&config)
 }
 
 fn relocation_removed(metrics: &Metrics, name: &str) -> u64 {
@@ -253,7 +261,6 @@ fn test_relocation_filter() {
 #[test]
 fn test_index_based_relocation_point_deletes() {
     let dir = tempdir::TempDir::new("test_index_based_relocation_point_deletes").unwrap();
-    let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
     let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
@@ -262,7 +269,7 @@ fn test_index_based_relocation_point_deletes() {
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
-        force_unload_config(&config),
+        index_based_config(),
         metrics.clone(),
     )
     .unwrap();
@@ -308,7 +315,6 @@ fn test_index_based_relocation_point_deletes() {
 #[test]
 fn test_index_based_relocation_with_bloom_filter_indexing() {
     let dir = tempdir::TempDir::new("test_index_based_relocation_bloom_indexing").unwrap();
-    let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
 
     let ksc_with_bloom = KeySpaceConfig::new().with_relocation_bloom_filter(0.01, 1000);
@@ -323,7 +329,7 @@ fn test_index_based_relocation_with_bloom_filter_indexing() {
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
-        force_unload_config(&config),
+        index_based_config(),
         metrics.clone(),
     )
     .unwrap();
@@ -392,7 +398,8 @@ fn test_index_based_relocation_filter() {
     let dir = tempdir::TempDir::new("test_index_based_relocation_filter").unwrap();
     let mut config = Config::small();
     config.wal_file_size = 2 * config.frag_size;
-    let config = Arc::new(config);
+    config.relocation_strategy = RelocationStrategy::IndexBased;
+    let config = force_unload_config(&config);
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
         if u64::from_be_bytes(key.try_into().unwrap()) % 2 == 0 {
@@ -410,7 +417,7 @@ fn test_index_based_relocation_filter() {
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
-            force_unload_config(&config),
+            config.clone(),
             metrics.clone(),
         )
         .unwrap();
@@ -430,7 +437,7 @@ fn test_index_based_relocation_filter() {
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
-            force_unload_config(&config),
+            config.clone(),
             metrics.clone(),
         )
         .unwrap();
@@ -524,7 +531,7 @@ fn test_relocation_strategies_produce_identical_results() {
         let db_index = Db::open(
             dir2.path(),
             key_shape.clone(),
-            config.clone(),
+            index_based_config(),
             metrics_index.clone(),
         )
         .unwrap();
@@ -598,7 +605,11 @@ fn test_both_strategies_handle_concurrent_writes() {
 
     let test_concurrent_strategy = |strategy_name: &str, use_index_based: bool| {
         let dir = tempdir::TempDir::new(&format!("test_concurrent_{strategy_name}")).unwrap();
-        let config = Arc::new(Config::small());
+        let config = if use_index_based {
+            index_based_config()
+        } else {
+            force_unload_config(&Config::small())
+        };
         let mut ksb = KeyShapeBuilder::new();
         let ksc = KeySpaceConfig::new();
         let ks = ksb.add_key_space_config("concurrent", 8, 1, KeyType::uniform(1), ksc);
@@ -730,7 +741,6 @@ fn test_both_strategies_handle_concurrent_writes() {
 #[test]
 fn test_index_based_relocation_progress_tracking() {
     let dir = tempdir::TempDir::new("test_index_progress_tracking").unwrap();
-    let config = Arc::new(Config::small());
 
     // Create multiple keyspaces to ensure cross-keyspace progress tracking
     let mut ksb = KeyShapeBuilder::new();
@@ -744,7 +754,7 @@ fn test_index_based_relocation_progress_tracking() {
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
-            config.clone(),
+            index_based_config(),
             metrics.clone(),
         )
         .unwrap();
@@ -764,7 +774,7 @@ fn test_index_based_relocation_progress_tracking() {
         let db = Db::open(
             dir.path(),
             key_shape.clone(),
-            config.clone(),
+            index_based_config(),
             metrics.clone(),
         )
         .unwrap();
@@ -782,25 +792,21 @@ fn test_index_based_relocation_progress_tracking() {
         db.wait_for_background_threads_to_finish();
     }
 
-    // Verify watermark files exist
-    let index_watermark_file = dir.path().join("rel_index");
-    assert!(
-        index_watermark_file.exists(),
-        "Index watermark file should be created"
-    );
+    // Verify watermark file exists
+    let watermark_file = dir.path().join("rel");
+    assert!(watermark_file.exists(), "Watermark file should be created");
 }
 
 #[test]
 fn test_index_based_relocation_empty_and_sparse_cells() {
     let dir = tempdir::TempDir::new("test_sparse_cells").unwrap();
-    let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new();
     let ks = ksb.add_key_space_config("sparse", 8, 4, KeyType::uniform(128), ksc); // 128 cells per mutex (power of 2)
     let key_shape = ksb.build();
     let metrics = Metrics::new();
 
-    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let db = Db::open(dir.path(), key_shape, index_based_config(), metrics.clone()).unwrap();
 
     // Create very sparse data - only populate every 10th cell
     for cell_idx in (0..128).step_by(10) {
@@ -838,7 +844,6 @@ fn test_index_based_relocation_empty_and_sparse_cells() {
 #[test]
 fn test_index_based_relocation_large_cells() {
     let dir = tempdir::TempDir::new("test_large_cells").unwrap();
-    let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new();
     // Use fewer cells so we can pack more entries per cell
@@ -846,7 +851,7 @@ fn test_index_based_relocation_large_cells() {
     let key_shape = ksb.build();
     let metrics = Metrics::new();
 
-    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let db = Db::open(dir.path(), key_shape, index_based_config(), metrics.clone()).unwrap();
 
     // Fill cells with many entries each
     let entries_per_cell = 1000u64;
@@ -891,13 +896,12 @@ fn test_index_based_relocation_large_cells() {
 #[test]
 fn test_watermark_highest_wal_position_tracking() {
     let dir = tempdir::TempDir::new("test_watermark_wal_position").unwrap();
-    let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ks = ksb.add_key_space_config("test", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
     let key_shape = ksb.build();
     let metrics = Metrics::new();
 
-    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let db = Db::open(dir.path(), key_shape, index_based_config(), metrics.clone()).unwrap();
 
     // Insert multiple entries to create WAL entries at different positions
     for key in 0..50u64 {
@@ -933,12 +937,21 @@ fn test_watermark_highest_wal_position_tracking() {
     db.wait_for_background_threads_to_finish();
 
     // Now the key test: load watermarks from disk and ensure it is as expected
-    let watermarks = RelocationWatermarks::load(dir.path()).unwrap();
-    let index_watermark = watermarks.get_index_progress();
+    let watermarks =
+        RelocationWatermarks::read_or_create(dir.path(), RelocationStrategy::IndexBased).unwrap();
 
     // The correct value should be the highest WAL position of entries that were processed
+    let (highest_wal_position, upper_limit) = match &watermarks.data {
+        WatermarkData::IndexBased(IndexWatermarkData {
+            highest_wal_position,
+            upper_limit,
+            ..
+        }) => (*highest_wal_position, *upper_limit),
+        _ => panic!("Expected IndexBased watermark"),
+    };
+
     assert_eq!(
-        index_watermark.upper_limit, initial_wal_position,
+        upper_limit, initial_wal_position,
         "Upper limit should equal initial WAL position (this defines the processing boundary)"
     );
 
@@ -948,23 +961,25 @@ fn test_watermark_highest_wal_position_tracking() {
     // 2. Less than or equal to upper_limit (can't process beyond the safe boundary)
     // 3. Close to upper_limit (most entries should be processed in a simple sequential insert scenario)
     assert!(
-        index_watermark.highest_wal_position > 0,
+        highest_wal_position > 0,
         "Watermark highest_wal_position ({}) should be greater than 0",
-        index_watermark.highest_wal_position
+        highest_wal_position
     );
     assert!(
-        index_watermark.highest_wal_position <= index_watermark.upper_limit,
+        highest_wal_position <= upper_limit,
         "Watermark highest_wal_position ({}) should not exceed upper_limit ({})",
-        index_watermark.highest_wal_position,
-        index_watermark.upper_limit
+        highest_wal_position,
+        upper_limit
     );
 
     // Precise correctness check: highest_wal_position should be close to upper_limit
-    let gap = index_watermark.upper_limit - index_watermark.highest_wal_position;
+    let gap = upper_limit - highest_wal_position;
     assert!(
         gap <= 100,
         "Gap between highest_wal_position ({}) and upper_limit ({}) is too large ({}), suggests incomplete processing",
-        index_watermark.highest_wal_position, index_watermark.upper_limit, gap
+        highest_wal_position,
+        upper_limit,
+        gap
     );
 
     // The exact value cannot be computed with precision because:
@@ -977,10 +992,10 @@ fn test_watermark_highest_wal_position_tracking() {
     // However, we can assert a deterministic bound: in our controlled test scenario with
     // sequential inserts followed by rebuild_control_region(), we expect high ingestion rate.
     assert!(
-        index_watermark.highest_wal_position >= initial_wal_position * 9 / 10,
+        highest_wal_position >= initial_wal_position * 9 / 10,
         "Watermark highest_wal_position ({}) should be at least 90% of initial WAL position ({}) \
          - if this fails, it suggests ingestion issues, not the bug we're testing",
-        index_watermark.highest_wal_position,
+        highest_wal_position,
         initial_wal_position
     );
 }

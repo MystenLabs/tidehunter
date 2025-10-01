@@ -59,7 +59,8 @@ impl Db {
         Self::maybe_create_config_file(&path, &config)?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
-        let relocation_watermarks = RelocationWatermarks::load(&path)?;
+        let relocation_watermarks =
+            RelocationWatermarks::read_or_create(&path, config.relocation_strategy)?;
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
         let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
 
