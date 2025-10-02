@@ -1,4 +1,4 @@
-use crate::batch::{Update, WriteBatch};
+use crate::batch::{RelocatedWriteBatch, Update, WriteBatch};
 use crate::cell::CellId;
 use crate::config::Config;
 use crate::context::{DbOpKind, KsContext, KsContextVec, ReadType, WalEntryKind};
@@ -12,11 +12,13 @@ use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
+use crate::relocation::updates::RelocationUpdates;
 use crate::relocation::{RelocationCommand, RelocationDriver, RelocationStrategy, Relocator};
 use crate::state_snapshot;
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalKind, WalPosition, WalRandomRead, WalWriter,
 };
+use crate::wal_tracker::WalGuard;
 use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
@@ -330,10 +332,7 @@ impl Db {
             .with_label_values(&[&tag, "write"])
             .mcs_timer();
 
-        let batch_start_entry = PreparedWalWrite::new(&WalEntry::BatchStart(updates.len() as u32));
-        let guards = self
-            .wal_writer
-            .multi_write(std::iter::once(&batch_start_entry).chain(&prepared_writes))?;
+        let guards = self.write_batch_into_wal(&prepared_writes)?;
 
         let mut num_inserts = 0;
         let mut num_deletes = 0;
@@ -391,6 +390,57 @@ impl Db {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn write_relocated_batch(&self, batch: RelocatedWriteBatch) -> DbResult<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let RelocatedWriteBatch {
+            prepared_writes,
+            keys,
+            ks,
+            cell_id,
+            last_processed,
+        } = batch;
+        let context = self.ks_context(ks);
+
+        let guards = self.write_relocated_batch_into_wal(&prepared_writes)?;
+        let mut updates = RelocationUpdates::new(last_processed);
+        for (guard, key) in guards.iter().skip(1).zip(keys.into_iter()) {
+            let reduced_key = context.ks_config.reduced_key_bytes(key);
+            updates.add(reduced_key, *guard.wal_position());
+        }
+        self.large_table
+            .sync_flush_for_relocation(context, &cell_id, self, updates)?;
+        drop(guards); // manual drop to make sure guards are not dropped up to this point
+        Ok(())
+    }
+
+    fn write_batch_into_wal(
+        &self,
+        prepared_writes: &[PreparedWalWrite],
+    ) -> DbResult<Vec<WalGuard>> {
+        let batch_start_entry =
+            PreparedWalWrite::new(&WalEntry::BatchStart(prepared_writes.len() as u32));
+        let guards = self
+            .wal_writer
+            .multi_write(std::iter::once(&batch_start_entry).chain(prepared_writes))?;
+        Ok(guards)
+    }
+
+    fn write_relocated_batch_into_wal(
+        &self,
+        prepared_writes: &[PreparedWalWrite],
+    ) -> DbResult<Vec<WalGuard>> {
+        // todo - this will need to be separate WalEntry that contains last_processed
+        let batch_start_entry =
+            PreparedWalWrite::new(&WalEntry::BatchStart(prepared_writes.len() as u32));
+        let writes = std::iter::once(&batch_start_entry).chain(prepared_writes);
+        writes
+            .map(|write| self.wal_writer.write(write).map_err(DbError::from))
+            .collect()
     }
 
     /// Ordered iterator over DB in the specified range

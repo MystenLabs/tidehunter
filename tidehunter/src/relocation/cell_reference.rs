@@ -1,8 +1,6 @@
 use crate::cell::CellId;
 use crate::db::Db;
 use crate::key_shape::KeySpace;
-use crate::WalPosition;
-use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,39 +45,5 @@ impl CellReference {
                 keyspace: self.keyspace,
                 cell_id: next_cell,
             })
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct CellProcessingContext {
-    pub entries_to_relocate: Vec<(Bytes, Bytes, WalPosition)>, // key, value, original position
-    pub highest_wal_position: WalPosition,
-    pub entries_removed: u64,
-    pub entries_kept: u64,
-}
-
-impl CellProcessingContext {
-    pub fn new() -> Self {
-        Self {
-            entries_to_relocate: Vec::new(),
-            highest_wal_position: WalPosition::new(0, 0),
-            entries_removed: 0,
-            entries_kept: 0,
-        }
-    }
-
-    pub fn add_entry_to_relocate(&mut self, key: Bytes, value: Bytes, position: WalPosition) {
-        self.entries_to_relocate.push((key, value, position));
-        self.entries_kept += 1;
-        if position.offset() > self.highest_wal_position.offset() {
-            self.highest_wal_position = position;
-        }
-    }
-
-    pub fn mark_entry_removed(&mut self, position: WalPosition) {
-        self.entries_removed += 1;
-        if position.offset() > self.highest_wal_position.offset() {
-            self.highest_wal_position = position;
-        }
     }
 }

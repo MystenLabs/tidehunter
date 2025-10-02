@@ -5,6 +5,7 @@ use crate::index::index_table::IndexTable;
 use crate::key_shape::KeySpace;
 use crate::large_table::Loader;
 use crate::metrics::Metrics;
+use crate::relocation::updates::RelocationUpdates;
 use crate::wal::WalPosition;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -142,7 +143,7 @@ impl IndexFlusherThread {
 
             let ks_context = db.ks_context(command.ks);
             if let Some((original_index, position)) =
-                Self::handle_command(&*db, &command, ks_context)
+                Self::handle_command(&*db, &command, ks_context, None)
             {
                 db.update_flushed_index(command.ks, command.cell, original_index, position);
             }
@@ -158,6 +159,7 @@ impl IndexFlusherThread {
         loader: &L,
         command: &FlusherCommand,
         ctx: &KsContext,
+        relocation_updates: Option<RelocationUpdates>,
     ) -> Option<(Arc<IndexTable>, WalPosition)> {
         let (original_index, mut merged_index) = match &command.flush_kind {
             FlushKind::MergeUnloaded(position, dirty_index) => {
@@ -181,6 +183,10 @@ impl IndexFlusherThread {
 
         merged_index.retain_above_position(loader.min_wal_position());
         Self::run_compactor(ctx, &mut merged_index);
+
+        if let Some(relocation_updates) = relocation_updates {
+            relocation_updates.apply(&mut merged_index);
+        }
 
         // Always flush everything to disk to avoid data loss
         // The filtering will happen during unmerge_flushed

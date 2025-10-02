@@ -1,7 +1,13 @@
+use crate::batch::RelocatedWriteBatch;
 use crate::db::{Db, DbResult, WalEntry};
+use crate::index::index_table::IndexTable;
 use crate::key_shape::KeySpace;
+use crate::large_table::Loader;
 use crate::metrics::Metrics;
+use crate::relocation::watermark::RelocationWatermarks;
+use crate::wal::WalError;
 use crate::WalPosition;
+pub use cell_reference::CellReference;
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -13,12 +19,7 @@ mod watermark;
 
 #[cfg(test)]
 mod relocation_tests;
-
-use crate::index::index_table::IndexTable;
-use crate::relocation::cell_reference::CellProcessingContext;
-use crate::relocation::watermark::RelocationWatermarks;
-use crate::wal::WalError;
-pub use cell_reference::CellReference;
+pub mod updates;
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
@@ -46,6 +47,39 @@ pub enum Decision {
 
 pub trait RelocationFilter: Fn(&[u8], &[u8]) -> Decision + Send + Sync + 'static {}
 impl<F> RelocationFilter for F where F: Fn(&[u8], &[u8]) -> Decision + Send + Sync + 'static {}
+
+struct CellProcessingContext {
+    batch: RelocatedWriteBatch,
+    highest_wal_position: WalPosition,
+    entries_removed: u64,
+    entries_kept: u64,
+}
+
+impl CellProcessingContext {
+    fn new(batch: RelocatedWriteBatch) -> Self {
+        Self {
+            batch,
+            highest_wal_position: WalPosition::new(0, 0),
+            entries_removed: 0,
+            entries_kept: 0,
+        }
+    }
+
+    fn add_entry_to_relocate(&mut self, key: Bytes, value: Bytes, position: WalPosition) {
+        self.batch.write(key, value);
+        self.entries_kept += 1;
+        if position.offset() > self.highest_wal_position.offset() {
+            self.highest_wal_position = position;
+        }
+    }
+
+    fn mark_entry_removed(&mut self, position: WalPosition) {
+        self.entries_removed += 1;
+        if position.offset() > self.highest_wal_position.offset() {
+            self.highest_wal_position = position;
+        }
+    }
+}
 
 pub(crate) struct RelocationDriver {
     db: Weak<Db>,
@@ -173,9 +207,8 @@ impl RelocationDriver {
 
             // Relocate entries if any were marked for keeping
             let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
-            if !context.entries_to_relocate.is_empty() {
-                let successful =
-                    self.relocate_entries(context.entries_to_relocate, cell_ref.keyspace, &db)?;
+            if !context.batch.is_empty() {
+                let successful = self.relocate_entries(context.batch, &db)?;
                 // Track successful relocations with existing metrics (same as WAL-based)
                 self.metrics
                     .relocation_kept
@@ -247,14 +280,16 @@ impl RelocationDriver {
             let mut current_cell = CellReference::first(&db, ks.id());
             while let Some(cell) = current_cell.take() {
                 current_cell = cell.next_in_ks(&db);
+                let mut batch =
+                    RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), gc_watermark);
                 let index = db
                     .large_table
                     .get_cell_index(db.ks_context(ks.id()), &cell.cell_id, db.as_ref())?
                     .unwrap_or(IndexTable::default().into());
-                for (key, position) in index.iter() {
+                for (_reduced_key, position) in index.iter() {
                     if position.offset() < gc_watermark {
-                        if let Some((_, value)) = db.read_record(position)? {
-                            db.insert(ks.id(), key.clone(), value)?;
+                        if let Some((key, value)) = db.read_record(position)? {
+                            batch.write(key, value);
                             self.metrics
                                 .relocation_kept
                                 .with_label_values(&[ks.name()])
@@ -262,6 +297,7 @@ impl RelocationDriver {
                         }
                     }
                 }
+                db.write_relocated_batch(batch)?;
             }
         }
         db.wal_writer.gc(gc_watermark)?;
@@ -293,7 +329,12 @@ impl RelocationDriver {
         db: &Arc<Db>,
         upper_limit: u64,
     ) -> DbResult<CellProcessingContext> {
-        let mut context = CellProcessingContext::new();
+        let batch = RelocatedWriteBatch::new(
+            cell_ref.keyspace,
+            cell_ref.cell_id.clone(),
+            db.last_processed_wal_position(),
+        );
+        let mut context = CellProcessingContext::new(batch);
         let mut removed_count = 0;
 
         // Phase A: Get shared reference to cell index
@@ -372,21 +413,10 @@ impl RelocationDriver {
     }
 
     /// Relocate entries following the same pattern as WAL-based relocation
-    fn relocate_entries(
-        &self,
-        entries: Vec<(Bytes, Bytes, WalPosition)>,
-        keyspace: KeySpace,
-        db: &Arc<Db>,
-    ) -> DbResult<u64> {
-        // Returns successful_inserts
-        let mut successful_inserts = 0;
+    fn relocate_entries(&self, batch: RelocatedWriteBatch, db: &Arc<Db>) -> DbResult<u64> {
+        let successful_inserts = batch.len() as u64;
 
-        for (key, value, _original_position) in entries {
-            // TODO: handle potential races with concurrent writes to the same key
-            // (same TODO as WAL-based relocation - consistency with existing approach)
-            db.insert(keyspace, key.to_vec(), value.to_vec())?;
-            successful_inserts += 1;
-        }
+        db.write_relocated_batch(batch)?;
 
         Ok(successful_inserts)
     }

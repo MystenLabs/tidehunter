@@ -12,6 +12,7 @@ use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::range_from_excluding;
 use crate::primitives::sharded_mutex::ShardedMutex;
+use crate::relocation::updates::RelocationUpdates;
 use crate::runtime;
 use crate::wal::{WalPosition, WalRandomRead};
 use bloom::{BloomFilter, ASMS};
@@ -430,6 +431,30 @@ impl LargeTable {
 
         // Return shared reference to the index data
         Ok(Some(entry.data.clone_shared()))
+    }
+
+    pub fn sync_flush_for_relocation<L: Loader>(
+        &self,
+        context: &KsContext,
+        cell_id: &CellId,
+        loader: &L,
+        relocation_updates: RelocationUpdates,
+    ) -> Result<(), L::Error> {
+        // Empty batch should be caught earlier
+        // to avoid writing empty relocation batch marker to wal
+        assert!(
+            !relocation_updates.is_empty(),
+            "Should not call sync_flush_for_relocation with empty RelocationUpdates"
+        );
+        let mutex_index = context.ks_config.mutex_for_cell(cell_id);
+        let mut row = self.row_by_mutex(context, mutex_index);
+
+        let entry = match row.try_entry_mut(cell_id) {
+            Some(entry) => entry,
+            None => return Ok(()), // Cell doesn't exist
+        };
+
+        entry.sync_flush(loader, true, Some(relocation_updates))
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
@@ -1047,7 +1072,7 @@ impl LargeTableEntry {
                 .snapshot_force_unload
                 .with_label_values(&[self.context.name()])
                 .inc();
-            self.sync_flush(loader, forced_relocation)?;
+            self.sync_flush(loader, forced_relocation, None)?;
         }
         Ok(())
     }
@@ -1061,6 +1086,7 @@ impl LargeTableEntry {
         &mut self,
         loader: &L,
         forced_relocation: bool,
+        relocation_updates: Option<RelocationUpdates>,
     ) -> Result<(), L::Error> {
         let flush_kind = match self.flush_kind() {
             Some(kind) => kind,
@@ -1079,6 +1105,7 @@ impl LargeTableEntry {
             loader,
             &FlusherCommand::new(self.context.id(), self.cell.clone(), flush_kind),
             &self.context,
+            relocation_updates,
         ) else {
             unreachable!(
                 "IndexFlusherThread::handle_command should not return None for non-test command"
@@ -1099,7 +1126,7 @@ impl LargeTableEntry {
         }
         if self.pending_last_processed.is_none() {
             if self.context.config.sync_flush {
-                self.sync_flush(loader, false)?;
+                self.sync_flush(loader, false, None)?;
             } else {
                 // Perform async flush - store the captured value for later
                 let flush_kind = self
@@ -1270,6 +1297,7 @@ impl LargeTableEntryState {
     }
 }
 
+#[derive(Debug)]
 pub enum GetResult {
     Value(Bytes),
     WalPosition(WalPosition),
