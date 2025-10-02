@@ -440,6 +440,12 @@ impl LargeTable {
         loader: &L,
         relocation_updates: RelocationUpdates,
     ) -> Result<(), L::Error> {
+        // Empty batch should be caught earlier
+        // to avoid writing empty relocation batch marker to wal
+        assert!(
+            !relocation_updates.is_empty(),
+            "Should not call sync_flush_for_relocation with empty RelocationUpdates"
+        );
         let mutex_index = context.ks_config.mutex_for_cell(cell_id);
         let mut row = self.row_by_mutex(context, mutex_index);
 
@@ -448,7 +454,7 @@ impl LargeTable {
             None => return Ok(()), // Cell doesn't exist
         };
 
-        entry.sync_flush(loader, false, Some(relocation_updates))
+        entry.sync_flush(loader, true, Some(relocation_updates))
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
@@ -1291,6 +1297,7 @@ impl LargeTableEntryState {
     }
 }
 
+#[derive(Debug)]
 pub enum GetResult {
     Value(Bytes),
     WalPosition(WalPosition),

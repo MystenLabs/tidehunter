@@ -41,4 +41,8 @@ impl RelocationUpdates {
     pub fn last_processed(&self) -> u64 {
         self.last_processed
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.updates.is_empty()
+    }
 }

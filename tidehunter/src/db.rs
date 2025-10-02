@@ -393,6 +393,10 @@ impl Db {
     }
 
     pub(crate) fn write_relocated_batch(&self, batch: RelocatedWriteBatch) -> DbResult<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
         let RelocatedWriteBatch {
             prepared_writes,
             keys,
@@ -433,10 +437,11 @@ impl Db {
         // todo - this will need to be separate WalEntry that contains last_processed
         let batch_start_entry =
             PreparedWalWrite::new(&WalEntry::BatchStart(prepared_writes.len() as u32));
-        let guards = self
-            .wal_writer
-            .multi_write(std::iter::once(&batch_start_entry).chain(prepared_writes))?;
-        Ok(guards)
+        let writes = std::iter::once(&batch_start_entry).chain(prepared_writes);
+        let guards = writes
+            .map(|write| self.wal_writer.write(write).map_err(DbError::from))
+            .collect();
+        guards
     }
 
     /// Ordered iterator over DB in the specified range

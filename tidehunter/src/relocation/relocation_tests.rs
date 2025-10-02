@@ -66,20 +66,20 @@ fn test_wal_relocation_basic_flow() {
     let config = Arc::new(config);
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
-        let value = u64::from_be_bytes(key.try_into().unwrap());
-        if value >= 10_000 {
+        let value = u32::from_be_bytes(key.try_into().unwrap());
+        if value >= 1_000 {
             Decision::StopRelocation
         } else {
             Decision::Remove
         }
     });
-    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
-    let ks2 = ksb.add_key_space_config("k2", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    let ks = ksb.add_key_space_config("k", 4, 1, KeyType::uniform(1), ksc);
+    let ks2 = ksb.add_key_space_config("k2", 4, 1, KeyType::uniform(1), KeySpaceConfig::new());
     let key_shape = ksb.build();
     let metrics = Metrics::new();
-    let sample_key = 3_u64.to_be_bytes().to_vec();
-    let insert_count = 20000_u64;
-    let value = vec![3; 1000];
+    let sample_key = 3_u32.to_be_bytes().to_vec();
+    let insert_count = 2000_u32;
+    let value = vec![3; 12 * 1000];
     {
         let db = Db::open(
             dir.path(),
@@ -129,7 +129,7 @@ fn test_wal_relocation_basic_flow() {
         Some(value.clone().into())
     );
     assert_eq!(
-        db.get(ks, &15000_u64.to_be_bytes().to_vec()).unwrap(),
+        db.get(ks, &1500_u32.to_be_bytes().to_vec()).unwrap(),
         Some(value.clone().into())
     );
 }

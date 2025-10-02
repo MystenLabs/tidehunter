@@ -280,14 +280,16 @@ impl RelocationDriver {
             let mut current_cell = CellReference::first(&db, ks.id());
             while let Some(cell) = current_cell.take() {
                 current_cell = cell.next_in_ks(&db);
+                let mut batch =
+                    RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), gc_watermark);
                 let index = db
                     .large_table
                     .get_cell_index(db.ks_context(ks.id()), &cell.cell_id, db.as_ref())?
                     .unwrap_or(IndexTable::default().into());
-                for (key, position) in index.iter() {
+                for (_reduced_key, position) in index.iter() {
                     if position.offset() < gc_watermark {
-                        if let Some((_, value)) = db.read_record(position)? {
-                            db.insert(ks.id(), key.clone(), value)?;
+                        if let Some((key, value)) = db.read_record(position)? {
+                            batch.write(key, value);
                             self.metrics
                                 .relocation_kept
                                 .with_label_values(&[ks.name()])
@@ -295,6 +297,7 @@ impl RelocationDriver {
                         }
                     }
                 }
+                db.write_relocated_batch(batch)?;
             }
         }
         db.wal_writer.gc(gc_watermark)?;
