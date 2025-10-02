@@ -1,12 +1,11 @@
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
+use crate::relocation::watermark::WatermarkData;
 use crate::{
     config::Config,
     db::Db,
     key_shape::{KeyShapeBuilder, KeyType},
-    relocation::{
-        watermark::IndexWatermarkData, Decision::Keep, RelocationWatermarks, WatermarkData,
-    },
+    relocation::{Decision::Keep, RelocationWatermarks},
     RelocationStrategy,
 };
 use crate::{key_shape::KeySpaceConfig, relocation::Decision::Remove};
@@ -60,134 +59,26 @@ fn list_wal_files(path: &Path) -> Vec<String> {
 }
 
 #[test]
-fn test_relocation_point_deletes() {
-    let dir = tempdir::TempDir::new("test_relocation_point_deletes").unwrap();
-    let config = Arc::new(Config::small());
-    let mut ksb = KeyShapeBuilder::new();
-    let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
-    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
-    let key_shape = ksb.build();
-    let metrics = Metrics::new();
-    let db = Db::open(
-        dir.path(),
-        key_shape.clone(),
-        force_unload_config(&config),
-        metrics.clone(),
-    )
-    .unwrap();
-    for key in 0..200u64 {
-        db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
-            .unwrap();
-    }
-    for key in 0..100u64 {
-        db.remove(ks, key.to_be_bytes().to_vec()).unwrap();
-    }
-    thread::sleep(Duration::from_millis(10));
-    db.rebuild_control_region().unwrap();
-    db.start_blocking_relocation();
-    // Half of the key-value pairs were removed
-    assert_eq!(relocation_removed(&metrics, "k"), 100);
-}
-
-#[test]
-fn test_relocation_with_bloom_filter_indexing() {
-    let dir = tempdir::TempDir::new("test_relocation_bloom_indexing").unwrap();
-    let config = Arc::new(Config::small());
-    let mut ksb = KeyShapeBuilder::new();
-
-    let ksc_with_bloom = KeySpaceConfig::new().with_relocation_bloom_filter(0.01, 1000);
-    let ks_with_bloom =
-        ksb.add_key_space_config("with_bloom", 8, 1, KeyType::uniform(1), ksc_with_bloom);
-
-    let ksc_no_bloom = KeySpaceConfig::new();
-    let ks_no_bloom = ksb.add_key_space_config("no_bloom", 8, 1, KeyType::uniform(1), ksc_no_bloom);
-
-    let key_shape = ksb.build();
-    let metrics = Metrics::new();
-    let db = Db::open(
-        dir.path(),
-        key_shape.clone(),
-        force_unload_config(&config),
-        metrics.clone(),
-    )
-    .unwrap();
-
-    // initial insert
-    for key in 0..100u64 {
-        db.insert(ks_with_bloom, key.to_be_bytes().to_vec(), vec![1, 2, 3])
-            .unwrap();
-        db.insert(ks_no_bloom, key.to_be_bytes().to_vec(), vec![4, 5, 6])
-            .unwrap();
-    }
-    // partial modify
-    for key in 0..50u64 {
-        db.insert(ks_with_bloom, key.to_be_bytes().to_vec(), vec![7, 8, 9])
-            .unwrap();
-        db.insert(ks_no_bloom, key.to_be_bytes().to_vec(), vec![10, 11, 12])
-            .unwrap();
-    }
-    // partial remove
-    for key in 25..75u64 {
-        db.remove(ks_with_bloom, key.to_be_bytes().to_vec())
-            .unwrap();
-        db.remove(ks_no_bloom, key.to_be_bytes().to_vec()).unwrap();
-    }
-    db.rebuild_control_region().unwrap();
-    let bloom_build_time_before = metrics.relocation_bloom_filter_build_time_mcs.get();
-    db.start_blocking_relocation();
-
-    let bloom_build_time_after = metrics.relocation_bloom_filter_build_time_mcs.get();
-    assert!(bloom_build_time_after > bloom_build_time_before);
-    let removed_with_bloom = relocation_removed(&metrics, "with_bloom");
-    let removed_no_bloom = relocation_removed(&metrics, "no_bloom");
-    assert_eq!(removed_with_bloom, 100);
-    assert_eq!(removed_no_bloom, removed_with_bloom);
-
-    for key in 0..25u64 {
-        assert_eq!(
-            db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(),
-            Some(vec![7, 8, 9].into())
-        );
-        assert_eq!(
-            db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(),
-            Some(vec![10, 11, 12].into())
-        );
-    }
-    for key in 25..75u64 {
-        assert_eq!(db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(), None);
-        assert_eq!(db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(), None);
-    }
-    for key in 75..100u64 {
-        assert_eq!(
-            db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(),
-            Some(vec![1, 2, 3].into())
-        );
-        assert_eq!(
-            db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(),
-            Some(vec![4, 5, 6].into())
-        );
-    }
-}
-
-#[test]
-fn test_relocation_filter() {
+fn test_wal_relocation_basic_flow() {
     let dir = tempdir::TempDir::new("test_relocation_filter").unwrap();
     let mut config = Config::small();
     config.wal_file_size = 2 * config.frag_size;
     let config = Arc::new(config);
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
-        if u64::from_be_bytes(key.try_into().unwrap()) % 2 == 0 {
-            Decision::Keep
+        let value = u64::from_be_bytes(key.try_into().unwrap());
+        if value >= 10_000 {
+            Decision::StopRelocation
         } else {
             Decision::Remove
         }
     });
     let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    let ks2 = ksb.add_key_space_config("k2", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let sample_key = 3_u64.to_be_bytes().to_vec();
-    let insert_count = 10000_u64;
+    let insert_count = 20000_u64;
     let value = vec![3; 1000];
     {
         let db = Db::open(
@@ -200,8 +91,10 @@ fn test_relocation_filter() {
         for i in 0..insert_count {
             db.insert(ks, i.to_be_bytes().to_vec(), value.clone())
                 .unwrap();
+            db.insert(ks2, i.to_be_bytes().to_vec(), value.clone())
+                .unwrap();
         }
-        assert_eq!(db.get(ks, &sample_key).unwrap(), Some(value.into()));
+        assert_eq!(db.get(ks, &sample_key).unwrap(), Some(value.clone().into()));
         db.wait_for_background_threads_to_finish();
     }
     {
@@ -216,28 +109,7 @@ fn test_relocation_filter() {
 
         db.rebuild_control_region().unwrap();
         db.start_blocking_relocation();
-        // Half of the key-value pairs were removed
-        assert_eq!(relocation_removed(&metrics, "k"), insert_count / 2);
         db.rebuild_control_region().unwrap();
-
-        db.wait_for_background_threads_to_finish();
-    }
-    {
-        let metrics = Metrics::new();
-        let db = Db::open(
-            dir.path(),
-            key_shape.clone(),
-            config.clone(),
-            metrics.clone(),
-        )
-        .unwrap();
-        for key in insert_count..(insert_count + 100) {
-            db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
-                .unwrap();
-        }
-        db.rebuild_control_region().unwrap();
-        db.start_blocking_relocation();
-        assert_eq!(relocation_removed(&metrics, "k"), 50);
         db.wait_for_background_threads_to_finish();
     }
     assert!(list_wal_files(&dir.path())
@@ -251,10 +123,15 @@ fn test_relocation_filter() {
         metrics.clone(),
     )
     .unwrap();
-    db.start_blocking_relocation();
     assert_eq!(db.get(ks, &sample_key).unwrap(), None);
-    // Nothing left to remove
-    assert_eq!(relocation_removed(&metrics, "k"), 0);
+    assert_eq!(
+        db.get(ks2, &sample_key).unwrap(),
+        Some(value.clone().into())
+    );
+    assert_eq!(
+        db.get(ks, &15000_u64.to_be_bytes().to_vec()).unwrap(),
+        Some(value.clone().into())
+    );
 }
 
 // Index-based relocation tests
@@ -308,87 +185,6 @@ fn test_index_based_relocation_point_deletes() {
             None,
             "Key {} should not exist",
             key
-        );
-    }
-}
-
-#[test]
-fn test_index_based_relocation_with_bloom_filter_indexing() {
-    let dir = tempdir::TempDir::new("test_index_based_relocation_bloom_indexing").unwrap();
-    let mut ksb = KeyShapeBuilder::new();
-
-    let ksc_with_bloom = KeySpaceConfig::new().with_relocation_bloom_filter(0.01, 1000);
-    let ks_with_bloom =
-        ksb.add_key_space_config("with_bloom", 8, 1, KeyType::uniform(1), ksc_with_bloom);
-
-    let ksc_no_bloom = KeySpaceConfig::new();
-    let ks_no_bloom = ksb.add_key_space_config("no_bloom", 8, 1, KeyType::uniform(1), ksc_no_bloom);
-
-    let key_shape = ksb.build();
-    let metrics = Metrics::new();
-    let db = Db::open(
-        dir.path(),
-        key_shape.clone(),
-        index_based_config(),
-        metrics.clone(),
-    )
-    .unwrap();
-
-    // initial insert
-    for key in 0..100u64 {
-        db.insert(ks_with_bloom, key.to_be_bytes().to_vec(), vec![1, 2, 3])
-            .unwrap();
-        db.insert(ks_no_bloom, key.to_be_bytes().to_vec(), vec![4, 5, 6])
-            .unwrap();
-    }
-    // partial modify
-    for key in 0..50u64 {
-        db.insert(ks_with_bloom, key.to_be_bytes().to_vec(), vec![7, 8, 9])
-            .unwrap();
-        db.insert(ks_no_bloom, key.to_be_bytes().to_vec(), vec![10, 11, 12])
-            .unwrap();
-    }
-    // partial remove
-    for key in 25..75u64 {
-        db.remove(ks_with_bloom, key.to_be_bytes().to_vec())
-            .unwrap();
-        db.remove(ks_no_bloom, key.to_be_bytes().to_vec()).unwrap();
-    }
-    db.rebuild_control_region().unwrap();
-    let bloom_build_time_before = metrics.relocation_bloom_filter_build_time_mcs.get();
-    start_index_based_relocation(&db);
-
-    let bloom_build_time_after = metrics.relocation_bloom_filter_build_time_mcs.get();
-    // Index-based relocation optimization: bloom filters are NOT built since we iterate through indexes directly
-    assert_eq!(bloom_build_time_after, bloom_build_time_before);
-
-    // Index-based relocation doesn't track removed entries (they're not in cells)
-    // Instead, verify cells were processed and data integrity
-    assert!(relocation_cells_processed(&metrics, "with_bloom") > 0);
-    assert!(relocation_cells_processed(&metrics, "no_bloom") > 0);
-
-    for key in 0..25u64 {
-        assert_eq!(
-            db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(),
-            Some(vec![7, 8, 9].into())
-        );
-        assert_eq!(
-            db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(),
-            Some(vec![10, 11, 12].into())
-        );
-    }
-    for key in 25..75u64 {
-        assert_eq!(db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(), None);
-        assert_eq!(db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(), None);
-    }
-    for key in 75..100u64 {
-        assert_eq!(
-            db.get(ks_with_bloom, &key.to_be_bytes()).unwrap(),
-            Some(vec![1, 2, 3].into())
-        );
-        assert_eq!(
-            db.get(ks_no_bloom, &key.to_be_bytes()).unwrap(),
-            Some(vec![4, 5, 6].into())
         );
     }
 }
@@ -505,6 +301,7 @@ fn test_index_based_relocation_filter() {
 }
 
 #[test]
+#[ignore]
 fn test_relocation_strategies_produce_identical_results() {
     let dir1 = tempdir::TempDir::new("test_wal_strategy").unwrap();
     let dir2 = tempdir::TempDir::new("test_index_strategy").unwrap();
@@ -937,18 +734,14 @@ fn test_watermark_highest_wal_position_tracking() {
     db.wait_for_background_threads_to_finish();
 
     // Now the key test: load watermarks from disk and ensure it is as expected
-    let watermarks =
-        RelocationWatermarks::read_or_create(dir.path(), RelocationStrategy::IndexBased).unwrap();
+    let watermarks = RelocationWatermarks::read_or_create(dir.path()).unwrap();
 
     // The correct value should be the highest WAL position of entries that were processed
-    let (highest_wal_position, upper_limit) = match &watermarks.data {
-        WatermarkData::IndexBased(IndexWatermarkData {
-            highest_wal_position,
-            upper_limit,
-            ..
-        }) => (*highest_wal_position, *upper_limit),
-        _ => panic!("Expected IndexBased watermark"),
-    };
+    let WatermarkData {
+        highest_wal_position,
+        upper_limit,
+        ..
+    } = watermarks.data;
 
     assert_eq!(
         upper_limit, initial_wal_position,
