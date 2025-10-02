@@ -12,9 +12,7 @@ use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
-use crate::relocation::{
-    RelocationCommand, RelocationDriver, RelocationStrategy, RelocationWatermarks, Relocator,
-};
+use crate::relocation::{RelocationCommand, RelocationDriver, RelocationStrategy, Relocator};
 use crate::state_snapshot;
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalKind, WalPosition, WalRandomRead, WalWriter,
@@ -59,8 +57,6 @@ impl Db {
         Self::maybe_create_config_file(&path, &config)?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
-        let relocation_watermarks =
-            RelocationWatermarks::read_or_create(&path, config.relocation_strategy)?;
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
         let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
 
@@ -107,12 +103,8 @@ impl Db {
         let _handles = IndexFlusher::start_threads(flusher_receivers, weak_db, metrics.clone());
 
         // Start the relocator with the weak reference
-        let _handle = RelocationDriver::start(
-            Arc::downgrade(&this),
-            relocation_watermarks,
-            relocator_receiver,
-            metrics,
-        );
+        let _handle =
+            RelocationDriver::start(Arc::downgrade(&this), path, relocator_receiver, metrics);
 
         // todo: store handles and wait for them on Db drop
 
@@ -254,16 +246,6 @@ impl Db {
     }
 
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
-        self.apply_insert(ks, k, v, None)
-    }
-
-    pub fn apply_insert(
-        &self,
-        ks: KeySpace,
-        k: impl Into<Bytes>,
-        v: impl Into<Bytes>,
-        relocation_pos: Option<u64>,
-    ) -> DbResult<()> {
         let context = self.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::Insert);
         let k = k.into();
@@ -277,7 +259,7 @@ impl Db {
             .set(guard.wal_position().offset() as i64);
         let reduced_key = context.ks_config.reduced_key_bytes(k);
         self.large_table
-            .insert(context, reduced_key, guard, &v, relocation_pos, self)?;
+            .insert(context, reduced_key, guard, &v, self)?;
         Ok(())
     }
 
@@ -297,10 +279,7 @@ impl Db {
         let context = self.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::Get);
         let reduced_key = context.ks_config.reduce_key(k);
-        match self
-            .large_table
-            .get(context, reduced_key.as_ref(), self, false)?
-        {
+        match self.large_table.get(context, reduced_key.as_ref(), self)? {
             GetResult::Value(value) => {
                 // todo check collision ?
                 Ok(Some(value))
@@ -325,7 +304,7 @@ impl Db {
         let reduced_key = context.ks_config.reduce_key(k);
         Ok(self
             .large_table
-            .get(context, reduced_key.as_ref(), self, false)?
+            .get(context, reduced_key.as_ref(), self)?
             .is_found())
     }
 
@@ -400,7 +379,7 @@ impl Db {
             match update {
                 Update::Record(_, _, value) => {
                     self.large_table
-                        .insert(context, reduced_key, guard, value, None, self)?
+                        .insert(context, reduced_key, guard, value, self)?
                 }
                 Update::Remove(..) => self.large_table.remove(context, reduced_key, guard, self)?,
             }
@@ -577,7 +556,7 @@ impl Db {
                     let context = contexts.ks_context(ks);
                     let reduced_key = context.ks_config.reduced_key_bytes(k);
                     let guard = crate::wal_tracker::WalGuard::replay_guard(position);
-                    large_table.insert(context, reduced_key, guard, &v, None, indexes)?;
+                    large_table.insert(context, reduced_key, guard, &v, indexes)?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()

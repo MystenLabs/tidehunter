@@ -200,21 +200,20 @@ impl LargeTable {
         k: Bytes,
         guard: crate::wal_tracker::WalGuard,
         value: &Bytes,
-        relocation_pos: Option<u64>,
         loader: &L,
     ) -> Result<(), L::Error> {
         self.fp.fp_insert_before_lock();
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
         let entry = row.entry_mut(&cell);
-        if entry.data.skip_stale_update(&k, v) {
+        if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
                 .with_label_values(&[context.name(), "insert"])
                 .inc();
             return Ok(());
         }
-        entry.insert(k.clone(), v, relocation_pos);
+        entry.insert(k.clone(), v);
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
             // Drop the guard before flushing to ensure last_processed is updated
@@ -256,7 +255,7 @@ impl LargeTable {
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
         let entry = row.entry_mut(&cell);
-        if entry.data.skip_stale_update(&k, v) {
+        if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
                 .with_label_values(&[context.name(), "remove"])
@@ -304,11 +303,10 @@ impl LargeTable {
         context: &KsContext,
         k: &[u8],
         loader: &L,
-        skip_lru_cache: bool,
     ) -> Result<GetResult, L::Error> {
         let ks = &context.ks_config;
         let (mut row, cell) = self.row(context, k);
-        if let (Some(value_lru), false) = (&mut row.value_lru, skip_lru_cache) {
+        if let Some(value_lru) = &mut row.value_lru {
             if let Some(value) = value_lru.get(k) {
                 context.inc_lookup_result(LookupResult::Found, LookupSource::Lru);
                 return Ok(GetResult::Value(value.clone()));
@@ -357,6 +355,23 @@ impl LargeTable {
             .lookup_mcs_histogram(index_reader.read_type())
             .observe(now.elapsed().as_micros() as f64);
         Ok(context.report_lookup_result(result, LookupSource::Lookup))
+    }
+
+    /// Checks if the update is potentially stale and the operation needs to be canceled.
+    /// This can happen if there are multiple concurrent updates for the same key.
+    /// Returns true if the update is outdated and should be skipped
+    fn skip_stale_update(
+        &self,
+        entry: &LargeTableEntry,
+        key: &Bytes,
+        wal_position: WalPosition,
+    ) -> bool {
+        // check the existing loaded WAL position first, if present
+        if let Some(last_position) = entry.data.get_update_position(key) {
+            last_position > wal_position
+        } else {
+            false
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -803,55 +818,6 @@ impl LargeTable {
         }
         true
     }
-
-    pub(crate) fn bloom_key(key: &[u8], pos: WalPosition) -> Vec<u8> {
-        let mut result = Vec::with_capacity(key.len() + 8);
-        result.extend_from_slice(key);
-        result.extend_from_slice(&pos.offset().to_le_bytes());
-        result
-    }
-
-    pub(crate) fn build_index_bloom_filters<L: Loader>(
-        &self,
-        loader: &L,
-    ) -> Result<HashMap<KeySpace, BloomFilter>, L::Error> {
-        let now = Instant::now();
-        let mut filters = HashMap::new();
-        for ks_table in self.table.iter() {
-            let ksd = &ks_table.context.ks_config;
-            let Some(bloom_params) = ksd.relocation_bloom_filter() else {
-                continue;
-            };
-            let mut bloom = BloomFilter::with_rate(bloom_params.rate, bloom_params.count);
-            for mutex in ks_table.rows.mutexes() {
-                let row = mutex.lock();
-                for entry in row.entries.iter() {
-                    for (key, pos) in entry.data.iter() {
-                        bloom.insert(&Self::bloom_key(key, pos));
-                    }
-                    if let LargeTableEntryState::Unloaded(position)
-                    | LargeTableEntryState::DirtyUnloaded(position) = &entry.state
-                    {
-                        if position.is_valid() {
-                            let index_table = loader.load(ksd, *position)?;
-                            for (key, pos) in index_table.iter() {
-                                if entry.data.get(key).is_none() {
-                                    bloom.insert(&Self::bloom_key(key, pos));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            filters.insert(ksd.id(), bloom);
-        }
-        if !filters.is_empty() {
-            self.metrics
-                .relocation_bloom_filter_build_time_mcs
-                .inc_by(now.elapsed().as_micros() as u64);
-        }
-        Ok(filters)
-    }
 }
 
 impl Row {
@@ -955,15 +921,10 @@ impl LargeTableEntry {
         entry
     }
 
-    pub fn insert(&mut self, k: Bytes, v: WalPosition, relocation_pos: Option<u64>) {
+    pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         self.state.mark_dirty();
         self.insert_bloom_filter(&k);
-        match relocation_pos {
-            Some(offset) => self.data.make_mut().relocation_insert(k, v, offset),
-            None => {
-                self.data.make_mut().insert(k, v);
-            }
-        }
+        self.data.make_mut().insert(k, v);
         self.report_loaded_keys_count();
     }
 

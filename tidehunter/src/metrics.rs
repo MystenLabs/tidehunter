@@ -188,11 +188,10 @@ pub struct Metrics {
     pub flushed_bytes: MetricIntCounterVec,
     pub flush_pending: MetricIntGauge,
 
-    pub relocation_position: MetricIntGauge,
+    pub relocation_target_position: MetricIntGauge,
     pub gc_position: MetricIntGaugeVec,
     pub relocation_kept: MetricIntCounterVec,
     pub relocation_removed: MetricIntCounterVec,
-    pub relocation_bloom_filter_build_time_mcs: MetricIntCounter,
 
     // Index-based relocation metrics
     pub relocation_cells_processed: MetricIntCounterVec,
@@ -397,15 +396,10 @@ impl Metrics {
             flushed_bytes: counter_vec!("flushed_bytes", &["ks"], registry, enabled),
             flush_pending: gauge!("flush_pending", registry, enabled),
 
-            relocation_position: gauge!("relocation_position", registry, enabled),
+            relocation_target_position: gauge!("relocation_target_position", registry, enabled),
             gc_position: gauge_vec!("gc_position", &["kind"], registry, enabled),
             relocation_kept: counter_vec!("relocation_kept", &["ks"], registry, enabled),
             relocation_removed: counter_vec!("relocation_removed", &["ks"], registry, enabled),
-            relocation_bloom_filter_build_time_mcs: counter!(
-                "relocation_bloom_filter_build_time_mcs",
-                registry,
-                enabled
-            ),
 
             // Index-based relocation metrics
             relocation_cells_processed: counter_vec!(
