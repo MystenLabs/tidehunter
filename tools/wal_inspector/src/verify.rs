@@ -346,7 +346,7 @@ fn read_keys_from_wal(context: &InspectorContext) -> Result<Vec<(KeySpace, Bytes
         let entry = WalEntry::from_bytes(raw_entry);
 
         match entry {
-            WalEntry::Record(ks, key, _value) => {
+            WalEntry::Record(ks, key, _value, _relocated) => {
                 record_count += 1;
                 // Store as simpler key entry
                 let key_entry = (ks.as_u8(), key.to_vec());

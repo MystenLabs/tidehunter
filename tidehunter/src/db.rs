@@ -253,7 +253,7 @@ impl Db {
         let k = k.into();
         let v = v.into();
         context.ks_config.check_key(&k);
-        let w = PreparedWalWrite::new(&WalEntry::Record(context.id(), k.clone(), v.clone()));
+        let w = PreparedWalWrite::new(&WalEntry::Record(context.id(), k.clone(), v.clone(), false));
         context.inc_wal_written(WalEntryKind::Record, w.len() as u64);
         let guard = self.wal_writer.write(&w)?;
         self.metrics
@@ -408,7 +408,7 @@ impl Db {
 
         let guards = self.write_relocated_batch_into_wal(&prepared_writes)?;
         let mut updates = RelocationUpdates::new(last_processed);
-        for (guard, key) in guards.iter().skip(1).zip(keys.into_iter()) {
+        for (guard, key) in guards.iter().zip(keys.into_iter()) {
             let reduced_key = context.ks_config.reduced_key_bytes(key);
             updates.add(reduced_key, *guard.wal_position());
         }
@@ -434,11 +434,8 @@ impl Db {
         &self,
         prepared_writes: &[PreparedWalWrite],
     ) -> DbResult<Vec<WalGuard>> {
-        // todo - this will need to be separate WalEntry that contains last_processed
-        let batch_start_entry =
-            PreparedWalWrite::new(&WalEntry::BatchStart(prepared_writes.len() as u32));
-        let writes = std::iter::once(&batch_start_entry).chain(prepared_writes);
-        writes
+        prepared_writes
+            .iter()
             .map(|write| self.wal_writer.write(write).map_err(DbError::from))
             .collect()
     }
@@ -551,7 +548,7 @@ impl Db {
         let Some(entry) = entry else {
             return Ok(None);
         };
-        if let WalEntry::Record(KeySpace(_), k, v) = entry {
+        if let WalEntry::Record(KeySpace(_), k, v, _relocated) = entry {
             Ok(Some((k, v)))
         } else {
             panic!("Unexpected wal entry where expected record");
@@ -560,7 +557,7 @@ impl Db {
 
     fn report_read(&self, entry: &WalEntry, read_type: ReadType) {
         let (kind, ks) = match entry {
-            WalEntry::Record(ks, _, _) => (WalEntryKind::Record, *ks),
+            WalEntry::Record(ks, ..) => (WalEntryKind::Record, *ks),
             WalEntry::Index(ks, _) => (WalEntryKind::Index, *ks),
             WalEntry::Remove(ks, _) => (WalEntryKind::Tombstone, *ks),
             WalEntry::BatchStart(_) => return,
@@ -601,21 +598,25 @@ impl Db {
                 continue;
             }
             match entry {
-                WalEntry::Record(ks, k, v) => {
+                WalEntry::Record(ks, k, v, relocated) => {
                     metrics.replayed_wal_records.inc();
+                    if relocated {
+                        // Nothing needs to be done for the relocated record
+                        continue;
+                    }
                     let context = contexts.ks_context(ks);
                     let reduced_key = context.ks_config.reduced_key_bytes(k);
-                    let guard = crate::wal_tracker::WalGuard::replay_guard(position);
+                    let guard = WalGuard::replay_guard(position);
                     large_table.insert(context, reduced_key, guard, &v, indexes)?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
-                    // todo - handle this by updating large table to Loaded()
+                    unreachable!("Should not have index entries in wal");
                 }
                 WalEntry::Remove(ks, k) => {
                     metrics.replayed_wal_records.inc();
                     let context = contexts.ks_context(ks);
                     let reduced_key = context.ks_config.reduced_key_bytes(k);
-                    let guard = crate::wal_tracker::WalGuard::replay_guard(position);
+                    let guard = WalGuard::replay_guard(position);
                     large_table.remove(context, reduced_key, guard, indexes)?;
                 }
                 WalEntry::BatchStart(size) => {
@@ -950,7 +951,12 @@ impl Loader for Db {
 #[doc(hidden)] // Used by tools/wal_inspector for WAL inspection
 #[derive(Debug)]
 pub enum WalEntry {
-    Record(KeySpace, Bytes, Bytes),
+    Record(
+        KeySpace,
+        Bytes,
+        Bytes,
+        bool, /* true for relocated record */
+    ),
     Index(KeySpace, Bytes),
     Remove(KeySpace, Bytes),
     BatchStart(u32),
@@ -969,18 +975,20 @@ impl WalEntry {
     const WAL_ENTRY_INDEX: u8 = 2;
     const WAL_ENTRY_REMOVE: u8 = 3;
     const WAL_ENTRY_BATCH_START: u8 = 4;
+    const WAL_ENTRY_RELOCATED_RECORD: u8 = 5;
     pub const INDEX_PREFIX_SIZE: usize = 2;
 
     pub fn from_bytes(bytes: Bytes) -> Self {
         let mut b = &bytes[..];
         let entry_type = b.get_u8();
         match entry_type {
-            WalEntry::WAL_ENTRY_RECORD => {
+            WalEntry::WAL_ENTRY_RECORD | WalEntry::WAL_ENTRY_RELOCATED_RECORD => {
                 let ks = KeySpace(b.get_u8());
                 let key_len = b.get_u16() as usize;
                 let k = bytes.slice(4..4 + key_len);
                 let v = bytes.slice(4 + key_len..);
-                WalEntry::Record(ks, k, v)
+                let relocated = entry_type == WalEntry::WAL_ENTRY_RELOCATED_RECORD;
+                WalEntry::Record(ks, k, v, relocated)
             }
             WalEntry::WAL_ENTRY_INDEX => {
                 let ks = KeySpace(b.get_u8());
@@ -999,7 +1007,7 @@ impl WalEntry {
 impl IntoBytesFixed for WalEntry {
     fn len(&self) -> usize {
         match self {
-            WalEntry::Record(KeySpace(_), k, v) => 1 + 1 + 2 + k.len() + v.len(),
+            WalEntry::Record(KeySpace(_), k, v, _relocated) => 1 + 1 + 2 + k.len() + v.len(),
             WalEntry::Index(KeySpace(_), index) => 1 + 1 + index.len(),
             WalEntry::Remove(KeySpace(_), k) => 1 + 1 + k.len(),
             WalEntry::BatchStart(_) => 1 + 4,
@@ -1009,8 +1017,12 @@ impl IntoBytesFixed for WalEntry {
     fn write_into_bytes(&self, buf: &mut BytesMut) {
         // todo avoid copy here
         match self {
-            WalEntry::Record(ks, k, v) => {
-                buf.put_u8(Self::WAL_ENTRY_RECORD);
+            WalEntry::Record(ks, k, v, relocated) => {
+                if *relocated {
+                    buf.put_u8(Self::WAL_ENTRY_RELOCATED_RECORD);
+                } else {
+                    buf.put_u8(Self::WAL_ENTRY_RECORD);
+                }
                 buf.put_u8(ks.0);
                 // todo use key len from ks instead
                 buf.put_u16(k.len() as u16);

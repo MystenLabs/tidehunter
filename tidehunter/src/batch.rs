@@ -50,7 +50,7 @@ impl WriteBatch {
     pub fn prepare_write(&mut self, update: Update) {
         let (wal_write, key) = match update {
             Update::Record(ks, ref key, ref value) => (
-                PreparedWalWrite::new(&WalEntry::Record(ks, key.clone(), value.clone())),
+                PreparedWalWrite::new(&WalEntry::Record(ks, key.clone(), value.clone(), false)),
                 key,
             ),
             Update::Remove(ks, ref key) => (
@@ -80,7 +80,8 @@ impl RelocatedWriteBatch {
     }
 
     pub fn write(&mut self, key: Bytes, value: Bytes) {
-        let write = PreparedWalWrite::new(&WalEntry::Record(self.ks, key.clone(), value.clone()));
+        let write =
+            PreparedWalWrite::new(&WalEntry::Record(self.ks, key.clone(), value.clone(), true));
         self.prepared_writes.push(write);
         self.keys.push(key);
     }
