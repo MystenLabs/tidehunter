@@ -438,10 +438,9 @@ impl Db {
         let batch_start_entry =
             PreparedWalWrite::new(&WalEntry::BatchStart(prepared_writes.len() as u32));
         let writes = std::iter::once(&batch_start_entry).chain(prepared_writes);
-        let guards = writes
+        writes
             .map(|write| self.wal_writer.write(write).map_err(DbError::from))
-            .collect();
-        guards
+            .collect()
     }
 
     /// Ordered iterator over DB in the specified range
