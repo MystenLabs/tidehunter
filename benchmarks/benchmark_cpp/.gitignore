@@ -1,0 +1,29 @@
+# Build directories
+build/
+cmake-build-*/
+
+# Binary files
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+benchmark_cpp
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependencies
+third_party/
+
+# Temporary files
+*.tmp
+*.log
