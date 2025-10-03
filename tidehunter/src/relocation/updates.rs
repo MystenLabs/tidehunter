@@ -11,7 +11,7 @@ pub struct RelocationUpdates {
 }
 
 struct RelocationUpdate {
-    key: Bytes,
+    reduced_key: Bytes,
     new_value: WalPosition,
 }
 
@@ -23,14 +23,17 @@ impl RelocationUpdates {
         }
     }
 
-    pub fn add(&mut self, key: Bytes, new_value: WalPosition) {
-        self.updates.push(RelocationUpdate { key, new_value });
+    pub fn add(&mut self, reduced_key: Bytes, new_value: WalPosition) {
+        self.updates.push(RelocationUpdate {
+            reduced_key,
+            new_value,
+        });
     }
 
     /// Apply relocation updates to the index table.
     pub fn apply(self, index: &mut IndexTable) {
         for update in self.updates {
-            index.apply_update(&update.key, |v| {
+            index.apply_update(&update.reduced_key, |v| {
                 if v.offset() < self.last_processed {
                     v.replace_wal_position(update.new_value)
                 }

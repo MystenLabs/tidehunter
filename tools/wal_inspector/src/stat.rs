@@ -176,7 +176,7 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
         let entry = WalEntry::from_bytes(raw_entry);
 
         match entry {
-            WalEntry::Record(ks, key, value) => {
+            WalEntry::Record(ks, key, value, _relocated) => {
                 stats.record_count += 1;
                 stats.record_space += entry_size;
 

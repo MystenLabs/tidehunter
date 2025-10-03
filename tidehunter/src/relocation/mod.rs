@@ -248,7 +248,7 @@ impl RelocationDriver {
             if position.offset() >= upper_limit {
                 break;
             }
-            if let WalEntry::Record(ks, key, value) = WalEntry::from_bytes(raw_entry) {
+            if let WalEntry::Record(ks, key, value, _relocated) = WalEntry::from_bytes(raw_entry) {
                 let ksd = db.key_shape.ks(ks);
                 if let Some(filter) = ksd.relocation_filter() {
                     if let Decision::StopRelocation = filter(&key, &value) {
