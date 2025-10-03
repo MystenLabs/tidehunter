@@ -127,6 +127,28 @@ pub fn main() {
             } else {
                 report!(report, "Periodic snapshot **disabled**");
             }
+
+            // Start continuous relocation if enabled
+            if let Some(strategy) = config.stress_client_parameters.relocation {
+                report!(report, "Starting continuous {:?} relocation", strategy);
+                let db_clone = storage.db.clone();
+                thread::spawn(move || {
+                    loop {
+                        // Start relocation and let it run to completion
+                        match db_clone.start_relocation_with_strategy(strategy) {
+                            Ok(_) => {
+                                // Immediately start next relocation (no pause)
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!("Relocation error: {e}");
+                                thread::sleep(Duration::from_secs(1)); // Brief pause on error
+                            }
+                        }
+                    }
+                });
+            }
+
             Arc::new(storage)
         }
         Backend::Rocksdb => {

@@ -4,9 +4,19 @@ use std::str::FromStr;
 
 use clap::{Parser, arg};
 use serde::{Deserialize, Serialize};
+use tidehunter::RelocationStrategy;
 
 /// Port for Prometheus metrics
 pub const METRICS_PORT: u16 = 9092;
+
+/// Helper to parse RelocationStrategy from string
+fn parse_relocation_strategy(s: &str) -> Result<RelocationStrategy, anyhow::Error> {
+    match s {
+        "wal" => Ok(RelocationStrategy::WalBased),
+        "index" => Ok(RelocationStrategy::IndexBased),
+        _ => anyhow::bail!("Invalid relocation strategy: use 'wal' or 'index'"),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KeyLayout {
@@ -141,6 +151,9 @@ pub struct StressClientParameters {
     /// The zipf exponent for reader position selection. 0 means uniform.
     #[serde(default = "defaults::default_zipf_exponent")]
     pub zipf_exponent: f64,
+    /// Relocation strategy. None means disabled, Some(strategy) enables continuous relocation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relocation: Option<RelocationStrategy>,
 }
 
 impl Default for StressClientParameters {
@@ -164,6 +177,7 @@ impl Default for StressClientParameters {
             backend: defaults::default_backend(),
             read_percentage: defaults::default_read_percentage(),
             zipf_exponent: defaults::default_zipf_exponent(),
+            relocation: None,
         }
     }
 }
@@ -331,6 +345,8 @@ pub struct StressArgs {
         help = "The zipf exponent for reader position selection. 0 means uniform."
     )]
     zipf_exponent: Option<f64>,
+    #[arg(long, help = "Relocation strategy (wal or index). Enables continuous relocation")]
+    relocation: Option<String>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -394,6 +410,19 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     }
     if let Some(zipf_exponent) = args.zipf_exponent {
         config.stress_client_parameters.zipf_exponent = zipf_exponent;
+    }
+    if let Some(relocation_str) = args.relocation {
+        match parse_relocation_strategy(&relocation_str) {
+            Ok(relocation) => {
+                config.stress_client_parameters.relocation = Some(relocation);
+                // Also set it in db_parameters for tidehunter
+                config.db_parameters.relocation_strategy = relocation;
+            }
+            Err(e) => {
+                eprintln!("Error parsing relocation strategy: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     config
