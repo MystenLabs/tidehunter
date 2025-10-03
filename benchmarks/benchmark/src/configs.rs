@@ -154,6 +154,9 @@ pub struct StressClientParameters {
     /// Relocation strategy. None means disabled, Some(strategy) enables continuous relocation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relocation: Option<RelocationStrategy>,
+    /// Ratio of writes that overwrite existing keys (0.0 to 1.0, default 0.0)
+    #[serde(default = "defaults::default_overwrite_ratio")]
+    pub overwrite_ratio: f64,
 }
 
 impl Default for StressClientParameters {
@@ -178,6 +181,7 @@ impl Default for StressClientParameters {
             read_percentage: defaults::default_read_percentage(),
             zipf_exponent: defaults::default_zipf_exponent(),
             relocation: None,
+            overwrite_ratio: defaults::default_overwrite_ratio(),
         }
     }
 }
@@ -247,6 +251,10 @@ pub mod defaults {
     }
 
     pub fn default_zipf_exponent() -> f64 {
+        0.0
+    }
+
+    pub fn default_overwrite_ratio() -> f64 {
         0.0
     }
 }
@@ -347,6 +355,8 @@ pub struct StressArgs {
     zipf_exponent: Option<f64>,
     #[arg(long, help = "Relocation strategy (wal or index). Enables continuous relocation")]
     relocation: Option<String>,
+    #[arg(long, help = "Ratio of writes that overwrite existing keys (0.0 to 1.0)")]
+    overwrite_ratio: Option<f64>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -423,6 +433,13 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
                 std::process::exit(1);
             }
         }
+    }
+    if let Some(overwrite_ratio) = args.overwrite_ratio {
+        if overwrite_ratio < 0.0 || overwrite_ratio > 1.0 {
+            eprintln!("Error: overwrite_ratio must be between 0.0 and 1.0");
+            std::process::exit(1);
+        }
+        config.stress_client_parameters.overwrite_ratio = overwrite_ratio;
     }
 
     config

@@ -400,6 +400,26 @@ struct StressThread {
 }
 
 impl StressThread {
+    /// Select an existing key position using either uniform or zipf distribution
+    fn select_existing_key<R: Rng>(&self, rng: &mut R, highest_local_pos: usize) -> u64 {
+        let upper_bound = self.global_pos(highest_local_pos) + 1;
+
+        if self.parameters.zipf_exponent != 0.0 && upper_bound > 1 {
+            // Use zipf distribution (hot keys)
+            let zipf = Zipf::new(upper_bound, self.parameters.zipf_exponent).unwrap();
+            let sample = zipf.sample(rng) as u64;
+            // The Zipf distribution generates number from 1 to N, where lower numbers are
+            // more likely. We want to read higher positions more often, so we subtract
+            // the sample from the upper bound.
+            upper_bound - sample
+        } else if upper_bound > 0 {
+            // Uniform distribution
+            rng.gen_range(0..upper_bound)
+        } else {
+            0
+        }
+    }
+
     pub fn run_writes(self) {
         #[allow(clippy::let_underscore_lock)] // RWLock here acts as a barrier
         let _ = self.start_lock.read();
@@ -454,22 +474,7 @@ impl StressThread {
                 // Read from the whole keyspace, which expands as writes are made. The highest
                 // key position this thread can read is determined by the latest key it has written.
                 let highest_local_pos = local_write_pos_counter.saturating_sub(1);
-                let read_pos_upper_bound = self.global_pos(highest_local_pos) + 1;
-
-                let pos = if self.parameters.zipf_exponent != 0.0 && read_pos_upper_bound > 1 {
-                    let zipf =
-                        Zipf::new(read_pos_upper_bound, self.parameters.zipf_exponent).unwrap();
-                    let sample = zipf.sample(&mut thread_rng) as u64;
-
-                    // The Zipf distribution generates number from 1 to N, where lower numbers are
-                    // more likely. We want to read higher positions more often, so we subtract
-                    // the sample from the upper bound.
-                    read_pos_upper_bound - sample
-                } else if read_pos_upper_bound > 0 {
-                    thread_rng.gen_range(0..read_pos_upper_bound)
-                } else {
-                    0
-                };
+                let pos = self.select_existing_key(&mut thread_rng, highest_local_pos);
 
                 let timer;
                 match self.parameters.read_mode {
@@ -528,9 +533,20 @@ impl StressThread {
                     self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
-                // Perform a write operation to a new key beyond the initial dataset.
-                let pos = self.global_pos(local_write_pos_counter);
-                local_write_pos_counter += 1;
+                // Perform a write operation
+                let should_overwrite = thread_rng.gen::<f64>() < self.parameters.overwrite_ratio
+                                       && local_write_pos_counter > 0;
+
+                let pos = if should_overwrite {
+                    // Select existing key to overwrite using same logic as reads
+                    let highest_local_pos = local_write_pos_counter.saturating_sub(1);
+                    self.select_existing_key(&mut thread_rng, highest_local_pos)
+                } else {
+                    // Create new key (current behavior)
+                    let pos = self.global_pos(local_write_pos_counter);
+                    local_write_pos_counter += 1;
+                    pos
+                };
 
                 let (key, value) = self.key_value(pos);
                 let timer = Instant::now();
