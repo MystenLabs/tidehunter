@@ -433,7 +433,9 @@ impl StressThread {
                 .bench_writes
                 .with_label_values(&[self.db.name()])
                 .observe(latency as f64);
-            self.latency.increment(latency as u64).unwrap();
+            if self.latency.increment(latency as u64).is_err() {
+                self.latency_errors.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
