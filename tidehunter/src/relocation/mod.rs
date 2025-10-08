@@ -265,11 +265,7 @@ impl RelocationDriver {
             .relocation_target_position
             .set(target_position.offset() as i64);
         // ensure the target position is big enough to cut
-        let gc_watermark = std::cmp::min(
-            target_position.offset(),
-            db.control_region_store.lock().last_position(),
-        );
-        if gc_watermark < (db.wal.wal_file_size() + db.wal.min_wal_position()) {
+        if target_position.offset() < (db.wal.wal_file_size() + db.wal.min_wal_position()) {
             return Ok(());
         }
         for ks in db.key_shape.iter_ks() {
@@ -280,14 +276,17 @@ impl RelocationDriver {
             let mut current_cell = CellReference::first(&db, ks.id());
             while let Some(cell) = current_cell.take() {
                 current_cell = cell.next_in_ks(&db);
-                let mut batch =
-                    RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), gc_watermark);
+                let mut batch = RelocatedWriteBatch::new(
+                    cell.keyspace,
+                    cell.cell_id.clone(),
+                    target_position.offset(),
+                );
                 let index = db
                     .large_table
                     .get_cell_index(db.ks_context(ks.id()), &cell.cell_id, db.as_ref())?
                     .unwrap_or(IndexTable::default().into());
                 for (_reduced_key, position) in index.iter() {
-                    if position.offset() < gc_watermark {
+                    if position.offset() < target_position.offset() {
                         if let Some((key, value)) = db.read_record(position)? {
                             batch.write(key, value);
                             self.metrics
@@ -300,7 +299,11 @@ impl RelocationDriver {
                 db.write_relocated_batch(batch)?;
             }
         }
-        db.wal_writer.gc(gc_watermark)?;
+        db.rebuild_control_region()?;
+        db.wal_writer.gc(std::cmp::min(
+            target_position.offset(),
+            db.control_region_store.lock().last_position(),
+        ))?;
         Ok(())
     }
 
