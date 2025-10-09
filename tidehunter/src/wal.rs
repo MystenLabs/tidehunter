@@ -478,9 +478,9 @@ impl Wal {
             ))
         } else {
             let buffer_size = if self.layout.direct_io {
-                self.layout.align(pos.len() as u64) as usize
+                self.layout.align(pos.frame_len() as u64) as usize
             } else {
-                pos.len()
+                pos.frame_len()
             };
             let mut buf = FileReader::io_buffer_bytes(buffer_size, self.layout.direct_io);
             let files = self.files.load();
@@ -489,9 +489,9 @@ impl Wal {
             };
             file.read_exact_at(&mut buf, self.layout.offset_in_wal_file(pos.offset))?;
             let mut bytes = Bytes::from(bytes::Bytes::from(buf));
-            if self.layout.direct_io && bytes.len() > pos.len() {
+            if self.layout.direct_io && bytes.len() > pos.frame_len() {
                 // Direct IO buffer can be larger then needed
-                bytes = bytes.slice(..pos.len());
+                bytes = bytes.slice(..pos.frame_len());
             }
             Ok((
                 ReadType::Syscall,
@@ -515,7 +515,8 @@ impl Wal {
             let offset = offset as usize;
             let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
             let data = map.data.slice(
-                header_end + inner_offset..header_end + pos.len() - CrcFrame::CRC_HEADER_LENGTH,
+                header_end + inner_offset
+                    ..header_end + pos.frame_len() - CrcFrame::CRC_HEADER_LENGTH,
             );
             Ok(WalRandomRead::Mapped(data))
         } else {
@@ -523,7 +524,7 @@ impl Wal {
             let file = files.get(self.layout.locate_file(pos.offset));
             let offset = self.layout.offset_in_wal_file(pos.offset);
             let header_end = offset + CrcFrame::CRC_HEADER_LENGTH as u64;
-            let range = (header_end + inner_offset as u64)..(offset + pos.len() as u64);
+            let range = (header_end + inner_offset as u64)..(offset + pos.frame_len() as u64);
             Ok(WalRandomRead::File(FileRange::new(
                 FileReader::new(file.clone(), self.layout.direct_io),
                 range,
@@ -950,11 +951,14 @@ impl WalPosition {
         r
     }
 
-    pub fn len(&self) -> usize {
+    /// Returns unaligned length of the wal frame.
+    /// The length includes frame header but does not account for alignment
+    pub fn frame_len(&self) -> usize {
         self.len as usize
     }
 
-    pub fn len_u32(&self) -> u32 {
+    /// Same as frame_len but returns u32
+    pub fn frame_len_u32(&self) -> u32 {
         self.len
     }
 

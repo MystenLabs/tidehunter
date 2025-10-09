@@ -62,7 +62,7 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
 
                 if let Some(pos) = entry.position.valid() {
                     all_positions.push((pos, ks_idx));
-                    total_position_size += pos.len() as u64;
+                    total_position_size += pos.frame_len() as u64;
                 }
             }
         }

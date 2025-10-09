@@ -298,7 +298,7 @@ impl IndexWalPosition {
         debug_assert_ne!(w, WalPosition::INVALID);
         Self {
             offset: w.offset(),
-            len: w.len_u32(),
+            len: w.frame_len_u32(),
             kind: IndexEntryKind::Clean,
         }
     }
@@ -307,7 +307,7 @@ impl IndexWalPosition {
         debug_assert_ne!(w, WalPosition::INVALID);
         Self {
             offset: w.offset(),
-            len: w.len_u32(),
+            len: w.frame_len_u32(),
             kind: IndexEntryKind::Modified,
         }
     }
@@ -316,7 +316,7 @@ impl IndexWalPosition {
         debug_assert_ne!(w, WalPosition::INVALID);
         Self {
             offset: w.offset(),
-            len: w.len_u32(),
+            len: w.frame_len_u32(),
             kind: IndexEntryKind::Removed,
         }
     }
@@ -334,7 +334,7 @@ impl IndexWalPosition {
 
     pub fn replace_wal_position(&mut self, position: WalPosition) {
         self.offset = position.offset();
-        self.len = position.len_u32();
+        self.len = position.frame_len_u32();
     }
 
     fn into_update_position(self) -> WalPosition {
