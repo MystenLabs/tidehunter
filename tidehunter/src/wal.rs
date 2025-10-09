@@ -962,6 +962,15 @@ impl WalPosition {
         self.len
     }
 
+    /// Returns length of the payload at given wal position, without crc frame header and alignment.
+    /// This is the length of the buffer that was passed when WalWriter::write was
+    /// called that created this wal position.
+    pub fn payload_len(&self) -> usize {
+        self.frame_len()
+            .checked_sub(CrcFrame::CRC_HEADER_LENGTH)
+            .expect("Frame length must be greater or equal to crc header length")
+    }
+
     pub fn valid(self) -> Option<Self> {
         if self == Self::INVALID {
             None

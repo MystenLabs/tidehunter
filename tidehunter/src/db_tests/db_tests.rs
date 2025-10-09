@@ -2400,3 +2400,93 @@ fn db_test_snapshot_unload_threshold() {
 
     assert_eq!(replay_position, wal_position_before);
 }
+
+#[test]
+fn test_empty_value_read_optimization() {
+    // This test verifies that when reading keys with empty values from keyspaces
+    // that use Hash indexing, we can avoid WAL reads by checking the payload length.
+    // Hash indexing means need_check_index_key() returns false, enabling the optimization.
+    let dir = tempdir::TempDir::new("test-empty-value-optimization").unwrap();
+    let config = Arc::new(Config::small());
+
+    // Use hash indexing which allows the optimization (need_check_index_key() == false)
+    let (key_shape, ks) = hashed_index_key_shape();
+    let metrics = Metrics::new();
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        metrics.clone(),
+    )
+    .unwrap();
+
+    // Insert keys with empty values - these should benefit from the optimization
+    for i in 0..10u32 {
+        db.insert(ks, i.to_be_bytes().to_vec(), vec![]).unwrap();
+    }
+
+    // Insert keys with non-empty values - these will require WAL reads
+    for i in 10..20u32 {
+        db.insert(ks, i.to_be_bytes().to_vec(), vec![i as u8])
+            .unwrap();
+    }
+
+    // Flush to ensure everything is written
+    db.large_table.flusher.barrier();
+
+    // Get initial read count
+    let initial_reads = metrics
+        .read
+        .with_label_values(&["root", "record", "mapped"])
+        .get()
+        + metrics
+            .read
+            .with_label_values(&["root", "record", "syscall"])
+            .get();
+    assert_eq!(initial_reads, 0);
+
+    // Read all keys with empty values - these should NOT increment the read metric
+    // due to the optimization
+    for i in 0..10u32 {
+        let val = db.get(ks, &i.to_be_bytes()).unwrap();
+        assert_eq!(val, Some(Bytes::new()));
+    }
+
+    let reads_after_empty = metrics
+        .read
+        .with_label_values(&["root", "record", "mapped"])
+        .get()
+        + metrics
+            .read
+            .with_label_values(&["root", "record", "syscall"])
+            .get();
+
+    // The optimization should have avoided all WAL reads for empty values
+    assert_eq!(
+        initial_reads, reads_after_empty,
+        "Empty value optimization should avoid WAL reads"
+    );
+
+    // Now read keys with non-empty values - these SHOULD increment the read metric
+    for i in 10..20u32 {
+        let val = db.get(ks, &i.to_be_bytes()).unwrap();
+        assert_eq!(val, Some(vec![i as u8].into()));
+    }
+
+    let reads_after_nonempty = metrics
+        .read
+        .with_label_values(&["root", "record", "mapped"])
+        .get()
+        + metrics
+            .read
+            .with_label_values(&["root", "record", "syscall"])
+            .get();
+
+    // Non-empty values should have caused WAL reads
+    assert_eq!(
+        reads_after_nonempty - reads_after_empty,
+        10,
+        "Non-empty values should require WAL reads"
+    );
+}

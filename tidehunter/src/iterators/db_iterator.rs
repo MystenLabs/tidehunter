@@ -19,7 +19,7 @@ pub struct DbIterator {
 impl DbIterator {
     pub(crate) fn new(db: Arc<Db>, ks: KeySpace) -> Self {
         let ksd = db.ks(ks);
-        let with_key_reduction = ksd.use_key_reduction_iterator();
+        let with_key_reduction = ksd.need_check_index_key();
         let cell = ksd.first_cell();
         Self {
             db,

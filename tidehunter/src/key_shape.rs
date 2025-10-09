@@ -253,7 +253,11 @@ impl KeySpaceDesc {
         self.key_type.last_cell(self)
     }
 
-    pub(crate) fn use_key_reduction_iterator(&self) -> bool {
+    /// Returns true if finding key in the index does not mean the record key matches the index key.
+    ///
+    /// This returns false for KeyIndexing::Hash because we use cryptographically strong hash,
+    /// and therefore it should be impossible to construct a key that collides with existing key.
+    pub(crate) fn need_check_index_key(&self) -> bool {
         match self.key_indexing {
             KeyIndexing::Fixed(_) => false,
             KeyIndexing::Reduction(_, _) => true,

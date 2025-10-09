@@ -287,7 +287,7 @@ impl Db {
                 Ok(Some(value))
             }
             GetResult::WalPosition(w) => {
-                let value = self.read_record_check_key(k, w)?;
+                let value = self.read_record_check_key(context, k, w)?;
                 let Some(value) = value else {
                     return Ok(None);
                 };
@@ -531,7 +531,22 @@ impl Db {
             .update_flushed_index(context, &cell, original_index, position)
     }
 
-    fn read_record_check_key(&self, k: &[u8], position: WalPosition) -> DbResult<Option<Bytes>> {
+    fn read_record_check_key(
+        &self,
+        context: &KsContext,
+        k: &[u8],
+        position: WalPosition,
+    ) -> DbResult<Option<Bytes>> {
+        if !context.ks_config.need_check_index_key() {
+            // Optimization only possible if an index key always matches a record key
+            if position.payload_len() == WalEntry::record_len(k, &[]) {
+                // We can see that wal position only holds the key and the value is empty,
+                // we don't need disk read from the wal.
+                // See test_empty_value_read_optimization
+                // todo this optimization can be enabled for iterators as well
+                return Ok(Some(Bytes::new()));
+            }
+        }
         let Some(record) = self.read_record(position)? else {
             return Ok(None);
         };
@@ -1002,12 +1017,16 @@ impl WalEntry {
             _ => panic!("Unknown wal entry type {entry_type}"),
         }
     }
+
+    fn record_len(k: &[u8], v: &[u8]) -> usize {
+        1 + 1 + 2 + k.len() + v.len()
+    }
 }
 
 impl IntoBytesFixed for WalEntry {
     fn len(&self) -> usize {
         match self {
-            WalEntry::Record(KeySpace(_), k, v, _relocated) => 1 + 1 + 2 + k.len() + v.len(),
+            WalEntry::Record(KeySpace(_), k, v, _relocated) => Self::record_len(k, v),
             WalEntry::Index(KeySpace(_), index) => 1 + 1 + index.len(),
             WalEntry::Remove(KeySpace(_), k) => 1 + 1 + k.len(),
             WalEntry::BatchStart(_) => 1 + 4,
