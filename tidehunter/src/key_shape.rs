@@ -431,7 +431,8 @@ impl KeySpaceDesc {
         self.id
     }
 
-    pub(crate) fn index_format(&self) -> &IndexFormatType {
+    #[doc(hidden)] // Used by tools/wal_inspector for analyzing keyspace indices
+    pub fn index_format(&self) -> &IndexFormatType {
         &self.config.index_format
     }
 }

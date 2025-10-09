@@ -5,6 +5,7 @@ use tidehunter::config::Config;
 use tidehunter::db::Db;
 use tidehunter::key_shape::KeyShape;
 
+mod analyze_ks;
 mod control_region_tool;
 mod force_snapshot;
 mod stat;
@@ -111,6 +112,20 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// Analyze a keyspace by loading index entries and summing payload sizes
+    AnalyzeKs {
+        /// Path to the database directory
+        #[arg(short = 'd', long)]
+        db_path: PathBuf,
+
+        /// Keyspace name to analyze
+        #[arg(short = 'k', long)]
+        keyspace: String,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -134,5 +149,10 @@ fn main() -> Result<()> {
             num_positions,
             verbose,
         } => control_region_tool::control_region_command(db_path, num_positions, verbose),
+        Commands::AnalyzeKs {
+            db_path,
+            keyspace,
+            verbose,
+        } => analyze_ks::analyze_ks_command(db_path, keyspace, verbose),
     }
 }
