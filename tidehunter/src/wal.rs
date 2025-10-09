@@ -26,13 +26,13 @@ pub struct WalWriter {
     position_and_map: Mutex<(IncrementalWalPosition, Map)>,
     wal_tracker: WalTracker,
     mapper: WalMapper,
+    wal_syncer: WalSyncer,
 }
 
 pub struct Wal {
     files: Arc<ArcSwap<WalFiles>>,
     layout: WalLayout,
     maps: RwLock<BTreeMap<u64, Map>>,
-    wal_syncer: WalSyncer,
     metrics: Arc<Metrics>,
 }
 
@@ -126,8 +126,7 @@ impl WalWriter {
                 self.wal
                     .recv_map(&self.mapper, map_id, &current_map_and_position.1);
             mem::swap(&mut offloaded_map, &mut current_map_and_position.1);
-            self.wal
-                .wal_syncer
+            self.wal_syncer
                 .send(offloaded_map, self.wal.layout.map_range(map_id).end);
         } else {
             // todo it is possible to have a race between map mutex and pos allocation so this check may fail
@@ -403,15 +402,13 @@ impl Wal {
     ) -> io::Result<Arc<Self>> {
         layout.assert_layout();
         let files = WalFiles::new(base_path, &layout)?;
-        let wal_syncer = WalSyncer::start(metrics.clone());
-        let reader = Wal {
+        let wal = Wal {
             files,
             layout,
             maps: Default::default(),
-            wal_syncer,
             metrics,
         };
-        Ok(Arc::new(reader))
+        Ok(Arc::new(wal))
     }
 
     fn open_file(path: &Path, layout: &WalLayout) -> io::Result<File> {
@@ -853,10 +850,12 @@ impl WalIterator {
         let wal_tracker = WalTracker::start(position.position);
         let position_and_map = (position, self.map);
         let position_and_map = Mutex::new(position_and_map);
+        let wal_syncer = WalSyncer::start(self.wal.metrics.clone());
         WalWriter {
             wal: self.wal,
             position_and_map,
             wal_tracker,
+            wal_syncer,
             mapper,
         }
     }
