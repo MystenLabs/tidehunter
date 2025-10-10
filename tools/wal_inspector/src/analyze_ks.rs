@@ -17,12 +17,10 @@ pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool
     // Find keyspace by name
     let mut ks_desc = None;
     let mut ks = KeySpace::new(0);
-    for i in 0..=255 {
-        let test_ks = KeySpace::new(i);
-        let desc = key_shape.ks(test_ks);
+    for desc in key_shape.iter_ks() {
         if desc.name() == keyspace_name {
             ks_desc = Some(desc);
-            ks = test_ks;
+            ks = desc.id();
             break;
         }
     }

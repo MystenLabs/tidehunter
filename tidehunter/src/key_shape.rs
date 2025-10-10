@@ -535,7 +535,8 @@ impl KeyShape {
         (this, KeySpace(0))
     }
 
-    pub(crate) fn iter_ks(&self) -> impl Iterator<Item = &KeySpaceDesc> + '_ {
+    #[doc(hidden)] // Used by tools/wal_inspector for iterating over keyspaces
+    pub fn iter_ks(&self) -> impl Iterator<Item = &KeySpaceDesc> + '_ {
         self.key_spaces.iter()
     }
 
