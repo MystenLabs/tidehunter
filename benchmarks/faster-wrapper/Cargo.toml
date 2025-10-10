@@ -1,0 +1,12 @@
+[package]
+name = "faster-wrapper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+faster-sys = { path = "../faster-sys" }
+libc = "0.2"
+minibytes = { path = "../../third-party/minibytes", default-features = false, features = ["frommmap", "frombytes"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-specific dependencies if needed

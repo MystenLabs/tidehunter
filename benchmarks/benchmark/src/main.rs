@@ -179,6 +179,34 @@ pub fn main() {
             let storage = LmdbStorage::open(&path);
             Arc::new(storage)
         }
+        Backend::Faster => {
+            #[cfg(target_os = "linux")]
+            {
+                use crate::storage::faster_native::FasterNativeStorage;
+                let storage = FasterNativeStorage::open(&path);
+                storage as Arc<dyn Storage>
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("ERROR: FASTER backend is only supported on Linux platforms.");
+                eprintln!("Please choose a different backend for macOS.");
+                std::process::exit(1);
+            }
+        }
+        Backend::F2 => {
+            #[cfg(target_os = "linux")]
+            {
+                use crate::storage::f2::F2Storage;
+                let storage = F2Storage::open(&path);
+                storage as Arc<dyn Storage>
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("ERROR: F2 backend is only supported on Linux platforms.");
+                eprintln!("Please choose a different backend for macOS.");
+                std::process::exit(1);
+            }
+        }
     };
     let stress = Stress {
         storage,
