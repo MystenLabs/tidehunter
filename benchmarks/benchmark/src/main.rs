@@ -91,7 +91,7 @@ pub fn main() {
     );
     let print_report = config.stress_client_parameters.report;
     let registry = Registry::new();
-    let benchmark_metrics = BenchmarkMetrics::new_in(&registry);
+    let benchmark_metrics = BenchmarkMetrics::new_in(&registry, &config);
     prometheus::start_prometheus_server(
         format!("0.0.0.0:{METRICS_PORT}").parse().unwrap(),
         &registry,
