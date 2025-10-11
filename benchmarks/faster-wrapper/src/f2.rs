@@ -1,9 +1,13 @@
 //! Safe wrapper for F2 (FASTER v2) key-value store
 
-use crate::{next_serial, StoreError};
+#[cfg(target_os = "linux")]
+use crate::next_serial;
+use crate::StoreError;
 use minibytes::Bytes;
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -44,20 +48,17 @@ impl F2Store {
     pub fn new(path: &Path) -> Result<Self, StoreError> {
         #[cfg(target_os = "linux")]
         {
-            let path_str = path
-                .to_str()
-                .ok_or(StoreError::InvalidConfiguration)?;
-            let c_path = CString::new(path_str)
-                .map_err(|_| StoreError::InvalidConfiguration)?;
+            let path_str = path.to_str().ok_or(StoreError::InvalidConfiguration)?;
+            let c_path = CString::new(path_str).map_err(|_| StoreError::InvalidConfiguration)?;
 
             let config = F2Config {
                 storage_path: c_path.as_ptr(),
-                hot_store_size: 1 << 30,     // 1GB hot store
-                cold_store_size: 1 << 34,    // 16GB cold store
-                read_cache_size: 1 << 28,    // 256MB read cache
+                hot_store_size: 1 << 30,  // 1GB hot store
+                cold_store_size: 1 << 34, // 16GB cold store
+                read_cache_size: 1 << 28, // 256MB read cache
                 enable_tiering: true,
-                hot_threshold: 0.8,          // Move to cold when hot store is 80% full
-                cold_threshold: 0.1,         // Move back to hot if accessed frequently
+                hot_threshold: 0.8,  // Move to cold when hot store is 80% full
+                cold_threshold: 0.1, // Move back to hot if accessed frequently
             };
 
             let store = unsafe { f2_create(&config) };
@@ -138,9 +139,8 @@ impl F2Store {
                     }
 
                     // Copy the data and free the C allocation
-                    let slice = unsafe {
-                        std::slice::from_raw_parts(value_ptr as *const u8, value_len)
-                    };
+                    let slice =
+                        unsafe { std::slice::from_raw_parts(value_ptr as *const u8, value_len) };
                     let bytes = Bytes::from(slice.to_vec());
 
                     unsafe {

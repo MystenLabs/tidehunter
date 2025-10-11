@@ -9,11 +9,11 @@ pub struct FasterNativeStorage {
 }
 
 impl FasterNativeStorage {
+    #[allow(dead_code)]
     pub fn open(path: &Path) -> Arc<Self> {
         std::fs::create_dir_all(path).unwrap();
 
-        let store = FasterStore::new(path)
-            .expect("Failed to create FASTER store");
+        let store = FasterStore::new(path).expect("Failed to create FASTER store");
 
         Arc::new(Self {
             store: Arc::new(store),

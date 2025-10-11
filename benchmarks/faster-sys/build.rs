@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -22,7 +22,10 @@ fn main() {
     generate_bindings(&faster_dir);
 
     // Link the built libraries
-    println!("cargo:rustc-link-search=native={}/cc/build", faster_dir.display());
+    println!(
+        "cargo:rustc-link-search=native={}/cc/build",
+        faster_dir.display()
+    );
     println!("cargo:rustc-link-lib=static=faster");
 
     // Link system libraries
@@ -40,7 +43,11 @@ fn clone_or_update_faster() -> PathBuf {
     if !faster_dir.exists() {
         println!("cargo:warning=Cloning FASTER repository...");
         let status = Command::new("git")
-            .args(&["clone", "--recursive", "https://github.com/microsoft/FASTER.git"])
+            .args([
+                "clone",
+                "--recursive",
+                "https://github.com/microsoft/FASTER.git",
+            ])
             .current_dir(&out_dir)
             .status()
             .expect("Failed to clone FASTER repository");
@@ -51,7 +58,7 @@ fn clone_or_update_faster() -> PathBuf {
     } else {
         println!("cargo:warning=Updating FASTER repository...");
         let status = Command::new("git")
-            .args(&["pull", "--recurse-submodules"])
+            .args(["pull", "--recurse-submodules"])
             .current_dir(&faster_dir)
             .status()
             .expect("Failed to update FASTER repository");
@@ -64,7 +71,7 @@ fn clone_or_update_faster() -> PathBuf {
     faster_dir
 }
 
-fn build_faster(faster_dir: &PathBuf) {
+fn build_faster(faster_dir: &Path) {
     let cc_dir = faster_dir.join("cc");
     let build_dir = cc_dir.join("build");
 
@@ -77,8 +84,8 @@ fn build_faster(faster_dir: &PathBuf) {
         .cpp(true)
         .std("c++17")
         .file("cpp/wrapper.cpp")
-        .include(&cc_dir.join("src"))
-        .include(&cc_dir.join("src/core"))
+        .include(cc_dir.join("src"))
+        .include(cc_dir.join("src/core"))
         .flag("-O3")
         .flag("-DNDEBUG")
         .compile("faster_wrapper");
@@ -86,7 +93,7 @@ fn build_faster(faster_dir: &PathBuf) {
     // Run cmake to build FASTER
     println!("cargo:warning=Building FASTER with cmake...");
     let cmake_status = Command::new("cmake")
-        .args(&["-DCMAKE_BUILD_TYPE=Release", ".."])
+        .args(["-DCMAKE_BUILD_TYPE=Release", ".."])
         .current_dir(&build_dir)
         .status()
         .expect("Failed to run cmake");
@@ -106,7 +113,7 @@ fn build_faster(faster_dir: &PathBuf) {
     }
 }
 
-fn generate_bindings(faster_dir: &PathBuf) {
+fn generate_bindings(faster_dir: &Path) {
     let cc_dir = faster_dir.join("cc");
 
     println!("cargo:warning=Generating Rust bindings...");

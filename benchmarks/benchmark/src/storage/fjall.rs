@@ -15,19 +15,19 @@ impl FjallStorage {
 
         // Configure Fjall with high-performance settings for benchmarking
         let config = Config::new(path)
-            .max_write_buffer_size(u64::MAX)           // Unbounded write buffers (officially documented)
-            .cache_size(16 * 1024 * 1024 * 1024)      // 16 GiB cache for reads
-            .max_journaling_size(2 * 1024 * 1024 * 1024)  // 2 GiB journal size
-            .fsync_ms(None);                           // No periodic fsync for benchmarks
+            .max_write_buffer_size(u64::MAX) // Unbounded write buffers (officially documented)
+            .cache_size(16 * 1024 * 1024 * 1024) // 16 GiB cache for reads
+            .max_journaling_size(2 * 1024 * 1024 * 1024) // 2 GiB journal size
+            .fsync_ms(None); // No periodic fsync for benchmarks
 
         // Open the keyspace
         let keyspace = config.open().unwrap();
 
         // Create a single partition with optimized settings
         let partition_opts = PartitionCreateOptions::default()
-            .max_memtable_size(256 * 1024 * 1024)     // 256 MiB memtable per partition
-            .block_size(16 * 1024)                    // 16 KiB blocks for better get_lt performance
-            .manual_journal_persist(true);             // Manual persistence control
+            .max_memtable_size(256 * 1024 * 1024) // 256 MiB memtable per partition
+            .block_size(16 * 1024) // 16 KiB blocks for better get_lt performance
+            .manual_journal_persist(true); // Manual persistence control
 
         let partition = keyspace
             .open_partition("benchmark", partition_opts)
@@ -63,10 +63,8 @@ impl Storage for FjallStorage {
         let iter = self.partition.range(range).rev();
 
         // Collect up to 'iterations' entries
-        for item in iter.take(iterations) {
-            if let Ok((_key, value)) = item {
-                result.push(Bytes::from(value.to_vec()));
-            }
+        for (_key, value) in iter.take(iterations).flatten() {
+            result.push(Bytes::from(value.to_vec()));
         }
 
         result

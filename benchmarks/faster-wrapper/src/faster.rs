@@ -1,9 +1,13 @@
 //! Safe wrapper for FASTER key-value store
 
-use crate::{next_serial, StoreError};
+#[cfg(target_os = "linux")]
+use crate::next_serial;
+use crate::StoreError;
 use minibytes::Bytes;
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -44,20 +48,17 @@ impl FasterStore {
     pub fn new(path: &Path) -> Result<Self, StoreError> {
         #[cfg(target_os = "linux")]
         {
-            let path_str = path
-                .to_str()
-                .ok_or(StoreError::InvalidConfiguration)?;
-            let c_path = CString::new(path_str)
-                .map_err(|_| StoreError::InvalidConfiguration)?;
+            let path_str = path.to_str().ok_or(StoreError::InvalidConfiguration)?;
+            let c_path = CString::new(path_str).map_err(|_| StoreError::InvalidConfiguration)?;
 
             let config = FasterConfig {
                 storage_path: c_path.as_ptr(),
-                initial_log_size: 1 << 30,  // 1GB
-                max_log_size: 1 << 34,      // 16GB
-                page_size: 1 << 21,          // 2MB
-                segment_size: 1 << 30,       // 1GB
+                initial_log_size: 1 << 30, // 1GB
+                max_log_size: 1 << 34,     // 16GB
+                page_size: 1 << 21,        // 2MB
+                segment_size: 1 << 30,     // 1GB
                 enable_read_cache: true,
-                read_cache_size: 1 << 28,    // 256MB
+                read_cache_size: 1 << 28, // 256MB
             };
 
             let store = unsafe { faster_create(&config) };
@@ -138,9 +139,8 @@ impl FasterStore {
                     }
 
                     // Copy the data and free the C allocation
-                    let slice = unsafe {
-                        std::slice::from_raw_parts(value_ptr as *const u8, value_len)
-                    };
+                    let slice =
+                        unsafe { std::slice::from_raw_parts(value_ptr as *const u8, value_len) };
                     let bytes = Bytes::from(slice.to_vec());
 
                     unsafe {
