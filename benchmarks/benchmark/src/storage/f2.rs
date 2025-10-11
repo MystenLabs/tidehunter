@@ -9,11 +9,11 @@ pub struct F2Storage {
 }
 
 impl F2Storage {
+    #[allow(dead_code)]
     pub fn open(path: &Path) -> Arc<Self> {
         std::fs::create_dir_all(path).unwrap();
 
-        let store = F2Store::new(path)
-            .expect("Failed to create F2 store");
+        let store = F2Store::new(path).expect("Failed to create F2 store");
 
         Arc::new(Self {
             store: Arc::new(store),
