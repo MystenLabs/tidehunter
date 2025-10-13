@@ -13,7 +13,9 @@ impl F2Storage {
     pub fn open(path: &Path) -> Arc<Self> {
         std::fs::create_dir_all(path).unwrap();
 
-        let store = F2Store::new(path).expect("Failed to create F2 store");
+        // Use the optimized configuration for large datasets (1TB data, 256GB RAM)
+        let store = F2Store::new_for_large_dataset(path)
+            .expect("Failed to create F2 store");
 
         Arc::new(Self {
             store: Arc::new(store),
