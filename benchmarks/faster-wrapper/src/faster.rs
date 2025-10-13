@@ -46,6 +46,23 @@ impl Drop for FasterStoreInner {
 
 impl FasterStore {
     pub fn new(path: &Path) -> Result<Self, StoreError> {
+        // Default configuration for backward compatibility
+        Self::new_with_config(
+            path,
+            1 << 30,  // 1GB initial log
+            1 << 34,  // 16GB max log
+            1 << 30,  // 1GB segment
+            1 << 28,  // 256MB read cache
+        )
+    }
+
+    pub fn new_with_config(
+        path: &Path,
+        initial_log_size: usize,
+        max_log_size: usize,
+        segment_size: usize,
+        read_cache_size: usize,
+    ) -> Result<Self, StoreError> {
         #[cfg(target_os = "linux")]
         {
             let path_str = path.to_str().ok_or(StoreError::InvalidConfiguration)?;
@@ -53,12 +70,12 @@ impl FasterStore {
 
             let config = FasterConfig {
                 storage_path: c_path.as_ptr(),
-                initial_log_size: 1 << 30, // 1GB
-                max_log_size: 1 << 34,     // 16GB
-                page_size: 1 << 21,        // 2MB
-                segment_size: 1 << 30,     // 1GB
+                initial_log_size,
+                max_log_size,
+                page_size: 1 << 21,  // 2MB (keep constant)
+                segment_size,
                 enable_read_cache: true,
-                read_cache_size: 1 << 28, // 256MB
+                read_cache_size,
             };
 
             let store = unsafe { faster_create(&config) };
@@ -73,9 +90,20 @@ impl FasterStore {
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = path;
+            let _ = (path, initial_log_size, max_log_size, segment_size, read_cache_size);
             Err(StoreError::PlatformNotSupported)
         }
+    }
+
+    /// Create a FASTER store optimized for large datasets (1TB) on high-memory machines (256GB RAM)
+    pub fn new_for_large_dataset(path: &Path) -> Result<Self, StoreError> {
+        Self::new_with_config(
+            path,
+            1 << 36,  // 64GB initial log
+            1 << 40,  // 1TB max log
+            1 << 32,  // 4GB segment
+            1 << 36,  // 64GB read cache
+        )
     }
 
     pub fn insert(&self, key: Bytes, value: Bytes) -> Result<(), StoreError> {

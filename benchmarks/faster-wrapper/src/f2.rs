@@ -46,6 +46,21 @@ impl Drop for F2StoreInner {
 
 impl F2Store {
     pub fn new(path: &Path) -> Result<Self, StoreError> {
+        // Default configuration for backward compatibility
+        Self::new_with_config(
+            path,
+            1 << 30,  // 1GB hot store
+            1 << 34,  // 16GB cold store
+            1 << 28,  // 256MB read cache
+        )
+    }
+
+    pub fn new_with_config(
+        path: &Path,
+        hot_store_size: usize,
+        cold_store_size: usize,
+        read_cache_size: usize,
+    ) -> Result<Self, StoreError> {
         #[cfg(target_os = "linux")]
         {
             let path_str = path.to_str().ok_or(StoreError::InvalidConfiguration)?;
@@ -53,9 +68,9 @@ impl F2Store {
 
             let config = F2Config {
                 storage_path: c_path.as_ptr(),
-                hot_store_size: 1 << 30,  // 1GB hot store
-                cold_store_size: 1 << 34, // 16GB cold store
-                read_cache_size: 1 << 28, // 256MB read cache
+                hot_store_size,
+                cold_store_size,
+                read_cache_size,
                 enable_tiering: true,
                 hot_threshold: 0.8,  // Move to cold when hot store is 80% full
                 cold_threshold: 0.1, // Move back to hot if accessed frequently
@@ -73,9 +88,19 @@ impl F2Store {
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = path;
+            let _ = (path, hot_store_size, cold_store_size, read_cache_size);
             Err(StoreError::PlatformNotSupported)
         }
+    }
+
+    /// Create an F2 store optimized for large datasets (1TB) on high-memory machines (256GB RAM)
+    pub fn new_for_large_dataset(path: &Path) -> Result<Self, StoreError> {
+        Self::new_with_config(
+            path,
+            1 << 37,  // 128GB hot store (50% of RAM for hot data)
+            1 << 40,  // 1TB cold store (full dataset on disk)
+            1 << 36,  // 64GB read cache (25% of RAM for cache)
+        )
     }
 
     pub fn insert(&self, key: Bytes, value: Bytes) -> Result<(), StoreError> {
