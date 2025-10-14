@@ -203,7 +203,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 "git checkout -B {commit} origin/{commit} 2>/dev/null || git checkout {commit}"
             ),
             "source $HOME/.cargo/env",
-            "RUSTFLAGS=-Ctarget-cpu=native cargo build --release",
+            "RUSTFLAGS=-Ctarget-cpu=native cargo build --release --features enable-faster",
         ]
         .join(" && ");
 
