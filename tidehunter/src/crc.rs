@@ -145,6 +145,6 @@ impl IntoBytesFixed for Vec<u8> {
     }
 
     fn write_into_bytes(&self, buf: &mut BytesMut) {
-        buf.put_slice(&self);
+        buf.put_slice(self);
     }
 }
