@@ -4,7 +4,8 @@ pub mod config;
 mod context;
 #[doc(hidden)] // Used by tools/wal_inspector for control region inspection
 pub mod control;
-mod crc;
+#[doc(hidden)] // Used by benchmarks and tools for WAL writes
+pub mod crc;
 pub mod db;
 #[cfg(test)]
 mod failpoints;

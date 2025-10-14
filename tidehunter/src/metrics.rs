@@ -478,3 +478,15 @@ pub fn print_histogram_stats(histogram: &MetricHistogram) {
         println!("Histogram stats: {:?}", inner);
     }
 }
+
+#[doc(hidden)] // Used by benchmarks for computing histogram averages
+pub fn get_histogram_avg(histogram: &MetricHistogram) -> Option<f64> {
+    histogram.inner.as_ref().and_then(|inner| {
+        let count = inner.get_sample_count();
+        if count > 0 {
+            Some(inner.get_sample_sum() / count as f64)
+        } else {
+            None
+        }
+    })
+}

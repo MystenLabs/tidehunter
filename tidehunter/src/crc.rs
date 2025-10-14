@@ -137,14 +137,14 @@ mod test {
             Err(CrcReadError::CrcMismatch)
         );
     }
+}
 
-    impl IntoBytesFixed for Vec<u8> {
-        fn len(&self) -> usize {
-            self.len()
-        }
+impl IntoBytesFixed for Vec<u8> {
+    fn len(&self) -> usize {
+        self.len()
+    }
 
-        fn write_into_bytes(&self, buf: &mut BytesMut) {
-            buf.put_slice(&self);
-        }
+    fn write_into_bytes(&self, buf: &mut BytesMut) {
+        buf.put_slice(&self);
     }
 }

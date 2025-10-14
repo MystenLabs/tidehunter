@@ -1,0 +1,14 @@
+[package]
+name = "wal_benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tidehunter = { version = "0.1.0", path = "../../tidehunter" }
+clap = { version = "4.5.32", features = ["derive"] }
+num_cpus = "1.13"
+rand = { workspace = true }
+tempfile = "3.3"
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+indicatif = "0.17"

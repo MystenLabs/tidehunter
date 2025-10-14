@@ -5,6 +5,7 @@ members = [
     "benchmarks/benchmark",
     "benchmarks/read_window_test",
     "benchmarks/index_benchmark",
+    "benchmarks/wal_benchmark",
     "scripts/generate_target_configs",
     "tests/concurrent_test",
     "tools/wal_inspector",
