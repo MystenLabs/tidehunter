@@ -1,5 +1,5 @@
 use crate::storage::Storage;
-use faster_wrapper::FasterStore;
+use faster_wrapper::{Config, FasterStore};
 use minibytes::Bytes;
 use std::path::Path;
 use std::sync::Arc;
@@ -13,9 +13,20 @@ impl FasterNativeStorage {
     pub fn open(path: &Path) -> Arc<Self> {
         std::fs::create_dir_all(path).unwrap();
 
-        // Use the optimized configuration for large datasets (1TB data, 256GB RAM)
-        let store = FasterStore::new_for_large_dataset(path)
-            .expect("Failed to create FASTER store");
+        // Create optimized configuration for large datasets (1TB data, 256GB RAM)
+        let config = Config {
+            storage_path: path.to_string_lossy().to_string(),
+            initial_log_size: 1 << 36, // 64GB initial size
+            max_log_size: 1 << 40,     // 1TB max size
+            page_size: 1 << 21,        // 2MB pages
+            segment_size: 1 << 32,     // 4GB segments
+            hash_table_size: 1 << 24,  // 16M buckets for better distribution
+            enable_read_cache: true,
+            read_cache_size: 1 << 36,  // 64GB read cache (25% of RAM)
+            log_mutable_fraction: 0.9, // 90% mutable region for write-heavy workload
+        };
+
+        let store = FasterStore::new(config).expect("Failed to create FASTER store");
 
         Arc::new(Self {
             store: Arc::new(store),
@@ -25,13 +36,20 @@ impl FasterNativeStorage {
 
 impl Storage for FasterNativeStorage {
     fn insert(&self, k: Bytes, v: Bytes) {
-        self.store.insert(k, v).unwrap_or_else(|e| {
+        let key_vec = k.as_ref().to_vec();
+        let val_vec = v.as_ref().to_vec();
+        self.store.insert(key_vec, val_vec).unwrap_or_else(|e| {
             eprintln!("FASTER insert failed: {}", e);
         });
     }
 
     fn get(&self, k: &[u8]) -> Option<Bytes> {
-        self.store.get(k).ok()
+        let key_vec = k.to_vec();
+        self.store
+            .get::<Vec<u8>, Vec<u8>>(key_vec)
+            .ok()
+            .flatten()
+            .map(|v| Bytes::copy_from_slice(&v))
     }
 
     fn get_lt(&self, _k: &[u8], _iterations: usize) -> Vec<Bytes> {
@@ -41,7 +59,8 @@ impl Storage for FasterNativeStorage {
     }
 
     fn exists(&self, k: &[u8]) -> bool {
-        self.store.exists(k)
+        let key_vec = k.to_vec();
+        self.store.get::<Vec<u8>, Vec<u8>>(key_vec).ok().is_some()
     }
 
     fn name(&self) -> &'static str {

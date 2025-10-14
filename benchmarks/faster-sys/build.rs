@@ -3,72 +3,41 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    // Check if we're on a supported platform
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-    if target_os != "linux" {
-        println!("cargo:warning=FASTER-sys only supports Linux platforms");
-        // Create stub implementations for non-Linux platforms
+    // Only build if enable-faster feature is enabled
+    if env::var("CARGO_FEATURE_ENABLE_FASTER").is_err() {
+        println!("cargo:warning=FASTER feature not enabled, skipping build");
         generate_stub_bindings();
         return;
     }
 
-    // Clone or update FASTER repository
-    let faster_dir = clone_or_update_faster();
+    // Check if we're on a supported platform
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if target_os != "linux" {
+        println!("cargo:warning=FASTER only supported on Linux, generating stubs");
+        generate_stub_bindings();
+        return;
+    }
+
+    // Verify FASTER submodule is initialized
+    let faster_dir = PathBuf::from("FASTER");
+    if !faster_dir.join("cc").exists() {
+        panic!(
+            "FASTER submodule not initialized. Run:\n\
+             cd benchmarks/faster-sys && git submodule update --init --recursive"
+        );
+    }
 
     // Build FASTER C++ library
     build_faster(&faster_dir);
 
+    // Build our C wrapper
+    build_c_wrapper(&faster_dir);
+
     // Generate Rust bindings
-    generate_bindings(&faster_dir);
+    generate_bindings();
 
-    // Link the built libraries
-    println!(
-        "cargo:rustc-link-search=native={}/cc/build",
-        faster_dir.display()
-    );
-    println!("cargo:rustc-link-lib=static=faster");
-
-    // Link system libraries
-    println!("cargo:rustc-link-lib=stdc++");
-    println!("cargo:rustc-link-lib=aio");
-    println!("cargo:rustc-link-lib=uuid");
-    println!("cargo:rustc-link-lib=tbb");
-    println!("cargo:rustc-link-lib=pthread");
-}
-
-fn clone_or_update_faster() -> PathBuf {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let faster_dir = out_dir.join("FASTER");
-
-    if !faster_dir.exists() {
-        println!("cargo:warning=Cloning FASTER repository...");
-        let status = Command::new("git")
-            .args([
-                "clone",
-                "--recursive",
-                "https://github.com/microsoft/FASTER.git",
-            ])
-            .current_dir(&out_dir)
-            .status()
-            .expect("Failed to clone FASTER repository");
-
-        if !status.success() {
-            panic!("Failed to clone FASTER repository");
-        }
-    } else {
-        println!("cargo:warning=Updating FASTER repository...");
-        let status = Command::new("git")
-            .args(["pull", "--recurse-submodules"])
-            .current_dir(&faster_dir)
-            .status()
-            .expect("Failed to update FASTER repository");
-
-        if !status.success() {
-            println!("cargo:warning=Failed to update FASTER repository, using existing version");
-        }
-    }
-
-    faster_dir
+    // Link libraries
+    link_libraries();
 }
 
 fn build_faster(faster_dir: &Path) {
@@ -78,22 +47,11 @@ fn build_faster(faster_dir: &Path) {
     // Create build directory
     std::fs::create_dir_all(&build_dir).unwrap();
 
-    // Build our custom wrapper first
-    println!("cargo:warning=Building FASTER C++ wrapper...");
-    cc::Build::new()
-        .cpp(true)
-        .std("c++17")
-        .file("cpp/wrapper.cpp")
-        .include(cc_dir.join("src"))
-        .include(cc_dir.join("src/core"))
-        .flag("-O3")
-        .flag("-DNDEBUG")
-        .compile("faster_wrapper");
-
-    // Run cmake to build FASTER
     println!("cargo:warning=Building FASTER with cmake...");
+
+    // Configure with cmake
     let cmake_status = Command::new("cmake")
-        .args(["-DCMAKE_BUILD_TYPE=Release", ".."])
+        .args(["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=OFF", ".."])
         .current_dir(&build_dir)
         .status()
         .expect("Failed to run cmake");
@@ -102,8 +60,9 @@ fn build_faster(faster_dir: &Path) {
         panic!("Failed to configure FASTER with cmake");
     }
 
+    // Build with make
     let make_status = Command::new("make")
-        .arg("-j4")
+        .args(["-j", "4", "faster"])
         .current_dir(&build_dir)
         .status()
         .expect("Failed to build FASTER");
@@ -111,46 +70,194 @@ fn build_faster(faster_dir: &Path) {
     if !make_status.success() {
         panic!("Failed to build FASTER");
     }
+
+    // Tell cargo where to find the built library
+    println!("cargo:rustc-link-search=native={}", build_dir.display());
 }
 
-fn generate_bindings(faster_dir: &Path) {
+fn build_c_wrapper(faster_dir: &Path) {
+    println!("cargo:warning=Building FASTER C++ wrapper...");
+
     let cc_dir = faster_dir.join("cc");
 
+    // Build the original variable-length wrapper
+    cc::Build::new()
+        .cpp(true)
+        .std("c++17")
+        .file("cpp/faster-c.cc")
+        .include(cc_dir.join("src"))
+        .include(cc_dir.join("src/core"))
+        .include(cc_dir.join("src/device"))
+        // Compiler flags
+        .flag("-O3")
+        .flag("-DNDEBUG")
+        .flag("-march=native")
+        // Warning flags
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-variable")
+        .flag_if_supported("-Wno-missing-field-initializers")
+        // Compile the wrapper
+        .compile("faster_c_wrapper");
+
+    // TODO: Fixed-size wrapper not yet complete, skip for now
+    // Build the new fixed-size wrapper
+    // println!("cargo:warning=Building FASTER fixed-size wrapper...");
+    // cc::Build::new()
+    //     .cpp(true)
+    //     .std("c++17")
+    //     .file("cpp/faster-fixed.cc")
+    //     .include(cc_dir.join("src"))
+    //     .include(cc_dir.join("src/core"))
+    //     .include(cc_dir.join("src/device"))
+    //     .include(cc_dir.join("src/environment"))
+    //     .include("cpp") // For faster-fixed.h
+    //     // Compiler flags
+    //     .flag("-O3")
+    //     .flag("-DNDEBUG")
+    //     .flag("-march=native")
+    //     // Warning flags
+    //     .flag_if_supported("-Wno-unused-parameter")
+    //     .flag_if_supported("-Wno-unused-variable")
+    //     .flag_if_supported("-Wno-missing-field-initializers")
+    //     // Compile the wrapper
+    //     .compile("faster_fixed_wrapper");
+}
+
+fn generate_bindings() {
     println!("cargo:warning=Generating Rust bindings...");
 
+    let faster_dir = PathBuf::from("FASTER");
+    let cc_dir = faster_dir.join("cc");
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // Generate bindings for variable-length API
     let bindings = bindgen::Builder::default()
-        .header("cpp/wrapper.h")
+        .header("cpp/faster-c.h")
+        // Add include paths
         .clang_arg(format!("-I{}", cc_dir.join("src").display()))
         .clang_arg(format!("-I{}", cc_dir.join("src/core").display()))
+        // C++ settings
+        .clang_arg("-xc++")
         .clang_arg("-std=c++17")
-        .clang_arg("-x")
-        .clang_arg("c++")
-        // Only expose our wrapper functions and types
+        // Only expose our C interface
         .allowlist_function("faster_.*")
         .allowlist_function("f2_.*")
-        .allowlist_type("FasterKv")
-        .allowlist_type("F2Kv")
-        .allowlist_type("FasterStatus")
-        .allowlist_type("FasterConfig")
-        .allowlist_type("F2Config")
-        // Ensure enums are properly generated
-        .rustified_enum("FasterStatus")
+        .allowlist_type("faster_.*")
+        .allowlist_type("f2_.*")
+        // Rustify enums
+        .rustified_enum("faster_status")
+        // Generate bindings
         .generate()
         .expect("Unable to generate bindings");
 
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings");
+
+    // Generate bindings for fixed-size API
+    println!("cargo:warning=Generating fixed-size bindings...");
+    let fixed_bindings = bindgen::Builder::default()
+        .header("cpp/faster-fixed-c.h")
+        // Only expose fixed-size interface
+        .allowlist_function("faster_fixed_.*")
+        .allowlist_function("f2_fixed_.*")
+        .allowlist_type("faster_status_t")
+        // Generate bindings
+        .generate()
+        .expect("Unable to generate fixed-size bindings");
+
+    fixed_bindings
+        .write_to_file(out_path.join("bindings_fixed.rs"))
+        .expect("Couldn't write fixed-size bindings");
+}
+
+fn link_libraries() {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+
+    // Link the FASTER static library built by cmake
+    let faster_dir = PathBuf::from("FASTER");
+    let build_dir = faster_dir.join("cc/build");
+    let absolute_build_dir =
+        std::fs::canonicalize(&build_dir).unwrap_or_else(|_| build_dir.clone());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        absolute_build_dir.display()
+    );
+    println!("cargo:rustc-link-lib=static=faster");
+
+    // Link C++ standard library
+    if target_os == "linux" {
+        println!("cargo:rustc-link-lib=stdc++");
+    } else if target_os == "macos" {
+        println!("cargo:rustc-link-lib=c++");
+    }
+
+    // Link system libraries
+    println!("cargo:rustc-link-lib=pthread");
+
+    // Linux-specific libraries
+    if target_os == "linux" {
+        println!("cargo:rustc-link-lib=aio");
+        println!("cargo:rustc-link-lib=uuid");
+        println!("cargo:rustc-link-lib=tbb");
+    }
+
+    // macOS-specific libraries
+    if target_os == "macos" {
+        // macOS uses different async I/O
+        println!("cargo:rustc-link-lib=framework=Foundation");
+    }
 }
 
 fn generate_stub_bindings() {
-    // Generate stub bindings for non-Linux platforms
+    // Generate stub bindings for non-Linux/macOS platforms
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let stub_content = r#"
-        // Stub bindings for non-Linux platforms
-        pub struct FasterKv;
-        pub struct F2Kv;
+        // Stub bindings for unsupported platforms
+
+        #[repr(C)]
+        pub struct faster_t;
+
+        #[repr(C)]
+        pub struct f2_t;
+
+        #[repr(C)]
+        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        pub enum faster_status {
+            FASTER_SUCCESS = 0,
+            FASTER_PENDING = 1,
+            FASTER_NOT_FOUND = 2,
+            FASTER_OUT_OF_MEMORY = 3,
+            FASTER_IO_ERROR = 4,
+            FASTER_CORRUPTED = 5,
+            FASTER_ABORTED = 6,
+            FASTER_ERROR = 7,
+        }
+
+        #[repr(C)]
+        pub struct faster_config_t {
+            pub storage_path: *const std::os::raw::c_char,
+            pub initial_log_size: u64,
+            pub max_log_size: u64,
+            pub page_size: u64,
+            pub segment_size: u64,
+            pub hash_table_size: u64,
+            pub enable_read_cache: bool,
+            pub read_cache_size: u64,
+            pub log_mutable_fraction: f64,
+        }
+
+        #[repr(C)]
+        pub struct f2_config_t {
+            pub storage_path: *const std::os::raw::c_char,
+            pub hot_store_size: u64,
+            pub cold_store_size: u64,
+            pub index_size: u64,
+            pub read_cache_size: u64,
+            pub hot_threshold: f64,
+            pub cold_threshold: f64,
+            pub segment_size: u64,
+        }
     "#;
 
     std::fs::write(out_dir.join("bindings.rs"), stub_content)

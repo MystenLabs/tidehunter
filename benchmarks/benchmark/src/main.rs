@@ -180,30 +180,34 @@ pub fn main() {
             Arc::new(storage)
         }
         Backend::Faster => {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "enable-faster"))]
             {
                 use crate::storage::faster_native::FasterNativeStorage;
                 let storage = FasterNativeStorage::open(&path);
                 storage as Arc<dyn Storage>
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(all(target_os = "linux", feature = "enable-faster")))]
             {
-                eprintln!("ERROR: FASTER backend is only supported on Linux platforms.");
-                eprintln!("Please choose a different backend for macOS.");
+                eprintln!("ERROR: FASTER backend requires Linux and the 'enable-faster' feature.");
+                eprintln!(
+                    "Please choose a different backend or build with the feature enabled on Linux."
+                );
                 std::process::exit(1);
             }
         }
         Backend::F2 => {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "enable-faster"))]
             {
                 use crate::storage::f2::F2Storage;
                 let storage = F2Storage::open(&path);
                 storage as Arc<dyn Storage>
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(all(target_os = "linux", feature = "enable-faster")))]
             {
-                eprintln!("ERROR: F2 backend is only supported on Linux platforms.");
-                eprintln!("Please choose a different backend for macOS.");
+                eprintln!("ERROR: F2 backend requires Linux and the 'enable-faster' feature.");
+                eprintln!(
+                    "Please choose a different backend or build with the feature enabled on Linux."
+                );
                 std::process::exit(1);
             }
         }
