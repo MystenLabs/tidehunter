@@ -27,6 +27,14 @@ struct Args {
     /// Database path (uses temporary directory if not specified)
     #[arg(short = 'p', long)]
     path: Option<String>,
+
+    /// Number of WAL instances (each thread assigned to instance via round-robin)
+    #[arg(short = 'w', long, default_value_t = 1)]
+    wal_instances: usize,
+
+    /// Enable direct I/O (bypasses OS page cache)
+    #[arg(long, default_value_t = false)]
+    direct_io: bool,
 }
 
 struct BenchmarkResult {
@@ -112,6 +120,11 @@ fn format_bytes(bytes: u64) -> String {
 fn main() {
     let args = Args::parse();
 
+    assert!(
+        args.wal_instances >= 1,
+        "Number of WAL instances must be at least 1"
+    );
+
     println!("WAL Benchmark Configuration:");
     println!("  Threads: {}", args.threads);
     println!("  Write size: {} bytes", args.write_size);
@@ -120,6 +133,8 @@ fn main() {
         args.duration_secs,
         args.duration_secs / 60
     );
+    println!("  WAL instances: {}", args.wal_instances);
+    println!("  Direct I/O: {}", args.direct_io);
     println!();
 
     // Setup database directory
@@ -143,19 +158,37 @@ fn main() {
     let wal_layout = WalLayout {
         frag_size: 1024 * 1024 * 1024,
         max_maps: 16,
-        direct_io: false,
+        direct_io: args.direct_io,
         wal_file_size: 10 * 1024 * 1024 * 1024,
         kind: WalKind::Replay,
     };
 
-    let metrics = Metrics::new();
-    let wal = Wal::open(&db_path, wal_layout, metrics.clone()).expect("Failed to open WAL");
+    // Create multiple WAL instances in separate subdirectories
+    let mut wal_writers = Vec::new();
+    let mut all_metrics = Vec::new();
 
-    let wal_writer = Arc::new(
-        wal.wal_iterator(0)
-            .expect("Failed to create WAL iterator")
-            .into_writer(),
-    );
+    for i in 0..args.wal_instances {
+        let wal_path = if args.wal_instances == 1 {
+            db_path.clone()
+        } else {
+            let instance_path = db_path.join(format!("wal_{}", i));
+            std::fs::create_dir_all(&instance_path)
+                .expect("Failed to create WAL instance directory");
+            instance_path
+        };
+
+        let metrics = Metrics::new();
+        let wal =
+            Wal::open(&wal_path, wal_layout.clone(), metrics.clone()).expect("Failed to open WAL");
+        let wal_writer = Arc::new(
+            wal.wal_iterator(0)
+                .expect("Failed to create WAL iterator")
+                .into_writer(),
+        );
+
+        wal_writers.push(wal_writer);
+        all_metrics.push(metrics);
+    }
 
     // Create progress bar
     let progress_bar = ProgressBar::new(args.duration_secs);
@@ -228,10 +261,11 @@ fn main() {
     let start_time = Instant::now();
     let duration = Duration::from_secs(args.duration_secs);
 
-    // Spawn worker threads
+    // Spawn worker threads - each thread is assigned to a WAL instance via round-robin
     let handles: Vec<_> = (0..args.threads)
         .map(|thread_id| {
-            let wal_writer = Arc::clone(&wal_writer);
+            let wal_instance_id = thread_id % args.wal_instances;
+            let wal_writer = Arc::clone(&wal_writers[wal_instance_id]);
             let write_size = args.write_size;
             let tw = Arc::clone(&total_writes);
             let tb = Arc::clone(&total_bytes);
@@ -280,9 +314,20 @@ fn main() {
     println!("  Overall QPS: {:.2} writes/sec", overall_qps);
     println!("  Overall throughput: {}", overall_throughput);
 
-    // Print WAL contention metric
-    if let Some(avg) = metrics::get_histogram_avg(&metrics.wal_contention) {
-        println!("  Avg WAL contention: {:.2} µs", avg);
+    // Print WAL contention metric (averaged across all WAL instances)
+    let mut total_contention_sum = 0.0;
+    let mut total_contention_count = 0u64;
+    for metrics_instance in &all_metrics {
+        if let Some((sum, count)) =
+            metrics::get_histogram_sum_count(&metrics_instance.wal_contention)
+        {
+            total_contention_sum += sum;
+            total_contention_count += count;
+        }
+    }
+    if total_contention_count > 0 {
+        let overall_avg = total_contention_sum / total_contention_count as f64;
+        println!("  Avg WAL contention: {:.2} µs", overall_avg);
     }
 
     println!();

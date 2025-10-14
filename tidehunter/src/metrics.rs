@@ -490,3 +490,11 @@ pub fn get_histogram_avg(histogram: &MetricHistogram) -> Option<f64> {
         }
     })
 }
+
+#[doc(hidden)] // Used by benchmarks for computing histogram sum and count
+pub fn get_histogram_sum_count(histogram: &MetricHistogram) -> Option<(f64, u64)> {
+    histogram
+        .inner
+        .as_ref()
+        .map(|inner| (inner.get_sample_sum(), inner.get_sample_count()))
+}
