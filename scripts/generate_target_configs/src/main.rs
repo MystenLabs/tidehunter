@@ -9,9 +9,9 @@ fn main() -> Result<()> {
 
     base_item.stress_client_parameters.mixed_threads = 36;
     base_item.stress_client_parameters.write_threads = 36;
-    base_item.stress_client_parameters.write_size = 512;
+    base_item.stress_client_parameters.write_size = 4096;
     base_item.stress_client_parameters.key_len = 32;
-    base_item.stress_client_parameters.writes = 83_000_000;
+    base_item.stress_client_parameters.writes = 3_000_000;
     base_item.stress_client_parameters.operations = 10_000_000;
     base_item.stress_client_parameters.background_writes = 0;
     base_item.stress_client_parameters.no_snapshot = false;
@@ -26,8 +26,15 @@ fn main() -> Result<()> {
     base_item.stress_client_parameters.read_percentage = 100;
     base_item.db_parameters.direct_io = false;
     let mut items: Vec<StressTestConfigs> = Vec::new();
-    for backend in [Backend::Tidehunter, Backend::Rocksdb] {
-        for read_mode in [ReadMode::Get, ReadMode::Exists, ReadMode::Lt(1)] {
+    for backend in [
+        Backend::Faster,
+        Backend::F2,
+        Backend::Lmdb,
+        Backend::Rocksdb,
+        Backend::Blobdb,
+        Backend::Tidehunter,
+    ] {
+        for read_mode in [ReadMode::Get, ReadMode::Exists] {
             for zipf_exponent in [0.0, 2.0] {
                 let mut item = base_item.clone();
                 item.stress_client_parameters.backend = backend.clone();

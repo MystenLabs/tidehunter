@@ -36,3 +36,8 @@ lmdb-rkv = "0.14"
 lmdb-rkv-sys = "0.11"
 fjall = "2.8"
 faster-wrapper = { path = "../faster-wrapper" }
+
+[features]
+default = []
+# Enable FASTER and F2 backends (Linux only)
+enable-faster = ["faster-wrapper/enable-faster"]

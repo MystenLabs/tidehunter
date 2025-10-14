@@ -1,5 +1,9 @@
+// FASTER and F2 backends - only available on Linux with the feature enabled
+#[cfg(all(target_os = "linux", feature = "enable-faster"))]
 pub mod f2;
+#[cfg(all(target_os = "linux", feature = "enable-faster"))]
 pub mod faster_native;
+
 pub mod fjall;
 pub mod lmdb;
 pub mod rocks;

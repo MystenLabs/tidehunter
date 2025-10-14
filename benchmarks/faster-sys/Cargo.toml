@@ -18,3 +18,5 @@ cmake = "0.1"
 
 [features]
 default = []
+# Enable FASTER and F2 backends (Linux only)
+enable-faster = []
