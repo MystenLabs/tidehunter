@@ -15,10 +15,10 @@ use crate::metrics::{Metrics, TimerExt};
 use crate::relocation::updates::RelocationUpdates;
 use crate::relocation::{RelocationCommand, RelocationDriver, RelocationStrategy, Relocator};
 use crate::state_snapshot;
-use crate::wal::{
-    PreparedWalWrite, Wal, WalError, WalIterator, WalKind, WalPosition, WalRandomRead, WalWriter,
-};
-use crate::wal_tracker::WalGuard;
+use crate::wal::layout::WalKind;
+use crate::wal::position::WalPosition;
+use crate::wal::tracker::WalGuard;
+use crate::wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalRandomRead, WalWriter};
 use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;

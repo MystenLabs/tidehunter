@@ -6,7 +6,7 @@ use minibytes::Bytes;
 use crate::index::index_table::IndexSerializationVisitor;
 use crate::math::{next_bounded, rescale_u32};
 use crate::metrics::Metrics;
-use crate::wal::WalPosition;
+use crate::wal::position::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 use super::index_format::{

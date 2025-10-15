@@ -8,7 +8,7 @@ use super::index_format::{Direction, IndexFormat};
 use crate::index::index_format::{binary_search, PREFIX_LENGTH};
 use crate::key_shape::CELL_PREFIX_LENGTH;
 use crate::metrics::Metrics;
-use crate::wal::WalPosition;
+use crate::wal::position::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 const DEFAULT_WINDOW_SIZE: usize = 800;

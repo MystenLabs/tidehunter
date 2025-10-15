@@ -5,7 +5,7 @@ use crate::index::index_table::IndexWalPosition;
 use crate::math;
 use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::relocation::RelocationFilter;
-use crate::wal::WalPosition;
+use crate::wal::position::WalPosition;
 use blake2::Digest;
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};

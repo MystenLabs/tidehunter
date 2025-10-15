@@ -7,7 +7,7 @@ use tidehunter::db::{Db, CONTROL_REGION_FILE};
 use tidehunter::index::index_format::IndexFormat;
 use tidehunter::key_shape::KeySpace;
 use tidehunter::test_utils::{Metrics, Wal, WalEntry};
-use tidehunter::wal::WalKind;
+use tidehunter::WalKind;
 
 pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool) -> Result<()> {
     // Load key shape

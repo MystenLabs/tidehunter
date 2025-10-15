@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::GetResult;
 use crate::metrics::{MetricHistogram, MetricIntCounter, MetricIntGauge, Metrics, TimerExt};
-use crate::wal::WalPosition;
+use crate::wal::position::WalPosition;
 use std::array;
 use std::ops::Deref;
 use std::sync::Arc;

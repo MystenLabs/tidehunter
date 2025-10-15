@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tidehunter::metrics::{self, Metrics};
-use tidehunter::wal::{PreparedWalWrite, Wal, WalKind, WalLayout};
+use tidehunter::{PreparedWalWrite, Wal, WalKind, WalLayout, WalWriter};
 
 /// Multi-threaded WAL benchmark for TideHunter
 #[derive(Parser, Debug)]
@@ -44,7 +44,7 @@ struct BenchmarkResult {
 
 fn run_benchmark_thread(
     thread_id: usize,
-    wal_writer: Arc<tidehunter::wal::WalWriter>,
+    wal_writer: Arc<WalWriter>,
     write_size: usize,
     duration: Duration,
     total_writes: Arc<AtomicU64>,

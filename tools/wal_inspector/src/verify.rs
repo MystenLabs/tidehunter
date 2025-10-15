@@ -6,7 +6,7 @@ use tidehunter::db::Db;
 use tidehunter::key_shape::KeySpace;
 use tidehunter::minibytes::Bytes;
 use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
-use tidehunter::wal::WalKind;
+use tidehunter::WalKind;
 
 pub fn verify_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Verify");

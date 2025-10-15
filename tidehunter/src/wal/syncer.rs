@@ -1,5 +1,5 @@
+use super::Map;
 use crate::metrics::Metrics;
-use crate::wal::Map;
 use memmap2::MmapMut;
 use std::sync::{mpsc, Arc};
 use std::thread;

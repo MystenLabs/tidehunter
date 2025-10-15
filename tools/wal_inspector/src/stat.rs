@@ -7,7 +7,7 @@ use std::fs;
 use std::io::ErrorKind;
 use tidehunter::key_shape::{KeyShape, KeySpace};
 use tidehunter::test_utils::{list_wal_files_with_sizes, Metrics, Wal, WalEntry, WalError};
-use tidehunter::wal::WalKind;
+use tidehunter::WalKind;
 
 pub fn stat_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Statistics");

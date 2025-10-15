@@ -1,15 +1,18 @@
+// Submodules
+pub mod layout;
+pub mod position;
+mod syncer;
+pub(crate) mod tracker;
+
 use crate::context::ReadType;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
-use crate::file_reader::{align_size, set_direct_options, FileReader};
+use crate::file_reader::set_direct_options;
+use crate::file_reader::FileReader;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
-use crate::wal_syncer::WalSyncer;
-use crate::wal_tracker::{WalGuard, WalTracker};
 use arc_swap::ArcSwap;
-use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -20,6 +23,13 @@ use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Instant;
 use std::{io, mem, ptr, thread};
+
+#[cfg(any(test, feature = "test-utils"))]
+use layout::WalKind;
+use layout::WalLayout;
+use position::{WalFileId, WalPosition};
+use syncer::WalSyncer;
+use tracker::{WalGuard, WalTracker};
 
 pub struct WalWriter {
     wal: Arc<Wal>,
@@ -68,15 +78,6 @@ struct WalFiles {
     files: Vec<Arc<File>>,
     min_file_id: WalFileId,
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct WalPosition {
-    offset: u64,
-    len: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct WalFileId(u64);
 
 pub enum WalRandomRead {
     Mapped(Bytes),
@@ -230,107 +231,6 @@ impl IncrementalWalPosition {
         let result = (position, self.position);
         self.position = position + len_aligned;
         result
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum WalKind {
-    Replay,
-    Index,
-}
-
-#[doc(hidden)] // Used by tools/wal_inspector for WAL configuration
-#[derive(Clone)]
-pub struct WalLayout {
-    pub frag_size: u64,
-    pub max_maps: usize,
-    pub direct_io: bool,
-    pub wal_file_size: u64,
-    pub kind: WalKind,
-}
-
-impl WalLayout {
-    fn assert_layout(&self) {
-        assert!(self.frag_size <= u32::MAX as u64, "Frag size too large");
-        assert_eq!(
-            self.frag_size,
-            self.align(self.frag_size),
-            "Frag size not aligned"
-        );
-        assert_eq!(
-            self.wal_file_size % self.frag_size,
-            0,
-            "WAL file size must be a multiple of the frag size"
-        );
-    }
-
-    /// Returns next position to write to after a previously allocated valid wal position.
-    fn next_after_wal_position(&self, wal_position: WalPosition) -> u64 {
-        assert!(wal_position.is_valid());
-        let len_aligned = self.align(wal_position.len as u64);
-        assert!(
-            len_aligned <= self.frag_size,
-            "Entry({len_aligned}) is larger then frag_size({})",
-            self.frag_size
-        );
-        wal_position.offset + len_aligned
-    }
-
-    /// Allocate the next position.
-    /// Block should not cross the map boundary defined by the self.frag_size
-    fn next_position(&self, mut pos: u64, len_aligned: u64) -> u64 {
-        assert!(
-            len_aligned <= self.frag_size,
-            "Entry({len_aligned}) is larger then frag_size({})",
-            self.frag_size
-        );
-        let map_start = self.locate(pos).0;
-        let map_end = self.locate(pos + len_aligned - 1).0;
-        if map_start != map_end {
-            pos = (map_start + 1) * self.frag_size;
-        }
-        pos
-    }
-
-    /// Return number of a mapping and offset inside the mapping for given position
-    #[inline]
-    fn locate(&self, pos: u64) -> (u64, u64) {
-        (pos / self.frag_size, pos % self.frag_size)
-    }
-
-    /// Return range of a particular mapping
-    fn map_range(&self, map: u64) -> Range<u64> {
-        let start = self.frag_size * map;
-        let end = self.frag_size * (map + 1);
-        start..end
-    }
-
-    #[doc(hidden)] // Used by tools/wal_inspector for control region inspection
-    #[inline]
-    pub fn locate_file(&self, offset: u64) -> WalFileId {
-        WalFileId(offset / self.wal_file_size)
-    }
-
-    #[inline]
-    fn offset_in_wal_file(&self, offset: u64) -> u64 {
-        offset % self.wal_file_size
-    }
-
-    pub fn align(&self, v: u64) -> u64 {
-        align_size(v, self.direct_io)
-    }
-
-    pub fn wal_file_name(&self, base_path: &Path, file_id: WalFileId) -> PathBuf {
-        base_path.join(format!("{}_{:016x}", self.kind.name(), file_id.0))
-    }
-}
-
-impl WalKind {
-    pub fn name(&self) -> &'static str {
-        match self {
-            WalKind::Replay => "wal",
-            WalKind::Index => "index",
-        }
     }
 }
 
@@ -919,85 +819,6 @@ impl PreparedWalWrite {
     }
 }
 
-impl WalPosition {
-    pub const MAX: WalPosition = WalPosition {
-        offset: u64::MAX,
-        len: u32::MAX,
-    };
-    pub const INVALID: WalPosition = Self::MAX;
-    pub const LENGTH: usize = 12;
-    #[cfg(test)]
-    pub const TEST: WalPosition = WalPosition::new(3311, 12);
-
-    // Creates new wal position.
-    // This should only be called from wal.rs or from conversion IndexWalPosition<->WalPosition
-    pub(crate) const fn new(offset: u64, len: u32) -> Self {
-        Self { offset, len }
-    }
-
-    pub fn write_to_buf(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.offset);
-        buf.put_u32(self.len);
-    }
-
-    pub fn to_vec(&self) -> Vec<u8> {
-        let mut buf = BytesMut::with_capacity(Self::LENGTH);
-        self.write_to_buf(&mut buf);
-        buf.into()
-    }
-
-    pub fn read_from_buf(buf: &mut impl Buf) -> Self {
-        Self::new(buf.get_u64(), buf.get_u32())
-    }
-
-    pub fn from_slice(mut slice: &[u8]) -> Self {
-        let r = Self::read_from_buf(&mut slice);
-        assert_eq!(0, slice.len());
-        r
-    }
-
-    /// Returns unaligned length of the wal frame.
-    /// The length includes frame header but does not account for alignment
-    pub fn frame_len(&self) -> usize {
-        self.len as usize
-    }
-
-    /// Same as frame_len but returns u32
-    pub fn frame_len_u32(&self) -> u32 {
-        self.len
-    }
-
-    /// Returns length of the payload at given wal position, without crc frame header and alignment.
-    /// This is the length of the buffer that was passed when WalWriter::write was
-    /// called that created this wal position.
-    pub fn payload_len(&self) -> usize {
-        self.frame_len()
-            .checked_sub(CrcFrame::CRC_HEADER_LENGTH)
-            .expect("Frame length must be greater or equal to crc header length")
-    }
-
-    pub fn valid(self) -> Option<Self> {
-        if self == Self::INVALID {
-            None
-        } else {
-            Some(self)
-        }
-    }
-
-    pub fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    pub fn is_valid(self) -> bool {
-        self != Self::INVALID
-    }
-
-    #[allow(dead_code)]
-    pub fn test_value(v: u64) -> Self {
-        Self::new(v, 0)
-    }
-}
-
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum WalError {
@@ -1059,7 +880,7 @@ pub fn list_wal_files_with_sizes(base_path: &Path) -> io::Result<Vec<(PathBuf, u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
+    use bytes::{BufMut, BytesMut};
     use std::collections::HashSet;
 
     #[test]

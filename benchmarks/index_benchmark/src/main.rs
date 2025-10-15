@@ -21,7 +21,7 @@ use tidehunter::key_shape::KeySpace;
 use tidehunter::key_shape::{KeyShape, KeyType};
 use tidehunter::lookup::FileRange;
 use tidehunter::metrics::Metrics;
-use tidehunter::wal::WalPosition;
+use tidehunter::WalPosition;
 
 /// Generates a file with serialized indices for benchmarking
 pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone>(

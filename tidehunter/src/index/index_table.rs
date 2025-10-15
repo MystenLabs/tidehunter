@@ -3,7 +3,7 @@ use crate::primitives::cursor::SliceCursor;
 use crate::primitives::range_from_excluding::RangeFromExcluding;
 use crate::primitives::slice_buf::SliceBuf;
 use crate::primitives::var_int::{deserialize_u16_varint, serialize_u16_varint, MAX_U16_VARINT};
-use crate::wal::WalPosition;
+use crate::wal::position::WalPosition;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use std::collections::btree_map::{Entry, Keys};

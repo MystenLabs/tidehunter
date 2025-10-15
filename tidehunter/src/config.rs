@@ -1,5 +1,5 @@
 use crate::relocation::RelocationStrategy;
-use crate::wal::{WalKind, WalLayout};
+use crate::wal::layout::{WalKind, WalLayout};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::cmp;

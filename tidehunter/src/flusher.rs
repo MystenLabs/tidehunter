@@ -6,7 +6,7 @@ use crate::key_shape::KeySpace;
 use crate::large_table::Loader;
 use crate::metrics::Metrics;
 use crate::relocation::updates::RelocationUpdates;
-use crate::wal::WalPosition;
+use crate::wal::position::WalPosition;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Weak;

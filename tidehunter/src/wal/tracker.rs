@@ -1,6 +1,6 @@
+use super::WalPosition;
 #[cfg(test)]
 use crate::latch::LatchGuard;
-use crate::WalPosition;
 use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,6 +151,7 @@ impl WalTrackerThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::WalPosition;
     use std::thread;
     use std::time::Duration;
 

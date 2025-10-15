@@ -23,9 +23,8 @@ mod primitives;
 mod relocation;
 mod runtime;
 mod state_snapshot;
-pub mod wal;
-mod wal_syncer;
-mod wal_tracker;
+
+pub(crate) mod wal;
 
 #[cfg(test)]
 mod latch;
@@ -35,15 +34,18 @@ pub use minibytes;
 
 pub use index::index_table::IndexWalPosition;
 pub use relocation::{Decision, RelocationStrategy};
-pub use wal::WalPosition;
+
+// WAL re-exports
+#[doc(hidden)] // Used by tools and benchmarks
+pub use wal::layout::{WalKind, WalLayout};
+pub use wal::position::WalPosition;
+#[doc(hidden)] // Used by benchmarks
+pub use wal::{PreparedWalWrite, Wal, WalWriter};
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils {
     pub use crate::db::WalEntry;
     pub use crate::metrics::Metrics;
-    pub use crate::wal::{list_wal_files_with_sizes, Wal, WalError, WalIterator, WalLayout};
+    pub use crate::wal::layout::WalLayout;
+    pub use crate::wal::{list_wal_files_with_sizes, Wal, WalError, WalIterator};
 }
-
-// Re-export for tools
-#[doc(hidden)] // Used by tools/wal_inspector for control region inspection
-pub use wal::{WalKind, WalLayout};

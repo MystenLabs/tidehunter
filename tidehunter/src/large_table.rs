@@ -14,7 +14,9 @@ use crate::primitives::range_from_excluding;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::relocation::updates::RelocationUpdates;
 use crate::runtime;
-use crate::wal::{WalPosition, WalRandomRead};
+use crate::wal::position::WalPosition;
+use crate::wal::tracker::WalGuard;
+use crate::wal::WalRandomRead;
 use bloom::{BloomFilter, ASMS};
 use lru::LruCache;
 use minibytes::Bytes;
@@ -199,7 +201,7 @@ impl LargeTable {
         &self,
         context: &KsContext,
         k: Bytes,
-        guard: crate::wal_tracker::WalGuard,
+        guard: WalGuard,
         value: &Bytes,
         loader: &L,
     ) -> Result<(), L::Error> {
@@ -249,7 +251,7 @@ impl LargeTable {
         &self,
         context: &KsContext,
         k: Bytes,
-        guard: crate::wal_tracker::WalGuard,
+        guard: WalGuard,
         _loader: &L,
     ) -> Result<(), L::Error> {
         self.fp.fp_remove_before_lock();
@@ -1530,7 +1532,8 @@ impl LargeTableFailPoints {
 mod tests {
     use super::*;
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
-    use crate::wal::{Wal, WalKind};
+    use crate::wal::layout::WalKind;
+    use crate::wal::Wal;
     use std::io;
 
     #[test]

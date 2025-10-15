@@ -1,5 +1,5 @@
 use crate::index::index_format::Direction;
-use crate::wal::WalPosition;
+use crate::wal::position::WalPosition;
 use minibytes::Bytes;
 use std::cmp::Ordering;
 

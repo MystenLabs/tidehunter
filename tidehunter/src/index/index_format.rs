@@ -8,7 +8,7 @@ use super::lookup_header::LookupHeaderIndex;
 use super::uniform_lookup::UniformLookupIndex;
 use crate::index::index_table::VariableLenKeyIndexIterator;
 use crate::metrics::{Metrics, TimerExt};
-use crate::wal::WalPosition;
+use crate::wal::position::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 pub const HEADER_ELEMENTS: usize = 128;
@@ -224,7 +224,7 @@ pub mod test {
         index::{index_format::IndexFormat, index_table::IndexTable},
         key_shape::KeyShape,
         metrics::Metrics,
-        wal::WalPosition,
+        wal::position::WalPosition,
     };
 
     // Create a mock reader
