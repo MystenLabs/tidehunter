@@ -1,4 +1,5 @@
 // Submodules
+pub(crate) mod allocator;
 pub(crate) mod files;
 pub mod layout;
 mod mapper;

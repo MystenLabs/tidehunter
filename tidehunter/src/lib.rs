@@ -42,6 +42,11 @@ pub use wal::position::WalPosition;
 #[doc(hidden)] // Used by benchmarks
 pub use wal::{PreparedWalWrite, Wal, WalWriter};
 
+#[doc(hidden)] // Used by benchmarks
+pub mod wal_allocator {
+    pub use crate::wal::allocator::WalAllocator;
+}
+
 #[cfg(feature = "test-utils")]
 pub mod test_utils {
     pub use crate::db::WalEntry;

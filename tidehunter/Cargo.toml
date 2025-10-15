@@ -42,5 +42,9 @@ name = "large_table_benchmarks"
 harness = false
 required-features = ["test-utils"]
 
+[[bench]]
+name = "wal_allocator_benchmarks"
+harness = false
+
 [lints.clippy]
 len_without_is_empty = "allow"
