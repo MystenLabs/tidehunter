@@ -36,7 +36,7 @@ pub struct Db {
     pub(crate) wal_writer: WalWriter,
     pub(crate) index_writer: WalWriter,
     pub(crate) control_region_store: Mutex<ControlRegionStore>,
-    config: Arc<Config>,
+    pub(crate) config: Arc<Config>,
     metrics: Arc<Metrics>,
     pub(crate) key_shape: KeyShape,
     relocator: Relocator,

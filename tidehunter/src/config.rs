@@ -29,6 +29,9 @@ pub struct Config {
     /// Strategy to use for relocation (WalBased or IndexBased)
     #[serde(default)]
     pub relocation_strategy: RelocationStrategy,
+    /// Maximum percentage of disk space that relocation can reclaim in a single run (0-100)
+    #[serde(default = "default_relocation_max_reclaim_pct")]
+    pub relocation_max_reclaim_pct: u8,
     /// Enable Tidehunter runtime metrics collection
     #[serde(default = "default_metrics_enabled")]
     pub metrics_enabled: bool,
@@ -36,6 +39,10 @@ pub struct Config {
 
 fn default_metrics_enabled() -> bool {
     true
+}
+
+fn default_relocation_max_reclaim_pct() -> u8 {
+    5
 }
 
 impl Default for Config {
@@ -52,6 +59,7 @@ impl Default for Config {
             sync_flush: false,
             wal_file_size: 10 * (1 << 30), // 10Gb
             relocation_strategy: RelocationStrategy::default(),
+            relocation_max_reclaim_pct: default_relocation_max_reclaim_pct(),
             metrics_enabled: true,
         }
     }
@@ -72,6 +80,7 @@ impl Config {
             wal_file_size: 4 * 1024 * 1024,
             relocation_strategy: RelocationStrategy::default(),
             metrics_enabled: true,
+            relocation_max_reclaim_pct: 100,
         }
     }
 
