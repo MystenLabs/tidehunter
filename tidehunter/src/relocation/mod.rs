@@ -236,16 +236,25 @@ impl RelocationDriver {
 
     fn wal_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
         let upper_limit = db.wal_writer.last_processed();
-        let mut wal_iterator = db.wal.wal_iterator(db.wal.min_wal_position())?;
-        let mut target_position = None;
+        let min_wal_position = db.wal.min_wal_position();
+        let mut wal_iterator = db.wal.wal_iterator(min_wal_position)?;
+
+        // Calculate the maximum amount we can reclaim based on configured percentage
+        let max_target_position = min_wal_position
+            + (upper_limit.saturating_sub(min_wal_position)
+                * db.config.relocation_max_reclaim_pct as u64
+                / 100)
+                .max(db.wal.wal_file_size());
         // find target cut-off position
+        let mut target_position = None;
         loop {
             let entry = wal_iterator.next();
             if matches!(entry, Err(WalError::Crc(_))) {
                 break;
             }
             let (position, raw_entry) = entry?;
-            if position.offset() >= upper_limit {
+            if position.offset() >= max_target_position.min(upper_limit) {
+                target_position = Some(position);
                 break;
             }
             if let WalEntry::Record(ks, key, value, _relocated) = WalEntry::from_bytes(raw_entry) {
@@ -265,7 +274,7 @@ impl RelocationDriver {
             .relocation_target_position
             .set(target_position.offset() as i64);
         // ensure the target position is big enough to cut
-        if target_position.offset() < (db.wal.wal_file_size() + db.wal.min_wal_position()) {
+        if target_position.offset() < (db.wal.wal_file_size() + min_wal_position) {
             return Ok(());
         }
         for ks in db.key_shape.iter_ks() {
