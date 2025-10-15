@@ -1,5 +1,7 @@
 // Submodules
+mod files;
 pub mod layout;
+mod mapper;
 pub mod position;
 mod syncer;
 pub(crate) mod tracker;
@@ -18,15 +20,16 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
-use std::thread::JoinHandle;
+use std::path::Path;
+use std::sync::Arc;
+#[cfg(test)]
+use std::thread;
 use std::time::Instant;
-use std::{io, mem, ptr, thread};
+use std::{io, mem, ptr};
 
-#[cfg(any(test, feature = "test-utils"))]
-use layout::WalKind;
+use files::WalFiles;
 use layout::WalLayout;
+use mapper::WalMapper;
 use position::{WalFileId, WalPosition};
 use syncer::WalSyncer;
 use tracker::{WalGuard, WalTracker};
@@ -46,19 +49,6 @@ pub struct Wal {
     metrics: Arc<Metrics>,
 }
 
-struct WalMapper {
-    jh: Option<JoinHandle<()>>,
-    receiver: Option<Mutex<mpsc::Receiver<Map>>>,
-}
-
-struct WalMapperThread {
-    sender: mpsc::SyncSender<Map>,
-    last_map: u64,
-    files: Arc<ArcSwap<WalFiles>>,
-    layout: WalLayout,
-    metrics: Arc<Metrics>,
-}
-
 pub struct WalIterator {
     wal: Arc<Wal>,
     map: Map,
@@ -71,12 +61,6 @@ pub(crate) struct Map {
     id: u64,
     pub data: Bytes,
     writeable: bool,
-}
-
-struct WalFiles {
-    base_path: PathBuf,
-    files: Vec<Arc<File>>,
-    min_file_id: WalFileId,
 }
 
 pub enum WalRandomRead {
@@ -234,71 +218,6 @@ impl IncrementalWalPosition {
     }
 }
 
-impl WalFiles {
-    fn new(base_path: &Path, layout: &WalLayout) -> io::Result<Arc<ArcSwap<Self>>> {
-        let wal_files = Self::load(base_path, layout)?;
-        Ok(Arc::new(ArcSwap::from(Arc::new(wal_files))))
-    }
-
-    fn load(base_path: &Path, layout: &WalLayout) -> io::Result<Self> {
-        let mut files = vec![];
-        for entry in std::fs::read_dir(base_path)? {
-            let file_path = entry?.path();
-            if file_path.is_file() {
-                if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
-                    if let Some(id_str) = file_name.strip_prefix(layout.kind.name()) {
-                        let Some(id_str) = id_str.strip_prefix("_") else {
-                            panic!(
-                                "invalid wal file name {:?}(failed to strip _ prefix)",
-                                file_name
-                            );
-                        };
-                        let id = u64::from_str_radix(id_str, 16)
-                            .unwrap_or_else(|_| panic!("invalid wal file name {:?}", file_name));
-                        let file = Wal::open_file(&file_path, layout)?;
-                        files.push((id, file));
-                    }
-                }
-            }
-        }
-        if files.is_empty() {
-            let file = Wal::open_file(&layout.wal_file_name(base_path, WalFileId(0)), layout)?;
-            files.push((0, file));
-        }
-        files.sort_by_key(|(id, _)| *id);
-        let min_file_id = files[0].0;
-        assert_eq!(
-            files[files.len() - 1].0 - min_file_id + 1,
-            files.len() as u64,
-            "WAL file IDs must form a contiguous range",
-        );
-        Ok(Self {
-            base_path: base_path.to_path_buf(),
-            files: files.into_iter().map(|(_, file)| Arc::new(file)).collect(),
-            min_file_id: WalFileId(min_file_id),
-        })
-    }
-
-    fn current_file_id(&self) -> WalFileId {
-        WalFileId(self.min_file_id.0 + self.files.len() as u64 - 1)
-    }
-
-    #[inline]
-    fn current_file(&self) -> &Arc<File> {
-        self.files.last().expect("unable to find current WAL file")
-    }
-
-    fn get_checked(&self, id: WalFileId) -> Option<&Arc<File>> {
-        id.0.checked_sub(self.min_file_id.0)
-            .and_then(|id| self.files.get(id as usize))
-    }
-
-    fn get(&self, id: WalFileId) -> &Arc<File> {
-        self.get_checked(id)
-            .unwrap_or_else(|| panic!("attempt to access non existing file {:?}", id))
-    }
-}
-
 impl Wal {
     #[doc(hidden)] // Used by tools/wal_inspector to open WAL files directly
     pub fn open(
@@ -317,7 +236,7 @@ impl Wal {
         Ok(Arc::new(wal))
     }
 
-    fn open_file(path: &Path, layout: &WalLayout) -> io::Result<File> {
+    pub(crate) fn open_file(path: &Path, layout: &WalLayout) -> io::Result<File> {
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
         set_direct_options(&mut options, layout.direct_io);
@@ -597,117 +516,6 @@ impl Wal {
     }
 }
 
-impl WalMapper {
-    pub fn start(
-        last_map: u64,
-        files: Arc<ArcSwap<WalFiles>>,
-        layout: WalLayout,
-        metrics: Arc<Metrics>,
-    ) -> Self {
-        let (sender, receiver) = mpsc::sync_channel(2);
-        let this = WalMapperThread {
-            last_map,
-            files,
-            layout,
-            sender,
-            metrics,
-        };
-        let jh = thread::Builder::new()
-            .name("wal-mapper".to_string())
-            .spawn(move || this.run())
-            .expect("failed to start wal-mapper thread");
-        let receiver = Mutex::new(receiver);
-        let receiver = Some(receiver);
-        let jh = Some(jh);
-        Self { jh, receiver }
-    }
-
-    pub fn next_map(&self) -> Map {
-        self.receiver
-            .as_ref()
-            .expect("next_map is called after drop")
-            .lock()
-            .recv()
-            .expect("Map thread stopped unexpectedly")
-    }
-}
-
-impl Drop for WalMapper {
-    fn drop(&mut self) {
-        self.receiver.take();
-        self.jh
-            .take()
-            .unwrap()
-            .join()
-            .expect("wal-mapper thread panic")
-    }
-}
-
-impl WalMapperThread {
-    pub fn run(mut self) {
-        loop {
-            let timer = Instant::now();
-            let map_id = self.last_map + 1;
-            let range = self.layout.map_range(map_id);
-            let file_id = self.layout.locate_file(range.start);
-            let mut files = self.files.load();
-            // if min_file_id has already been removed by relocation, reload the list of active files
-            if !self
-                .layout
-                .wal_file_name(&files.base_path, files.min_file_id)
-                .exists()
-            {
-                let new_files = WalFiles::load(&files.base_path, &self.layout)
-                    .expect("Failed to reload wal files directory");
-                self.files.store(Arc::new(new_files));
-                files = self.files.load();
-            }
-            if file_id > files.current_file_id() {
-                assert_eq!(file_id, WalFileId(files.current_file_id().0 + 1));
-                let mut new_files = files.files.clone();
-                let new_file_path = self.layout.wal_file_name(&files.base_path, file_id);
-                let new_file = Wal::open_file(&new_file_path, &self.layout)
-                    .expect("Failed to create new wal file");
-                new_files.push(Arc::new(new_file));
-
-                let new_wal_files = WalFiles {
-                    base_path: files.base_path.clone(),
-                    files: new_files,
-                    min_file_id: files.min_file_id,
-                };
-                self.files.store(Arc::new(new_wal_files));
-                files = self.files.load();
-            }
-            Wal::extend_to_map(&self.layout, &files, range.start)
-                .expect("Failed to extend wal file");
-            let data = unsafe {
-                let mut options = memmap2::MmapOptions::new();
-                options
-                    .offset(self.layout.offset_in_wal_file(range.start))
-                    .len(self.layout.frag_size as usize);
-                options
-                    .populate()
-                    .map_mut(files.get(file_id))
-                    .expect("Failed to mmap on wal file")
-                    .into()
-            };
-            let map = Map {
-                id: map_id,
-                writeable: true,
-                data,
-            };
-            self.last_map = map_id;
-            self.metrics
-                .wal_mapper_time_mcs
-                .inc_by(timer.elapsed().as_micros() as u64);
-            // todo ideally figure out a way to not create a map when sender closes
-            if self.sender.send(map).is_err() {
-                return;
-            }
-        }
-    }
-}
-
 impl WalIterator {
     #[allow(clippy::should_implement_trait)] // todo better name
     pub fn next(&mut self) -> Result<(WalPosition, Bytes), WalError> {
@@ -838,48 +646,13 @@ impl From<io::Error> for WalError {
     }
 }
 
-#[doc(hidden)] // Used by tools/wal_inspector for progress tracking
 #[cfg(any(test, feature = "test-utils"))]
-pub fn list_wal_files_with_sizes(base_path: &Path) -> io::Result<Vec<(PathBuf, u64)>> {
-    let prefix = format!("{}_", WalKind::Replay.name());
-    let mut files = vec![];
-
-    for entry in std::fs::read_dir(base_path)? {
-        let file_path = entry?.path();
-        if file_path.is_file() {
-            if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
-                if let Some(id_str) = file_name.strip_prefix(&prefix) {
-                    if u64::from_str_radix(id_str, 16).is_ok() {
-                        let metadata = std::fs::metadata(&file_path)?;
-                        files.push((file_path, metadata.len()));
-                    }
-                }
-            }
-        }
-    }
-
-    // If no WAL files found, check for the default wal_0000000000000000 file
-    if files.is_empty() {
-        let default_wal_path = base_path.join(format!("{}{:016x}", prefix, 0));
-        if default_wal_path.exists() {
-            let metadata = std::fs::metadata(&default_wal_path)?;
-            files.push((default_wal_path, metadata.len()));
-        }
-    }
-
-    // Sort by file name (which corresponds to WAL file ID)
-    files.sort_by(|(a, _), (b, _)| {
-        let a_name = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let b_name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        a_name.cmp(b_name)
-    });
-
-    Ok(files)
-}
+pub use files::list_wal_files_with_sizes;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::layout::WalKind;
     use bytes::{BufMut, BytesMut};
     use std::collections::HashSet;
 
