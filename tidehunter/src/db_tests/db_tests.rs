@@ -6,6 +6,7 @@ use crate::failpoints::FailPoint;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{KeyIndexing, KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
+use crate::latch::Latch;
 use crate::metrics::Metrics;
 use minibytes::Bytes;
 use rand::rngs::{StdRng, ThreadRng};
@@ -2399,6 +2400,72 @@ fn db_test_snapshot_unload_threshold() {
     println!("  - Replay position in control region: {}", replay_position);
 
     assert_eq!(replay_position, wal_position_before);
+}
+
+#[test]
+// This test simulates a situation
+// where index wal file is deleted while index is being read by another thread.
+// We use latch fail point to emulate race condition where thread reading from the db is blocked
+// after it reads the index but before it does IO to the index, while the file is being deleted.
+// This test will fail if index reader is acquired after the row mutex is dropped in LargeTable::get
+fn test_concurrent_index_reclaim() {
+    let dir = tempdir::TempDir::new("test-concurrent-index-reclaim").unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = config.frag_size;
+    let config = Arc::new(config);
+    let (key_shape, ks) = KeyShape::new_single(2, 1, KeyType::uniform(1));
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    const SLEEP: u64 = 200;
+
+    db.insert(ks, vec![1, 2], vec![5, 6]).unwrap();
+    thread::sleep(Duration::from_millis(10));
+    db.force_rebuild_control_region().unwrap();
+    let (lookup_latch, lookup_latch_guard) = Latch::new();
+    db.large_table.fp.0.write().fp_lookup_after_lock_drop = FailPoint::latch(lookup_latch);
+    let lookup_thread = {
+        let db = db.clone();
+        thread::spawn(move || db.get(ks, &[1, 2]))
+    };
+    thread::sleep(Duration::from_millis(SLEEP));
+    assert!(!lookup_thread.is_finished());
+    // Write big buffer into index wal to force it to go to next wal file
+    db.index_writer
+        .write(&PreparedWalWrite::new(&vec![
+            0;
+            config.frag_size as usize - 16
+        ]))
+        .unwrap();
+    db.insert(ks, vec![3, 4], vec![6, 7]).unwrap();
+    thread::sleep(Duration::from_millis(SLEEP));
+    db.force_rebuild_control_region().unwrap();
+    db.insert(ks, vec![3, 4], vec![6, 7]).unwrap();
+    thread::sleep(Duration::from_millis(SLEEP)); // todo use wal t
+    db.force_rebuild_control_region().unwrap();
+    // Write big buffer into index wal to force it to go to next wal file, which also trigger file reclaim in WalMapper thread
+    db.index_writer
+        .write(&PreparedWalWrite::new(&vec![
+            0;
+            config.frag_size as usize - 16
+        ]))
+        .unwrap();
+    thread::sleep(Duration::from_millis(SLEEP));
+    // Assert that at least one file was deleted
+    assert!(db.indexes.min_wal_position() > 0);
+    assert!(!lookup_thread.is_finished());
+    drop(lookup_latch_guard);
+
+    assert_eq!(
+        Some(vec![5, 6].into()),
+        lookup_thread.join().unwrap().unwrap()
+    );
 }
 
 #[test]

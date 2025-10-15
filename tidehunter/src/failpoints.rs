@@ -1,3 +1,4 @@
+use crate::latch::Latch;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::ops::Range;
@@ -22,6 +23,14 @@ impl FailPoint {
             let mut rng = ThreadRng::default();
             let delay = rng.gen_range(range.clone());
             thread::sleep(delay)
+        });
+        Self { fp }
+    }
+
+    /// Failpoint that blocks until provided latch is unlocked
+    pub fn latch(latch: Latch) -> Self {
+        let fp = Box::new(move || {
+            latch.latch();
         });
         Self { fp }
     }

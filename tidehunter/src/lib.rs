@@ -27,6 +27,9 @@ pub mod wal;
 mod wal_syncer;
 mod wal_tracker;
 
+#[cfg(test)]
+mod latch;
+
 // todo remove re-export
 pub use minibytes;
 

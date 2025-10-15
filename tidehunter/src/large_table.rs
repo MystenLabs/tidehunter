@@ -342,10 +342,16 @@ impl LargeTable {
             }
             LargeTableEntryState::Unloaded(position) => position,
         };
+        // Allocate index reader **before** dropping the mutex - this ensures
+        // that we can read from the index,
+        // even if the relocation is concurrently deleting the file holding the index.
+        // See also test_concurrent_index_reclaim
+        let index_reader = loader.index_reader(index_position)?;
         // drop row to avoid holding mutex during IO
         drop(row);
+
+        self.fp.fp_lookup_after_lock_drop();
         let now = Instant::now();
-        let index_reader = loader.index_reader(index_position)?;
         // todo - consider only doing block_in_place for the syscall random reader
         // TODO: handle entries that may be removed by relocation but are still referenced in the index
         let result = runtime::block_in_place(|| {
@@ -1495,12 +1501,15 @@ pub(crate) struct LargeTableFailPoints(pub(crate) parking_lot::RwLock<LargeTable
 pub(crate) struct LargeTableFailPointsInner {
     pub fp_insert_before_lock: crate::failpoints::FailPoint,
     pub fp_remove_before_lock: crate::failpoints::FailPoint,
+    pub fp_lookup_after_lock_drop: crate::failpoints::FailPoint,
 }
 
 #[cfg(not(test))]
 impl LargeTableFailPoints {
     pub fn fp_insert_before_lock(&self) {}
     pub fn fp_remove_before_lock(&self) {}
+
+    pub fn fp_lookup_after_lock_drop(&self) {}
 }
 
 #[cfg(test)]
@@ -1511,6 +1520,9 @@ impl LargeTableFailPoints {
 
     pub fn fp_remove_before_lock(&self) {
         self.0.read().fp_insert_before_lock.fp();
+    }
+    pub fn fp_lookup_after_lock_drop(&self) {
+        self.0.read().fp_lookup_after_lock_drop.fp();
     }
 }
 
