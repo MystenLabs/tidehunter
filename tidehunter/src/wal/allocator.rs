@@ -12,8 +12,8 @@ pub struct WalAllocator {
 }
 
 pub struct AllocationResult {
-    pub allocated_position: u64,
-    pub previous_position: u64,
+    allocated_position: u64,
+    previous_position: u64,
 }
 
 impl WalAllocator {
@@ -65,6 +65,22 @@ impl WalAllocator {
     }
 }
 
+impl AllocationResult {
+    /// Returns if allocated position is in the beginning
+    /// of new fragment and needs skip marker in previous fragment
+    pub fn need_skip_marker(&self) -> Option<u64> {
+        if self.previous_position != self.allocated_position {
+            Some(self.previous_position)
+        } else {
+            None
+        }
+    }
+
+    pub fn allocated_position(&self) -> u64 {
+        self.allocated_position
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,13 +88,7 @@ mod tests {
 
     #[test]
     fn test_basic_allocation() {
-        let layout = WalLayout {
-            frag_size: 1024,
-            max_maps: 10,
-            direct_io: false,
-            wal_file_size: 1024 * 10,
-            kind: WalKind::Replay,
-        };
+        let layout = l(1024);
 
         let allocator = WalAllocator::new(layout, 0);
 
@@ -97,13 +107,7 @@ mod tests {
 
     #[test]
     fn test_fragment_boundary() {
-        let layout = WalLayout {
-            frag_size: 1024,
-            max_maps: 10,
-            direct_io: false,
-            wal_file_size: 1024 * 10,
-            kind: WalKind::Replay,
-        };
+        let layout = l(1024);
 
         let allocator = WalAllocator::new(layout, 900);
 
@@ -119,13 +123,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let layout = WalLayout {
-            frag_size: 1024 * 1024,
-            max_maps: 10,
-            direct_io: false,
-            wal_file_size: 1024 * 1024 * 10,
-            kind: WalKind::Replay,
-        };
+        let layout = l(1024 * 1024);
 
         let allocator = Arc::new(WalAllocator::new(layout, 0));
         let mut handles = vec![];
@@ -162,5 +160,28 @@ mod tests {
 
         // Final position should be 1000 * 104 = 104000 (100 bytes aligns to 104)
         assert_eq!(allocator.position(), 104_000);
+    }
+
+    #[test]
+    fn test_need_skip_marker() {
+        let layout = l(1024);
+        let allocator = WalAllocator::new(layout, 0);
+        let r = allocator.allocate(10);
+        assert!(r.need_skip_marker().is_none());
+        assert_eq!(0, r.allocated_position());
+
+        let r = allocator.allocate(1020);
+        assert_eq!(1024, r.allocated_position());
+        assert_eq!(Some(16), r.need_skip_marker());
+    }
+
+    fn l(frag_size: u64) -> WalLayout {
+        WalLayout {
+            frag_size,
+            max_maps: 10,
+            direct_io: false,
+            wal_file_size: frag_size * 10,
+            kind: WalKind::Replay,
+        }
     }
 }
