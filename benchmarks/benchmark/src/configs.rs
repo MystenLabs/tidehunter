@@ -100,7 +100,6 @@ pub enum Backend {
     Lmdb,
     Fjall,
     Faster,
-    F2,
 }
 
 impl FromStr for Backend {
@@ -119,11 +118,9 @@ impl FromStr for Backend {
             Ok(Self::Fjall)
         } else if s == "faster" {
             Ok(Self::Faster)
-        } else if s == "f2" {
-            Ok(Self::F2)
         } else {
             anyhow::bail!(
-                "Only allowed choices for backend are 'thdb'(Tidehunter), 'rocks'(RocksDB), 'blobdb'(RocksDB BlobDB), 'lmdb'(LMDB), 'fjall'(Fjall), 'faster'(FASTER), or 'f2'(F2/FASTER v2)"
+                "Only allowed choices for backend are 'thdb'(Tidehunter), 'rocks'(RocksDB), 'blobdb'(RocksDB BlobDB), 'lmdb'(LMDB), 'fjall'(Fjall), or 'faster'(FASTER)"
             );
         }
     }

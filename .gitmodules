@@ -1,3 +1,0 @@
-[submodule "benchmarks/faster-sys/FASTER"]
-	path = benchmarks/faster-sys/FASTER
-	url = https://github.com/microsoft/FASTER.git
