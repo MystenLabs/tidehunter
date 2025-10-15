@@ -13,7 +13,8 @@ impl FasterNativeStorage {
     pub fn open(path: &Path) -> Arc<Self> {
         std::fs::create_dir_all(path).unwrap();
 
-        // Create optimized configuration for large datasets (1TB data, 256GB RAM)
+        // FASTER config optimized for 1TB dataset with 256GB RAM
+        // Note: Using smaller sizes would require careful page alignment
         let config = Config {
             storage_path: path.to_string_lossy().to_string(),
             initial_log_size: 1 << 36, // 64GB initial size
