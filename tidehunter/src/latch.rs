@@ -19,3 +19,7 @@ impl Latch {
         let _ = self.0.lock();
     }
 }
+
+// Rather than enable send_guard feature globally in parking_lot,
+// using this just for the latch
+unsafe impl Send for LatchGuard {}

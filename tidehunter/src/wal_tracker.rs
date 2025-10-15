@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::latch::LatchGuard;
 use crate::WalPosition;
 use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
 use std::rc::Rc;
@@ -42,7 +44,13 @@ struct WalTrackerThread {
 
 struct WalTrackerMessage {
     mutex: Arc<Mutex<()>>,
-    position: u64,
+    kind: WalTrackerMessageKind,
+}
+
+enum WalTrackerMessageKind {
+    Position(u64),
+    #[cfg(test)]
+    Barrier(#[allow(dead_code)] LatchGuard),
 }
 
 impl WalTracker {
@@ -65,7 +73,7 @@ impl WalTracker {
         let guard = mutex.lock_arc();
         let message = WalTrackerMessage {
             mutex,
-            position: end_position,
+            kind: WalTrackerMessageKind::Position(end_position),
         };
         self.sender.send(message).ok();
         WalGuardMaker {
@@ -75,6 +83,19 @@ impl WalTracker {
 
     pub fn last_processed(&self) -> u64 {
         self.last_processed.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub fn barrier(&self) {
+        use crate::latch::Latch;
+        let (latch, guard) = Latch::new();
+        let mutex = Arc::new(Mutex::new(()));
+        let message = WalTrackerMessage {
+            mutex,
+            kind: WalTrackerMessageKind::Barrier(guard),
+        };
+        self.sender.send(message).ok();
+        latch.latch();
     }
 }
 
@@ -114,8 +135,15 @@ impl WalTrackerThread {
             // And simply blocking until received guard is dropped is enough to get correct last_processed.
             #[allow(clippy::let_underscore_lock)]
             let _ = message.mutex.lock();
-            self.last_processed
-                .store(message.position, Ordering::SeqCst);
+            match message.kind {
+                WalTrackerMessageKind::Position(position) => {
+                    self.last_processed.store(position, Ordering::SeqCst)
+                }
+                #[cfg(test)]
+                WalTrackerMessageKind::Barrier(_) => {
+                    // Drop a barrier here
+                }
+            }
         }
     }
 }

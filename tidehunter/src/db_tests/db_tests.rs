@@ -2426,7 +2426,7 @@ fn test_concurrent_index_reclaim() {
     const SLEEP: u64 = 200;
 
     db.insert(ks, vec![1, 2], vec![5, 6]).unwrap();
-    thread::sleep(Duration::from_millis(10));
+    db.index_writer.wal_tracker_barrier();
     db.force_rebuild_control_region().unwrap();
     let (lookup_latch, lookup_latch_guard) = Latch::new();
     db.large_table.fp.0.write().fp_lookup_after_lock_drop = FailPoint::latch(lookup_latch);
@@ -2444,10 +2444,10 @@ fn test_concurrent_index_reclaim() {
         ]))
         .unwrap();
     db.insert(ks, vec![3, 4], vec![6, 7]).unwrap();
-    thread::sleep(Duration::from_millis(SLEEP));
+    db.index_writer.wal_tracker_barrier();
     db.force_rebuild_control_region().unwrap();
     db.insert(ks, vec![3, 4], vec![6, 7]).unwrap();
-    thread::sleep(Duration::from_millis(SLEEP)); // todo use wal t
+    db.index_writer.wal_tracker_barrier();
     db.force_rebuild_control_region().unwrap();
     // Write big buffer into index wal to force it to go to next wal file, which also trigger file reclaim in WalMapper thread
     db.index_writer
