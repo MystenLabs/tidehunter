@@ -1,5 +1,5 @@
 // Submodules
-mod files;
+pub(crate) mod files;
 pub mod layout;
 mod mapper;
 pub mod position;
@@ -645,9 +645,6 @@ impl From<io::Error> for WalError {
         Self::Io(value)
     }
 }
-
-#[cfg(any(test, feature = "test-utils"))]
-pub use files::list_wal_files_with_sizes;
 
 #[cfg(test)]
 mod tests {
