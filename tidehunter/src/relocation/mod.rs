@@ -277,36 +277,43 @@ impl RelocationDriver {
         if target_position.offset() < (db.wal.wal_file_size() + min_wal_position) {
             return Ok(());
         }
-        for ks in db.key_shape.iter_ks() {
-            // no need to relocate. All entries with position < target_position are stale
+        let mut current_cell = CellReference::first(&db, KeySpace::first());
+        while let Some(cell) = current_cell.take() {
+            current_cell = cell.next(&db);
+            let ks = db.key_shape.ks(cell.keyspace);
+            // For keyspaces with relocation filter, flush and clear stale entries
             if ks.relocation_filter().is_some() {
+                db.large_table.sync_flush_for_relocation(
+                    db.ks_context(cell.keyspace),
+                    &cell.cell_id,
+                    db.as_ref(),
+                    None,
+                    Some(target_position.offset()),
+                )?;
                 continue;
             }
-            let mut current_cell = CellReference::first(&db, ks.id());
-            while let Some(cell) = current_cell.take() {
-                current_cell = cell.next_in_ks(&db);
-                let mut batch = RelocatedWriteBatch::new(
-                    cell.keyspace,
-                    cell.cell_id.clone(),
-                    target_position.offset(),
-                );
-                let index = db
-                    .large_table
-                    .get_cell_index(db.ks_context(ks.id()), &cell.cell_id, db.as_ref())?
-                    .unwrap_or(IndexTable::default().into());
-                for (_reduced_key, position) in index.iter() {
-                    if position.offset() < target_position.offset() {
-                        if let Some((key, value)) = db.read_record(position)? {
-                            batch.write(key, value);
-                            self.metrics
-                                .relocation_kept
-                                .with_label_values(&[ks.name()])
-                                .inc();
-                        }
+            // For keyspaces without relocation filter, relocate entries
+            let mut batch = RelocatedWriteBatch::new(
+                cell.keyspace,
+                cell.cell_id.clone(),
+                target_position.offset(),
+            );
+            let index = db
+                .large_table
+                .get_cell_index(db.ks_context(cell.keyspace), &cell.cell_id, db.as_ref())?
+                .unwrap_or(IndexTable::default().into());
+            for (_reduced_key, position) in index.iter() {
+                if position.offset() < target_position.offset() {
+                    if let Some((key, value)) = db.read_record(position)? {
+                        batch.write(key, value);
+                        self.metrics
+                            .relocation_kept
+                            .with_label_values(&[ks.name()])
+                            .inc();
                     }
                 }
-                db.write_relocated_batch(batch)?;
             }
+            db.write_relocated_batch(batch)?;
         }
         db.rebuild_control_region()?;
         db.wal_writer.gc(std::cmp::min(

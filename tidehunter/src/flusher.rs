@@ -143,7 +143,7 @@ impl IndexFlusherThread {
 
             let ks_context = db.ks_context(command.ks);
             if let Some((original_index, position)) =
-                Self::handle_command(&*db, &command, ks_context, None)
+                Self::handle_command(&*db, &command, ks_context, None, None)
             {
                 db.update_flushed_index(command.ks, command.cell, original_index, position);
             }
@@ -160,6 +160,7 @@ impl IndexFlusherThread {
         command: &FlusherCommand,
         ctx: &KsContext,
         relocation_updates: Option<RelocationUpdates>,
+        relocation_cutoff: Option<u64>,
     ) -> Option<(Arc<IndexTable>, WalPosition)> {
         let (original_index, mut merged_index) = match &command.flush_kind {
             FlushKind::MergeUnloaded(position, dirty_index) => {
@@ -181,7 +182,18 @@ impl IndexFlusherThread {
             FlushKind::Barrier(_) => return None,
         };
 
-        merged_index.retain_above_position(loader.min_wal_position());
+        match relocation_cutoff {
+            Some(cutoff) => {
+                let length = merged_index.len();
+                merged_index.retain_above_position(cutoff);
+                if merged_index.len() == length {
+                    return None;
+                }
+            }
+            // TODO: Used only if relocation doesn't call sync flush. Remove if no such implementation is needed anymore
+            None => merged_index.retain_above_position(loader.min_wal_position()),
+        }
+        merged_index.retain_above_position(relocation_cutoff.unwrap_or(loader.min_wal_position()));
         Self::run_compactor(ctx, &mut merged_index);
 
         if let Some(relocation_updates) = relocation_updates {

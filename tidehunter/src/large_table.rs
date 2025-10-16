@@ -446,14 +446,9 @@ impl LargeTable {
         context: &KsContext,
         cell_id: &CellId,
         loader: &L,
-        relocation_updates: RelocationUpdates,
+        relocation_updates: Option<RelocationUpdates>,
+        relocation_cutoff: Option<u64>,
     ) -> Result<(), L::Error> {
-        // Empty batch should be caught earlier
-        // to avoid writing empty relocation batch marker to wal
-        assert!(
-            !relocation_updates.is_empty(),
-            "Should not call sync_flush_for_relocation with empty RelocationUpdates"
-        );
         let mutex_index = context.ks_config.mutex_for_cell(cell_id);
         let mut row = self.row_by_mutex(context, mutex_index);
 
@@ -462,7 +457,7 @@ impl LargeTable {
             None => return Ok(()), // Cell doesn't exist
         };
 
-        entry.sync_flush(loader, true, Some(relocation_updates))
+        entry.sync_flush(loader, true, relocation_updates, relocation_cutoff)
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
@@ -1080,7 +1075,7 @@ impl LargeTableEntry {
                 .snapshot_force_unload
                 .with_label_values(&[self.context.name()])
                 .inc();
-            self.sync_flush(loader, forced_relocation, None)?;
+            self.sync_flush(loader, forced_relocation, None, None)?;
         }
         Ok(())
     }
@@ -1095,6 +1090,7 @@ impl LargeTableEntry {
         loader: &L,
         forced_relocation: bool,
         relocation_updates: Option<RelocationUpdates>,
+        relocation_cutoff: Option<u64>,
     ) -> Result<(), L::Error> {
         let flush_kind = match self.flush_kind() {
             Some(kind) => kind,
@@ -1114,6 +1110,7 @@ impl LargeTableEntry {
             &FlusherCommand::new(self.context.id(), self.cell.clone(), flush_kind),
             &self.context,
             relocation_updates,
+            relocation_cutoff,
         ) else {
             unreachable!(
                 "IndexFlusherThread::handle_command should not return None for non-test command"
@@ -1134,7 +1131,7 @@ impl LargeTableEntry {
         }
         if self.pending_last_processed.is_none() {
             if self.context.config.sync_flush {
-                self.sync_flush(loader, false, None)?;
+                self.sync_flush(loader, false, None, None)?;
             } else {
                 // Perform async flush - store the captured value for later
                 let flush_kind = self
