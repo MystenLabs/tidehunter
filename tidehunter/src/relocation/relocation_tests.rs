@@ -19,7 +19,7 @@ fn force_unload_config(config: &Config) -> Arc<Config> {
 
 fn index_based_config() -> Arc<Config> {
     let mut config = Config::small();
-    config.relocation_strategy = RelocationStrategy::IndexBased;
+    config.relocation_strategy = RelocationStrategy::IndexBased(None);
     force_unload_config(&config)
 }
 
@@ -40,7 +40,7 @@ fn relocation_cells_processed(metrics: &Metrics, keyspace_name: &str) -> u64 {
 }
 
 fn start_index_based_relocation(db: &Db) {
-    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased)
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(None))
 }
 
 fn list_wal_files(path: &Path) -> Vec<String> {
@@ -194,7 +194,7 @@ fn test_index_based_relocation_filter() {
     let dir = tempdir::TempDir::new("test_index_based_relocation_filter").unwrap();
     let mut config = Config::small();
     config.wal_file_size = 2 * config.frag_size;
-    config.relocation_strategy = RelocationStrategy::IndexBased;
+    config.relocation_strategy = RelocationStrategy::IndexBased(None);
     let config = force_unload_config(&config);
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
@@ -791,4 +791,83 @@ fn test_watermark_highest_wal_position_tracking() {
         highest_wal_position,
         initial_wal_position
     );
+}
+
+/// Helper: Capture current WAL position after a write
+fn capture_last_processed_position(db: &Db) -> u64 {
+    db.wal_writer.last_processed()
+}
+
+/// Helper to start relocation with target position
+fn start_index_based_relocation_with_target(db: &Db, target_position: Option<u64>) {
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(target_position))
+}
+
+/// Read and validate watermark file
+fn read_watermark(path: &Path) -> WatermarkData {
+    RelocationWatermarks::read_or_create(path).unwrap().data
+}
+
+#[test]
+fn test_index_based_relocation_with_target_position() {
+    let dir = tempdir::TempDir::new("test_target_position").unwrap();
+    let config = index_based_config();
+    let mut ksb = KeyShapeBuilder::new();
+    let ks = ksb.add_key_space("default", 8, 1, KeyType::uniform(1));
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+
+    // Insert 1000 entries sequentially
+    for i in 0..500u64 {
+        let key = i.to_be_bytes().to_vec();
+        let value = format!("value_{}", i).into_bytes();
+        db.insert(ks, key, value).unwrap();
+    }
+
+    // Capture WAL position at entry 500
+    let mid_position = capture_last_processed_position(&db);
+
+    // Continue inserting entries 501-1000
+    for i in 500..1000u64 {
+        let key = i.to_be_bytes().to_vec();
+        let value = format!("value_{}", i).into_bytes();
+        db.insert(ks, key, value).unwrap();
+    }
+
+    // Force unload to ensure entries are in index (index-based relocation needs this)
+    db.rebuild_control_region().unwrap();
+
+    // Run relocation with target_position
+    start_index_based_relocation_with_target(&db, Some(mid_position));
+
+    // Get metrics
+    let kept = metrics
+        .relocation_kept
+        .with_label_values(&["default"])
+        .get();
+
+    // Verify approximately 500 entries were relocated (allow some margin for WAL position variation)
+    assert!(
+        kept >= 400 && kept <= 600,
+        "Expected ~500 entries relocated, got {}",
+        kept
+    );
+
+    // Verify entries below and above target
+    let key_250 = 250u64.to_be_bytes().to_vec();
+    let key_750 = 750u64.to_be_bytes().to_vec();
+
+    assert_eq!(
+        db.get(ks, &key_250).unwrap(),
+        Some(format!("value_{}", 250).into_bytes().into())
+    );
+    assert_eq!(
+        db.get(ks, &key_750).unwrap(),
+        Some(format!("value_{}", 750).into_bytes().into())
+    );
+
+    // Check watermark file contains target_position
+    let watermark = read_watermark(dir.path());
+    assert_eq!(watermark.target_position, Some(mid_position));
 }
