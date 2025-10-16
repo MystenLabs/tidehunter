@@ -14,6 +14,7 @@ pub struct WalAllocator {
 pub struct AllocationResult {
     allocated_position: u64,
     previous_position: u64,
+    len_aligned: u64,
 }
 
 impl WalAllocator {
@@ -28,18 +29,18 @@ impl WalAllocator {
 
     /// Atomically allocate space for an entry of the given size.
     /// Returns an AllocationResult containing the allocated position and previous position.
-    pub fn allocate(&self, size: u64) -> AllocationResult {
-        let aligned_size = self.layout.align(size);
+    pub fn allocate(&self, len: u64) -> AllocationResult {
+        let len_aligned = self.layout.align(len);
 
         loop {
             // Load current position
             let current_pos = self.position.load(Ordering::Acquire);
 
             // Calculate where this allocation should go
-            let allocated_pos = self.layout.next_position(current_pos, aligned_size);
+            let allocated_pos = self.layout.next_position(current_pos, len_aligned);
 
             // Calculate next position after this allocation
-            let next_pos = allocated_pos + aligned_size;
+            let next_pos = allocated_pos + len_aligned;
 
             // Try to atomically update position
             match self.position.compare_exchange(
@@ -52,6 +53,7 @@ impl WalAllocator {
                     return AllocationResult {
                         allocated_position: allocated_pos,
                         previous_position: current_pos,
+                        len_aligned,
                     };
                 }
                 Err(_) => continue, // Contention detected, retry
@@ -78,6 +80,18 @@ impl AllocationResult {
 
     pub fn allocated_position(&self) -> u64 {
         self.allocated_position
+    }
+
+    pub fn next_position(&self) -> u64 {
+        self.allocated_position + self.len_aligned
+    }
+
+    pub fn previous_position(&self) -> u64 {
+        self.previous_position
+    }
+
+    pub fn len_aligned(&self) -> u64 {
+        self.len_aligned
     }
 }
 

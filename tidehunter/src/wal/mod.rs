@@ -130,7 +130,7 @@ impl WalWriter {
         let end_pos = pos + len_aligned;
         // IMPORTANT: Must call new_batch while holding the position mutex to ensure
         // WalTracker receives positions in order
-        let wal_batch = self.wal_tracker.new_batch(end_pos);
+        let wal_batch = self.wal_tracker.allocated(end_pos);
 
         // Dropping lock to allow data copy to be done in parallel
         drop(current_map_and_position);

@@ -97,6 +97,17 @@ impl WalLayout {
     pub fn wal_file_name(&self, base_path: &Path, file_id: WalFileId) -> PathBuf {
         base_path.join(format!("{}_{:016x}", self.kind.name(), file_id.0))
     }
+
+    #[cfg(test)]
+    pub fn new_simple(frag_size: u64) -> Self {
+        Self {
+            frag_size,
+            wal_file_size: frag_size,
+            max_maps: 1,
+            direct_io: false,
+            kind: WalKind::Replay,
+        }
+    }
 }
 
 impl WalKind {
