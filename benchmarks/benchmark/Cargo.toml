@@ -35,9 +35,9 @@ rand_distr = "0.4"
 lmdb-rkv = "0.14"
 lmdb-rkv-sys = "0.11"
 fjall = "2.8"
-faster-wrapper = { path = "../faster-wrapper" }
+faster-rs = { path = "../../third-party/faster-rs", optional = true }
 
 [features]
 default = []
-# Enable FASTER and F2 backends (Linux only)
-enable-faster = ["faster-wrapper/enable-faster"]
+# Enable FASTER backend (Linux only)
+enable-faster = ["faster-rs"]

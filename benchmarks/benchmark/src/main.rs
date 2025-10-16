@@ -182,8 +182,8 @@ pub fn main() {
         Backend::Faster => {
             #[cfg(all(target_os = "linux", feature = "enable-faster"))]
             {
-                use crate::storage::faster_native::FasterNativeStorage;
-                let storage = FasterNativeStorage::open(&path);
+                use crate::storage::faster::FasterStorage;
+                let storage = FasterStorage::open(&path);
                 storage as Arc<dyn Storage>
             }
             #[cfg(not(all(target_os = "linux", feature = "enable-faster")))]
