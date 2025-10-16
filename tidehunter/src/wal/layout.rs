@@ -1,4 +1,5 @@
 use crate::file_reader::align_size;
+use crate::WalPosition;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -61,7 +62,8 @@ impl WalLayout {
         let map_start = self.locate(pos).0;
         let map_end = self.locate(pos + len_aligned - 1).0;
         if map_start != map_end {
-            pos = (map_start + 1) * self.frag_size;
+            debug_assert_eq!(map_start + 1, map_end);
+            pos = self.first_in_frag(map_start + 1);
         }
         pos
     }
@@ -70,6 +72,22 @@ impl WalLayout {
     #[inline]
     pub(super) fn locate(&self, pos: u64) -> (u64, u64) {
         (pos / self.frag_size, pos % self.frag_size)
+    }
+
+    /// Returns first position in fragment
+    fn first_in_frag(&self, map: u64) -> u64 {
+        map * self.frag_size
+    }
+
+    /// Check if offset of given wal position is the first position in fragment.
+    /// Return Some(frag) if this is the first wal position in frag, returns None otherwise.
+    pub(super) fn is_first_in_frag(&self, pos: &WalPosition) -> Option<u64> {
+        let (frag, offset) = self.locate(pos.offset);
+        if offset == 0 {
+            Some(frag)
+        } else {
+            None
+        }
     }
 
     /// Return range of a particular mapping
@@ -117,4 +135,20 @@ impl WalKind {
             WalKind::Index => "index",
         }
     }
+}
+
+#[test]
+fn test_first_in_frag() {
+    let layout = WalLayout {
+        frag_size: 1024,
+        max_maps: 1,
+        direct_io: false,
+        wal_file_size: 1024,
+        kind: WalKind::Replay,
+    };
+
+    assert_eq!(0, layout.first_in_frag(0));
+    assert_eq!(1024, layout.first_in_frag(1));
+    assert_eq!(Some(1), layout.is_first_in_frag(&WalPosition::new(1024, 1)));
+    assert_eq!(None, layout.is_first_in_frag(&WalPosition::new(1025, 1)));
 }

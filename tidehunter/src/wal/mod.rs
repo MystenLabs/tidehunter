@@ -15,7 +15,7 @@ use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
 use arc_swap::ArcSwap;
 use minibytes::Bytes;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -26,8 +26,9 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::thread;
 use std::time::Instant;
-use std::{io, mem, ptr};
+use std::{io, ptr};
 
+use crate::wal_allocator::WalAllocator;
 use files::WalFiles;
 use layout::WalLayout;
 use mapper::WalMapper;
@@ -37,7 +38,7 @@ use tracker::{WalGuard, WalTracker};
 
 pub struct WalWriter {
     wal: Arc<Wal>,
-    position_and_map: Mutex<(IncrementalWalPosition, Map)>,
+    allocator: WalAllocator,
     wal_tracker: WalTracker,
     mapper: WalMapper,
     wal_syncer: WalSyncer,
@@ -87,74 +88,52 @@ impl WalWriter {
             .into_iter()
             .map(|w| self.wal.layout.align(w.len() as u64))
             .sum();
-        let mut current_map_and_position = self.position_and_map.lock();
-        let (mut pos, prev_block_end) = current_map_and_position.0.allocate_position(len_aligned);
-        // todo duplicated code
-        let (map_id, mut offset) = self.wal.layout.locate(pos);
-        // todo - decide whether map is covered by mutex or we want concurrent writes
-        if current_map_and_position.1.id != map_id {
-            if pos != prev_block_end {
-                let (prev_map, prev_offset) = self.wal.layout.locate(prev_block_end);
-                assert_eq!(prev_map, current_map_and_position.1.id);
-                let skip_marker = CrcFrame::skip_marker();
-                assert!(
-                    current_map_and_position.1.writeable,
-                    "Attempt to write into read-only map"
-                );
-                let buf = write_buf_at(
-                    &current_map_and_position.1.data,
-                    prev_offset as usize,
-                    skip_marker.as_ref().len(),
-                );
-                buf.copy_from_slice(skip_marker.as_ref());
-            }
-            let mut offloaded_map =
-                self.wal
-                    .recv_map(&self.mapper, map_id, &current_map_and_position.1);
-            mem::swap(&mut offloaded_map, &mut current_map_and_position.1);
-            self.wal_syncer
-                .send(offloaded_map, self.wal.layout.map_range(map_id).end);
-        } else {
-            // todo it is possible to have a race between map mutex and pos allocation so this check may fail
-            // assert_eq!(pos, align(prev_block_end));
+        let allocation_result = self.allocator.allocate(len_aligned);
+        if let Some(skip_marker_pos) = allocation_result.need_skip_marker() {
+            self.write_skip_marker(skip_marker_pos);
         }
-        // safety: pos calculation logic guarantees non-overlapping writes
-        // position only available after write here completes
-        assert!(
-            current_map_and_position.1.writeable,
-            "Attempt to write into read-only map"
-        );
-        let data = current_map_and_position.1.data.clone();
+
+        let (map, mut offset) = self.get_writeable_map(allocation_result.allocated_position());
 
         // Calculate the end position after all writes
-        let end_pos = pos + len_aligned;
-        // IMPORTANT: Must call new_batch while holding the position mutex to ensure
-        // WalTracker receives positions in order
-        let wal_batch = self.wal_tracker.allocated(end_pos);
-
-        // Dropping lock to allow data copy to be done in parallel
-        drop(current_map_and_position);
+        let mut pos = allocation_result.allocated_position();
+        let wal_batch = self.wal_tracker.allocated(&allocation_result);
 
         let mut guards = vec![];
         for w in writes {
             let frame_size = w.len();
             let aligned_frame_size = self.wal.layout.align(frame_size as u64);
-            let buf = write_buf_at(&data, offset as usize, frame_size);
+            let buf = write_buf_at(&map.data, offset, frame_size);
             buf.copy_from_slice(w.frame.as_ref());
             // conversion to u32 is safe - pos is less than self.frag_size,
             // and self.frag_size is asserted less than u32::MAX
             let wal_position = WalPosition::new(pos, frame_size as u32);
             guards.push(wal_batch.guard(wal_position));
             pos += aligned_frame_size;
-            offset += aligned_frame_size;
+            offset += aligned_frame_size as usize;
         }
         Ok(guards)
+    }
+
+    fn write_skip_marker(&self, position: u64) {
+        let (map, offset) = self.get_writeable_map(position);
+        let skip_marker = CrcFrame::skip_marker();
+        let buf = write_buf_at(&map.data, offset, skip_marker.as_ref().len());
+        buf.copy_from_slice(skip_marker.as_ref());
+    }
+
+    fn get_writeable_map(&self, position: u64) -> (Map, usize) {
+        let (map, offset) = self.wal.layout.locate(position);
+        // todo wait if map is not available
+        let map = self.wal.get_map(map).expect("Not found writable map");
+        assert!(map.writeable, "Map is not writable");
+        (map, offset as usize)
     }
 
     /// Current un-initialized position,
     /// not to be used as WalPosition, only as a metric to see how many bytes were written
     pub fn position(&self) -> u64 {
-        self.position_and_map.lock().0.position
+        self.allocator.position()
     }
 
     /// Returns the last processed position from the WalTracker
@@ -197,25 +176,6 @@ impl WalWriter {
     /// Waits until wal_tracker processes all in-flight messages.
     pub fn wal_tracker_barrier(&self) {
         self.wal_tracker.barrier()
-    }
-}
-
-#[derive(Clone)]
-struct IncrementalWalPosition {
-    position: u64,
-    layout: WalLayout,
-}
-
-impl IncrementalWalPosition {
-    /// Allocate new position according to layout
-    ///
-    /// Returns new position and then end of previous block
-    pub fn allocate_position(&mut self, len_aligned: u64) -> (u64, u64) {
-        assert!(len_aligned > 0);
-        let position = self.layout.next_position(self.position, len_aligned);
-        let result = (position, self.position);
-        self.position = position + len_aligned;
-        result
     }
 }
 
@@ -551,24 +511,19 @@ impl WalIterator {
     }
 
     pub fn into_writer(self) -> WalWriter {
-        let position = IncrementalWalPosition {
-            position: self.position,
-            layout: self.wal.layout.clone(),
-        };
         let mapper = WalMapper::start(
             self.map.id,
             Arc::clone(&self.wal.files),
             self.wal.layout.clone(),
             self.wal().metrics.clone(),
         );
-        assert_eq!(self.wal.layout.locate(position.position).0, self.map.id);
-        let wal_tracker = WalTracker::start(position.position);
-        let position_and_map = (position, self.map);
-        let position_and_map = Mutex::new(position_and_map);
+        assert_eq!(self.wal.layout.locate(self.position).0, self.map.id);
+        let wal_tracker = WalTracker::start(self.position);
+        let allocator = WalAllocator::new(self.wal.layout.clone(), self.position);
         let wal_syncer = WalSyncer::start(self.wal.metrics.clone());
         WalWriter {
             wal: self.wal,
-            position_and_map,
+            allocator,
             wal_tracker,
             wal_syncer,
             mapper,
@@ -727,30 +682,6 @@ mod tests {
         }
         // we wrote into two frags
         // assert_eq!(2048, fs::metadata(file).unwrap().len());
-    }
-
-    #[test]
-    fn test_incremental_wal_position() {
-        let layout = WalLayout {
-            frag_size: 512,
-            max_maps: 2,
-            direct_io: false,
-            wal_file_size: 10 << 12,
-            kind: WalKind::Replay,
-        };
-        let mut position = IncrementalWalPosition {
-            layout,
-            position: 0,
-        };
-        assert_eq!((0, 0), position.allocate_position(16));
-        assert_eq!((16, 16), position.allocate_position(8));
-        assert_eq!((24, 24), position.allocate_position(8));
-        assert_eq!((32, 32), position.allocate_position(104));
-        assert_eq!((136, 136), position.allocate_position(128));
-        assert_eq!((264, 264), position.allocate_position(240));
-        // Leap over frag boundary
-        assert_eq!((512, 504), position.allocate_position(16));
-        assert_eq!((512 + 16, 512 + 16), position.allocate_position(32));
     }
 
     #[test]
