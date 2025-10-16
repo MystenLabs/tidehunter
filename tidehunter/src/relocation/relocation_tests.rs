@@ -884,6 +884,7 @@ fn test_compute_target_position_from_ratio() {
         let value = format!("value_{}", i).into_bytes();
         db.insert(ks, key, value).unwrap();
     }
+    db.large_table.flusher.barrier();
 
     let min_pos = db.wal.min_wal_position();
     let last_pos = db.wal_writer.last_processed().as_u64();
@@ -910,7 +911,9 @@ fn test_compute_target_position_from_ratio() {
     );
 
     let target_100 = compute_target_position_from_ratio(&db, 1.0).unwrap();
-    assert_eq!(target_100, last_pos);
+    // Read fresh last_pos since background threads may have advanced the WAL
+    let last_pos_at_100 = db.wal_writer.last_processed().as_u64();
+    assert_eq!(target_100, last_pos_at_100);
 
     // Test clamping - negative ratio should give min_pos
     let target_negative = compute_target_position_from_ratio(&db, -0.5).unwrap();
@@ -918,5 +921,7 @@ fn test_compute_target_position_from_ratio() {
 
     // Test clamping - ratio > 1.0 should give last_pos
     let target_over_one = compute_target_position_from_ratio(&db, 1.5).unwrap();
-    assert_eq!(target_over_one, last_pos);
+    // Read fresh last_pos again
+    let last_pos_at_over = db.wal_writer.last_processed().as_u64();
+    assert_eq!(target_over_one, last_pos_at_over);
 }
