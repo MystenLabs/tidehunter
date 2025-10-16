@@ -131,9 +131,10 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                         .send((index_idx, bytes.as_ref().to_vec()))
                         .await
                         .map_err(|e| {
-                            std::io::Error::other(
-                                format!("Failed to send index through channel: {}", e),
-                            )
+                            std::io::Error::other(format!(
+                                "Failed to send index through channel: {}",
+                                e
+                            ))
                         });
 
                     if let Err(e) = result {
@@ -155,18 +156,14 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
             match task {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(e)) => Err(e),
-                Err(e) => Err(std::io::Error::other(
-                    e.to_string(),
-                )),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
             }?
         }
 
         // Wait for the consumer task to complete
         match consumer.await {
             Ok(result) => result,
-            Err(e) => Err(std::io::Error::other(
-                e.to_string(),
-            )),
+            Err(e) => Err(std::io::Error::other(e.to_string())),
         }
     })?;
 
