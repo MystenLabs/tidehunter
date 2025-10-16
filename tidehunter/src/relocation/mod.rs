@@ -21,6 +21,48 @@ mod watermark;
 mod relocation_tests;
 pub mod updates;
 
+/// Computes a target WAL position based on a ratio of the total WAL range.
+///
+/// # Arguments
+/// * `db` - The database instance
+/// * `ratio` - A value between 0.0 and 1.0 representing the fraction of WAL to process.
+///             0.0 = start of WAL, 0.5 = middle, 1.0 = end (last_processed)
+///
+/// # Returns
+/// * `Some(position)` - The computed target position in bytes
+/// * `None` - If the WAL is empty or calculation fails
+///
+/// # Examples
+/// ```ignore
+/// // Relocate the first 30% of the WAL
+/// let target = compute_target_position_from_ratio(&db, 0.3);
+/// db.start_relocation_with_strategy(RelocationStrategy::IndexBased(target));
+/// ```
+#[allow(dead_code)] // Used in tests and available for library users
+pub fn compute_target_position_from_ratio(db: &Arc<Db>, ratio: f64) -> Option<u64> {
+    // Clamp ratio to valid range [0.0, 1.0]
+    let ratio = ratio.clamp(0.0, 1.0);
+
+    // Get the WAL range
+    let min_position = db.wal.min_wal_position();
+    let last_processed = db.wal_writer.last_processed();
+
+    // Handle edge cases
+    if last_processed <= min_position {
+        return None; // WAL is empty or in invalid state
+    }
+
+    // Compute the total range
+    let total_range = last_processed - min_position;
+
+    // Calculate target position
+    let offset = (total_range as f64 * ratio) as u64;
+    let target = min_position + offset;
+
+    // Ensure we don't exceed last_processed
+    Some(target.min(last_processed))
+}
+
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
