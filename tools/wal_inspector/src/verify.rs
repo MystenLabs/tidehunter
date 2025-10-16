@@ -203,7 +203,7 @@ fn verify_keys_through_iteration(
             match iterator.next() {
                 Some(Ok((key, value))) => {
                     found_kv_pairs.insert(key.to_vec(), value.to_vec());
-                    if verbose && found_kv_pairs.len() % 100 == 0 {
+                    if verbose && found_kv_pairs.len().is_multiple_of(100) {
                         println!(
                             "    Found {} key-value pairs so far in keyspace {}",
                             found_kv_pairs.len(),

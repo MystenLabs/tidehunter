@@ -32,7 +32,7 @@ impl JobId {
         // The job id is expected to be in the format "instance-node-<index>".
         self.0
             .split('-')
-            .last()
+            .next_back()
             .expect("Valid job id is hyphenated")
             .parse::<usize>()
             .expect("Job id contains the node index")
@@ -159,7 +159,7 @@ impl MetricsCollector {
         let responses = try_join_all(
             self.metrics
                 .iter()
-                .map(|metric| self.client.query(&metric).get()),
+                .map(|metric| self.client.query(metric).get()),
         )
         .await?;
 
