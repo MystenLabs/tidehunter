@@ -727,6 +727,11 @@ mod tests {
                 .unwrap()
         };
 
+        // Wait for background threads (WalTracker and WalMapper) to finish
+        // The mapper pre-allocates additional maps in the background and could
+        // extend the file after we try to corrupt it, causing a race condition
+        thread::sleep(Duration::from_millis(100));
+
         // Corrupt the file length
         let file = OpenOptions::new().write(true).open(&file_path).unwrap();
         let len = file.metadata().unwrap().len();
