@@ -406,15 +406,15 @@ impl Db {
         } = batch;
         let context = self.ks_context(ks);
 
-        let guards = self.write_relocated_batch_into_wal(&prepared_writes)?;
+        let positions = self.write_relocated_batch_into_wal(&prepared_writes)?;
         let mut updates = RelocationUpdates::new(last_processed);
-        for (guard, key) in guards.iter().zip(keys.into_iter()) {
+        for (pos, key) in positions.into_iter().zip(keys.into_iter()) {
             let reduced_key = context.ks_config.reduced_key_bytes(key);
-            updates.add(reduced_key, *guard.wal_position());
+            updates.add(reduced_key, pos);
         }
+        // todo this do not hold guards before flushing the index - need to confirm if this is ok
         self.large_table
             .sync_flush_for_relocation(context, &cell_id, self, Some(updates), None)?;
-        drop(guards); // manual drop to make sure guards are not dropped up to this point
         Ok(())
     }
 
@@ -433,10 +433,16 @@ impl Db {
     fn write_relocated_batch_into_wal(
         &self,
         prepared_writes: &[PreparedWalWrite],
-    ) -> DbResult<Vec<WalGuard>> {
+    ) -> DbResult<Vec<WalPosition>> {
+        // todo make sure its ok to drop guard right away
         prepared_writes
             .iter()
-            .map(|write| self.wal_writer.write(write).map_err(DbError::from))
+            .map(|write| {
+                self.wal_writer
+                    .write(write)
+                    .map_err(DbError::from)
+                    .map(|g| *g.wal_position())
+            })
             .collect()
     }
 
@@ -712,7 +718,7 @@ impl Db {
     }
 
     fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(ReadType, Option<WalEntry>)> {
-        let (read_type, entry) = wal.read_unmapped(position)?;
+        let (read_type, entry) = wal.read(position)?;
         Ok((read_type, entry.map(WalEntry::from_bytes)))
     }
 
@@ -876,9 +882,8 @@ impl Drop for Db {
         self.relocator
             .0
             .send(RelocationCommand::Cancel(sender))
-            .expect("Failed to send a cancellation request to the relocator");
-        recv.recv()
-            .expect("Failed to await for graceful relocator shutdown");
+            .ok();
+        recv.recv().ok();
     }
 }
 

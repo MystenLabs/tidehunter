@@ -1,14 +1,14 @@
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
+use crate::key_shape::KeySpaceConfig;
 use crate::relocation::watermark::WatermarkData;
 use crate::{
     config::Config,
     db::Db,
     key_shape::{KeyShapeBuilder, KeyType},
-    relocation::{Decision::Keep, RelocationWatermarks},
+    relocation::RelocationWatermarks,
     RelocationStrategy,
 };
-use crate::{key_shape::KeySpaceConfig, relocation::Decision::Remove};
 use crate::{metrics::Metrics, relocation::Decision};
 
 fn force_unload_config(config: &Config) -> Arc<Config> {
@@ -199,9 +199,9 @@ fn test_index_based_relocation_filter() {
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
         if u64::from_be_bytes(key.try_into().unwrap()) % 2 == 0 {
-            Keep
+            Decision::Keep
         } else {
-            Remove
+            Decision::Remove
         }
     });
     let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);

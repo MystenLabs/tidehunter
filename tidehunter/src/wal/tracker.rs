@@ -1,7 +1,11 @@
 use super::WalPosition;
 #[cfg(test)]
 use crate::latch::LatchGuard;
+use crate::wal::allocator::AllocationResult;
+use crate::wal::mapper::WalMapper;
+use crate::WalLayout;
 use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -40,6 +44,14 @@ pub struct WalGuardMaker {
 struct WalTrackerThread {
     receiver: mpsc::Receiver<WalTrackerMessage>,
     last_processed: Arc<AtomicU64>,
+    state: WalTrackerState,
+    mapper: WalMapper,
+    layout: WalLayout,
+}
+
+struct WalTrackerState {
+    pending: BTreeMap<u64, AllocationResult>,
+    last_processed: u64,
 }
 
 struct WalTrackerMessage {
@@ -48,32 +60,35 @@ struct WalTrackerMessage {
 }
 
 enum WalTrackerMessageKind {
-    Position(u64),
+    AllocationMessage(AllocationResult),
     #[cfg(test)]
     Barrier(#[allow(dead_code)] LatchGuard),
 }
 
 impl WalTracker {
-    pub fn start(last_processed: u64) -> Self {
+    pub fn start(layout: WalLayout, mapper: WalMapper, last_processed: u64) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let last_processed = Arc::new(AtomicU64::new(last_processed));
+        let atomic_last_processed = Arc::new(AtomicU64::new(last_processed));
         let thread = WalTrackerThread {
             receiver,
-            last_processed: last_processed.clone(),
+            state: WalTrackerState::new_empty(last_processed),
+            last_processed: atomic_last_processed.clone(),
+            mapper,
+            layout,
         };
         thread::spawn(move || thread.run());
         Self {
             sender,
-            last_processed,
+            last_processed: atomic_last_processed,
         }
     }
 
-    pub fn new_batch(&self, end_position: u64) -> WalGuardMaker {
+    pub fn allocated(&self, allocation_result: AllocationResult) -> WalGuardMaker {
         let mutex = Arc::new(Mutex::new(()));
         let guard = mutex.lock_arc();
         let message = WalTrackerMessage {
             mutex,
-            kind: WalTrackerMessageKind::Position(end_position),
+            kind: WalTrackerMessageKind::AllocationMessage(allocation_result),
         };
         self.sender.send(message).ok();
         WalGuardMaker {
@@ -126,106 +141,166 @@ impl WalGuardMaker {
 }
 
 impl WalTrackerThread {
-    pub fn run(self) {
+    pub fn run(mut self) {
         for message in self.receiver {
-            // Note that messages are sent when wal position is allocated,
-            // within the scope of position mutex in the wal.
-            // This means messages are sent(and received!) in the same order positions are allocated in wal.
-            // Therefore, we don't need to maintain BTree or similar structure here of all unprocessed wal positions,
-            // And simply blocking until received guard is dropped is enough to get correct last_processed.
             #[allow(clippy::let_underscore_lock)]
             let _ = message.mutex.lock();
-            match message.kind {
-                WalTrackerMessageKind::Position(position) => {
-                    self.last_processed.store(position, Ordering::SeqCst)
+            let position = match message.kind {
+                WalTrackerMessageKind::AllocationMessage(message) => {
+                    self.state.add_processed(message, |result| {
+                        if let Some(frag) =
+                            self.layout.is_first_in_frag(result.allocated_position())
+                        {
+                            if let Some(prev_frag) = frag.checked_sub(1) {
+                                // When the first position for frag is allocated and all positions before it are processed,
+                                // Then the previous fragment can be finalized.
+                                self.mapper.map_finalized(prev_frag);
+                            }
+                        }
+                    })
                 }
                 #[cfg(test)]
                 WalTrackerMessageKind::Barrier(_) => {
                     // Drop a barrier here
+                    continue;
                 }
+            };
+            if let Some(position) = position {
+                self.last_processed.store(position, Ordering::SeqCst);
             }
         }
+    }
+}
+
+impl WalTrackerState {
+    pub fn new_empty(last_processed: u64) -> Self {
+        Self {
+            pending: Default::default(),
+            last_processed,
+        }
+    }
+
+    pub fn add_processed<F: FnMut(&AllocationResult)>(
+        &mut self,
+        mut result: AllocationResult,
+        mut callback: F,
+    ) -> Option<u64> {
+        let previous_position = result.previous_position();
+        if self.last_processed != previous_position {
+            self.pending.insert(result.previous_position(), result);
+            return None;
+        }
+        callback(&result);
+        while let Some(next_result) = self.pending.remove(&result.next_position()) {
+            result = next_result;
+            callback(&result);
+        }
+        self.last_processed = result.next_position();
+        Some(self.last_processed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wal::WalPosition;
+    use crate::wal_allocator::WalAllocator;
+    use crate::WalLayout;
     use std::thread;
     use std::time::Duration;
 
     #[test]
-    fn test_wal_tracker_basic() {
-        let tracker = WalTracker::start(0);
+    fn test_tracker_state() {
+        let mut state = WalTrackerState::new_empty(0);
+        let layout = WalLayout::new_simple(32);
+        let allocator = WalAllocator::new(layout, 0);
+        let a = allocator.allocate(12);
+        let b = allocator.allocate(6);
+        assert!(b.need_skip_marker().is_none());
+        let c = allocator.allocate(17);
+        assert!(c.need_skip_marker().is_some());
 
-        // Initially last_processed should be 0
-        assert_eq!(tracker.last_processed(), 0);
+        state.add_processed(a.clone(), |_| {});
+        state.add_processed(b.clone(), |_| {});
+        state.add_processed(c.clone(), |_| {});
+        assert_eq!(state.last_processed, c.next_position());
+        assert!(state.pending.is_empty());
 
-        // Create a batch and guard at position 100
-        let batch = tracker.new_batch(100);
-        let pos = WalPosition::new(100, 10);
-        let guard = batch.guard(pos);
+        let mut state = WalTrackerState::new_empty(0);
+        state.add_processed(b.clone(), |_| {});
+        assert_eq!(state.last_processed, 0);
+        state.add_processed(a.clone(), |_| {});
+        assert_eq!(state.last_processed, b.next_position());
+        state.add_processed(c.clone(), |_| {});
+        assert_eq!(state.last_processed, c.next_position());
+        assert!(state.pending.is_empty());
 
-        // Guard should contain the correct position
-        assert_eq!(guard.wal_position(), &pos);
-
-        // Drop the guard and wait a bit for processing
-        drop(guard);
-        drop(batch);
-        thread::sleep(Duration::from_millis(10));
-
-        // last_processed should be updated
-        assert_eq!(tracker.last_processed(), 100);
-    }
-
-    #[test]
-    fn test_wal_batch() {
-        let tracker = WalTracker::start(0);
-
-        // Create a batch
-        let batch = tracker.new_batch(200);
-
-        // Create guards from the batch
-        let pos1 = WalPosition::new(150, 5);
-        let pos2 = WalPosition::new(180, 8);
-        let guard1 = batch.guard(pos1);
-        let guard2 = batch.guard(pos2);
-
-        // Guards should contain correct positions
-        assert_eq!(guard1.wal_position(), &pos1);
-        assert_eq!(guard2.wal_position(), &pos2);
-
-        // Drop guards and wait for processing
-        drop(guard1);
-        drop(guard2);
-        drop(batch);
-        thread::sleep(Duration::from_millis(10));
-
-        // last_processed should be updated to the batch end position
-        assert_eq!(tracker.last_processed(), 200);
+        let mut state = WalTrackerState::new_empty(0);
+        state.add_processed(c.clone(), |_| {});
+        assert_eq!(state.last_processed, 0);
+        state.add_processed(b.clone(), |_| {});
+        assert_eq!(state.last_processed, 0);
+        state.add_processed(a.clone(), |_| {});
+        assert_eq!(state.last_processed, c.next_position());
+        assert!(state.pending.is_empty());
     }
 
     #[test]
     fn test_multiple_guards_ordering() {
-        let tracker = WalTracker::start(0);
+        let layout = WalLayout::new_simple(32);
+        let allocator = WalAllocator::new(layout.clone(), 0);
+        let a = allocator.allocate(8);
+        let b = allocator.allocate(9);
+        let c = allocator.allocate(10);
 
-        // Create batches in order (this determines channel message order)
-        let batch1 = tracker.new_batch(100);
-        let batch2 = tracker.new_batch(200);
-        let batch3 = tracker.new_batch(300);
+        let test = |tracker: WalTracker,
+                    guard1: WalGuardMaker,
+                    guard2: WalGuardMaker,
+                    guard3: WalGuardMaker| {
+            drop(guard3);
+            thread::sleep(Duration::from_millis(10));
+            assert_eq!(tracker.last_processed(), 0);
 
-        // Drop in reverse order - but processing is blocked by channel ordering
-        drop(batch3); // Unlocks position 300, but channel must process 100 first
+            drop(guard1);
+            thread::sleep(Duration::from_millis(10));
+            assert_eq!(tracker.last_processed(), a.next_position());
+
+            drop(guard2);
+            tracker.barrier();
+            assert_eq!(tracker.last_processed(), c.next_position());
+        };
+
+        // Test when messages are sent to tracker in order positions are allocated
+        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let guard1 = tracker.allocated(a.clone());
+        let guard2 = tracker.allocated(b.clone());
+        let guard3 = tracker.allocated(c.clone());
+        test(tracker, guard1, guard2, guard3);
+
+        // Test tracker when messages are sent to tracker in different order
+        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let guard1 = tracker.allocated(a.clone());
+        let guard3 = tracker.allocated(c.clone());
+        let guard2 = tracker.allocated(b.clone());
+        test(tracker, guard1, guard2, guard3);
+
+        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let guard3 = tracker.allocated(c.clone());
+        let guard2 = tracker.allocated(b.clone());
+        let guard1 = tracker.allocated(a.clone());
+
+        drop(guard3);
         thread::sleep(Duration::from_millis(10));
-        assert_eq!(tracker.last_processed(), 0); // No change, blocked on position 100
+        assert_eq!(tracker.last_processed(), 0);
 
-        drop(batch1); // Unlocks position 100, allows processing of 100, but blocked on 200
+        drop(guard1);
         thread::sleep(Duration::from_millis(10));
-        assert_eq!(tracker.last_processed(), 100); // Can process 100 now
+        // Even thought guard1 is dropped, because guard2
+        // is sent before guard1, it blocks the tracker thread, and a message is not processed
+        assert_eq!(tracker.last_processed(), 0);
 
-        drop(batch2); // Unlocks position 200, allows processing of 200 and 300
-        thread::sleep(Duration::from_millis(50));
-        assert_eq!(tracker.last_processed(), 300); // Processes 200, then 300
+        drop(guard2);
+        tracker.barrier();
+        // When all guards blocked the state is correct
+        assert_eq!(tracker.last_processed(), c.next_position());
     }
 }

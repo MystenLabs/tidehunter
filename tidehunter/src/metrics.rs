@@ -165,7 +165,7 @@ pub struct Metrics {
     pub lookup_io_bytes: MetricIntCounter,
 
     pub large_table_contention: MetricHistogramVec,
-    pub wal_contention: MetricHistogram,
+    pub wal_write_wait: MetricIntCounter,
     pub wal_synced_position: MetricIntGauge,
     pub db_op_mcs: MetricHistogramVec,
     pub map_time_mcs: MetricHistogram,
@@ -343,7 +343,7 @@ impl Metrics {
                 registry,
                 enabled
             ),
-            wal_contention: histogram!("wal_contention", lock_buckets.clone(), registry, enabled),
+            wal_write_wait: counter!("wal_write_wait", registry, enabled),
             wal_synced_position: gauge!("wal_synced_position", registry, enabled),
             db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry, enabled),
             map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry, enabled),
