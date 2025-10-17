@@ -413,7 +413,7 @@ impl Db {
             updates.add(reduced_key, *guard.wal_position());
         }
         self.large_table
-            .sync_flush_for_relocation(context, &cell_id, self, updates)?;
+            .sync_flush_for_relocation(context, &cell_id, self, Some(updates), None)?;
         drop(guards); // manual drop to make sure guards are not dropped up to this point
         Ok(())
     }
