@@ -11,7 +11,6 @@ pub(crate) struct WatermarkData {
     pub next_to_process: Option<CellReference>,
     pub highest_wal_position: u64,
     pub upper_limit: u64,
-    #[serde(default)] // For backward compatibility with existing watermark files
     pub target_position: Option<u64>,
 }
 

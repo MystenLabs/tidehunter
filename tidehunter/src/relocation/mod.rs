@@ -30,7 +30,7 @@ pub mod updates;
 ///
 /// # Returns
 /// * `Some(position)` - The computed target position in bytes
-/// * `None` - If the WAL is empty or calculation fails
+/// * `None` - If there is no WAL data to process (last_processed <= min_position)
 ///
 /// # Examples
 /// ```ignore
@@ -38,7 +38,6 @@ pub mod updates;
 /// let target = compute_target_position_from_ratio(&db, 0.3);
 /// db.start_relocation_with_strategy(RelocationStrategy::IndexBased(target));
 /// ```
-#[allow(dead_code)] // Used in tests and available for library users
 pub fn compute_target_position_from_ratio(db: &Arc<Db>, ratio: f64) -> Option<u64> {
     // Clamp ratio to valid range [0.0, 1.0]
     let ratio = ratio.clamp(0.0, 1.0);

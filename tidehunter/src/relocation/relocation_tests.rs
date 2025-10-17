@@ -793,21 +793,6 @@ fn test_watermark_highest_wal_position_tracking() {
     );
 }
 
-/// Helper: Capture current WAL position after a write
-fn capture_last_processed_position(db: &Db) -> u64 {
-    db.wal_writer.last_processed()
-}
-
-/// Helper to start relocation with target position
-fn start_index_based_relocation_with_target(db: &Db, target_position: Option<u64>) {
-    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(target_position))
-}
-
-/// Read and validate watermark file
-fn read_watermark(path: &Path) -> WatermarkData {
-    RelocationWatermarks::read_or_create(path).unwrap().data
-}
-
 #[test]
 fn test_index_based_relocation_with_target_position() {
     let dir = tempdir::TempDir::new("test_target_position").unwrap();
@@ -826,7 +811,7 @@ fn test_index_based_relocation_with_target_position() {
     }
 
     // Capture WAL position at entry 500
-    let mid_position = capture_last_processed_position(&db);
+    let mid_position = db.wal_writer.last_processed();
 
     // Continue inserting entries 501-1000
     for i in 500..1000u64 {
@@ -839,7 +824,7 @@ fn test_index_based_relocation_with_target_position() {
     db.rebuild_control_region().unwrap();
 
     // Run relocation with target_position
-    start_index_based_relocation_with_target(&db, Some(mid_position));
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(Some(mid_position)));
 
     // Get metrics
     let kept = metrics
@@ -868,7 +853,9 @@ fn test_index_based_relocation_with_target_position() {
     );
 
     // Check watermark file contains target_position
-    let watermark = read_watermark(dir.path());
+    let watermark = RelocationWatermarks::read_or_create(dir.path())
+        .unwrap()
+        .data;
     assert_eq!(watermark.target_position, Some(mid_position));
 }
 
