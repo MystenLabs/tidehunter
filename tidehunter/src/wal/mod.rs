@@ -12,22 +12,19 @@ use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::file_reader::set_direct_options;
 use crate::file_reader::FileReader;
 use crate::lookup::{FileRange, RandomRead};
-use crate::metrics::{Metrics, TimerExt};
+use crate::metrics::Metrics;
 use arc_swap::ArcSwap;
 use minibytes::Bytes;
-use parking_lot::RwLock;
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
+use std::io;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(test)]
 use std::thread;
-use std::time::Instant;
-use std::{io, ptr};
+use std::time::Duration;
 
+use crate::wal::mapper::WalMaps;
 use crate::wal_allocator::WalAllocator;
 use files::WalFiles;
 use layout::WalLayout;
@@ -40,19 +37,18 @@ pub struct WalWriter {
     wal: Arc<Wal>,
     allocator: WalAllocator,
     wal_tracker: WalTracker,
-    mapper: WalMapper,
-    wal_syncer: WalSyncer,
 }
 
 pub struct Wal {
     files: Arc<ArcSwap<WalFiles>>,
     layout: WalLayout,
-    maps: RwLock<BTreeMap<u64, Map>>,
+    maps: Arc<ArcSwap<WalMaps>>,
     metrics: Arc<Metrics>,
 }
 
 pub struct WalIterator {
     wal: Arc<Wal>,
+    maps: WalMaps,
     map: Map,
     position: u64,
 }
@@ -97,7 +93,7 @@ impl WalWriter {
 
         // Calculate the end position after all writes
         let mut pos = allocation_result.allocated_position();
-        let wal_batch = self.wal_tracker.allocated(&allocation_result);
+        let wal_batch = self.wal_tracker.allocated(allocation_result);
 
         let mut guards = vec![];
         for w in writes {
@@ -124,10 +120,17 @@ impl WalWriter {
 
     fn get_writeable_map(&self, position: u64) -> (Map, usize) {
         let (map, offset) = self.wal.layout.locate(position);
-        // todo wait if map is not available
-        let map = self.wal.get_map(map).expect("Not found writable map");
-        assert!(map.writeable, "Map is not writable");
-        (map, offset as usize)
+        const MAX_ATTEMPTS: usize = 10 * 1000;
+        for _ in 0..MAX_ATTEMPTS {
+            let Some(map) = self.wal.get_map(map) else {
+                self.wal.metrics.wal_write_wait.inc();
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            };
+            assert!(map.writeable, "Map is not writable");
+            return (map, offset as usize);
+        }
+        panic!("Could not receive writable map {map}")
     }
 
     /// Current un-initialized position,
@@ -146,7 +149,6 @@ impl WalWriter {
     /// Given watermark positions will be preserved.
     pub fn gc(&self, watermark: u64) -> io::Result<()> {
         let wal_files = self.wal.files.load();
-        let mut new_min_file_id = None;
         for idx in 0..wal_files.files.len() {
             let file_id = WalFileId(wal_files.min_file_id.0 + idx as u64);
             if (file_id.0 + 1) * self.wal.layout.wal_file_size >= watermark {
@@ -156,13 +158,6 @@ impl WalWriter {
             if path.exists() {
                 std::fs::remove_file(path)?;
             }
-            new_min_file_id = Some(file_id);
-        }
-        if let Some(new_min_file_id) = new_min_file_id {
-            let threshold =
-                (new_min_file_id.0 + 1) * self.wal.layout.wal_file_size / self.wal.layout.frag_size;
-            let mut maps = self.wal.maps.write();
-            maps.retain(|map_id, _| *map_id >= threshold);
         }
         self.wal
             .metrics
@@ -222,27 +217,12 @@ impl Wal {
         Ok(file)
     }
 
-    // todo remove
-    #[doc(hidden)]
-    #[cfg(test)]
-    pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalError> {
-        assert_ne!(
-            pos,
-            WalPosition::INVALID,
-            "Trying to read invalid wal position"
-        );
-        let (map, offset) = self.layout.locate(pos.offset);
-        let map = self.map(map, false)?;
-        // todo avoid clone, introduce Bytes::slice_in_place
-        Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
-    }
-
-    /// Read the wal position without mapping.
-    /// If mapping exists, it is still used for reading
-    /// if mapping does not exist the read syscall is used instead.
+    /// Read the wal position.
+    /// If mapping exists, it is used for reading.
+    /// If mapping does not exist, the read syscall is used instead.
     ///
     /// This method returns what type of read was used along with bytes read.
-    pub fn read_unmapped(&self, pos: WalPosition) -> Result<(ReadType, Option<Bytes>), WalError> {
+    pub fn read(&self, pos: WalPosition) -> Result<(ReadType, Option<Bytes>), WalError> {
         assert_ne!(
             pos,
             WalPosition::INVALID,
@@ -316,94 +296,12 @@ impl Wal {
     }
 
     fn get_map(&self, id: u64) -> Option<Map> {
-        let maps = match self.maps.try_read() {
-            Some(maps) => maps,
-            None => {
-                let now = Instant::now();
-                let maps = self.maps.read();
-                self.metrics
-                    .wal_contention
-                    .observe(now.elapsed().as_micros() as f64);
-                maps
-            }
-        };
-        maps.get(&id).cloned()
-    }
-
-    fn recv_map(&self, wal_mapper: &WalMapper, expect_id: u64, pin_map: &Map) -> Map {
-        let map = wal_mapper.next_map();
-        assert_eq!(
-            map.id, expect_id,
-            "Id from wal mapper does not match expected map id"
-        );
-        let mut maps = self.maps.write();
-        let prev = maps.insert(map.id, map.clone());
-        if prev.is_some() {
-            panic!("Re-inserting mapping into wal is not allowed");
-        }
-        let pin_map_entry = maps.get_mut(&pin_map.id).expect("Pin map not found");
-        assert!(
-            ptr::eq(pin_map.data.as_ptr(), pin_map_entry.data.as_ptr()),
-            "Pin map entry and located map do not match"
-        );
-        pin_map_entry.writeable = false;
-        // Remove memory mapping and copy over data to a regular byte array
-        // pin_map_entry.data = Bytes::copy_from_slice(&pin_map.data);
-        // Preserve mem mapping
-        pin_map_entry.data = pin_map.data.clone();
-        if maps.len() > self.layout.max_maps {
-            if let Some((_, popped_map)) = maps.pop_first() {
-                drop(maps);
-                // self.maps write lock is very expensive as it blocks any IO operation
-                // dropping popped_map can result in syscall, therefore doing it after lock is released
-                drop(popped_map);
-            }
-        }
-        map
-    }
-
-    fn map(&self, id: u64, writeable: bool) -> io::Result<Map> {
-        let mut maps = self.maps.write();
-        let _timer = self.metrics.map_time_mcs.clone().mcs_timer();
-        let map = match maps.entry(id) {
-            Entry::Vacant(va) => {
-                // todo - make sure WalMapper is not active when this code is called
-                let range = self.layout.map_range(id);
-                let data = unsafe {
-                    let mut options = memmap2::MmapOptions::new();
-                    options
-                        .offset(self.layout.offset_in_wal_file(range.start))
-                        .len(self.layout.frag_size as usize);
-                    let files = self.files.load();
-                    let file = files.get(self.layout.locate_file(range.start));
-                    if writeable {
-                        options /*.populate()*/
-                            .map_mut(file)?
-                            .into()
-                    } else {
-                        options.map(file)?.into()
-                    }
-                };
-                let map = Map {
-                    id,
-                    writeable,
-                    data,
-                };
-                va.insert(map)
-            }
-            Entry::Occupied(oc) => oc.into_mut(),
-        };
-        let map = map.clone();
-        if maps.len() > self.layout.max_maps {
-            maps.pop_first();
-        }
-        Ok(map)
+        self.maps.load().get(id).cloned()
     }
 
     /// Resize file to fit the specified map id
-    fn extend_to_map(layout: &WalLayout, files: &WalFiles, position: u64) -> io::Result<()> {
-        let (map_id, _) = layout.locate(position);
-        let file = files.get(layout.locate_file(position));
+    fn extend_to_map_id(layout: &WalLayout, files: &WalFiles, map_id: u64) -> io::Result<()> {
+        let file = files.get(layout.file_for_map(map_id));
         let mut end = layout.offset_in_wal_file(layout.map_range(map_id).end);
         if end == 0 {
             // If the map range end equals wal_file_size, set the end explicitly instead of using 0
@@ -428,17 +326,8 @@ impl Wal {
     }
 
     /// Iterate wal from the position after given position
-    /// If WalPosition::INVALID is specified, iterate from start
     pub fn wal_iterator(self: &Arc<Self>, position: u64) -> Result<WalIterator, WalError> {
-        let (map_id, _) = self.layout.locate(position);
-        Self::extend_to_map(&self.layout, &self.files.load(), position)?;
-        let map = self.map(map_id, true)?;
-        let iterator = WalIterator {
-            wal: self.clone(),
-            position,
-            map,
-        };
-        Ok(iterator)
+        WalIterator::new(self.clone(), position)
     }
 
     /// Returns wal writer positions after a given valid write position.
@@ -478,6 +367,20 @@ impl Wal {
 }
 
 impl WalIterator {
+    fn new(wal: Arc<Wal>, position: u64) -> Result<Self, WalError> {
+        let mut maps = WalMaps::default();
+        let (map_id, _) = wal.layout.locate(position);
+        let files = wal.files.load();
+        let map = Self::make_map(&wal.layout, map_id, &files, &mut maps)?
+            .expect("First map must be available"); // todo check this is actually true
+        Ok(Self {
+            maps,
+            wal,
+            position,
+            map,
+        })
+    }
+
     #[allow(clippy::should_implement_trait)] // todo better name
     pub fn next(&mut self) -> Result<(WalPosition, Bytes), WalError> {
         let frame = self.read_one();
@@ -501,32 +404,48 @@ impl WalIterator {
     }
 
     fn read_one(&mut self) -> Result<Bytes, WalError> {
-        // todo duplicated code
         let (map_id, offset) = self.wal.layout.locate(self.position);
         if self.map.id != map_id {
-            Wal::extend_to_map(&self.wal.layout, &self.wal.files.load(), self.position)?;
-            self.map = self.wal.map(map_id, true)?;
+            let files = self.wal.files.load();
+            let Some(map) = Self::make_map(&self.wal.layout, map_id, &files, &mut self.maps)?
+            else {
+                return Err(WalError::EndOfWal);
+            };
+            self.map = map;
         }
         Ok(CrcFrame::read_from_bytes(&self.map.data, offset as usize)?)
     }
 
+    fn make_map(
+        layout: &WalLayout,
+        map_id: u64,
+        files: &WalFiles,
+        maps: &mut WalMaps,
+    ) -> Result<Option<Map>, WalError> {
+        Wal::extend_to_map_id(&layout, &files, map_id)?;
+        let Some(file) = files.get_checked(layout.file_for_map(map_id)) else {
+            return Ok(None);
+        };
+        Ok(Some(maps.map(&file, &layout, map_id).clone()))
+    }
+
     pub fn into_writer(self) -> WalWriter {
+        let syncer = WalSyncer::start(self.wal.metrics.clone());
+        self.wal.maps.store(Arc::new(self.maps));
         let mapper = WalMapper::start(
-            self.map.id,
-            Arc::clone(&self.wal.files),
+            self.wal.maps.clone(),
+            self.wal.files.clone(),
             self.wal.layout.clone(),
-            self.wal().metrics.clone(),
+            syncer,
+            self.wal.metrics.clone(),
         );
         assert_eq!(self.wal.layout.locate(self.position).0, self.map.id);
-        let wal_tracker = WalTracker::start(self.position);
+        let wal_tracker = WalTracker::start(self.wal.layout.clone(), mapper, self.position);
         let allocator = WalAllocator::new(self.wal.layout.clone(), self.position);
-        let wal_syncer = WalSyncer::start(self.wal.metrics.clone());
         WalWriter {
             wal: self.wal,
             allocator,
             wal_tracker,
-            wal_syncer,
-            mapper,
         }
     }
 
@@ -588,6 +507,7 @@ impl PreparedWalWrite {
 pub enum WalError {
     Io(io::Error),
     Crc(CrcReadError),
+    EndOfWal,
 }
 
 impl From<CrcReadError> for WalError {
@@ -614,7 +534,7 @@ mod tests {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let layout = WalLayout {
             frag_size: 1024,
-            max_maps: 2,
+            max_maps: 3,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -628,14 +548,14 @@ mod tests {
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap();
             let data = wal.read(*pos.wal_position()).unwrap();
-            assert_eq!(&[1, 2, 3], data.as_ref());
+            assert_eq!(&[1, 2, 3], data.1.as_ref().unwrap().as_ref());
             let pos = writer.write(&PreparedWalWrite::new(&vec![])).unwrap();
             let data = wal.read(*pos.wal_position()).unwrap();
-            assert_eq!(&[] as &[u8], data.as_ref());
+            assert_eq!(&[] as &[u8], data.1.as_ref().unwrap().as_ref());
             drop(data);
             let pos = writer.write(&PreparedWalWrite::new(&large)).unwrap();
             let data = wal.read(*pos.wal_position()).unwrap();
-            assert_eq!(&large, data.as_ref());
+            assert_eq!(&large, data.1.unwrap().as_ref());
         }
         {
             let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
@@ -650,7 +570,7 @@ mod tests {
                 .unwrap();
             assert_eq!(pos.wal_position().offset(), 1024); // assert we skipped over to next frag
             let data = wal.read(*pos.wal_position()).unwrap();
-            assert_eq!(&[91, 92, 93], data.as_ref());
+            assert_eq!(&[91, 92, 93], data.1.unwrap().as_ref());
         }
         {
             let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
@@ -661,24 +581,10 @@ mod tests {
             let p4 = assert_bytes(&[91, 92, 93], wal_iterator.next());
             wal_iterator.next().expect_err("Error expected");
             let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
-            assert_eq!(&[1, 2, 3], wal.read(p1).unwrap().as_ref());
-            assert_eq!(&[] as &[u8], wal.read(p2).unwrap().as_ref());
-            assert_eq!(&large, wal.read(p3).unwrap().as_ref());
-            assert_eq!(&[91, 92, 93], wal.read(p4).unwrap().as_ref());
-
-            assert_eq!(
-                &[1, 2, 3],
-                wal.read_unmapped(p1).unwrap().1.unwrap().as_ref()
-            );
-            assert_eq!(
-                &[] as &[u8],
-                wal.read_unmapped(p2).unwrap().1.unwrap().as_ref()
-            );
-            assert_eq!(&large, wal.read_unmapped(p3).unwrap().1.unwrap().as_ref());
-            assert_eq!(
-                &[91, 92, 93],
-                wal.read_unmapped(p4).unwrap().1.unwrap().as_ref()
-            );
+            assert_eq!(&[1, 2, 3], wal.read(p1).unwrap().1.unwrap().as_ref());
+            assert_eq!(&[] as &[u8], wal.read(p2).unwrap().1.unwrap().as_ref());
+            assert_eq!(&large, wal.read(p3).unwrap().1.unwrap().as_ref());
+            assert_eq!(&[91, 92, 93], wal.read(p4).unwrap().1.unwrap().as_ref());
         }
         // we wrote into two frags
         // assert_eq!(2048, fs::metadata(file).unwrap().len());
@@ -686,10 +592,11 @@ mod tests {
 
     #[test]
     fn test_concurrent_wal_write() {
+        println!("Phase 1");
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let layout = WalLayout {
             frag_size: 512,
-            max_maps: 2,
+            max_maps: 4,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -722,6 +629,7 @@ mod tests {
         }
         drop(wal_writer);
         drop(wal);
+        println!("Phase 2");
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let mut iterator = wal.wal_iterator(0).unwrap();
         while let Ok((_, value)) = iterator.next() {
@@ -804,7 +712,7 @@ mod tests {
         let frag_size = 512;
         let layout = WalLayout {
             frag_size,
-            max_maps: 2,
+            max_maps: 3,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -828,7 +736,7 @@ mod tests {
         // Re-open the WAL and ensure it resizes correctly
         let wal = Wal::open(dir.path(), layout, Metrics::new()).unwrap();
         let data = wal.read(*position.wal_position()).unwrap();
-        assert_eq!(&[1, 2, 3], data.as_ref());
+        assert_eq!(&[1, 2, 3], data.1.unwrap().as_ref());
         assert_eq!(file.metadata().unwrap().len() % frag_size, 0);
     }
 
@@ -837,7 +745,7 @@ mod tests {
         let dir = tempdir::TempDir::new("test-multi-file-wal").unwrap();
         let layout = WalLayout {
             frag_size: 1024,
-            max_maps: 2,
+            max_maps: 3,
             direct_io: false,
             wal_file_size: 8192,
             kind: WalKind::Replay,
@@ -994,8 +902,8 @@ mod tests {
         };
 
         let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
-        assert_eq!(&[1, 2, 3], wal.read(pos1).unwrap().as_ref());
-        assert_eq!(&[4, 5, 6], wal.read(pos2).unwrap().as_ref());
+        assert_eq!(&[1, 2, 3], wal.read(pos1).unwrap().1.unwrap().as_ref());
+        assert_eq!(&[4, 5, 6], wal.read(pos2).unwrap().1.unwrap().as_ref());
     }
 
     #[track_caller]

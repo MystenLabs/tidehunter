@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tidehunter::metrics::{self, Metrics};
+use tidehunter::metrics::Metrics;
 use tidehunter::{PreparedWalWrite, Wal, WalKind, WalLayout, WalWriter};
 
 /// Multi-threaded WAL benchmark for TideHunter
@@ -165,7 +165,7 @@ fn main() {
 
     // Create multiple WAL instances in separate subdirectories
     let mut wal_writers = Vec::new();
-    let mut all_metrics = Vec::new();
+    let metrics = Metrics::new();
 
     for i in 0..args.wal_instances {
         let wal_path = if args.wal_instances == 1 {
@@ -177,7 +177,6 @@ fn main() {
             instance_path
         };
 
-        let metrics = Metrics::new();
         let wal =
             Wal::open(&wal_path, wal_layout.clone(), metrics.clone()).expect("Failed to open WAL");
         let wal_writer = Arc::new(
@@ -187,7 +186,6 @@ fn main() {
         );
 
         wal_writers.push(wal_writer);
-        all_metrics.push(metrics);
     }
 
     // Create progress bar
@@ -314,21 +312,7 @@ fn main() {
     println!("  Overall QPS: {:.2} writes/sec", overall_qps);
     println!("  Overall throughput: {}", overall_throughput);
 
-    // Print WAL contention metric (averaged across all WAL instances)
-    let mut total_contention_sum = 0.0;
-    let mut total_contention_count = 0u64;
-    for metrics_instance in &all_metrics {
-        if let Some((sum, count)) =
-            metrics::get_histogram_sum_count(&metrics_instance.wal_contention)
-        {
-            total_contention_sum += sum;
-            total_contention_count += count;
-        }
-    }
-    if total_contention_count > 0 {
-        let overall_avg = total_contention_sum / total_contention_count as f64;
-        println!("  Avg WAL contention: {:.2} µs", overall_avg);
-    }
+    println!("  Metric wal_write_wait: {}", metrics.wal_write_wait.get());
 
     println!();
     println!("Benchmark completed successfully!");

@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::layout::WalLayout;
 
 /// A thread-safe WAL position allocator that atomically allocates space in the WAL.
-#[allow(dead_code)]
 pub struct WalAllocator {
     position: AtomicU64,
     // padding ensures position is alone on cache line
@@ -11,6 +10,7 @@ pub struct WalAllocator {
     layout: WalLayout,
 }
 
+#[derive(Clone)]
 pub struct AllocationResult {
     allocated_position: u64,
     previous_position: u64,

@@ -116,7 +116,7 @@ pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool
         }
 
         // Read the entry from index WAL
-        let entry_result = index_wal.read_unmapped(*index_position);
+        let entry_result = index_wal.read(*index_position);
 
         let entry_bytes = match entry_result {
             Ok((_read_type, Some(bytes))) => bytes,

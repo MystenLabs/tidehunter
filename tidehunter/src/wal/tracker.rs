@@ -2,6 +2,8 @@ use super::WalPosition;
 #[cfg(test)]
 use crate::latch::LatchGuard;
 use crate::wal::allocator::AllocationResult;
+use crate::wal::mapper::WalMapper;
+use crate::WalLayout;
 use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -43,10 +45,12 @@ struct WalTrackerThread {
     receiver: mpsc::Receiver<WalTrackerMessage>,
     last_processed: Arc<AtomicU64>,
     state: WalTrackerState,
+    mapper: WalMapper,
+    layout: WalLayout,
 }
 
 struct WalTrackerState {
-    pending: BTreeMap<u64, u64>,
+    pending: BTreeMap<u64, AllocationResult>,
     last_processed: u64,
 }
 
@@ -55,25 +59,22 @@ struct WalTrackerMessage {
     kind: WalTrackerMessageKind,
 }
 
-struct AllocationMessage {
-    previous_position: u64,
-    next_position: u64,
-}
-
 enum WalTrackerMessageKind {
-    AllocationMessage(AllocationMessage),
+    AllocationMessage(AllocationResult),
     #[cfg(test)]
     Barrier(#[allow(dead_code)] LatchGuard),
 }
 
 impl WalTracker {
-    pub fn start(last_processed: u64) -> Self {
+    pub fn start(layout: WalLayout, mapper: WalMapper, last_processed: u64) -> Self {
         let (sender, receiver) = mpsc::channel();
         let atomic_last_processed = Arc::new(AtomicU64::new(last_processed));
         let thread = WalTrackerThread {
             receiver,
             state: WalTrackerState::new_empty(last_processed),
             last_processed: atomic_last_processed.clone(),
+            mapper,
+            layout,
         };
         thread::spawn(move || thread.run());
         Self {
@@ -82,13 +83,12 @@ impl WalTracker {
         }
     }
 
-    pub fn allocated(&self, allocation_result: &AllocationResult) -> WalGuardMaker {
+    pub fn allocated(&self, allocation_result: AllocationResult) -> WalGuardMaker {
         let mutex = Arc::new(Mutex::new(()));
         let guard = mutex.lock_arc();
-        let allocation_message = AllocationMessage::from_allocation_result(allocation_result);
         let message = WalTrackerMessage {
             mutex,
-            kind: WalTrackerMessageKind::AllocationMessage(allocation_message),
+            kind: WalTrackerMessageKind::AllocationMessage(allocation_result),
         };
         self.sender.send(message).ok();
         WalGuardMaker {
@@ -111,15 +111,6 @@ impl WalTracker {
         };
         self.sender.send(message).ok();
         latch.latch();
-    }
-}
-
-impl AllocationMessage {
-    pub fn from_allocation_result(result: &AllocationResult) -> Self {
-        Self {
-            previous_position: result.previous_position(),
-            next_position: result.next_position(),
-        }
     }
 }
 
@@ -156,7 +147,17 @@ impl WalTrackerThread {
             let _ = message.mutex.lock();
             let position = match message.kind {
                 WalTrackerMessageKind::AllocationMessage(message) => {
-                    self.state.add_processed(&message)
+                    self.state.add_processed(message, |result| {
+                        if let Some(frag) =
+                            self.layout.is_first_in_frag(result.allocated_position())
+                        {
+                            if let Some(prev_frag) = frag.checked_sub(1) {
+                                // When the first position for frag is allocated and all positions before it are processed,
+                                // Then the previous fragment can be finalized.
+                                self.mapper.map_finalized(prev_frag);
+                            }
+                        }
+                    })
                 }
                 #[cfg(test)]
                 WalTrackerMessageKind::Barrier(_) => {
@@ -179,19 +180,22 @@ impl WalTrackerState {
         }
     }
 
-    /// Add an allocation message to state, return new last_processed if it has changed
-    pub fn add_processed(&mut self, result: &AllocationMessage) -> Option<u64> {
-        let previous_position = result.previous_position;
+    pub fn add_processed<F: FnMut(&AllocationResult)>(
+        &mut self,
+        mut result: AllocationResult,
+        mut callback: F,
+    ) -> Option<u64> {
+        let previous_position = result.previous_position();
         if self.last_processed != previous_position {
-            self.pending
-                .insert(result.previous_position, result.next_position);
+            self.pending.insert(result.previous_position(), result);
             return None;
         }
-        let mut next_position = result.next_position;
-        while let Some(position) = self.pending.remove(&next_position) {
-            next_position = position;
+        callback(&result);
+        while let Some(next_result) = self.pending.remove(&result.next_position()) {
+            result = next_result;
+            callback(&result);
         }
-        self.last_processed = next_position;
+        self.last_processed = result.next_position();
         Some(self.last_processed)
     }
 }
@@ -209,43 +213,41 @@ mod tests {
         let mut state = WalTrackerState::new_empty(0);
         let layout = WalLayout::new_simple(32);
         let allocator = WalAllocator::new(layout, 0);
-        let a = AllocationMessage::from_allocation_result(&allocator.allocate(12));
+        let a = allocator.allocate(12);
         let b = allocator.allocate(6);
         assert!(b.need_skip_marker().is_none());
-        let b = AllocationMessage::from_allocation_result(&b);
         let c = allocator.allocate(17);
         assert!(c.need_skip_marker().is_some());
-        let c = AllocationMessage::from_allocation_result(&c);
 
-        state.add_processed(&a);
-        state.add_processed(&b);
-        state.add_processed(&c);
-        assert_eq!(state.last_processed, c.next_position);
+        state.add_processed(a.clone(), |_| {});
+        state.add_processed(b.clone(), |_| {});
+        state.add_processed(c.clone(), |_| {});
+        assert_eq!(state.last_processed, c.next_position());
         assert!(state.pending.is_empty());
 
         let mut state = WalTrackerState::new_empty(0);
-        state.add_processed(&b);
+        state.add_processed(b.clone(), |_| {});
         assert_eq!(state.last_processed, 0);
-        state.add_processed(&a);
-        assert_eq!(state.last_processed, b.next_position);
-        state.add_processed(&c);
-        assert_eq!(state.last_processed, c.next_position);
+        state.add_processed(a.clone(), |_| {});
+        assert_eq!(state.last_processed, b.next_position());
+        state.add_processed(c.clone(), |_| {});
+        assert_eq!(state.last_processed, c.next_position());
         assert!(state.pending.is_empty());
 
         let mut state = WalTrackerState::new_empty(0);
-        state.add_processed(&c);
+        state.add_processed(c.clone(), |_| {});
         assert_eq!(state.last_processed, 0);
-        state.add_processed(&b);
+        state.add_processed(b.clone(), |_| {});
         assert_eq!(state.last_processed, 0);
-        state.add_processed(&a);
-        assert_eq!(state.last_processed, c.next_position);
+        state.add_processed(a.clone(), |_| {});
+        assert_eq!(state.last_processed, c.next_position());
         assert!(state.pending.is_empty());
     }
 
     #[test]
     fn test_multiple_guards_ordering() {
         let layout = WalLayout::new_simple(32);
-        let allocator = WalAllocator::new(layout, 0);
+        let allocator = WalAllocator::new(layout.clone(), 0);
         let a = allocator.allocate(8);
         let b = allocator.allocate(9);
         let c = allocator.allocate(10);
@@ -268,23 +270,23 @@ mod tests {
         };
 
         // Test when messages are sent to tracker in order positions are allocated
-        let tracker = WalTracker::start(0);
-        let guard1 = tracker.allocated(&a);
-        let guard2 = tracker.allocated(&b);
-        let guard3 = tracker.allocated(&c);
+        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let guard1 = tracker.allocated(a.clone());
+        let guard2 = tracker.allocated(b.clone());
+        let guard3 = tracker.allocated(c.clone());
         test(tracker, guard1, guard2, guard3);
 
         // Test tracker when messages are sent to tracker in different order
-        let tracker = WalTracker::start(0);
-        let guard1 = tracker.allocated(&a);
-        let guard3 = tracker.allocated(&c);
-        let guard2 = tracker.allocated(&b);
+        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let guard1 = tracker.allocated(a.clone());
+        let guard3 = tracker.allocated(c.clone());
+        let guard2 = tracker.allocated(b.clone());
         test(tracker, guard1, guard2, guard3);
 
-        let tracker = WalTracker::start(0);
-        let guard3 = tracker.allocated(&c);
-        let guard2 = tracker.allocated(&b);
-        let guard1 = tracker.allocated(&a);
+        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let guard3 = tracker.allocated(c.clone());
+        let guard2 = tracker.allocated(b.clone());
+        let guard1 = tracker.allocated(a.clone());
 
         drop(guard3);
         thread::sleep(Duration::from_millis(10));
