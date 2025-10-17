@@ -422,11 +422,11 @@ impl WalIterator {
         files: &WalFiles,
         maps: &mut WalMaps,
     ) -> Result<Option<Map>, WalError> {
-        Wal::extend_to_map_id(&layout, &files, map_id)?;
+        Wal::extend_to_map_id(layout, files, map_id)?;
         let Some(file) = files.get_checked(layout.file_for_map(map_id)) else {
             return Ok(None);
         };
-        Ok(Some(maps.map(&file, &layout, map_id).clone()))
+        Ok(Some(maps.map(file, layout, map_id).clone()))
     }
 
     pub fn into_writer(self) -> WalWriter {
