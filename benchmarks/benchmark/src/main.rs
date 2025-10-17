@@ -6,7 +6,8 @@ use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
 use configs::{
-    Backend, KeyLayout, ReadMode, StressArgs, StressClientParameters, StressTestConfigs,
+    Backend, KeyLayout, ReadMode, RelocationConfig, StressArgs, StressClientParameters,
+    StressTestConfigs,
 };
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
@@ -21,6 +22,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 use tidehunter::key_shape::{KeyShape, KeySpaceConfig, KeyType};
+use tidehunter::{compute_target_position_from_ratio, RelocationStrategy};
 
 mod configs;
 mod metrics;
@@ -129,11 +131,30 @@ pub fn main() {
             }
 
             // Start continuous relocation if enabled
-            if let Some(strategy) = config.stress_client_parameters.relocation {
-                report!(report, "Starting continuous {:?} relocation", strategy);
+            if let Some(ref relocation_config) = config.stress_client_parameters.relocation {
+                report!(
+                    report,
+                    "Starting continuous {:?} relocation",
+                    relocation_config
+                );
                 let db_clone = storage.db.clone();
+                let relocation_config = relocation_config.clone();
                 thread::spawn(move || {
                     loop {
+                        // Convert RelocationConfig to RelocationStrategy for this iteration
+                        let strategy = match &relocation_config {
+                            RelocationConfig::Wal => RelocationStrategy::WalBased,
+                            RelocationConfig::Index { ratio: None } => {
+                                RelocationStrategy::IndexBased(None)
+                            }
+                            RelocationConfig::Index { ratio: Some(r) } => {
+                                // Compute fresh target position from ratio each iteration
+                                let target_position =
+                                    compute_target_position_from_ratio(&db_clone, *r);
+                                RelocationStrategy::IndexBased(target_position)
+                            }
+                        };
+
                         // Start relocation and let it run to completion
                         match db_clone.start_relocation_with_strategy(strategy) {
                             Ok(_) => {
@@ -537,7 +558,7 @@ impl StressThread {
             } else {
                 // Perform a write operation
                 let should_overwrite = thread_rng.gen::<f64>() < self.parameters.overwrite_ratio
-                                       && local_write_pos_counter > 0;
+                    && local_write_pos_counter > 0;
 
                 let pos = if should_overwrite {
                     // Select existing key to overwrite using same logic as reads

@@ -9,12 +9,30 @@ use tidehunter::RelocationStrategy;
 /// Port for Prometheus metrics
 pub const METRICS_PORT: u16 = 9092;
 
-/// Helper to parse RelocationStrategy from string
-fn parse_relocation_strategy(s: &str) -> Result<RelocationStrategy, anyhow::Error> {
-    match s {
-        "wal" => Ok(RelocationStrategy::WalBased),
-        "index" => Ok(RelocationStrategy::IndexBased),
-        _ => anyhow::bail!("Invalid relocation strategy: use 'wal' or 'index'"),
+/// Benchmark-level relocation configuration that stores user intent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RelocationConfig {
+    Wal,
+    Index { ratio: Option<f64> },
+}
+
+/// Helper to parse RelocationConfig from string
+/// Accepts "wal", "index", or "index:0.5" (with ratio)
+fn parse_relocation_config(s: &str) -> Result<RelocationConfig, anyhow::Error> {
+    if s == "wal" {
+        Ok(RelocationConfig::Wal)
+    } else if s == "index" {
+        Ok(RelocationConfig::Index { ratio: None })
+    } else if let Some(ratio_str) = s.strip_prefix("index:") {
+        let ratio: f64 = ratio_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid ratio format: must be a number"))?;
+        if !(0.0..=1.0).contains(&ratio) {
+            anyhow::bail!("Ratio must be between 0.0 and 1.0, got {}", ratio);
+        }
+        Ok(RelocationConfig::Index { ratio: Some(ratio) })
+    } else {
+        anyhow::bail!("Invalid relocation strategy: use 'wal', 'index', or 'index:<ratio>' (e.g., 'index:0.5')");
     }
 }
 
@@ -151,9 +169,9 @@ pub struct StressClientParameters {
     /// The zipf exponent for reader position selection. 0 means uniform.
     #[serde(default = "defaults::default_zipf_exponent")]
     pub zipf_exponent: f64,
-    /// Relocation strategy. None means disabled, Some(strategy) enables continuous relocation
+    /// Relocation configuration. None means disabled, Some(config) enables continuous relocation
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub relocation: Option<RelocationStrategy>,
+    pub relocation: Option<RelocationConfig>,
     /// Ratio of writes that overwrite existing keys (0.0 to 1.0, default 0.0)
     #[serde(default = "defaults::default_overwrite_ratio")]
     pub overwrite_ratio: f64,
@@ -353,9 +371,15 @@ pub struct StressArgs {
         help = "The zipf exponent for reader position selection. 0 means uniform."
     )]
     zipf_exponent: Option<f64>,
-    #[arg(long, help = "Relocation strategy (wal or index). Enables continuous relocation")]
+    #[arg(
+        long,
+        help = "Relocation strategy (wal or index). Enables continuous relocation"
+    )]
     relocation: Option<String>,
-    #[arg(long, help = "Ratio of writes that overwrite existing keys (0.0 to 1.0)")]
+    #[arg(
+        long,
+        help = "Ratio of writes that overwrite existing keys (0.0 to 1.0)"
+    )]
     overwrite_ratio: Option<f64>,
 }
 
@@ -422,20 +446,24 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
         config.stress_client_parameters.zipf_exponent = zipf_exponent;
     }
     if let Some(relocation_str) = args.relocation {
-        match parse_relocation_strategy(&relocation_str) {
-            Ok(relocation) => {
-                config.stress_client_parameters.relocation = Some(relocation);
-                // Also set it in db_parameters for tidehunter
-                config.db_parameters.relocation_strategy = relocation;
+        match parse_relocation_config(&relocation_str) {
+            Ok(relocation_config) => {
+                config.stress_client_parameters.relocation = Some(relocation_config.clone());
+                // Set the base strategy in db_parameters for tidehunter
+                // The actual target position will be computed dynamically in the benchmark
+                config.db_parameters.relocation_strategy = match relocation_config {
+                    RelocationConfig::Wal => RelocationStrategy::WalBased,
+                    RelocationConfig::Index { .. } => RelocationStrategy::IndexBased(None),
+                };
             }
             Err(e) => {
-                eprintln!("Error parsing relocation strategy: {}", e);
+                eprintln!("Error parsing relocation config: {}", e);
                 std::process::exit(1);
             }
         }
     }
     if let Some(overwrite_ratio) = args.overwrite_ratio {
-        if overwrite_ratio < 0.0 || overwrite_ratio > 1.0 {
+        if !(0.0..=1.0).contains(&overwrite_ratio) {
             eprintln!("Error: overwrite_ratio must be between 0.0 and 1.0");
             std::process::exit(1);
         }
