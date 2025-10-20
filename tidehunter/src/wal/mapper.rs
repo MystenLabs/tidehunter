@@ -98,7 +98,7 @@ impl Drop for WalMapper {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(jh) = self.jh.take() {
-            jh.join().expect("wal-mapper thread panic")
+            crate::thread_util::join_thread_with_timeout(jh, "wal-mapper", 10);
         }
     }
 }

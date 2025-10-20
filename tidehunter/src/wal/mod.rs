@@ -718,19 +718,16 @@ mod tests {
             kind: WalKind::Replay,
         };
 
-        // Write an entry into the WAl
+        // Write an entry into the WAL and extract just the position (not the guard)
         let position = {
             let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
             let writer = wal.wal_iterator(0).unwrap().into_writer();
             writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap()
+                .into_wal_position()
         };
-
-        // Wait for background threads (WalTracker and WalMapper) to finish
-        // The mapper pre-allocates additional maps in the background and could
-        // extend the file after we try to corrupt it, causing a race condition
-        thread::sleep(Duration::from_millis(100));
+        // Guard dropped immediately above, WalWriter drops here and joins background threads
 
         // Corrupt the file length
         let file = OpenOptions::new().write(true).open(&file_path).unwrap();
@@ -740,7 +737,7 @@ mod tests {
 
         // Re-open the WAL and ensure it resizes correctly
         let wal = Wal::open(dir.path(), layout, Metrics::new()).unwrap();
-        let data = wal.read(*position.wal_position()).unwrap();
+        let data = wal.read(position).unwrap();
         assert_eq!(&[1, 2, 3], data.1.unwrap().as_ref());
         assert_eq!(file.metadata().unwrap().len() % frag_size, 0);
     }
@@ -891,19 +888,19 @@ mod tests {
         let pos1 = {
             let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
             let writer = wal.writer_after(None).unwrap();
-            *writer
+            writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap()
-                .wal_position()
+                .into_wal_position()
         };
 
         let pos2 = {
             let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
             let writer = wal.writer_after(Some(pos1)).unwrap();
-            *writer
+            writer
                 .write(&PreparedWalWrite::new(&vec![4, 5, 6]))
                 .unwrap()
-                .wal_position()
+                .into_wal_position()
         };
 
         let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());

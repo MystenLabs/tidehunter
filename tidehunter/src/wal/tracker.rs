@@ -26,9 +26,9 @@ use std::thread;
 /// This is an essential property to avoid race conditions with an asynchronous flush
 /// and the snapshot process,
 /// and this is what allows us not to hold large table mutex when writing to the wal.
-#[derive(Clone)]
 pub struct WalTracker {
-    sender: mpsc::Sender<WalTrackerMessage>,
+    jh: Option<thread::JoinHandle<()>>,
+    sender: Option<mpsc::Sender<WalTrackerMessage>>,
     last_processed: Arc<AtomicU64>,
 }
 
@@ -76,9 +76,13 @@ impl WalTracker {
             mapper,
             layout,
         };
-        thread::spawn(move || thread.run());
+        let jh = thread::Builder::new()
+            .name("wal-tracker".to_string())
+            .spawn(move || thread.run())
+            .expect("failed to start wal-tracker thread");
         Self {
-            sender,
+            jh: Some(jh),
+            sender: Some(sender),
             last_processed: atomic_last_processed,
         }
     }
@@ -90,7 +94,11 @@ impl WalTracker {
             mutex,
             kind: WalTrackerMessageKind::AllocationMessage(allocation_result),
         };
-        self.sender.send(message).ok();
+        self.sender
+            .as_ref()
+            .expect("WalTracker already dropped")
+            .send(message)
+            .ok();
         WalGuardMaker {
             shared_guard: Rc::new(guard),
         }
@@ -109,14 +117,36 @@ impl WalTracker {
             mutex,
             kind: WalTrackerMessageKind::Barrier(guard),
         };
-        self.sender.send(message).ok();
+        self.sender
+            .as_ref()
+            .expect("WalTracker already dropped")
+            .send(message)
+            .ok();
         latch.latch();
+    }
+}
+
+impl Drop for WalTracker {
+    fn drop(&mut self) {
+        // Drop the sender first to signal the tracker thread to exit
+        self.sender.take();
+        // Wait for the tracker thread to complete with a timeout
+        if let Some(jh) = self.jh.take() {
+            crate::thread_util::join_thread_with_timeout(jh, "wal-tracker", 10);
+        }
+        // WalMapper's Drop will be called when the tracker thread exits,
+        // which in turn waits for the mapper thread to complete
     }
 }
 
 impl WalGuard {
     pub fn wal_position(&self) -> &WalPosition {
         &self.wal_position
+    }
+
+    /// Consumes the guard and returns the WalPosition, immediately dropping the guard
+    pub fn into_wal_position(self) -> WalPosition {
+        self.wal_position
     }
 
     /// Create a guard for replay that doesn't track position updates
