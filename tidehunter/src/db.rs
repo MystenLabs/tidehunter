@@ -122,10 +122,10 @@ impl Db {
         let shape_file_path = Self::shape_file_path(path);
         if !shape_file_path.exists() {
             let yaml = key_shape.to_yaml().map_err(|e| {
-                DbError::Io(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to serialize key shape: {}", e),
-                ))
+                DbError::Io(io::Error::other(format!(
+                    "Failed to serialize key shape: {}",
+                    e
+                )))
             })?;
             std::fs::write(&shape_file_path, yaml)?;
         }
@@ -161,10 +161,10 @@ impl Db {
         let config_file_path = Self::config_file_path(path);
         if !config_file_path.exists() {
             let yaml = serde_yaml::to_string(config).map_err(|e| {
-                DbError::Io(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to serialize config: {}", e),
-                ))
+                DbError::Io(io::Error::other(format!(
+                    "Failed to serialize config: {}",
+                    e
+                )))
             })?;
             std::fs::write(&config_file_path, yaml)?;
         }

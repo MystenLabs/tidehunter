@@ -180,7 +180,7 @@ impl IndexTable {
             .filter_map(|(k, v)| v.into_wal_position().valid().map(|pos| (k, pos)))
     }
 
-    pub fn keys(&self) -> Keys<Bytes, IndexWalPosition> {
+    pub fn keys(&self) -> Keys<'_, Bytes, IndexWalPosition> {
         self.data.keys()
     }
 

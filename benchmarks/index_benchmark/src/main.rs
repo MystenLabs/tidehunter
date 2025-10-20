@@ -131,10 +131,10 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                         .send((index_idx, bytes.as_ref().to_vec()))
                         .await
                         .map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("Failed to send index through channel: {}", e),
-                            )
+                            std::io::Error::other(format!(
+                                "Failed to send index through channel: {}",
+                                e
+                            ))
                         });
 
                     if let Err(e) = result {
@@ -156,20 +156,14 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
             match task {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(e)) => Err(e),
-                Err(e) => Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
             }?
         }
 
         // Wait for the consumer task to complete
         match consumer.await {
             Ok(result) => result,
-            Err(e) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )),
+            Err(e) => Err(std::io::Error::other(e.to_string())),
         }
     })?;
 
@@ -195,7 +189,7 @@ impl IndexBenchmark {
         };
 
         assert!(
-            (file_length - 8) % index_count == 0,
+            (file_length - 8).is_multiple_of(index_count),
             "File size is not a multiple of index count"
         );
         let index_size = (file_length - 8) / index_count;

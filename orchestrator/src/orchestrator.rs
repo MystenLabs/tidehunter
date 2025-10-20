@@ -228,7 +228,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // Select instances to configure.
         let (instances, _) = self.select_instances()?;
         for (i, node) in instances.iter().enumerate() {
-            display::config(format!("  - node {i}"), &node.ssh_address());
+            display::config(format!("  - node {i}"), node.ssh_address());
         }
 
         // Generate the genesis configuration file and the keystore allowing access to gas objects.
@@ -485,13 +485,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     &parameters.target_configs.len()
                 ),
             );
-            display::config("Benchmark Parameters", &parameters);
+            display::config("Benchmark Parameters", parameters);
             display::newline();
 
             // Cleanup the testbed (in case the previous run was not completed).
             self.cleanup(true).await?;
             // Start the instance monitoring tools.
-            let monitor = self.start_monitoring(&parameters).await?;
+            let monitor = self.start_monitoring(parameters).await?;
 
             // Initialize the metrics collector.
             let batch_timestamp = Utc::now().format("%Y-%m-%d-%H-%M-%S").to_string();
@@ -508,21 +508,21 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
             // Configure all instances (if needed).
             if !self.skip_testbed_configuration {
-                self.configure(&parameters).await?;
+                self.configure(parameters).await?;
             }
 
             // Deploy the validators.
-            self.run_nodes(&parameters).await?;
+            self.run_nodes(parameters).await?;
 
             // Wait for the benchmark to terminate.
-            self.run(&parameters, &mut collector).await?;
+            self.run(parameters, &mut collector).await?;
 
             // Kill the nodes and clients (without deleting the log files).
             self.cleanup(false).await?;
 
             // Download the log files.
             if self.settings.log_processing {
-                let error_counter = self.download_logs(&parameters, &batch_timestamp).await?;
+                let error_counter = self.download_logs(parameters, &batch_timestamp).await?;
                 error_counter.print_summary();
             }
         }
