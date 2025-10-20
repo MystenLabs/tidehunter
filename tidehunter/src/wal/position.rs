@@ -1,6 +1,10 @@
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 
+pub trait HasOffset {
+    fn offset(&self) -> u64;
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition {
     pub(super) offset: u64,
@@ -12,6 +16,9 @@ pub struct WalFileId(pub(super) u64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct MapId(pub(super) u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct LastProcessed(pub(super) u64);
 
 impl WalPosition {
     pub const MAX: WalPosition = WalPosition {
@@ -92,6 +99,12 @@ impl WalPosition {
     }
 }
 
+impl HasOffset for WalPosition {
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+}
+
 impl MapId {
     pub(super) fn new(id: u64) -> Self {
         Self(id)
@@ -107,6 +120,32 @@ impl MapId {
 
     pub(super) fn next_map(self) -> Self {
         MapId(self.0 + 1)
+    }
+}
+
+impl LastProcessed {
+    pub(super) fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn none() -> Self {
+        Self(0)
+    }
+
+    pub(crate) fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Returns whether the position is processed(included in the index).
+    pub(crate) fn is_processed<T: HasOffset>(self, pos: &T) -> bool {
+        // Offset is processed if it is below (but not equal) to last_processed position
+        // last_processed points to a next allocated position
+        pos.offset() < self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_test(value: u64) -> Self {
+        Self(value)
     }
 }
 

@@ -1,6 +1,6 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use super::layout::WalLayout;
+use crate::wal::position::HasOffset;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A thread-safe WAL position allocator that atomically allocates space in the WAL.
 pub struct WalAllocator {
@@ -92,6 +92,12 @@ impl AllocationResult {
 
     pub fn len_aligned(&self) -> u64 {
         self.len_aligned
+    }
+}
+
+impl HasOffset for AllocationResult {
+    fn offset(&self) -> u64 {
+        self.allocated_position
     }
 }
 

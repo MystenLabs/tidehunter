@@ -29,7 +29,7 @@ use crate::wal_allocator::WalAllocator;
 use files::WalFiles;
 use layout::WalLayout;
 use mapper::WalMapper;
-use position::{MapId, WalPosition};
+use position::{LastProcessed, MapId, WalPosition};
 use syncer::WalSyncer;
 use tracker::{WalGuard, WalTracker};
 
@@ -140,7 +140,7 @@ impl WalWriter {
     }
 
     /// Returns the last processed position from the WalTracker
-    pub fn last_processed(&self) -> u64 {
+    pub fn last_processed(&self) -> LastProcessed {
         self.wal_tracker.last_processed()
     }
 
@@ -432,7 +432,11 @@ impl WalIterator {
             self.wal.metrics.clone(),
         );
         assert_eq!(self.wal.layout.locate(self.position).0, self.map.id);
-        let wal_tracker = WalTracker::start(self.wal.layout.clone(), mapper, self.position);
+        let wal_tracker = WalTracker::start(
+            self.wal.layout.clone(),
+            mapper,
+            LastProcessed::new(self.position),
+        );
         let allocator = WalAllocator::new(self.wal.layout.clone(), self.position);
         WalWriter {
             wal: self.wal,
@@ -677,9 +681,9 @@ mod tests {
 
         // Initial last_processed should be less than or equal to guard position
         assert!(
-            initial_last_processed <= guard_position.offset(),
+            initial_last_processed.as_u64() <= guard_position.offset(),
             "initial last_processed ({}) should be <= guard position ({})",
-            initial_last_processed,
+            initial_last_processed.as_u64(),
             guard_position.offset()
         );
 
@@ -690,9 +694,9 @@ mod tests {
         // Check that last_processed is greater than the guard position
         let final_last_processed = writer.last_processed();
         assert!(
-            final_last_processed > guard_position.offset(),
+            final_last_processed.as_u64() > guard_position.offset(),
             "final last_processed ({}) should be > guard position ({})",
-            final_last_processed,
+            final_last_processed.as_u64(),
             guard_position.offset()
         );
     }

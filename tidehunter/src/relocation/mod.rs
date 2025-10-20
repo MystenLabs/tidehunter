@@ -164,7 +164,7 @@ impl RelocationDriver {
         // Capture the upper WAL limit to avoid race conditions
         // Only process entries written before this point. This is the last position that was written
         // and made its way into the large table
-        let upper_limit = db.wal_writer.last_processed();
+        let upper_limit = db.wal_writer.last_processed().as_u64();
 
         // Get starting cell reference from saved progress
         let mut current_cell_ref = match &watermarks.data.next_to_process {
@@ -235,7 +235,7 @@ impl RelocationDriver {
     }
 
     fn wal_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
-        let upper_limit = db.wal_writer.last_processed();
+        let upper_limit = db.wal_writer.last_processed().as_u64();
         let min_wal_position = db.wal.min_wal_position();
         let mut wal_iterator = db.wal.wal_iterator(min_wal_position)?;
 
@@ -351,7 +351,7 @@ impl RelocationDriver {
         let batch = RelocatedWriteBatch::new(
             cell_ref.keyspace,
             cell_ref.cell_id.clone(),
-            db.last_processed_wal_position(),
+            db.last_processed_wal_position().as_u64(),
         );
         let mut context = CellProcessingContext::new(batch);
         let mut removed_count = 0;

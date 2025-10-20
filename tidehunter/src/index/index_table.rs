@@ -3,7 +3,7 @@ use crate::primitives::cursor::SliceCursor;
 use crate::primitives::range_from_excluding::RangeFromExcluding;
 use crate::primitives::slice_buf::SliceBuf;
 use crate::primitives::var_int::{deserialize_u16_varint, serialize_u16_varint, MAX_U16_VARINT};
-use crate::wal::position::WalPosition;
+use crate::wal::position::{HasOffset, LastProcessed, WalPosition};
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use std::collections::btree_map::{Entry, Keys};
@@ -93,9 +93,9 @@ impl IndexTable {
     }
 
     /// Remove flushed index entries that have offset <= last_processed
-    pub fn unmerge_flushed(&mut self, original: &Self, last_processed: u64) {
+    pub fn unmerge_flushed(&mut self, original: &Self, last_processed: LastProcessed) {
         for (k, v) in original.data.iter() {
-            if v.offset >= last_processed {
+            if !last_processed.is_processed(v) {
                 // Do not unmerge entries that might have in-flight operations
                 continue;
             }
@@ -264,8 +264,14 @@ impl IndexTable {
         });
     }
 
-    /// Retain only entries with offset > last_processed
+    /// Retain only unprocessed entries
+    pub fn retain_unprocessed(&mut self, last_processed: LastProcessed) {
+        self.data.retain(|_k, v| !last_processed.is_processed(v));
+    }
+
+    /// Retain only entries with offset >= last_processed
     pub fn retain_above_position(&mut self, last_processed: u64) {
+        // todo ideally should use LastProcessed::is_processed here
         self.data.retain(|_k, v| v.offset >= last_processed);
     }
 
@@ -372,6 +378,12 @@ impl IndexWalPosition {
     }
 }
 
+impl HasOffset for IndexWalPosition {
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+}
+
 pub trait IndexSerializationVisitor {
     fn add_key(&mut self, key: &[u8], offset: usize);
 }
@@ -457,7 +469,7 @@ mod tests {
         index2.insert(vec![1].into(), WalPosition::test_value(5));
         index2.insert(vec![3].into(), WalPosition::test_value(8));
         let len_before = index2.len();
-        index2.unmerge_flushed(&index, u64::MAX);
+        index2.unmerge_flushed(&index, LastProcessed::new_test(u64::MAX));
         let len_after = index2.len();
         assert_eq!(len_after as i64 - len_before as i64, -2);
         let data = index2.into_data().into_iter().collect::<Vec<_>>();
@@ -485,7 +497,7 @@ mod tests {
 
         // With last_processed=4, only entries at positions 2 and 3 should be unmerged
         let len_before = index2.len();
-        index2.unmerge_flushed(&index, 4);
+        index2.unmerge_flushed(&index, LastProcessed::new_test(4));
         let len_after = index2.len();
         assert_eq!(len_after as i64 - len_before as i64, -1);
         let data = index2.into_data().into_iter().collect::<Vec<_>>();

@@ -14,7 +14,7 @@ use crate::primitives::range_from_excluding;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::relocation::updates::RelocationUpdates;
 use crate::runtime;
-use crate::wal::position::WalPosition;
+use crate::wal::position::{LastProcessed, WalPosition};
 use crate::wal::tracker::WalGuard;
 use crate::wal::WalRandomRead;
 use bloom::{BloomFilter, ASMS};
@@ -45,11 +45,11 @@ pub struct LargeTableEntry {
     context: KsContext,
     bloom_filter: Option<BloomFilter>,
     unload_jitter: usize,
-    last_processed: u64,
+    last_processed: LastProcessed,
     /// Tracks the WAL last_processed position captured when an async flush was initiated.
     /// - `None`: No flush is pending
     /// - `Some(pos)`: Async flush is in progress, will update `last_processed` to `pos` when complete
-    pending_last_processed: Option<u64>,
+    pending_last_processed: Option<LastProcessed>,
 }
 
 enum LargeTableEntryState {
@@ -83,7 +83,7 @@ pub(crate) type RowContainer<T> = BTreeMap<CellId, T>;
 #[doc(hidden)] // Used by tools/wal_inspector for control region inspection
 pub struct SnapshotEntryData {
     pub position: WalPosition,
-    pub last_processed: u64,
+    pub last_processed: LastProcessed,
 }
 
 impl SnapshotEntryData {
@@ -91,7 +91,7 @@ impl SnapshotEntryData {
     pub fn empty() -> Self {
         Self {
             position: WalPosition::INVALID,
-            last_processed: 0,
+            last_processed: LastProcessed::none(),
         }
     }
 }
@@ -514,7 +514,7 @@ impl LargeTable {
             max_pos.offset()
         } else {
             // Case 3: Empty database - use WAL's last_processed position
-            wal_last_processed
+            wal_last_processed.as_u64()
         };
 
         let data = LargeTableContainer(data);
@@ -595,7 +595,7 @@ impl LargeTable {
                 if !entry.state.is_empty() {
                     replay_from = Some(cmp::min(
                         replay_from.unwrap_or(u64::MAX),
-                        entry.last_processed,
+                        entry.last_processed.as_u64(),
                     ));
                 }
             }
@@ -872,7 +872,7 @@ pub trait Loader {
     /// Returns the last WAL position that has been fully processed and committed.
     /// This position represents the highest WAL offset where all operations up to and
     /// including that offset have been successfully processed and their guards dropped.
-    fn last_processed_wal_position(&self) -> u64;
+    fn last_processed_wal_position(&self) -> LastProcessed;
 
     fn min_wal_position(&self) -> u64;
 }
@@ -923,7 +923,7 @@ impl LargeTableEntry {
             bloom_filter,
             unload_jitter,
             pending_last_processed: None,
-            last_processed: 0,
+            last_processed: LastProcessed::none(),
         }
     }
 
@@ -1062,7 +1062,7 @@ impl LargeTableEntry {
         }
         let position = self.last_processed;
         // position can actually be great then tail_position due to concurrency
-        let distance = tail_position.saturating_sub(position);
+        let distance = tail_position.saturating_sub(position.as_u64());
         // Use override if provided, otherwise use config value
         let threshold =
             snapshot_unload_threshold_override.unwrap_or(config.snapshot_unload_threshold);
@@ -1144,9 +1144,9 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    fn clear_after_flush(&mut self, position: WalPosition, last_processed: u64) {
-        // Retain only entries with offset > last_processed
-        self.data.make_mut().retain_above_position(last_processed);
+    fn clear_after_flush(&mut self, position: WalPosition, last_processed: LastProcessed) {
+        // Retain only entries with offset >= last_processed
+        self.data.make_mut().retain_unprocessed(last_processed);
         self.report_loaded_keys_count();
 
         // If all entries were removed, update state to Unloaded
@@ -1612,9 +1612,9 @@ mod tests {
                 Ok(WalPosition::test_value(100))
             }
 
-            fn last_processed_wal_position(&self) -> u64 {
+            fn last_processed_wal_position(&self) -> LastProcessed {
                 // Return a test value for mock
-                0
+                LastProcessed::none()
             }
 
             fn min_wal_position(&self) -> u64 {
@@ -1870,7 +1870,7 @@ mod tests {
                 CellId::Integer(i),
                 SnapshotEntryData {
                     position: WalPosition::test_value(position_value as u64),
-                    last_processed: position_value as u64,
+                    last_processed: LastProcessed::new_test(position_value as u64),
                 },
             );
         }
@@ -1921,7 +1921,7 @@ mod tests {
             CellId::Integer(0),
             SnapshotEntryData {
                 position: WalPosition::INVALID,
-                last_processed: 0,
+                last_processed: LastProcessed::none(),
             },
         )]
         .into_iter()

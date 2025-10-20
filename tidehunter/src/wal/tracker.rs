@@ -1,3 +1,4 @@
+use super::position::LastProcessed;
 use super::WalPosition;
 #[cfg(test)]
 use crate::latch::LatchGuard;
@@ -52,7 +53,7 @@ struct WalTrackerThread {
 
 struct WalTrackerState {
     pending: BTreeMap<u64, AllocationResult>,
-    last_processed: u64,
+    last_processed: LastProcessed,
 }
 
 struct WalTrackerMessage {
@@ -67,9 +68,9 @@ enum WalTrackerMessageKind {
 }
 
 impl WalTracker {
-    pub fn start(layout: WalLayout, mapper: WalMapper, last_processed: u64) -> Self {
+    pub fn start(layout: WalLayout, mapper: WalMapper, last_processed: LastProcessed) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let atomic_last_processed = Arc::new(AtomicU64::new(last_processed));
+        let atomic_last_processed = Arc::new(AtomicU64::new(last_processed.as_u64()));
         let mapper = Arc::new(mapper);
         let thread = WalTrackerThread {
             receiver,
@@ -107,8 +108,8 @@ impl WalTracker {
         }
     }
 
-    pub fn last_processed(&self) -> u64 {
-        self.last_processed.load(Ordering::SeqCst)
+    pub fn last_processed(&self) -> LastProcessed {
+        LastProcessed::new(self.last_processed.load(Ordering::SeqCst))
     }
 
     pub fn min_wal_position_updated(&self, watermark: u64) {
@@ -203,14 +204,15 @@ impl WalTrackerThread {
                 }
             };
             if let Some(position) = position {
-                self.last_processed.store(position, Ordering::SeqCst);
+                self.last_processed
+                    .store(position.as_u64(), Ordering::SeqCst);
             }
         }
     }
 }
 
 impl WalTrackerState {
-    pub fn new_empty(last_processed: u64) -> Self {
+    pub fn new_empty(last_processed: LastProcessed) -> Self {
         Self {
             pending: Default::default(),
             last_processed,
@@ -221,9 +223,9 @@ impl WalTrackerState {
         &mut self,
         mut result: AllocationResult,
         mut callback: F,
-    ) -> Option<u64> {
+    ) -> Option<LastProcessed> {
         let previous_position = result.previous_position();
-        if self.last_processed != previous_position {
+        if self.last_processed.as_u64() != previous_position {
             self.pending.insert(result.previous_position(), result);
             return None;
         }
@@ -232,7 +234,7 @@ impl WalTrackerState {
             result = next_result;
             callback(&result);
         }
-        self.last_processed = result.next_position();
+        self.last_processed = LastProcessed::new(result.next_position());
         Some(self.last_processed)
     }
 }
@@ -247,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_tracker_state() {
-        let mut state = WalTrackerState::new_empty(0);
+        let mut state = WalTrackerState::new_empty(LastProcessed::new(0));
         let layout = WalLayout::new_simple(32);
         let allocator = WalAllocator::new(layout, 0);
         let a = allocator.allocate(12);
@@ -257,27 +259,39 @@ mod tests {
         assert!(c.need_skip_marker().is_some());
 
         state.add_processed(a.clone(), |_| {});
+        assert!(state.last_processed.is_processed(&a));
+        assert!(!state.last_processed.is_processed(&b));
+        assert!(!state.last_processed.is_processed(&c));
+
         state.add_processed(b.clone(), |_| {});
+        assert!(state.last_processed.is_processed(&a));
+        assert!(state.last_processed.is_processed(&b));
+        assert!(!state.last_processed.is_processed(&c));
+
         state.add_processed(c.clone(), |_| {});
-        assert_eq!(state.last_processed, c.next_position());
+        assert!(state.last_processed.is_processed(&a));
+        assert!(state.last_processed.is_processed(&b));
+        assert!(state.last_processed.is_processed(&c));
+
+        assert_eq!(state.last_processed.as_u64(), c.next_position());
         assert!(state.pending.is_empty());
 
-        let mut state = WalTrackerState::new_empty(0);
+        let mut state = WalTrackerState::new_empty(LastProcessed::new(0));
         state.add_processed(b.clone(), |_| {});
-        assert_eq!(state.last_processed, 0);
+        assert_eq!(state.last_processed.as_u64(), 0);
         state.add_processed(a.clone(), |_| {});
-        assert_eq!(state.last_processed, b.next_position());
+        assert_eq!(state.last_processed.as_u64(), b.next_position());
         state.add_processed(c.clone(), |_| {});
-        assert_eq!(state.last_processed, c.next_position());
+        assert_eq!(state.last_processed.as_u64(), c.next_position());
         assert!(state.pending.is_empty());
 
-        let mut state = WalTrackerState::new_empty(0);
+        let mut state = WalTrackerState::new_empty(LastProcessed::new(0));
         state.add_processed(c.clone(), |_| {});
-        assert_eq!(state.last_processed, 0);
+        assert_eq!(state.last_processed.as_u64(), 0);
         state.add_processed(b.clone(), |_| {});
-        assert_eq!(state.last_processed, 0);
+        assert_eq!(state.last_processed.as_u64(), 0);
         state.add_processed(a.clone(), |_| {});
-        assert_eq!(state.last_processed, c.next_position());
+        assert_eq!(state.last_processed.as_u64(), c.next_position());
         assert!(state.pending.is_empty());
     }
 
@@ -295,49 +309,61 @@ mod tests {
                     guard3: WalGuardMaker| {
             drop(guard3);
             thread::sleep(Duration::from_millis(10));
-            assert_eq!(tracker.last_processed(), 0);
+            assert_eq!(tracker.last_processed().as_u64(), 0);
 
             drop(guard1);
             thread::sleep(Duration::from_millis(10));
-            assert_eq!(tracker.last_processed(), a.next_position());
+            assert_eq!(tracker.last_processed().as_u64(), a.next_position());
 
             drop(guard2);
             tracker.barrier();
-            assert_eq!(tracker.last_processed(), c.next_position());
+            assert_eq!(tracker.last_processed().as_u64(), c.next_position());
         };
 
         // Test when messages are sent to tracker in order positions are allocated
-        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let tracker = WalTracker::start(
+            layout.clone(),
+            WalMapper::new_unstarted().0,
+            LastProcessed::new(0),
+        );
         let guard1 = tracker.allocated(a.clone());
         let guard2 = tracker.allocated(b.clone());
         let guard3 = tracker.allocated(c.clone());
         test(tracker, guard1, guard2, guard3);
 
         // Test tracker when messages are sent to tracker in different order
-        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let tracker = WalTracker::start(
+            layout.clone(),
+            WalMapper::new_unstarted().0,
+            LastProcessed::new(0),
+        );
         let guard1 = tracker.allocated(a.clone());
         let guard3 = tracker.allocated(c.clone());
         let guard2 = tracker.allocated(b.clone());
         test(tracker, guard1, guard2, guard3);
 
-        let tracker = WalTracker::start(layout.clone(), WalMapper::new_unstarted().0, 0);
+        let tracker = WalTracker::start(
+            layout.clone(),
+            WalMapper::new_unstarted().0,
+            LastProcessed::new(0),
+        );
         let guard3 = tracker.allocated(c.clone());
         let guard2 = tracker.allocated(b.clone());
         let guard1 = tracker.allocated(a.clone());
 
         drop(guard3);
         thread::sleep(Duration::from_millis(10));
-        assert_eq!(tracker.last_processed(), 0);
+        assert_eq!(tracker.last_processed().as_u64(), 0);
 
         drop(guard1);
         thread::sleep(Duration::from_millis(10));
         // Even thought guard1 is dropped, because guard2
         // is sent before guard1, it blocks the tracker thread, and a message is not processed
-        assert_eq!(tracker.last_processed(), 0);
+        assert_eq!(tracker.last_processed().as_u64(), 0);
 
         drop(guard2);
         tracker.barrier();
         // When all guards blocked the state is correct
-        assert_eq!(tracker.last_processed(), c.next_position());
+        assert_eq!(tracker.last_processed().as_u64(), c.next_position());
     }
 }

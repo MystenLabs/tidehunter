@@ -16,7 +16,7 @@ use crate::relocation::updates::RelocationUpdates;
 use crate::relocation::{RelocationCommand, RelocationDriver, RelocationStrategy, Relocator};
 use crate::state_snapshot;
 use crate::wal::layout::WalKind;
-use crate::wal::position::WalPosition;
+use crate::wal::position::{LastProcessed, WalPosition};
 use crate::wal::tracker::WalGuard;
 use crate::wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalRandomRead, WalWriter};
 use bloom::needed_bits;
@@ -915,10 +915,8 @@ impl Loader for Wal {
         unimplemented!()
     }
 
-    fn last_processed_wal_position(&self) -> u64 {
-        // Wal doesn't have access to WalWriter, so return 0
-        // This is only used during flush which Wal doesn't support
-        0
+    fn last_processed_wal_position(&self) -> LastProcessed {
+        unimplemented!()
     }
 
     fn min_wal_position(&self) -> u64 {
@@ -956,7 +954,7 @@ impl Loader for Db {
         self.write_index(ks, data)
     }
 
-    fn last_processed_wal_position(&self) -> u64 {
+    fn last_processed_wal_position(&self) -> LastProcessed {
         self.wal_writer.last_processed()
     }
 
