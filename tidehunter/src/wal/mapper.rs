@@ -160,10 +160,18 @@ impl WalMapperThread {
                         }
                         num_files_deleted += 1;
                     }
-                    // Update the WalFiles structure by removing deleted files
+                    // Update the WalFiles structure and maps by removing deleted files
                     if num_files_deleted > 0 {
                         let new_files = wal_files.skip_first_n_files(num_files_deleted);
+                        let new_min_file_id = new_files.min_file_id;
                         self.files.store(Arc::new(new_files));
+
+                        // Remove all maps that belonged to deleted files
+                        self.maps.maps.retain(|&map_id, _| {
+                            self.layout.file_for_map(map_id) >= new_min_file_id
+                        });
+
+                        self.publish_maps();
                     }
                 }
             }
@@ -195,8 +203,10 @@ impl WalMapperThread {
         Wal::extend_to_map_id(&self.layout, &files, map_id).expect("Failed to extend wal file");
         self.maps.map(files.get(file_id), &self.layout, map_id);
 
-        //todo remove maps for deleted files maps.retain(|map_id, _| *map_id >= threshold);
-        // (n+1)*self.wal.layout.wal_file_size / self.wal.layout.frag_size
+        self.publish_maps();
+    }
+
+    fn publish_maps(&self) {
         let new_maps = self.maps.clone();
         self.maps_arc.store(Arc::new(new_maps));
     }
