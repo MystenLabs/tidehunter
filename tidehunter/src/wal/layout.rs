@@ -96,6 +96,13 @@ impl WalLayout {
         start..end
     }
 
+    /// Return the position range for a particular WAL file
+    pub fn wal_file_range(&self, file_id: WalFileId) -> Range<u64> {
+        let start = self.wal_file_size * file_id.0;
+        let end = self.wal_file_size * (file_id.0 + 1);
+        start..end
+    }
+
     #[doc(hidden)] // Used by tools/wal_inspector for control region inspection
     #[inline]
     pub fn locate_file(&self, offset: u64) -> WalFileId {
@@ -154,4 +161,37 @@ fn test_first_in_frag() {
     assert_eq!(1024, layout.first_in_frag(1));
     assert_eq!(Some(1), layout.is_first_in_frag(1024));
     assert_eq!(None, layout.is_first_in_frag(1025));
+}
+
+#[test]
+fn test_wal_file_range() {
+    let layout = WalLayout {
+        frag_size: 1024,
+        max_maps: 4,
+        direct_io: false,
+        wal_file_size: 8192,
+        kind: WalKind::Replay,
+    };
+
+    // File 0 should contain positions 0..8192
+    assert_eq!(0..8192, layout.wal_file_range(WalFileId(0)));
+
+    // File 1 should contain positions 8192..16384
+    assert_eq!(8192..16384, layout.wal_file_range(WalFileId(1)));
+
+    // File 5 should contain positions 40960..49152
+    assert_eq!(40960..49152, layout.wal_file_range(WalFileId(5)));
+
+    // Verify that locate_file and wal_file_range are consistent
+    for pos in [0, 100, 8191, 8192, 16383, 16384, 40960] {
+        let file_id = layout.locate_file(pos);
+        let range = layout.wal_file_range(file_id);
+        assert!(
+            range.contains(&pos),
+            "Position {} should be in range {:?} for file {:?}",
+            pos,
+            range,
+            file_id
+        );
+    }
 }

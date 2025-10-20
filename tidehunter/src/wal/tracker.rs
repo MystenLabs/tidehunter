@@ -30,6 +30,7 @@ pub struct WalTracker {
     jh: Option<thread::JoinHandle<()>>,
     sender: Option<mpsc::Sender<WalTrackerMessage>>,
     last_processed: Arc<AtomicU64>,
+    mapper: Arc<WalMapper>,
 }
 
 pub struct WalGuard {
@@ -45,7 +46,7 @@ struct WalTrackerThread {
     receiver: mpsc::Receiver<WalTrackerMessage>,
     last_processed: Arc<AtomicU64>,
     state: WalTrackerState,
-    mapper: WalMapper,
+    mapper: Arc<WalMapper>,
     layout: WalLayout,
 }
 
@@ -69,11 +70,12 @@ impl WalTracker {
     pub fn start(layout: WalLayout, mapper: WalMapper, last_processed: u64) -> Self {
         let (sender, receiver) = mpsc::channel();
         let atomic_last_processed = Arc::new(AtomicU64::new(last_processed));
+        let mapper = Arc::new(mapper);
         let thread = WalTrackerThread {
             receiver,
             state: WalTrackerState::new_empty(last_processed),
             last_processed: atomic_last_processed.clone(),
-            mapper,
+            mapper: mapper.clone(),
             layout,
         };
         let jh = thread::Builder::new()
@@ -84,6 +86,7 @@ impl WalTracker {
             jh: Some(jh),
             sender: Some(sender),
             last_processed: atomic_last_processed,
+            mapper,
         }
     }
 
@@ -106,6 +109,10 @@ impl WalTracker {
 
     pub fn last_processed(&self) -> u64 {
         self.last_processed.load(Ordering::SeqCst)
+    }
+
+    pub fn min_wal_position_updated(&self, watermark: u64) {
+        self.mapper.min_wal_position_updated(watermark);
     }
 
     #[cfg(test)]

@@ -29,7 +29,7 @@ use crate::wal_allocator::WalAllocator;
 use files::WalFiles;
 use layout::WalLayout;
 use mapper::WalMapper;
-use position::{WalFileId, WalPosition};
+use position::WalPosition;
 use syncer::WalSyncer;
 use tracker::{WalGuard, WalTracker};
 
@@ -144,21 +144,13 @@ impl WalWriter {
         self.wal_tracker.last_processed()
     }
 
-    /// Deletes WAL files that have been fully processed by the relocation process up to the watermark position.
+    /// Requests deletion of WAL files that have been fully processed by the relocation process up to the watermark position.
     ///
     /// Given watermark positions will be preserved.
+    /// The actual file deletion is performed by the mapper thread.
     pub fn gc(&self, watermark: u64) -> io::Result<()> {
-        let wal_files = self.wal.files.load();
-        for idx in 0..wal_files.files.len() {
-            let file_id = WalFileId(wal_files.min_file_id.0 + idx as u64);
-            if (file_id.0 + 1) * self.wal.layout.wal_file_size >= watermark {
-                break;
-            }
-            let path = self.wal.layout.wal_file_name(&wal_files.base_path, file_id);
-            if path.exists() {
-                std::fs::remove_file(path)?;
-            }
-        }
+        // Send message to mapper thread to update minimum WAL position and remove old files
+        self.wal_tracker.min_wal_position_updated(watermark);
         self.wal
             .metrics
             .gc_position

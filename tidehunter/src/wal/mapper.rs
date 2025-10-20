@@ -11,13 +11,18 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+pub(crate) enum WalMapperMessage {
+    MapFinalized(u64),
+    MinWalPositionUpdated(u64),
+}
+
 pub(crate) struct WalMapper {
     jh: Option<JoinHandle<()>>,
-    sender: Option<mpsc::SyncSender<u64>>,
+    sender: Option<mpsc::SyncSender<WalMapperMessage>>,
 }
 
 struct WalMapperThread {
-    receiver: mpsc::Receiver<u64>,
+    receiver: mpsc::Receiver<WalMapperMessage>,
     maps_arc: Arc<ArcSwap<WalMaps>>,
     maps: WalMaps,
     files: Arc<ArcSwap<WalFiles>>,
@@ -74,7 +79,7 @@ impl WalMapper {
     }
 
     #[cfg(test)]
-    pub fn new_unstarted() -> (Self, mpsc::Receiver<u64>) {
+    pub fn new_unstarted() -> (Self, mpsc::Receiver<WalMapperMessage>) {
         let (sender, receiver) = mpsc::sync_channel(1024);
         (
             Self {
@@ -89,7 +94,15 @@ impl WalMapper {
         self.sender
             .as_ref()
             .expect("Wal mapper dropped")
-            .send(map_id)
+            .send(WalMapperMessage::MapFinalized(map_id))
+            .ok();
+    }
+
+    pub fn min_wal_position_updated(&self, watermark: u64) {
+        self.sender
+            .as_ref()
+            .expect("Wal mapper dropped")
+            .send(WalMapperMessage::MinWalPositionUpdated(watermark))
             .ok();
     }
 }
@@ -115,20 +128,45 @@ impl WalMapperThread {
             map_id += 1;
             self.make_map(map_id);
         }
-        while let Ok(map_to_sync_id) = self.receiver.recv() {
+        while let Ok(message) = self.receiver.recv() {
             let timer = Instant::now();
-            let map_to_sync = self
-                .maps
-                .maps
-                .get_mut(&map_to_sync_id)
-                .expect("Map to finalize not found");
-            map_to_sync.writeable = false;
-            self.syncer.send(
-                map_to_sync.clone(),
-                self.layout.map_range(map_to_sync_id).end,
-            );
-            map_id += 1;
-            self.make_map(map_id);
+            match message {
+                WalMapperMessage::MapFinalized(map_to_sync_id) => {
+                    let map_to_sync = self
+                        .maps
+                        .maps
+                        .get_mut(&map_to_sync_id)
+                        .expect("Map to finalize not found");
+                    map_to_sync.writeable = false;
+                    self.syncer.send(
+                        map_to_sync.clone(),
+                        self.layout.map_range(map_to_sync_id).end,
+                    );
+                    map_id += 1;
+                    self.make_map(map_id);
+                }
+                WalMapperMessage::MinWalPositionUpdated(watermark) => {
+                    // Delete files up to the watermark
+                    let wal_files = self.files.load();
+                    let mut num_files_deleted = 0;
+                    for idx in 0..wal_files.files.len() {
+                        let file_id = WalFileId(wal_files.min_file_id.0 + idx as u64);
+                        if self.layout.wal_file_range(file_id).end >= watermark {
+                            break;
+                        }
+                        let path = self.layout.wal_file_name(&wal_files.base_path, file_id);
+                        if path.exists() {
+                            std::fs::remove_file(path).expect("Failed to remove wal file");
+                        }
+                        num_files_deleted += 1;
+                    }
+                    // Update the WalFiles structure by removing deleted files
+                    if num_files_deleted > 0 {
+                        let new_files = wal_files.skip_first_n_files(num_files_deleted);
+                        self.files.store(Arc::new(new_files));
+                    }
+                }
+            }
             self.metrics
                 .wal_mapper_time_mcs
                 .inc_by(timer.elapsed().as_micros() as u64);
@@ -138,17 +176,6 @@ impl WalMapperThread {
     fn make_map(&mut self, map_id: u64) {
         let file_id = self.layout.file_for_map(map_id);
         let mut files = self.files.load();
-        // if min_file_id has already been removed by relocation, reload the list of active files
-        if !self
-            .layout
-            .wal_file_name(&files.base_path, files.min_file_id)
-            .exists()
-        {
-            let new_files = WalFiles::load(&files.base_path, &self.layout)
-                .expect("Failed to reload wal files directory");
-            self.files.store(Arc::new(new_files));
-            files = self.files.load();
-        }
         if file_id > files.current_file_id() {
             assert_eq!(file_id, WalFileId(files.current_file_id().0 + 1));
             let mut new_files = files.files.clone();

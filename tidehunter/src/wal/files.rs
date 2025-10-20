@@ -78,6 +78,22 @@ impl WalFiles {
         self.get_checked(id)
             .unwrap_or_else(|| panic!("attempt to access non existing file {:?}", id))
     }
+
+    /// Creates a new WalFiles with the first `num_files` removed.
+    /// This is used after deleting old WAL files from disk.
+    pub(crate) fn skip_first_n_files(&self, num_files: usize) -> Self {
+        assert!(
+            num_files <= self.files.len(),
+            "Cannot skip {} files, only {} files exist",
+            num_files,
+            self.files.len()
+        );
+        Self {
+            base_path: self.base_path.clone(),
+            files: self.files[num_files..].to_vec(),
+            min_file_id: WalFileId(self.min_file_id.0 + num_files as u64),
+        }
+    }
 }
 
 #[allow(dead_code)]
