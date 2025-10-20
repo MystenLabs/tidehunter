@@ -2557,3 +2557,57 @@ fn test_empty_value_read_optimization() {
         "Non-empty values should require WAL reads"
     );
 }
+
+#[test]
+fn test_wal_failpoint_panic_during_batch() {
+    let dir = tempdir::TempDir::new("test_wal_failpoint_panic_during_batch").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+
+    // First, open the database and set up the failpoint
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        // Set up WAL failpoint to panic after 2 writes
+        use crate::wal::WalFailPointsInner;
+        db.wal_writer.fp.0.store(Arc::new(WalFailPointsInner {
+            fp_multi_write_before_write_buf: FailPoint::panic_after_n_calls(2),
+        }));
+
+        // Create a batch with 3 records
+        let mut batch = WriteBatch::new();
+        batch.write(ks, vec![1, 2, 3, 4], vec![10]);
+        batch.write(ks, vec![2, 3, 4, 5], vec![20]);
+        batch.write(ks, vec![3, 4, 5, 6], vec![30]);
+
+        // Attempt to write the batch - this should panic on the 3rd write
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            db.write_batch(batch).unwrap();
+        }));
+
+        assert!(result.is_err(), "Expected panic during batch write");
+    }
+
+    // Now reopen the database - it should open without issues
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        // Verify that none of the keys from the failed batch are accessible
+        // Since the batch write is atomic, all 3 writes should have been rolled back
+        assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
+        assert_eq!(None, db.get(ks, &[2, 3, 4, 5]).unwrap());
+        assert_eq!(None, db.get(ks, &[3, 4, 5, 6]).unwrap());
+    }
+}

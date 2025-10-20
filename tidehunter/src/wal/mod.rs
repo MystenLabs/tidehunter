@@ -37,6 +37,7 @@ pub struct WalWriter {
     wal: Arc<Wal>,
     allocator: WalAllocator,
     wal_tracker: WalTracker,
+    pub(crate) fp: WalFailPoints,
 }
 
 pub struct Wal {
@@ -99,6 +100,7 @@ impl WalWriter {
         for w in writes {
             let frame_size = w.len();
             let aligned_frame_size = self.wal.layout.align(frame_size as u64);
+            self.fp.fp_multi_write_before_write_buf();
             let buf = write_buf_at(&map.data, offset, frame_size);
             buf.copy_from_slice(w.frame.as_ref());
             // conversion to u32 is safe - pos is less than self.frag_size,
@@ -442,6 +444,8 @@ impl WalIterator {
             wal: self.wal,
             allocator,
             wal_tracker,
+            #[allow(clippy::default_constructed_unit_structs)]
+            fp: WalFailPoints::default(),
         }
     }
 
@@ -515,6 +519,39 @@ impl From<CrcReadError> for WalError {
 impl From<io::Error> for WalError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+// WalFailPoints definitions
+#[cfg(not(test))]
+#[derive(Default)]
+pub(crate) struct WalFailPoints;
+
+#[cfg(test)]
+pub(crate) struct WalFailPoints(pub(crate) ArcSwap<WalFailPointsInner>);
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct WalFailPointsInner {
+    pub fp_multi_write_before_write_buf: crate::failpoints::FailPoint,
+}
+
+#[cfg(test)]
+impl Default for WalFailPoints {
+    fn default() -> Self {
+        Self(ArcSwap::from_pointee(WalFailPointsInner::default()))
+    }
+}
+
+#[cfg(not(test))]
+impl WalFailPoints {
+    pub fn fp_multi_write_before_write_buf(&self) {}
+}
+
+#[cfg(test)]
+impl WalFailPoints {
+    pub fn fp_multi_write_before_write_buf(&self) {
+        self.0.load().fp_multi_write_before_write_buf.fp();
     }
 }
 
