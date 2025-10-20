@@ -10,6 +10,9 @@ pub struct WalPosition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalFileId(pub(super) u64);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct MapId(pub(super) u64);
+
 impl WalPosition {
     pub const MAX: WalPosition = WalPosition {
         offset: u64::MAX,
@@ -86,6 +89,24 @@ impl WalPosition {
     #[allow(dead_code)]
     pub fn test_value(v: u64) -> Self {
         Self::new(v, 0)
+    }
+}
+
+impl MapId {
+    pub(super) fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub(super) fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    pub(super) fn prev_map(self) -> Option<Self> {
+        self.0.checked_sub(1).map(MapId)
+    }
+
+    pub(super) fn next_map(self) -> Self {
+        MapId(self.0 + 1)
     }
 }
 

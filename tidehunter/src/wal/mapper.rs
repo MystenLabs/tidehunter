@@ -1,5 +1,5 @@
 use super::layout::WalLayout;
-use super::position::WalFileId;
+use super::position::{MapId, WalFileId};
 use super::{Map, Wal, WalFiles};
 use crate::metrics::Metrics;
 use crate::wal::syncer::WalSyncer;
@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 pub(crate) enum WalMapperMessage {
-    MapFinalized(u64),
+    MapFinalized(MapId),
     MinWalPositionUpdated(u64),
 }
 
@@ -35,7 +35,7 @@ const INITIAL_MAPS_BUFFER: usize = 2;
 #[derive(Clone, Default)]
 pub struct WalMaps {
     // todo make it vec + min map id
-    maps: BTreeMap<u64, Map>,
+    maps: BTreeMap<MapId, Map>,
 }
 
 impl WalMapper {
@@ -90,7 +90,7 @@ impl WalMapper {
         )
     }
 
-    pub fn map_finalized(&self, map_id: u64) {
+    pub fn map_finalized(&self, map_id: MapId) {
         self.sender
             .as_ref()
             .expect("Wal mapper dropped")
@@ -125,7 +125,7 @@ impl WalMapperThread {
             .expect("Can't start wal mapper with empty maps")
             .0;
         for _ in 0..INITIAL_MAPS_BUFFER {
-            map_id += 1;
+            map_id = map_id.next_map();
             self.make_map(map_id);
         }
         while let Ok(message) = self.receiver.recv() {
@@ -142,7 +142,7 @@ impl WalMapperThread {
                         map_to_sync.clone(),
                         self.layout.map_range(map_to_sync_id).end,
                     );
-                    map_id += 1;
+                    map_id = map_id.next_map();
                     self.make_map(map_id);
                 }
                 WalMapperMessage::MinWalPositionUpdated(watermark) => {
@@ -181,7 +181,7 @@ impl WalMapperThread {
         }
     }
 
-    fn make_map(&mut self, map_id: u64) {
+    fn make_map(&mut self, map_id: MapId) {
         let file_id = self.layout.file_for_map(map_id);
         let mut files = self.files.load();
         if file_id > files.current_file_id() {
@@ -213,11 +213,11 @@ impl WalMapperThread {
 }
 
 impl WalMaps {
-    pub fn get(&self, map_id: u64) -> Option<&Map> {
+    pub fn get(&self, map_id: MapId) -> Option<&Map> {
         self.maps.get(&map_id)
     }
 
-    pub fn map(&mut self, file: &File, layout: &WalLayout, map_id: u64) -> &Map {
+    pub fn map(&mut self, file: &File, layout: &WalLayout, map_id: MapId) -> &Map {
         let range = layout.map_range(map_id);
         let data = unsafe {
             let mut options = memmap2::MmapOptions::new();

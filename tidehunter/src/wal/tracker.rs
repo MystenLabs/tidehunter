@@ -188,7 +188,7 @@ impl WalTrackerThread {
                         if let Some(frag) =
                             self.layout.is_first_in_frag(result.allocated_position())
                         {
-                            if let Some(prev_frag) = frag.checked_sub(1) {
+                            if let Some(prev_frag) = frag.prev_map() {
                                 // When the first position for frag is allocated and all positions before it are processed,
                                 // Then the previous fragment can be finalized.
                                 self.mapper.map_finalized(prev_frag);

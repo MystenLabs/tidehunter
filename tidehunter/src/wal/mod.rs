@@ -29,7 +29,7 @@ use crate::wal_allocator::WalAllocator;
 use files::WalFiles;
 use layout::WalLayout;
 use mapper::WalMapper;
-use position::WalPosition;
+use position::{MapId, WalPosition};
 use syncer::WalSyncer;
 use tracker::{WalGuard, WalTracker};
 
@@ -56,7 +56,7 @@ pub struct WalIterator {
 #[derive(Clone)]
 // todo only pub between wal.rs and wal_syncer.rs
 pub(crate) struct Map {
-    id: u64,
+    id: MapId,
     pub data: Bytes,
     writeable: bool,
 }
@@ -130,7 +130,7 @@ impl WalWriter {
             assert!(map.writeable, "Map is not writable");
             return (map, offset as usize);
         }
-        panic!("Could not receive writable map {map}")
+        panic!("Could not receive writable map {map:?}")
     }
 
     /// Current un-initialized position,
@@ -287,12 +287,12 @@ impl Wal {
         }
     }
 
-    fn get_map(&self, id: u64) -> Option<Map> {
+    fn get_map(&self, id: MapId) -> Option<Map> {
         self.maps.load().get(id).cloned()
     }
 
     /// Resize file to fit the specified map id
-    fn extend_to_map_id(layout: &WalLayout, files: &WalFiles, map_id: u64) -> io::Result<()> {
+    fn extend_to_map_id(layout: &WalLayout, files: &WalFiles, map_id: MapId) -> io::Result<()> {
         let file = files.get(layout.file_for_map(map_id));
         let mut end = layout.offset_in_wal_file(layout.map_range(map_id).end);
         if end == 0 {
@@ -378,7 +378,7 @@ impl WalIterator {
         let frame = self.read_one();
         let frame = if matches!(frame, Err(WalError::Crc(CrcReadError::SkipMarker))) {
             // handle skip marker - jump to next frag
-            let next_map = self.map.id + 1;
+            let next_map = self.map.id.next_map();
             self.position = self.wal.layout.map_range(next_map).start;
             self.read_one()?
         } else {
@@ -410,7 +410,7 @@ impl WalIterator {
 
     fn make_map(
         layout: &WalLayout,
-        map_id: u64,
+        map_id: MapId,
         files: &WalFiles,
         maps: &mut WalMaps,
     ) -> Result<Option<Map>, WalError> {
