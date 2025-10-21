@@ -2558,41 +2558,44 @@ fn test_empty_value_read_optimization() {
     );
 }
 
+/// Helper function to set up a database with an incomplete batch in the WAL
+/// This simulates a crash during batch write, leaving the WAL in a partially written state
+fn setup_corrupted_db(
+    dir: &std::path::Path,
+    key_shape: &KeyShape,
+    config: &Arc<Config>,
+    ks: KeySpace,
+) {
+    let db = Db::open(dir, key_shape.clone(), config.clone(), Metrics::new()).unwrap();
+
+    // Set up WAL failpoint to panic after 2 writes
+    use crate::wal::WalFailPointsInner;
+    db.wal_writer.fp.0.store(Arc::new(WalFailPointsInner {
+        fp_multi_write_before_write_buf: FailPoint::panic_after_n_calls(2),
+    }));
+
+    // Create a batch with 3 records
+    let mut batch = WriteBatch::new();
+    batch.write(ks, vec![1, 2, 3, 4], vec![10]);
+    batch.write(ks, vec![2, 3, 4, 5], vec![20]);
+    batch.write(ks, vec![3, 4, 5, 6], vec![30]);
+
+    // Attempt to write the batch - this should panic on the 3rd write
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        db.write_batch(batch).unwrap();
+    }));
+
+    assert!(result.is_err(), "Expected panic during batch write");
+}
+
 #[test]
-fn test_wal_failpoint_panic_during_batch() {
+fn test_batch_after_incomplete_batch() {
     let dir = tempdir::TempDir::new("test_wal_failpoint_panic_during_batch").unwrap();
     let config = Arc::new(Config::small());
     let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
 
-    // First, open the database and set up the failpoint
-    {
-        let db = Db::open(
-            dir.path(),
-            key_shape.clone(),
-            config.clone(),
-            Metrics::new(),
-        )
-        .unwrap();
-
-        // Set up WAL failpoint to panic after 2 writes
-        use crate::wal::WalFailPointsInner;
-        db.wal_writer.fp.0.store(Arc::new(WalFailPointsInner {
-            fp_multi_write_before_write_buf: FailPoint::panic_after_n_calls(2),
-        }));
-
-        // Create a batch with 3 records
-        let mut batch = WriteBatch::new();
-        batch.write(ks, vec![1, 2, 3, 4], vec![10]);
-        batch.write(ks, vec![2, 3, 4, 5], vec![20]);
-        batch.write(ks, vec![3, 4, 5, 6], vec![30]);
-
-        // Attempt to write the batch - this should panic on the 3rd write
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            db.write_batch(batch).unwrap();
-        }));
-
-        assert!(result.is_err(), "Expected panic during batch write");
-    }
+    // Set up database with incomplete batch
+    setup_corrupted_db(dir.path(), &key_shape, &config, ks);
 
     // Now reopen the database - it should open without issues
     {
@@ -2609,5 +2612,78 @@ fn test_wal_failpoint_panic_during_batch() {
         assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
         assert_eq!(None, db.get(ks, &[2, 3, 4, 5]).unwrap());
         assert_eq!(None, db.get(ks, &[3, 4, 5, 6]).unwrap());
+
+        // Now write the batch again without the failpoint
+        let mut batch = WriteBatch::new();
+        batch.write(ks, vec![1, 2, 3, 4], vec![10]);
+        batch.write(ks, vec![2, 3, 4, 5], vec![20]);
+        batch.write(ks, vec![3, 4, 5, 6], vec![30]);
+        db.write_batch(batch).unwrap();
+    }
+
+    // Reopen the database again and verify all keys are accessible
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        // Verify all keys are now accessible with correct values
+        assert_eq!(Some(vec![10].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+        assert_eq!(Some(vec![20].into()), db.get(ks, &[2, 3, 4, 5]).unwrap());
+        assert_eq!(Some(vec![30].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
+    }
+}
+
+#[test]
+fn test_standalone_write_after_incomplete_batch() {
+    let dir = tempdir::TempDir::new("test_wal_failpoint_standalone_write").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+
+    // Set up database with incomplete batch
+    setup_corrupted_db(dir.path(), &key_shape, &config, ks);
+
+    // Reopen the database - replay should stop at CRC error
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        // Verify that none of the keys from the failed batch are accessible
+        assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
+        assert_eq!(None, db.get(ks, &[2, 3, 4, 5]).unwrap());
+        assert_eq!(None, db.get(ks, &[3, 4, 5, 6]).unwrap());
+
+        // Now write a STANDALONE record (not a batch)
+        // This will overwrite the garbage space left by the incomplete batch
+        db.insert(ks, vec![4, 5, 6, 7], vec![40]).unwrap();
+
+        // Verify the standalone write is accessible before reopen
+        assert_eq!(Some(vec![40].into()), db.get(ks, &[4, 5, 6, 7]).unwrap());
+    }
+
+    // Reopen the database again
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            Some(vec![40].into()),
+            db.get(ks, &[4, 5, 6, 7]).unwrap(),
+            "Standalone write after incomplete batch should be accessible"
+        );
     }
 }

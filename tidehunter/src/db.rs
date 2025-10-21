@@ -597,13 +597,16 @@ impl Db {
     ) -> DbResult<WalWriter> {
         let mut batch = VecDeque::new();
         let mut batch_remaining = 0;
+        let mut batch_start_position: Option<u64> = None;
         loop {
             let (position, entry) = if batch_remaining == 0 && !batch.is_empty() {
+                // Processing complete batch - clear the start position
+                batch_start_position = None;
                 batch.pop_front().expect("invariant checked")
             } else {
                 let entry = wal_iterator.next();
                 if matches!(entry, Err(WalError::Crc(_))) {
-                    break Ok(wal_iterator.into_writer());
+                    break Ok(wal_iterator.into_writer(batch_start_position));
                 }
                 let (position, raw_entry) = entry?;
                 let entry = WalEntry::from_bytes(raw_entry);
@@ -641,6 +644,7 @@ impl Db {
                     large_table.remove(context, reduced_key, guard, indexes)?;
                 }
                 WalEntry::BatchStart(size) => {
+                    batch_start_position = Some(position.offset());
                     batch = VecDeque::with_capacity(size as usize);
                     batch_remaining = size;
                 }

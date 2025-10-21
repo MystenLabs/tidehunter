@@ -336,7 +336,7 @@ impl Wal {
             0
         };
         let iterator = self.wal_iterator(position)?;
-        Ok(iterator.into_writer())
+        Ok(iterator.into_writer(None))
     }
 
     /// Ensure the file is written to disk (blocking call).
@@ -423,7 +423,11 @@ impl WalIterator {
         Ok(Some(maps.map(file, layout, map_id).clone()))
     }
 
-    pub fn into_writer(self) -> WalWriter {
+    pub fn into_writer(self, position_override: Option<u64>) -> WalWriter {
+        let position = position_override.unwrap_or(self.position);
+
+        self.clear_fragment_from_position(position);
+
         let syncer = WalSyncer::start(self.wal.metrics.clone());
         self.wal.maps.store(Arc::new(self.maps));
         let mapper = WalMapper::start(
@@ -433,19 +437,34 @@ impl WalIterator {
             syncer,
             self.wal.metrics.clone(),
         );
-        assert_eq!(self.wal.layout.locate(self.position).0, self.map.id);
+        assert_eq!(self.wal.layout.locate(position).0, self.map.id);
         let wal_tracker = WalTracker::start(
             self.wal.layout.clone(),
             mapper,
-            LastProcessed::new(self.position),
+            LastProcessed::new(position),
         );
-        let allocator = WalAllocator::new(self.wal.layout.clone(), self.position);
+        let allocator = WalAllocator::new(self.wal.layout.clone(), position);
         WalWriter {
             wal: self.wal,
             allocator,
             wal_tracker,
             #[allow(clippy::default_constructed_unit_structs)]
             fp: WalFailPoints::default(),
+        }
+    }
+
+    /// Fills fragment with zeroes from given position to the end of the fragment.
+    fn clear_fragment_from_position(&self, position: u64) {
+        let (map_id, offset) = self.wal.layout.locate(position);
+        assert_eq!(map_id, self.map.id, "position must be in current map");
+
+        let map_range = self.wal.layout.map_range(map_id);
+        let fragment_size = (map_range.end - map_range.start) as usize;
+        let bytes_to_zero = fragment_size - offset as usize;
+
+        if bytes_to_zero > 0 {
+            let buf = write_buf_at(&self.map.data, offset as usize, bytes_to_zero);
+            buf.fill(0);
         }
     }
 
@@ -576,7 +595,7 @@ mod tests {
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
             let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
-            let writer = wal.wal_iterator(0).unwrap().into_writer();
+            let writer = wal.wal_iterator(0).unwrap().into_writer(None);
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap();
@@ -597,7 +616,7 @@ mod tests {
             assert_bytes(&[], wal_iterator.next());
             assert_bytes(&large, wal_iterator.next());
             wal_iterator.next().expect_err("Error expected");
-            let writer = wal_iterator.into_writer();
+            let writer = wal_iterator.into_writer(None);
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![91, 92, 93]))
                 .unwrap();
@@ -635,7 +654,7 @@ mod tests {
             kind: WalKind::Replay,
         };
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
-        let wal_writer = wal.wal_iterator(0).unwrap().into_writer();
+        let wal_writer = wal.wal_iterator(0).unwrap().into_writer(None);
         let wal_writer = Arc::new(wal_writer);
         let threads = 8u64;
         let writes_per_thread = 256u64;
@@ -702,7 +721,7 @@ mod tests {
         };
         let wal = Wal::open(dir.path(), layout, Metrics::new()).unwrap();
         let wal_iterator = wal.wal_iterator(0).unwrap();
-        let writer = wal_iterator.into_writer();
+        let writer = wal_iterator.into_writer(None);
 
         // Write some data and get a guard
         let data = vec![1, 2, 3, 4, 5];
@@ -754,7 +773,7 @@ mod tests {
         // Write an entry into the WAL and extract just the position (not the guard)
         let position = {
             let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
-            let writer = wal.wal_iterator(0).unwrap().into_writer();
+            let writer = wal.wal_iterator(0).unwrap().into_writer(None);
             writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap()
@@ -786,7 +805,7 @@ mod tests {
             kind: WalKind::Replay,
         };
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
-        let writer = wal.wal_iterator(0).unwrap().into_writer();
+        let writer = wal.wal_iterator(0).unwrap().into_writer(None);
         for i in 0..100 {
             let mut data = vec![0; 256];
             data[0] = i as u8;
@@ -831,7 +850,7 @@ mod tests {
         };
 
         let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
-        let writer = wal.wal_iterator(0).unwrap().into_writer();
+        let writer = wal.wal_iterator(0).unwrap().into_writer(None);
 
         // Use a seeded RNG for reproducibility
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);

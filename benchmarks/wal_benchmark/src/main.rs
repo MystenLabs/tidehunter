@@ -182,7 +182,7 @@ fn main() {
         let wal_writer = Arc::new(
             wal.wal_iterator(0)
                 .expect("Failed to create WAL iterator")
-                .into_writer(),
+                .into_writer(None),
         );
 
         wal_writers.push(wal_writer);
