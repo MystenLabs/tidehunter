@@ -813,7 +813,7 @@ fn test_index_based_relocation_with_target_position() {
     }
 
     // Capture WAL position at entry 500
-    let mid_position = db.wal_writer.last_processed();
+    let mid_position = db.wal_writer.last_processed().as_u64();
 
     // Continue inserting entries 501-1000
     for i in 500..1000u64 {
