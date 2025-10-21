@@ -146,38 +146,42 @@ impl WalMapperThread {
                     self.make_map(map_id);
                 }
                 WalMapperMessage::MinWalPositionUpdated(watermark) => {
-                    // Delete files up to the watermark
-                    let wal_files = self.files.load();
-                    let mut num_files_deleted = 0;
-                    for idx in 0..wal_files.files.len() {
-                        let file_id = WalFileId(wal_files.min_file_id.0 + idx as u64);
-                        if self.layout.wal_file_range(file_id).end >= watermark {
-                            break;
-                        }
-                        let path = self.layout.wal_file_name(&wal_files.base_path, file_id);
-                        if path.exists() {
-                            std::fs::remove_file(path).expect("Failed to remove wal file");
-                        }
-                        num_files_deleted += 1;
-                    }
-                    // Update the WalFiles structure and maps by removing deleted files
-                    if num_files_deleted > 0 {
-                        let new_files = wal_files.skip_first_n_files(num_files_deleted);
-                        let new_min_file_id = new_files.min_file_id;
-                        self.files.store(Arc::new(new_files));
-
-                        // Remove all maps that belonged to deleted files
-                        self.maps.maps.retain(|&map_id, _| {
-                            self.layout.file_for_map(map_id) >= new_min_file_id
-                        });
-
-                        self.publish_maps();
-                    }
+                    self.min_wal_position_updated(watermark);
                 }
             }
             self.metrics
                 .wal_mapper_time_mcs
                 .inc_by(timer.elapsed().as_micros() as u64);
+        }
+    }
+
+    /// Delete files up to the watermark
+    fn min_wal_position_updated(&mut self, watermark: u64) {
+        let wal_files = self.files.load();
+        let mut num_files_deleted = 0;
+        for idx in 0..wal_files.files.len() {
+            let file_id = WalFileId(wal_files.min_file_id.0 + idx as u64);
+            if self.layout.wal_file_range(file_id).end >= watermark {
+                break;
+            }
+            let path = self.layout.wal_file_name(&wal_files.base_path, file_id);
+            if path.exists() {
+                std::fs::remove_file(path).expect("Failed to remove wal file");
+            }
+            num_files_deleted += 1;
+        }
+        // Update the WalFiles structure and maps by removing deleted files
+        if num_files_deleted > 0 {
+            let new_files = wal_files.skip_first_n_files(num_files_deleted);
+            let new_min_file_id = new_files.min_file_id;
+            self.files.store(Arc::new(new_files));
+
+            // Remove all maps that belonged to deleted files
+            self.maps
+                .maps
+                .retain(|&map_id, _| self.layout.file_for_map(map_id) >= new_min_file_id);
+
+            self.publish_maps();
         }
     }
 
