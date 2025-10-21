@@ -1112,9 +1112,7 @@ impl LargeTableEntry {
             relocation_updates,
             relocation_cutoff,
         ) else {
-            unreachable!(
-                "IndexFlusherThread::handle_command should not return None for non-test command"
-            )
+            return Ok(());
         };
         self.last_processed = last_processed;
         self.clear_after_flush(position, last_processed);
