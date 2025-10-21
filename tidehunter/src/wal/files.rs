@@ -29,9 +29,7 @@ impl WalFiles {
                 if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
                     if let Some(id_str) = file_name.strip_prefix(layout.kind.name()) {
                         let Some(id_str) = id_str.strip_prefix("_") else {
-                            panic!(
-                                "invalid wal file name {file_name:?}(failed to strip _ prefix)"
-                            );
+                            panic!("invalid wal file name {file_name:?}(failed to strip _ prefix)");
                         };
                         let id = u64::from_str_radix(id_str, 16)
                             .unwrap_or_else(|_| panic!("invalid wal file name {file_name:?}"));
