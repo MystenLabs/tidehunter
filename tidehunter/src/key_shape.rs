@@ -923,13 +923,17 @@ impl KeyIndexing {
             KeyIndexing::Reduction(key_size, _) => *key_size,
             KeyIndexing::Hash | KeyIndexing::VariableLength => {
                 if k > MAX_KEY_LEN {
-                    panic!("Key space {name} accepts maximum keys size {MAX_KEY_LEN}, given {k}");
+                    panic!(
+                        "Key space {name} accepts maximum keys size {MAX_KEY_LEN}, given {k}"
+                    );
                 }
                 return;
             }
         };
         if expected_key_size != k {
-            panic!("Key space {name} accepts keys size {expected_key_size}, given {k}");
+            panic!(
+                "Key space {name} accepts keys size {expected_key_size}, given {k}"
+            );
         }
     }
 

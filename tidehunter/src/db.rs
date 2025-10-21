@@ -160,7 +160,9 @@ impl Db {
         let config_file_path = Self::config_file_path(path);
         if !config_file_path.exists() {
             let yaml = serde_yaml::to_string(config).map_err(|e| {
-                DbError::Io(io::Error::other(format!("Failed to serialize config: {e}")))
+                DbError::Io(io::Error::other(format!(
+                    "Failed to serialize config: {e}"
+                )))
             })?;
             std::fs::write(&config_file_path, yaml)?;
         }

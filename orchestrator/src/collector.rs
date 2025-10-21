@@ -251,7 +251,7 @@ mod test {
     use crate::collector::{JobId, MetricLabel, MetricsCollector};
 
     /// Test data for the metrics collector.
-    const TEST_VECTOR: &'static str = r#"
+    const TEST_VECTOR: &str = r#"
 [
   {
     "metric": {

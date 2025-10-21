@@ -101,7 +101,7 @@ pub mod test {
     fn split_benchmark_parameters() {
         let parameters = BenchmarkParametersGeneric::<TestConfig>::new(
             Default::default(),
-            vec![TestConfig::default(); 10],
+            vec![TestConfig; 10],
         );
         let split = parameters.split(3);
         assert_eq!(split.len(), 4);

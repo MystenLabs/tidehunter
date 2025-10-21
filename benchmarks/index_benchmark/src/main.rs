@@ -30,7 +30,9 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     entries_per_index: usize,
     index_format: P,
 ) -> std::io::Result<()> {
-    println!("Generating index file with {n_indices} indices, {entries_per_index} entries each");
+    println!(
+        "Generating index file with {n_indices} indices, {entries_per_index} entries each"
+    );
 
     // Create the main output file and write the number of indices
     let mut file = File::create(output_path)?;
@@ -299,7 +301,9 @@ fn analyze_multithreaded_results(
     println!("  Threads: {num_threads}");
     println!("  End-to-end time: {end_to_end_time:.2?}");
     println!("  Total lookups: {total_lookups}");
-    println!("  End-to-end throughput: {end_to_end_throughput:.2} lookups/sec");
+    println!(
+        "  End-to-end throughput: {end_to_end_throughput:.2} lookups/sec"
+    );
 
     // Calculate per-thread statistics
     for (i, thread_dur) in thread_durations.iter().enumerate() {
@@ -494,7 +498,9 @@ fn main() {
                 IndexBenchmark::load_from_file(header_file, header_file_length, direct_io)
                     .expect("Failed to load HeaderLookupIndex benchmark file");
 
-            println!("Running multithreaded benchmark with {num_threads} threads");
+            println!(
+                "Running multithreaded benchmark with {num_threads} threads"
+            );
             for run in 0..num_runs {
                 println!("Run {}/{}", run + 1, num_runs);
 

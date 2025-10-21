@@ -457,7 +457,7 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
                 };
             }
             Err(e) => {
-                eprintln!("Error parsing relocation config: {}", e);
+                eprintln!("Error parsing relocation config: {e}");
                 std::process::exit(1);
             }
         }

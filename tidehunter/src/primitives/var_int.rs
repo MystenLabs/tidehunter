@@ -9,7 +9,9 @@ const MAX_SINGLE_BYTE_EXCLUDED: u16 = 0x80;
 /// Panics if the value exceeds the encodable limit (32767).
 pub fn serialize_u16_varint(value: u16, buf: &mut impl BufMut) {
     if value > MAX_U16_VARINT {
-        panic!("Value {value} exceeds maximum encodable value {MAX_U16_VARINT}");
+        panic!(
+            "Value {value} exceeds maximum encodable value {MAX_U16_VARINT}"
+        );
     }
 
     if value < MAX_SINGLE_BYTE_EXCLUDED {

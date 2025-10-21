@@ -125,7 +125,9 @@ pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool
                 continue;
             }
             Err(e) => {
-                eprintln!("Warning: Failed to read index at position {index_position:?}: {e:?}");
+                eprintln!(
+                    "Warning: Failed to read index at position {index_position:?}: {e:?}"
+                );
                 continue;
             }
         };
