@@ -132,12 +132,14 @@ where
 
     /// Creates `Bytes` from a [`BytesOwner`] (for example, `Vec<u8>`).
     pub fn from_owner(value: impl AbstractOwner<T>) -> Self {
-        let slice: &T = value.as_ref();
+        // Create Arc first to ensure pointer stability for value types like arrays
+        let owner = Arc::new(value);
+        let slice: &T = AsRef::<T>::as_ref(&*owner);
         let bytes = slice.as_bytes();
         Self {
             ptr: bytes.as_ptr(),
             len: bytes.len(),
-            owner: Some(Arc::new(value)),
+            owner: Some(owner),
         }
     }
 

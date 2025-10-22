@@ -13,6 +13,7 @@ use crate::TextOwner;
 impl BytesOwner for Vec<u8> {}
 impl BytesOwner for Box<[u8]> {}
 impl BytesOwner for String {}
+impl<const N: usize> BytesOwner for [u8; N] {}
 #[cfg(feature = "frommmap")]
 impl BytesOwner for memmap2::Mmap {}
 #[cfg(feature = "frommmap")]
