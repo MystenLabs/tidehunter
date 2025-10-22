@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
-use std::{cmp, mem};
+use std::time::{Duration, Instant};
+use std::{cmp, mem, thread};
 
 pub struct LargeTable {
     table: Vec<KsTable>,
@@ -450,14 +450,25 @@ impl LargeTable {
         relocation_cutoff: Option<u64>,
     ) -> Result<(), L::Error> {
         let mutex_index = context.ks_config.mutex_for_cell(cell_id);
-        let mut row = self.row_by_mutex(context, mutex_index);
+        loop {
+            let mut row = self.row_by_mutex(context, mutex_index);
 
-        let entry = match row.try_entry_mut(cell_id) {
-            Some(entry) => entry,
-            None => return Ok(()), // Cell doesn't exist
-        };
+            let entry = match row.try_entry_mut(cell_id) {
+                Some(entry) => entry,
+                None => return Ok(()), // Cell doesn't exist
+            };
 
-        entry.sync_flush(loader, true, relocation_updates, relocation_cutoff)
+            if entry.pending_last_processed.is_some() {
+                // If async flush is in progress we can't do sync_flush.
+                // Simply wait until async flush completes.
+                // This is called from the relocation thread so some amount of thread sleep is ok.
+                drop(row);
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+
+            return entry.sync_flush(loader, true, relocation_updates, relocation_cutoff);
+        }
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
@@ -1092,6 +1103,10 @@ impl LargeTableEntry {
         relocation_updates: Option<RelocationUpdates>,
         relocation_cutoff: Option<u64>,
     ) -> Result<(), L::Error> {
+        assert!(
+            self.pending_last_processed.is_none(),
+            "sync_flush is called while async flush is in progress"
+        );
         let flush_kind = match self.flush_kind() {
             Some(kind) => kind,
             None => {
