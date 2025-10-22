@@ -131,7 +131,7 @@ impl RandomAccessSpeedTest {
 
 fn format_bytes(l: usize) -> String {
     if l < 1024 {
-        format!("{}  b", l)
+        format!("{l}  b")
     } else if l < 1024 * 1024 {
         format!("{:.1} Kb", l as f64 / 1024.)
     } else if l < 1024 * 1024 * 1024 {

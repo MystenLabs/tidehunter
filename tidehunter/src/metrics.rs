@@ -475,7 +475,7 @@ impl Drop for McsCounterTimer {
 
 pub fn print_histogram_stats(histogram: &MetricHistogram) {
     if let Some(inner) = &histogram.inner {
-        println!("Histogram stats: {:?}", inner);
+        println!("Histogram stats: {inner:?}");
     }
 }
 

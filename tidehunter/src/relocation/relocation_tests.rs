@@ -824,7 +824,9 @@ fn test_index_based_relocation_with_target_position() {
     db.rebuild_control_region().unwrap();
 
     // Run relocation with target_position
-    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(Some(mid_position)));
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(Some(
+        mid_position.as_u64(),
+    )));
 
     // Get metrics
     let kept = metrics
@@ -856,7 +858,7 @@ fn test_index_based_relocation_with_target_position() {
     let watermark = RelocationWatermarks::read_or_create(dir.path())
         .unwrap()
         .data;
-    assert_eq!(watermark.target_position, Some(mid_position));
+    assert_eq!(watermark.target_position, Some(mid_position.as_u64()));
 }
 
 #[test]
@@ -881,7 +883,7 @@ fn test_compute_target_position_from_ratio() {
     }
 
     let min_pos = db.wal.min_wal_position();
-    let last_pos = db.wal_writer.last_processed();
+    let last_pos = db.wal_writer.last_processed().as_u64();
     let range = last_pos - min_pos;
 
     // Test various ratios

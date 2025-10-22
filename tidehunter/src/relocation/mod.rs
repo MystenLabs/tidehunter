@@ -26,7 +26,7 @@ pub mod updates;
 /// # Arguments
 /// * `db` - The database instance
 /// * `ratio` - A value between 0.0 and 1.0 representing the fraction of WAL to process.
-///             0.0 = start of WAL, 0.5 = middle, 1.0 = end (last_processed)
+///   0.0 = start of WAL, 0.5 = middle, 1.0 = end (last_processed)
 ///
 /// # Returns
 /// * `Some(position)` - The computed target position in bytes
@@ -44,7 +44,7 @@ pub fn compute_target_position_from_ratio(db: &Arc<Db>, ratio: f64) -> Option<u6
 
     // Get the WAL range
     let min_position = db.wal.min_wal_position();
-    let last_processed = db.wal_writer.last_processed();
+    let last_processed = db.wal_writer.last_processed().as_u64();
 
     // Handle edge cases
     if last_processed <= min_position {

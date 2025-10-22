@@ -311,7 +311,7 @@ fn main() {
                             match db_instance.get(key_space, &key) {
                                 Ok(value) => value,
                                 Err(e) => {
-                                    println!("ERROR: db.get() failed for key {:?}: {:?}", key, e);
+                                    println!("ERROR: db.get() failed for key {key:?}: {e:?}");
                                     println!("Exiting test due to error");
                                     std::process::exit(1);
                                 }
@@ -406,8 +406,7 @@ fn main() {
                 );
             }
             None => panic!(
-                "Key {:?} exists in in-memory state with value {:?}, but not in database",
-                key, expected_value
+                "Key {key:?} exists in in-memory state with value {expected_value:?}, but not in database"
             ),
         }
     }
@@ -470,14 +469,14 @@ fn main() {
         .snapshot_force_unload
         .with_label_values(&[db_instance.ks_name(key_space)])
         .get();
-    println!("  snapshot_force_unload metric: {}", force_unload_count);
+    println!("  snapshot_force_unload metric: {force_unload_count}");
 
     println!("\nTest passed successfully!");
 }
 
 fn human_readable_bytes(bytes: u64) -> String {
     if bytes < 1024 {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else if bytes < 1024 * 1024 * 1024 {

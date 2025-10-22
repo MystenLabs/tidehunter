@@ -71,7 +71,7 @@ fn benchmark_large_table_insert_batch(c: &mut Criterion) {
     for key_size in [8, 32, 48].iter() {
         for batch_size in [10, 50, 100].iter() {
             group.bench_with_input(
-                BenchmarkId::new(format!("key_{}_batch", key_size), batch_size),
+                BenchmarkId::new(format!("key_{key_size}_batch"), batch_size),
                 batch_size,
                 |b, &batch_size| {
                     // Setup: Create a new database for each benchmark iteration group

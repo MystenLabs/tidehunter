@@ -30,10 +30,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     entries_per_index: usize,
     index_format: P,
 ) -> std::io::Result<()> {
-    println!(
-        "Generating index file with {} indices, {} entries each",
-        n_indices, entries_per_index
-    );
+    println!("Generating index file with {n_indices} indices, {entries_per_index} entries each");
 
     // Create the main output file and write the number of indices
     let mut file = File::create(output_path)?;
@@ -66,7 +63,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 
             while let Some((i, buffer)) = rx.recv().await {
                 if i % 100 == 0 {
-                    println!("  Merging index {} into main file...", i);
+                    println!("  Merging index {i} into main file...");
                 }
 
                 // Write the serialized index to the main file
@@ -92,7 +89,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 
             // Spawn a task for each thread
             let task = tokio::spawn(async move {
-                println!("  Starting task {}...", i);
+                println!("  Starting task {i}...");
                 let batch_size = if i < num_threads - 1 {
                     n_indices / num_threads
                 } else {
@@ -102,7 +99,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                 for j in 0..batch_size {
                     let index_idx = i * batch_size + j;
                     if index_idx % 1000 == 0 {
-                        println!("  Generating index {}...", index_idx);
+                        println!("  Generating index {index_idx}...");
                     }
 
                     // Create an IndexTable with m entries
@@ -132,13 +129,12 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                         .await
                         .map_err(|e| {
                             std::io::Error::other(format!(
-                                "Failed to send index through channel: {}",
-                                e
+                                "Failed to send index through channel: {e}"
                             ))
                         });
 
                     if let Err(e) = result {
-                        println!("Failed to send index through channel: {}", e);
+                        println!("Failed to send index through channel: {e}");
                         return Err(e);
                     }
                 }
@@ -225,8 +221,7 @@ impl IndexBenchmark {
         metrics: &Metrics,
     ) -> (Duration, Vec<Vec<Duration>>) {
         println!(
-            "Running multithreaded benchmark with {} threads, {} lookups per thread in batches of {}",
-            num_threads, num_lookups, batch_size
+            "Running multithreaded benchmark with {num_threads} threads, {num_lookups} lookups per thread in batches of {batch_size}"
         );
 
         // Use thread::scope to manage threads and collect results
@@ -300,14 +295,11 @@ fn analyze_multithreaded_results(
     // Flatten all durations for overall latency stats
     let all_durations: Vec<Duration> = thread_durations.iter().flatten().cloned().collect();
 
-    println!("{} Multithreaded Results:", name);
-    println!("  Threads: {}", num_threads);
-    println!("  End-to-end time: {:.2?}", end_to_end_time);
-    println!("  Total lookups: {}", total_lookups);
-    println!(
-        "  End-to-end throughput: {:.2} lookups/sec",
-        end_to_end_throughput
-    );
+    println!("{name} Multithreaded Results:");
+    println!("  Threads: {num_threads}");
+    println!("  End-to-end time: {end_to_end_time:.2?}");
+    println!("  Total lookups: {total_lookups}");
+    println!("  End-to-end throughput: {end_to_end_throughput:.2} lookups/sec");
 
     // Calculate per-thread statistics
     for (i, thread_dur) in thread_durations.iter().enumerate() {
@@ -333,14 +325,14 @@ fn analyze_multithreaded_results(
             .iter()
             .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
-        println!("  Thread {} Results:", i);
-        println!("    Lookups: {}", thread_total_lookups);
-        println!("    Throughput: {:.2} lookups/sec", thread_throughput);
+        println!("  Thread {i} Results:");
+        println!("    Lookups: {thread_total_lookups}");
+        println!("    Throughput: {thread_throughput:.2} lookups/sec");
         println!("    Latency per lookup:");
-        println!("      Mean: {:.2} ns", mean);
-        println!("      Std Dev: {:.2} ns", std_dev);
-        println!("      Min: {:.2} ns", min);
-        println!("      Max: {:.2} ns", max);
+        println!("      Mean: {mean:.2} ns");
+        println!("      Std Dev: {std_dev:.2} ns");
+        println!("      Min: {min:.2} ns");
+        println!("      Max: {max:.2} ns");
     }
 
     // Calculate overall latency statistics
@@ -364,10 +356,10 @@ fn analyze_multithreaded_results(
         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     println!("  Overall Latency Statistics:");
-    println!("    Mean: {:.2} ns", all_mean);
-    println!("    Std Dev: {:.2} ns", all_std_dev);
-    println!("    Min: {:.2} ns", all_min);
-    println!("    Max: {:.2} ns", all_max);
+    println!("    Mean: {all_mean:.2} ns");
+    println!("    Std Dev: {all_std_dev:.2} ns");
+    println!("    Min: {all_min:.2} ns");
+    println!("    Max: {all_max:.2} ns");
 }
 
 #[derive(Parser)]
@@ -437,7 +429,7 @@ fn main() {
             let uniform_path = Path::new(&uniform_file);
 
             println!("Generating benchmark files...");
-            println!("Generating LookupHeaderIndex file: {:?}", header_path);
+            println!("Generating LookupHeaderIndex file: {header_path:?}");
             generate_index_file(
                 header_path,
                 num_indices,
@@ -446,7 +438,7 @@ fn main() {
             )
             .expect("Failed to generate LookupHeaderIndex file");
 
-            println!("Generating UniformLookupIndex file: {:?}", uniform_path);
+            println!("Generating UniformLookupIndex file: {uniform_path:?}");
             generate_index_file(
                 uniform_path,
                 num_indices,
@@ -502,10 +494,7 @@ fn main() {
                 IndexBenchmark::load_from_file(header_file, header_file_length, direct_io)
                     .expect("Failed to load HeaderLookupIndex benchmark file");
 
-            println!(
-                "Running multithreaded benchmark with {} threads",
-                num_threads
-            );
+            println!("Running multithreaded benchmark with {num_threads} threads");
             for run in 0..num_runs {
                 println!("Run {}/{}", run + 1, num_runs);
 

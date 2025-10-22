@@ -69,7 +69,7 @@ impl IndexFlusher {
                     IndexFlusherThread::new(db.clone(), receiver, metrics.clone(), thread_id);
 
                 thread::Builder::new()
-                    .name(format!("flusher-{}", thread_id))
+                    .name(format!("flusher-{thread_id}"))
                     .spawn(move || flusher_thread.run())
                     .unwrap()
             })

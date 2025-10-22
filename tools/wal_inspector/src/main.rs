@@ -26,7 +26,7 @@ impl InspectorContext {
         // Load the database configuration, fallback to defaults if not found
         let config = Db::load_config(&db_path).unwrap_or_else(|e| {
             if verbose {
-                println!("Could not load config file ({:?}), using defaults", e);
+                println!("Could not load config file ({e:?}), using defaults");
             }
             Config::default()
         });
@@ -37,7 +37,7 @@ impl InspectorContext {
 
         if verbose {
             println!("Loaded database context:");
-            println!("  DB path: {:?}", db_path);
+            println!("  DB path: {db_path:?}");
             println!("  Fragment size: {} MB", config.frag_size / (1024 * 1024));
             println!(
                 "  WAL file size: {} GB",

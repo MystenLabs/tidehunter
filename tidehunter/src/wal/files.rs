@@ -29,13 +29,10 @@ impl WalFiles {
                 if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
                     if let Some(id_str) = file_name.strip_prefix(layout.kind.name()) {
                         let Some(id_str) = id_str.strip_prefix("_") else {
-                            panic!(
-                                "invalid wal file name {:?}(failed to strip _ prefix)",
-                                file_name
-                            );
+                            panic!("invalid wal file name {file_name:?}(failed to strip _ prefix)");
                         };
                         let id = u64::from_str_radix(id_str, 16)
-                            .unwrap_or_else(|_| panic!("invalid wal file name {:?}", file_name));
+                            .unwrap_or_else(|_| panic!("invalid wal file name {file_name:?}"));
                         let file = Wal::open_file(&file_path, layout)?;
                         files.push((id, file));
                     }
@@ -76,7 +73,7 @@ impl WalFiles {
 
     pub(crate) fn get(&self, id: WalFileId) -> &Arc<File> {
         self.get_checked(id)
-            .unwrap_or_else(|| panic!("attempt to access non existing file {:?}", id))
+            .unwrap_or_else(|| panic!("attempt to access non existing file {id:?}"))
     }
 
     /// Creates a new WalFiles with the first `num_files` removed.

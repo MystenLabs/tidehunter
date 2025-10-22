@@ -104,7 +104,7 @@ fn test_into_vec() {
 fn test_bytes_debug_format() {
     let v = b"printable\t\r\n\'\"\\\x00\x01\x02printable".to_vec();
     let b = Bytes::from(v);
-    let escaped = format!("{:?}", b);
+    let escaped = format!("{b:?}");
     let expected = r#"b"printable\t\r\n\'\"\\\x00\x01\x02printable""#;
     assert_eq!(escaped, expected);
 }

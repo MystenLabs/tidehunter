@@ -36,7 +36,7 @@ pub fn force_snapshot_command(context: &InspectorContext) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to force rebuild control region: {:?}", e))?;
 
     println!("✓ Snapshot completed successfully");
-    println!("  Snapshot replay position: {:#x}", snapshot_position);
+    println!("  Snapshot replay position: {snapshot_position:#x}");
 
     // Verify all entries are clean
     if !db.is_all_clean() {
