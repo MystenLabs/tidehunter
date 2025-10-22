@@ -72,7 +72,7 @@ impl RocksStorage {
         // One common issue is that the default ulimit is too low,
         // leading to I/O errors such as "Too many open files". Raising fdlimit to bypass it.
         if let Some(limit) = fdlimit::raise_fd_limit() {
-            println!("Raised fdlimit to {}", limit);
+            println!("Raised fdlimit to {limit}");
             // on windows raise_fd_limit return None
             opt.set_max_open_files((limit / 8) as i32);
         }

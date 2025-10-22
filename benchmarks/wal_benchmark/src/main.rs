@@ -78,7 +78,7 @@ fn run_benchmark_thread(
                 total_bytes.fetch_add(write_size as u64, Ordering::Relaxed);
             }
             Err(e) => {
-                eprintln!("Thread {}: Write failed: {:?}", thread_id, e);
+                eprintln!("Thread {thread_id}: Write failed: {e:?}");
                 break;
             }
         }
@@ -101,7 +101,7 @@ fn format_throughput(bytes: u64, duration: Duration) -> String {
     } else if bytes_per_sec >= 1_000.0 {
         format!("{:.2} KB/s", bytes_per_sec / 1_000.0)
     } else {
-        format!("{:.2} B/s", bytes_per_sec)
+        format!("{bytes_per_sec:.2} B/s")
     }
 }
 
@@ -113,7 +113,7 @@ fn format_bytes(bytes: u64) -> String {
     } else if bytes >= 1_000 {
         format!("{:.2} KB", bytes as f64 / 1_000.0)
     } else {
-        format!("{} bytes", bytes)
+        format!("{bytes} bytes")
     }
 }
 
@@ -151,7 +151,7 @@ fn main() {
         _temp_dir.path().to_path_buf()
     };
 
-    println!("Database path: {:?}", db_path);
+    println!("Database path: {db_path:?}");
     println!();
 
     // Setup WAL
@@ -171,7 +171,7 @@ fn main() {
         let wal_path = if args.wal_instances == 1 {
             db_path.clone()
         } else {
-            let instance_path = db_path.join(format!("wal_{}", i));
+            let instance_path = db_path.join(format!("wal_{i}"));
             std::fs::create_dir_all(&instance_path)
                 .expect("Failed to create WAL instance directory");
             instance_path
@@ -279,7 +279,7 @@ fn main() {
     for handle in handles {
         match handle.join() {
             Ok(result) => results.push(result),
-            Err(e) => eprintln!("Thread panicked: {:?}", e),
+            Err(e) => eprintln!("Thread panicked: {e:?}"),
         }
     }
 
@@ -302,15 +302,15 @@ fn main() {
     println!("==================");
     println!();
     println!("Overall Statistics:");
-    println!("  Total elapsed time: {:.2?}", total_elapsed);
-    println!("  Total writes: {}", total_writes_final);
+    println!("  Total elapsed time: {total_elapsed:.2?}");
+    println!("  Total writes: {total_writes_final}");
     println!(
         "  Total bytes written: {} ({})",
         format_bytes(total_bytes_final),
         total_bytes_final
     );
-    println!("  Overall QPS: {:.2} writes/sec", overall_qps);
-    println!("  Overall throughput: {}", overall_throughput);
+    println!("  Overall QPS: {overall_qps:.2} writes/sec");
+    println!("  Overall throughput: {overall_throughput}");
 
     println!("  Metric wal_write_wait: {}", metrics.wal_write_wait.get());
 

@@ -22,19 +22,18 @@ pub fn join_thread_with_timeout(jh: JoinHandle<()>, thread_name: &str, timeout_s
             // Thread completed successfully
         }
         Ok(Err(e)) => {
-            panic!("{} thread panicked: {:?}", thread_name, e);
+            panic!("{thread_name} thread panicked: {e:?}");
         }
         Err(_timeout) => {
             let msg = format!(
-                "{} thread did not stop in {} seconds (this should not happen)",
-                thread_name, timeout_secs
+                "{thread_name} thread did not stop in {timeout_secs} seconds (this should not happen)"
             );
 
             #[cfg(test)]
-            panic!("{}", msg);
+            panic!("{msg}");
 
             #[cfg(not(test))]
-            eprintln!("WARNING: {}", msg);
+            eprintln!("WARNING: {msg}");
         }
     }
 }

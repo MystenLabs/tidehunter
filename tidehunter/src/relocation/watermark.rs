@@ -44,7 +44,7 @@ impl RelocationWatermarks {
         let data = bincode::deserialize::<WatermarkData>(&buffer).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Failed to deserialize watermark: {}", e),
+                format!("Failed to deserialize watermark: {e}"),
             )
         })?;
 
@@ -62,7 +62,7 @@ impl RelocationWatermarks {
         let serialized = bincode::serialize(&self.data).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Failed to serialize watermark: {}", e),
+                format!("Failed to serialize watermark: {e}"),
             )
         })?;
 

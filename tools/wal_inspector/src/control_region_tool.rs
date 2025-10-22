@@ -76,18 +76,18 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
     // Print basic statistics
     println!("Control Region Statistics");
     println!("=========================");
-    println!("Path: {:?}", control_path);
+    println!("Path: {control_path:?}");
     println!(
         "Last processed position: {}",
         control_region.last_position()
     );
     if let Some(last_index_pos) = control_region.last_index_wal_position() {
-        println!("Last index WAL position: {:?}", last_index_pos);
+        println!("Last index WAL position: {last_index_pos:?}");
     }
     println!();
 
     println!("Entry Statistics:");
-    println!("  Total entries: {}", total_entries);
+    println!("  Total entries: {total_entries}");
     println!("  Valid WAL positions: {}", all_positions.len());
     println!();
 
@@ -103,7 +103,7 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
     );
     if total_index_wal_size > 0 {
         let usage_percentage = (total_position_size as f64 / total_index_wal_size as f64) * 100.0;
-        println!("  Usage percentage: {:.2}%", usage_percentage);
+        println!("  Usage percentage: {usage_percentage:.2}%");
     }
     println!();
 
@@ -111,7 +111,7 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
     if verbose && !ks_stats.is_empty() {
         println!("Keyspace Breakdown:");
         for (ks_idx, total) in ks_stats {
-            println!("  Keyspace {}: {} entries", ks_idx, total);
+            println!("  Keyspace {ks_idx}: {total} entries");
         }
         println!();
     }
@@ -120,13 +120,13 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
     if !all_positions.is_empty() {
         println!("WAL Position Percentiles:");
         if let Some(p50) = snapshot.pct_wal_position(50) {
-            println!("  P50: {:?}", p50);
+            println!("  P50: {p50:?}");
         }
         if let Some(p90) = snapshot.pct_wal_position(90) {
-            println!("  P90: {:?}", p90);
+            println!("  P90: {p90:?}");
         }
         if let Some(p99) = snapshot.pct_wal_position(99) {
-            println!("  P99: {:?}", p99);
+            println!("  P99: {p99:?}");
         }
         println!();
     }
@@ -134,7 +134,7 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
     // Print lowest N positions with their keyspace name and WAL file
     if !all_positions.is_empty() {
         let display_count = num_positions.min(all_positions.len());
-        println!("Lowest {} WAL positions:", display_count);
+        println!("Lowest {display_count} WAL positions:");
         for (i, (position, ks_idx)) in all_positions.iter().take(display_count).enumerate() {
             let ks = key_shape.ks(tidehunter::key_shape::KeySpace::new(*ks_idx as u8));
             let file_id = wal_layout.locate_file(position.offset());

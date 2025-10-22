@@ -26,7 +26,7 @@ pub fn format_count(count: usize) -> String {
     }
 
     if unit_index == 0 {
-        format!("{}", count)
+        format!("{count}")
     } else {
         format!("{:.1}{}", size, UNITS[unit_index])
     }

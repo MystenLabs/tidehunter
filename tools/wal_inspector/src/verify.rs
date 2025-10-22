@@ -213,7 +213,7 @@ fn verify_keys_through_iteration(
                 }
                 Some(Err(e)) => {
                     errors += 1;
-                    println!("  ✗ Error during iteration in keyspace {}: {:?}", ks_id, e);
+                    println!("  ✗ Error during iteration in keyspace {ks_id}: {e:?}");
                     break;
                 }
                 None => break, // End of iteration
@@ -336,7 +336,7 @@ fn read_keys_from_wal(context: &InspectorContext) -> Result<Vec<(KeySpace, Bytes
             Ok(entry) => entry,
             Err(e) => {
                 if context.verbose {
-                    println!("Error reading WAL entry: {:?}", e);
+                    println!("Error reading WAL entry: {e:?}");
                 }
                 break;
             }
@@ -352,7 +352,7 @@ fn read_keys_from_wal(context: &InspectorContext) -> Result<Vec<(KeySpace, Bytes
                 let key_entry = (ks.as_u8(), key.to_vec());
                 keys_map.insert(key_entry, ());
                 if context.verbose && record_count % 1000 == 0 {
-                    println!("  Processed {} records...", record_count);
+                    println!("  Processed {record_count} records...");
                 }
             }
             WalEntry::Remove(ks, key) => {
@@ -371,11 +371,11 @@ fn read_keys_from_wal(context: &InspectorContext) -> Result<Vec<(KeySpace, Bytes
     }
 
     println!("\nWAL Statistics:");
-    println!("  Total entries: {}", entry_count);
-    println!("  Records: {}", record_count);
-    println!("  Removes: {}", remove_count);
-    println!("  Index entries: {}", index_count);
-    println!("  Batch starts: {}", batch_count);
+    println!("  Total entries: {entry_count}");
+    println!("  Records: {record_count}");
+    println!("  Removes: {remove_count}");
+    println!("  Index entries: {index_count}");
+    println!("  Batch starts: {batch_count}");
     println!("  Unique keys remaining: {}", keys_map.len());
 
     // Convert back to expected format

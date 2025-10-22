@@ -204,7 +204,7 @@ pub(crate) fn main() {
     let t0 = Instant::now();
     let window_sizes = precompute_window_sizes(&n_values, &p_values);
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("Precomputation complete in {:.2}s", elapsed);
+    println!("Precomputation complete in {elapsed:.2}s");
 
     let test_ns = [100, 1000, 10_000, 100_000, 1_000_000];
     let num_iterations = 10;
@@ -251,12 +251,10 @@ pub(crate) fn main() {
         let final_exact_time = exact_time / (num_iterations as f64);
 
         println!(
-            "{:>8} entries: Approx hit rate {:.3}, approx time: {:.3}s",
-            n, final_approx, final_approx_time
+            "{n:>8} entries: Approx hit rate {final_approx:.3}, approx time: {final_approx_time:.3}s"
         );
         println!(
-            "{:>8} entries: Exact  hit rate {:.3}, exact  time: {:.3}s",
-            n, final_exact, final_exact_time
+            "{n:>8} entries: Exact  hit rate {final_exact:.3}, exact  time: {final_exact_time:.3}s"
         );
         println!();
     }

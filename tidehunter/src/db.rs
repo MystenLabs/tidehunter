@@ -123,8 +123,7 @@ impl Db {
         if !shape_file_path.exists() {
             let yaml = key_shape.to_yaml().map_err(|e| {
                 DbError::Io(io::Error::other(format!(
-                    "Failed to serialize key shape: {}",
-                    e
+                    "Failed to serialize key shape: {e}"
                 )))
             })?;
             std::fs::write(&shape_file_path, yaml)?;
@@ -147,7 +146,7 @@ impl Db {
         KeyShape::from_yaml(&yaml).map_err(|e| {
             DbError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Failed to deserialize key shape: {}", e),
+                format!("Failed to deserialize key shape: {e}"),
             ))
         })
     }
@@ -161,10 +160,7 @@ impl Db {
         let config_file_path = Self::config_file_path(path);
         if !config_file_path.exists() {
             let yaml = serde_yaml::to_string(config).map_err(|e| {
-                DbError::Io(io::Error::other(format!(
-                    "Failed to serialize config: {}",
-                    e
-                )))
+                DbError::Io(io::Error::other(format!("Failed to serialize config: {e}")))
             })?;
             std::fs::write(&config_file_path, yaml)?;
         }
@@ -186,7 +182,7 @@ impl Db {
         serde_yaml::from_str(&yaml).map_err(|e| {
             DbError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Failed to deserialize config: {}", e),
+                format!("Failed to deserialize config: {e}"),
             ))
         })
     }
@@ -848,8 +844,7 @@ impl Db {
             if poll_count > 10000 {
                 // Increased timeout
                 panic!(
-                    "Database shutdown timeout: background threads not terminating after {} polls",
-                    poll_count
+                    "Database shutdown timeout: background threads not terminating after {poll_count} polls"
                 );
             }
             thread::sleep(Duration::from_millis(10)); // Longer sleep

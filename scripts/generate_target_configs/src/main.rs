@@ -34,7 +34,7 @@ fn main() -> Result<()> {
                 item.stress_client_parameters.read_mode = read_mode.clone();
                 item.stress_client_parameters.zipf_exponent = zipf_exponent;
                 let yaml = serde_yaml::to_string(&item)?;
-                println!("{}", yaml);
+                println!("{yaml}");
                 items.push(item);
             }
         }

@@ -74,7 +74,7 @@ pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool
     }
 
     if index_positions.is_empty() {
-        println!("No index entries found for keyspace: {}", keyspace_name);
+        println!("No index entries found for keyspace: {keyspace_name}");
         return Ok(());
     }
 
@@ -121,14 +121,11 @@ pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool
         let entry_bytes = match entry_result {
             Ok((_read_type, Some(bytes))) => bytes,
             Ok((_read_type, None)) => {
-                eprintln!("Warning: No data at index position {:?}", index_position);
+                eprintln!("Warning: No data at index position {index_position:?}");
                 continue;
             }
             Err(e) => {
-                eprintln!(
-                    "Warning: Failed to read index at position {:?}: {:?}",
-                    index_position, e
-                );
+                eprintln!("Warning: Failed to read index at position {index_position:?}: {e:?}");
                 continue;
             }
         };
@@ -167,8 +164,7 @@ pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool
             }
             _ => {
                 eprintln!(
-                    "Warning: Expected Index entry at position {:?}, but found different entry type",
-                    index_position
+                    "Warning: Expected Index entry at position {index_position:?}, but found different entry type"
                 );
             }
         }
@@ -180,11 +176,11 @@ pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool
     }
 
     // Print results
-    println!("\nAnalysis Results for Keyspace: {}", keyspace_name);
+    println!("\nAnalysis Results for Keyspace: {keyspace_name}");
     println!("=====================================");
     println!("Index entries in control region: {}", index_positions.len());
-    println!("Index entries successfully read: {}", successfully_read);
-    println!("Total keys in indices: {}", total_keys);
+    println!("Index entries successfully read: {successfully_read}");
+    println!("Total keys in indices: {total_keys}");
     println!(
         "Total payload size: {} ({} bytes)",
         format_bytes(total_payload_len as usize),
@@ -193,7 +189,7 @@ pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool
 
     if total_keys > 0 {
         let avg_payload = total_payload_len / total_keys as u64;
-        println!("Average payload size per key: {} bytes", avg_payload);
+        println!("Average payload size per key: {avg_payload} bytes");
 
         // Calculate and print size distribution
         println!("\nPayload Size Distribution:");

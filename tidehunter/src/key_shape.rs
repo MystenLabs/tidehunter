@@ -611,13 +611,14 @@ impl KeyType {
         let max_bits = (MAX_KEY_LEN as u64) * 8;
         assert!(
             prefix_bits <= max_bits,
-            "prefix_bits ({}) exceeds maximum key length in bits ({})",
-            prefix_bits,
-            max_bits
+            "prefix_bits ({prefix_bits}) exceeds maximum key length in bits ({max_bits})"
         );
 
         let prefix_len_bytes = prefix_bits.div_ceil(8) as usize;
-        let cluster_bits = if prefix_bits.is_multiple_of(8) {
+        // Added this allow here to support rust 1.85
+        // TODO: remove this allow once Sui upgrades to rust 1.90
+        #[allow(unknown_lints, clippy::manual_is_multiple_of)]
+        let cluster_bits = if prefix_bits % 8 == 0 {
             0
         } else {
             (8 - (prefix_bits % 8)) as usize
@@ -842,19 +843,13 @@ impl KeyIndexing {
             KeyIndexing::Reduction(key_size, _) => *key_size,
             KeyIndexing::Hash | KeyIndexing::VariableLength => {
                 if k > MAX_KEY_LEN {
-                    panic!(
-                        "Key space {} accepts maximum keys size {}, given {}",
-                        name, MAX_KEY_LEN, k
-                    );
+                    panic!("Key space {name} accepts maximum keys size {MAX_KEY_LEN}, given {k}");
                 }
                 return;
             }
         };
         if expected_key_size != k {
-            panic!(
-                "Key space {} accepts keys size {}, given {}",
-                name, expected_key_size, k
-            );
+            panic!("Key space {name} accepts keys size {expected_key_size}, given {k}");
         }
     }
 

@@ -133,8 +133,8 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
             if let Some(pb) = &progress_bar {
                 pb.finish_and_clear();
             }
-            println!("CRC error encountered: {:?}", crc_err);
-            println!("Last successful WAL position: {:#x}", last_position);
+            println!("CRC error encountered: {crc_err:?}");
+            println!("Last successful WAL position: {last_position:#x}");
             break;
         }
 
@@ -145,7 +145,7 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
                     pb.finish_and_clear();
                 }
                 if context.verbose {
-                    println!("Error reading WAL entry: {:?}", e);
+                    println!("Error reading WAL entry: {e:?}");
                 }
                 break;
             }
@@ -165,7 +165,7 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
 
         entry_count += 1;
         if context.verbose && progress_bar.is_none() && entry_count % 10000 == 0 {
-            println!("  Processed {} entries...", entry_count);
+            println!("  Processed {entry_count} entries...");
         }
 
         // Calculate the size of the raw entry
@@ -458,7 +458,7 @@ fn print_control_region_info(context: &InspectorContext) -> Result<()> {
 
             if total_wal_size > 0 {
                 let replay_percent = (replay_position as f64 / total_wal_size as f64) * 100.0;
-                println!("  Progress:            {:.1}%", replay_percent);
+                println!("  Progress:            {replay_percent:.1}%");
             }
         }
     } else {
@@ -497,8 +497,8 @@ mod tests {
         // Write some test records
         let mut batch = WriteBatch::new();
         for i in 0..10 {
-            let key = format!("key{:05}", i);
-            let value = format!("value{}", i);
+            let key = format!("key{i:05}");
+            let value = format!("value{i}");
             batch.write(ks, key.into_bytes(), value.into_bytes());
         }
         db.write_batch(batch)
@@ -507,7 +507,7 @@ mod tests {
         // Add some removes
         let mut batch = WriteBatch::new();
         for i in 2..5 {
-            let key = format!("key{:05}", i);
+            let key = format!("key{i:05}");
             batch.delete(ks, key.into_bytes());
         }
         db.write_batch(batch)

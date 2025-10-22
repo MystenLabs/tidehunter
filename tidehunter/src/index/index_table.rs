@@ -103,7 +103,7 @@ impl IndexTable {
             match entry {
                 Entry::Vacant(_) => {
                     #[cfg(any(debug_assertions, feature = "test_methods"))]
-                    panic!("unmerge_flushed entry mismatch {:?}", k)
+                    panic!("unmerge_flushed entry mismatch {k:?}")
                     // todo promote this to unconditional panic?
                 }
                 Entry::Occupied(oc) => {
