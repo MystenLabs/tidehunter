@@ -416,6 +416,36 @@ impl LargeTable {
         ks_table.lock(mutex, &context.large_table_contention)
     }
 
+    /// Locks the row for a cell, waiting for any pending async flush to complete.
+    ///
+    /// The returned cell is guaranteed to have pending_last_processed = None.
+    ///
+    /// This is not suitable for frequent user-facing operations as it blocks current thread
+    /// via sleep while it waits for pending flush to finish.
+    fn lock_cell_waiting_for_flush(
+        &self,
+        context: &KsContext,
+        cell: &CellId,
+    ) -> MutexGuard<'_, Row> {
+        let mutex = context.ks_config.mutex_for_cell(cell);
+        let ks_table = self.ks_table(&context.ks_config);
+
+        loop {
+            let mut row = ks_table.lock(mutex, &context.large_table_contention);
+
+            if let Some(entry) = row.try_entry_mut(cell)
+                && entry.pending_last_processed.is_some()
+            {
+                // Async flush is in progress, wait for it to complete
+                drop(row);
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+
+            return row;
+        }
+    }
+
     /// Get a shared reference to the index for a specific cell.
     /// Returns None if the cell doesn't exist.
     pub fn get_cell_index<L: Loader>(
@@ -449,26 +479,14 @@ impl LargeTable {
         relocation_updates: Option<RelocationUpdates>,
         relocation_cutoff: Option<u64>,
     ) -> Result<(), L::Error> {
-        let mutex_index = context.ks_config.mutex_for_cell(cell_id);
-        loop {
-            let mut row = self.row_by_mutex(context, mutex_index);
+        let mut row = self.lock_cell_waiting_for_flush(context, cell_id);
 
-            let entry = match row.try_entry_mut(cell_id) {
-                Some(entry) => entry,
-                None => return Ok(()), // Cell doesn't exist
-            };
+        let entry = match row.try_entry_mut(cell_id) {
+            Some(entry) => entry,
+            None => return Ok(()), // Cell doesn't exist
+        };
 
-            if entry.pending_last_processed.is_some() {
-                // If async flush is in progress we can't do sync_flush.
-                // Simply wait until async flush completes.
-                // This is called from the relocation thread so some amount of thread sleep is ok.
-                drop(row);
-                thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-
-            return entry.sync_flush(loader, true, relocation_updates, relocation_cutoff);
-        }
+        entry.sync_flush(loader, true, relocation_updates, relocation_cutoff)
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
@@ -796,6 +814,39 @@ impl LargeTable {
         }
     }
 
+    /// Drops all cells in the specified range for the given key space.
+    ///
+    /// This method removes all entries from cells between `from_cell` and `to_cell` (inclusive).
+    /// For Array-based storage (Uniform key type), entries are cleared but remain in the array.
+    /// For Tree-based storage (PrefixedUniform key type), entries are actually removed from the BTreeMap.
+    ///
+    /// The implementation waits for any pending async flush operations to complete before dropping cells.
+    pub(crate) fn drop_cells_in_range(
+        &self,
+        context: &KsContext,
+        from_cell: &CellId,
+        to_cell: &CellId,
+    ) {
+        let mut current_cell = Some(from_cell.clone());
+
+        while let Some(cell) = current_cell.as_ref() {
+            let mut row = self.lock_cell_waiting_for_flush(context, cell);
+            row.remove_entry(cell);
+
+            if cell == to_cell {
+                break;
+            }
+
+            current_cell = self.next_cell(context, cell, false);
+
+            if let Some(ref next) = current_cell
+                && next > to_cell
+            {
+                break;
+            }
+        }
+    }
+
     pub fn report_entries_state(&self) {
         let mut states: HashMap<_, i64> = HashMap::new();
         for ks_table in &self.table {
@@ -866,6 +917,10 @@ impl Row {
 
     pub fn try_entry_mut(&mut self, id: &CellId) -> Option<&mut LargeTableEntry> {
         self.entries.try_entry_mut(id, &self.context)
+    }
+
+    pub fn remove_entry(&mut self, id: &CellId) {
+        self.entries.remove_entry(id, &self.context)
     }
 }
 
@@ -1229,6 +1284,16 @@ impl LargeTableEntry {
         matches!(self.state, LargeTableEntryState::Empty)
     }
 
+    /// Clears this entry, setting its state to Empty and dropping all data.
+    pub(crate) fn clear(&mut self) {
+        self.state = LargeTableEntryState::Empty;
+        self.data = Default::default();
+        if let Some(ref mut bloom) = self.bloom_filter {
+            bloom.clear();
+        }
+        self.last_processed = LastProcessed::none();
+    }
+
     pub fn flush_kind(&mut self) -> Option<FlushKind> {
         match self.state {
             LargeTableEntryState::Empty => None,
@@ -1457,6 +1522,37 @@ impl Entries {
                     panic!("Invalid cell id for tree entry list: {cell_id:?}");
                 };
                 tree.get_mut(cell)
+            }
+        }
+    }
+
+    /// Removes an entry from the container.
+    /// For Array-based entries, this clears the entry but does not remove it.
+    /// For Tree-based entries, this actually removes the entry from the BTreeMap.
+    ///
+    /// Caller must ensure entry does not have pending async flush, otherwise this function panics.
+    pub fn remove_entry(&mut self, cell_id: &CellId, context: &KsContext) {
+        match self {
+            Entries::Array(_, _) => {
+                // For arrays, we can't remove entries, only clear them
+                if let Some(entry) = self.try_entry_mut(cell_id, context) {
+                    assert!(
+                        entry.pending_last_processed.is_none(),
+                        "remove_entry on cell while async flush is pending"
+                    );
+                    entry.clear();
+                }
+            }
+            Entries::Tree(tree) => {
+                let CellId::Bytes(cell) = cell_id else {
+                    panic!("Invalid cell id for tree entry list: {cell_id:?}");
+                };
+                if let Some(entry) = tree.remove(cell) {
+                    assert!(
+                        entry.pending_last_processed.is_none(),
+                        "remove_entry on cell while async flush is pending"
+                    );
+                }
             }
         }
     }

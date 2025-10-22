@@ -246,6 +246,10 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
                 stats.batch_start_count += 1;
                 stats.batch_start_space += entry_size;
             }
+            WalEntry::DropCells(_ks, _from, _to) => {
+                // DropCells entries are rare administrative operations
+                // We don't track specific statistics for them currently
+            }
         }
     }
 

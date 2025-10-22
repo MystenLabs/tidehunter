@@ -370,6 +370,12 @@ fn read_keys_from_wal(context: &InspectorContext) -> Result<Vec<(KeySpace, Bytes
             WalEntry::BatchStart(_size) => {
                 batch_count += 1;
             }
+            WalEntry::DropCells(_ks, _from, _to) => {
+                // DropCells is an administrative operation that drops ranges of cells
+                println!(
+                    "\nWARNING: DropCells WAL entry detected. This tool does not support DropCells entries, and verification results may be incorrect."
+                );
+            }
         }
     }
 

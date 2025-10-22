@@ -306,6 +306,57 @@ impl Db {
             .is_found())
     }
 
+    /// Drops all cells in the specified key range for the given key space.
+    ///
+    /// This method removes all data from cells that contain keys in the range
+    /// `[from_inclusive, to_inclusive]`.
+    ///
+    /// This method requires that cell range provided covers full range of cells,
+    /// it is not possible to drop part of the cell with this method.
+    ///
+    /// # Arguments
+    ///
+    /// * `ks` - The key space to operate on
+    /// * `from_inclusive` - The first key in the range (must be the first key in its cell)
+    /// * `to_inclusive` - The last key in the range (must be the last key in its cell)
+    ///
+    /// # Panics
+    ///
+    /// This method panics if:
+    /// - `from_inclusive` is not the first key in its cell
+    /// - `to_inclusive` is not the last key in its cell
+    /// - The key space does not support fixed-length keys
+    ///
+    /// # Behavior by Key Type
+    ///
+    /// - **Uniform key type** (Array-based storage): Entries are cleared but remain in the fixed-size array
+    /// - **PrefixedUniform key type** (Tree-based storage): Entries are completely removed from the large table
+    pub fn drop_cells_in_range(
+        &self,
+        ks: KeySpace,
+        from_inclusive: &[u8],
+        to_inclusive: &[u8],
+    ) -> DbResult<()> {
+        let ksd = self.key_shape.ks(ks);
+
+        // Convert keys from user format to index format
+        let from_reduced = ksd.reduce_key(from_inclusive);
+        let to_reduced = ksd.reduce_key(to_inclusive);
+
+        // Validate keys and get cell range
+        let (from_cell, to_cell) = ksd.map_key_range_to_cell_range(&from_reduced, &to_reduced);
+
+        let entry = WalEntry::DropCells(ks, from_cell.clone(), to_cell.clone());
+        let w = PreparedWalWrite::new(&entry);
+        self.wal_writer.write(&w)?;
+
+        let context = self.ks_context(ks);
+        self.large_table
+            .drop_cells_in_range(context, &from_cell, &to_cell);
+
+        Ok(())
+    }
+
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
         let WriteBatch {
             updates,
@@ -578,6 +629,7 @@ impl Db {
             WalEntry::Index(ks, _) => (WalEntryKind::Index, *ks),
             WalEntry::Remove(ks, _) => (WalEntryKind::Tombstone, *ks),
             WalEntry::BatchStart(_) => return,
+            WalEntry::DropCells(_, _, _) => return, // No metrics for DropCells
         };
         let context = self.large_table.ks_context(ks);
         context.inc_read(kind, read_type);
@@ -643,6 +695,11 @@ impl Db {
                     batch_start_position = Some(position.offset());
                     batch = VecDeque::with_capacity(size as usize);
                     batch_remaining = size;
+                }
+                WalEntry::DropCells(ks, from_cell, to_cell) => {
+                    metrics.replayed_wal_records.inc();
+                    let context = contexts.ks_context(ks);
+                    large_table.drop_cells_in_range(context, &from_cell, &to_cell);
                 }
             }
         }
@@ -974,6 +1031,7 @@ pub enum WalEntry {
     Index(KeySpace, Bytes),
     Remove(KeySpace, Bytes),
     BatchStart(u32),
+    DropCells(KeySpace, CellId, CellId),
 }
 
 #[derive(Debug)]
@@ -990,6 +1048,7 @@ impl WalEntry {
     const WAL_ENTRY_REMOVE: u8 = 3;
     const WAL_ENTRY_BATCH_START: u8 = 4;
     const WAL_ENTRY_RELOCATED_RECORD: u8 = 5;
+    const WAL_ENTRY_DROP_CELLS: u8 = 6;
     pub const INDEX_PREFIX_SIZE: usize = 2;
 
     pub fn from_bytes(bytes: Bytes) -> Self {
@@ -1013,6 +1072,12 @@ impl WalEntry {
                 WalEntry::Remove(ks, bytes.slice(2..))
             }
             WalEntry::WAL_ENTRY_BATCH_START => WalEntry::BatchStart(b.get_u32()),
+            WalEntry::WAL_ENTRY_DROP_CELLS => {
+                let ks = KeySpace(b.get_u8());
+                let from_cell = CellId::from_bytes(&mut b);
+                let to_cell = CellId::from_bytes(&mut b);
+                WalEntry::DropCells(ks, from_cell, to_cell)
+            }
             _ => panic!("Unknown wal entry type {entry_type}"),
         }
     }
@@ -1029,6 +1094,9 @@ impl IntoBytesFixed for WalEntry {
             WalEntry::Index(KeySpace(_), index) => 1 + 1 + index.len(),
             WalEntry::Remove(KeySpace(_), k) => 1 + 1 + k.len(),
             WalEntry::BatchStart(_) => 1 + 4,
+            WalEntry::DropCells(KeySpace(_), from_cell, to_cell) => {
+                1 + 1 + from_cell.len() + to_cell.len()
+            }
         }
     }
 
@@ -1060,6 +1128,12 @@ impl IntoBytesFixed for WalEntry {
             WalEntry::BatchStart(size) => {
                 buf.put_u8(Self::WAL_ENTRY_BATCH_START);
                 buf.put_u32(*size);
+            }
+            WalEntry::DropCells(ks, from_cell, to_cell) => {
+                buf.put_u8(Self::WAL_ENTRY_DROP_CELLS);
+                buf.put_u8(ks.0);
+                from_cell.write_into_bytes(buf);
+                to_cell.write_into_bytes(buf);
             }
         }
     }

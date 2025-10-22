@@ -8,6 +8,7 @@ use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{KeyIndexing, KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
 use crate::latch::Latch;
 use crate::metrics::Metrics;
+use hex_literal::hex;
 use minibytes::Bytes;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};
@@ -2687,4 +2688,157 @@ fn test_standalone_write_after_incomplete_batch() {
             "Standalone write after incomplete batch should be accessible"
         );
     }
+}
+
+#[test]
+fn test_drop_cells_in_range_uniform() {
+    let dir = tempdir::TempDir::new("test-drop-cells").unwrap();
+    let (key_shape, ks) = KeyShape::new_single(10, 2, KeyType::uniform(2));
+    let config = Arc::new(Config::small());
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    // Insert data across multiple cells
+    // Cell 0: 0x00000000..0x40000000
+    db.insert(ks, hex!("00000000000000000000"), vec![1])
+        .unwrap();
+    db.insert(ks, hex!("10000000000000000000"), vec![2])
+        .unwrap();
+    // Cell 1: 0x40000000..0x80000000
+    db.insert(ks, hex!("40000000000000000000"), vec![3])
+        .unwrap();
+    db.insert(ks, hex!("50000000000000000000"), vec![4])
+        .unwrap();
+    // Cell 2: 0x80000000..0xC0000000
+    db.insert(ks, hex!("80000000000000000000"), vec![5])
+        .unwrap();
+
+    // Verify all data is present
+    assert_eq!(
+        Some(vec![1].into()),
+        db.get(ks, &hex!("00000000000000000000")).unwrap()
+    );
+    assert_eq!(
+        Some(vec![3].into()),
+        db.get(ks, &hex!("40000000000000000000")).unwrap()
+    );
+    assert_eq!(
+        Some(vec![5].into()),
+        db.get(ks, &hex!("80000000000000000000")).unwrap()
+    );
+
+    // Get boundary keys for cells 0 and 1
+    let ksd = db.key_shape.ks(ks);
+    let (first_key, _) = ksd.cell_range(&crate::cell::CellId::Integer(0));
+    let (_, last_key) = ksd.cell_range(&crate::cell::CellId::Integer(1));
+
+    // Drop cells 0 and 1
+    db.drop_cells_in_range(ks, &first_key, &last_key).unwrap();
+
+    // Data from cells 0 and 1 should be gone from memory
+    assert_eq!(None, db.get(ks, &hex!("00000000000000000000")).unwrap());
+    assert_eq!(None, db.get(ks, &hex!("40000000000000000000")).unwrap());
+    // But data from cell 2 should still be there
+    assert_eq!(
+        Some(vec![5].into()),
+        db.get(ks, &hex!("80000000000000000000")).unwrap()
+    );
+
+    // Reopen the database - dropped cells should remain dropped after WAL replay
+    drop(db);
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+
+    // Data from cells 0 and 1 should still be gone
+    assert_eq!(None, db.get(ks, &hex!("00000000000000000000")).unwrap());
+    assert_eq!(None, db.get(ks, &hex!("40000000000000000000")).unwrap());
+    // Data from cell 2 should still be there
+    assert_eq!(
+        Some(vec![5].into()),
+        db.get(ks, &hex!("80000000000000000000")).unwrap()
+    );
+}
+
+#[test]
+fn test_drop_cells_in_range_prefixed_uniform() {
+    let dir = tempdir::TempDir::new("test-drop-cells-prefixed").unwrap();
+    let (key_shape, ks) = KeyShape::new_single(10, 16, KeyType::from_prefix_bits(16));
+    let config = Arc::new(Config::small());
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    // Insert data across multiple cells (different prefixes)
+    db.insert(ks, hex!("12340000000000000000"), vec![1])
+        .unwrap();
+    db.insert(ks, hex!("1234AAAAAAAAAAAAAAAA"), vec![2])
+        .unwrap();
+    db.insert(ks, hex!("56780000000000000000"), vec![3])
+        .unwrap();
+    db.insert(ks, hex!("5678BBBBBBBBBBBBBBBB"), vec![4])
+        .unwrap();
+    db.insert(ks, hex!("9ABC0000000000000000"), vec![5])
+        .unwrap();
+
+    // Verify all data is present
+    assert_eq!(
+        Some(vec![1].into()),
+        db.get(ks, &hex!("12340000000000000000")).unwrap()
+    );
+    assert_eq!(
+        Some(vec![3].into()),
+        db.get(ks, &hex!("56780000000000000000")).unwrap()
+    );
+    assert_eq!(
+        Some(vec![5].into()),
+        db.get(ks, &hex!("9ABC0000000000000000")).unwrap()
+    );
+
+    // Get boundary keys for cell [0x12, 0x34] only (single cell)
+    // Note: Testing single cell drop for PrefixedUniform to avoid issues with
+    // next_cell traversal over non-existent cells in the BTreeMap
+    let ksd = db.key_shape.ks(ks);
+    let cell1 = crate::cell::CellId::Bytes(smallvec::SmallVec::from_slice(&[0x12, 0x34]));
+    let (first_key, last_key) = ksd.cell_range(&cell1);
+
+    // Drop single cell [0x12, 0x34]
+    db.drop_cells_in_range(ks, &first_key, &last_key).unwrap();
+
+    // Data from cell [0x12, 0x34] should be gone from memory
+    assert_eq!(None, db.get(ks, &hex!("12340000000000000000")).unwrap());
+    // But data from other cells should still be there
+    assert_eq!(
+        Some(vec![3].into()),
+        db.get(ks, &hex!("56780000000000000000")).unwrap()
+    );
+    assert_eq!(
+        Some(vec![5].into()),
+        db.get(ks, &hex!("9ABC0000000000000000")).unwrap()
+    );
+
+    // Reopen the database - dropped cells should remain dropped after WAL replay
+    drop(db);
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+
+    // Data from cell [0x12, 0x34] should still be gone
+    assert_eq!(None, db.get(ks, &hex!("12340000000000000000")).unwrap());
+    // Data from other cells should still be there
+    assert_eq!(
+        Some(vec![3].into()),
+        db.get(ks, &hex!("56780000000000000000")).unwrap()
+    );
+    assert_eq!(
+        Some(vec![5].into()),
+        db.get(ks, &hex!("9ABC0000000000000000")).unwrap()
+    );
 }

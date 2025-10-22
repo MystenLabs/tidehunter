@@ -135,7 +135,7 @@ impl UniformLookupIndex {
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
         let element_size = ks.require_index_element_size();
-        let key_size = ks.require_index_key_size();
+        let key_size = ks.require_index_key_size("uniform lookup index");
         let file_length = reader.len();
 
         // Read a window from the beginning or end of the file
@@ -203,7 +203,7 @@ impl IndexFormat for UniformLookupIndex {
         // todo simplify this function
         // compute cell and prefix
         let element_size = ks.require_index_element_size();
-        let key_size = ks.require_index_key_size();
+        let key_size = ks.require_index_key_size("uniform lookup index");
         assert_eq!(key.len(), key_size);
         let cell = ks.cell_id(key);
         let cell_prefix_range = ks.index_prefix_range(&cell);
@@ -276,7 +276,7 @@ impl IndexFormat for UniformLookupIndex {
         metrics: &Metrics,
     ) -> Option<(Bytes, WalPosition)> {
         let element_size = ks.require_index_element_size();
-        let key_size = ks.require_index_key_size();
+        let key_size = ks.require_index_key_size("uniform lookup index");
         let file_length = reader.len();
 
         // If there's no previous key, just start at the beginning/end

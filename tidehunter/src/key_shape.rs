@@ -299,12 +299,13 @@ impl KeySpaceDesc {
     }
 
     /// Returns index key size if index key size is fixed.
-    /// Panics for variable length keys.
-    pub(crate) fn require_index_key_size(&self) -> usize {
+    /// Panics for variable length keys with a message including the provided reason.
+    pub(crate) fn require_index_key_size(&self, reason: &'static str) -> usize {
         let Some(key_size) = self.index_key_size() else {
             panic!(
-                "Ks {} uses uniform index that requires key length known ahead of time",
-                self.name()
+                "Ks {} does not support variable length keys for {}",
+                self.name(),
+                reason
             )
         };
         key_size
@@ -439,6 +440,80 @@ impl KeySpaceDesc {
     #[doc(hidden)] // Used by tools/wal_inspector for analyzing keyspace indices
     pub fn index_format(&self) -> &IndexFormatType {
         &self.config.index_format
+    }
+
+    /// Returns the first and last keys in a cell.
+    ///
+    /// This method is only supported for key spaces with fixed-length keys.
+    /// Panics if called on a key space with variable-length keys.
+    ///
+    /// Returns a tuple of (first_key, last_key) where both keys have the key space's configured length.
+    pub(crate) fn cell_range(&self, cell: &CellId) -> (Vec<u8>, Vec<u8>) {
+        let key_len = self.require_index_key_size("cell_range");
+
+        match self.key_type {
+            KeyType::Uniform(_) => {
+                let range = self.index_prefix_range(cell);
+                let first_u32 = range.start as u32;
+                let last_u32 = (range.end - 1) as u32;
+
+                let mut first_key = vec![0u8; key_len];
+                let mut last_key = vec![0xFFu8; key_len];
+
+                first_key[0..CELL_PREFIX_LENGTH].copy_from_slice(&first_u32.to_be_bytes());
+                last_key[0..CELL_PREFIX_LENGTH].copy_from_slice(&last_u32.to_be_bytes());
+
+                (first_key, last_key)
+            }
+            KeyType::PrefixedUniform(config) => {
+                let prefix = cell.assume_bytes_id();
+                let prefix_len = config.prefix_len_bytes;
+
+                let mut first_key = vec![0u8; key_len];
+                let mut last_key = vec![0xFFu8; key_len];
+
+                first_key[0..prefix_len].copy_from_slice(prefix);
+                last_key[0..prefix_len].copy_from_slice(prefix);
+
+                (first_key, last_key)
+            }
+        }
+    }
+
+    /// Maps a range of keys to a range of cell IDs.
+    ///
+    /// Verifies that `from_inclusive` is the first key in its cell and
+    /// `to_inclusive` is the last key in its cell, panicking otherwise.
+    ///
+    /// This method is only supported for key spaces with fixed-length keys.
+    /// Panics if called on a key space with variable-length keys.
+    ///
+    /// Returns a tuple of (from_cell_id, to_cell_id) representing the inclusive range.
+    pub(crate) fn map_key_range_to_cell_range(
+        &self,
+        from_inclusive: &[u8],
+        to_inclusive: &[u8],
+    ) -> (CellId, CellId) {
+        let from_cell = self.cell_id(from_inclusive);
+        let to_cell = self.cell_id(to_inclusive);
+
+        // Verify from_inclusive is the first key in from_cell
+        let (first_key, _) = self.cell_range(&from_cell);
+        assert_eq!(
+            from_inclusive,
+            first_key.as_slice(),
+            "from_inclusive is not the first key in its cell"
+        );
+
+        // Verify to_inclusive is the last key in to_cell
+        let (_, last_key) = self.cell_range(&to_cell);
+        assert_eq!(
+            to_inclusive,
+            last_key.as_slice(),
+            "to_inclusive is not the last key in its cell"
+        );
+
+        (from_cell, to_cell)
     }
 }
 
@@ -1168,5 +1243,165 @@ mod tests {
     fn test_from_prefix_bits_too_large() {
         let max_bits = (MAX_KEY_LEN as u64) * 8;
         KeyType::from_prefix_bits(max_bits + 1);
+    }
+
+    #[test]
+    fn test_cell_range_uniform() {
+        // Create a key shape with 4 cells (2 mutexes, 2 cells per mutex)
+        let (key_shape, ks) = KeyShape::new_single(10, 2, KeyType::uniform(2));
+        let ksd = key_shape.ks(ks);
+
+        // Test cell 0: range 0x00000000..0x40000000
+        let (first, last) = ksd.cell_range(&CellId::Integer(0));
+        assert_eq!(first.as_slice(), &hex!("00000000 00000000 0000"));
+        assert_eq!(last.as_slice(), &hex!("3fffffff ffffffff ffff"));
+
+        // Test cell 1: range 0x40000000..0x80000000
+        let (first, last) = ksd.cell_range(&CellId::Integer(1));
+        assert_eq!(first.as_slice(), &hex!("40000000 00000000 0000"));
+        assert_eq!(last.as_slice(), &hex!("7fffffff ffffffff ffff"));
+
+        // Test cell 3 (last cell): range 0xC0000000..0x100000000
+        let (first, last) = ksd.cell_range(&CellId::Integer(3));
+        assert_eq!(first.as_slice(), &hex!("c0000000 00000000 0000"));
+        assert_eq!(last.as_slice(), &hex!("ffffffff ffffffff ffff"));
+    }
+
+    #[test]
+    fn test_cell_range_prefixed_uniform() {
+        // Create a key shape with 2-byte prefix
+        let (key_shape, ks) = KeyShape::new_single(10, 16, KeyType::from_prefix_bits(16));
+        let ksd = key_shape.ks(ks);
+
+        // Test cell [0x12, 0x34]
+        let cell = c(&[0x12, 0x34]);
+        let (first, last) = ksd.cell_range(&cell);
+        assert_eq!(first.as_slice(), &hex!("1234 00000000 00000000"));
+        assert_eq!(last.as_slice(), &hex!("1234 ffffffff ffffffff"));
+
+        // Test cell [0xff, 0xff] (last cell)
+        let cell = c(&[0xff, 0xff]);
+        let (first, last) = ksd.cell_range(&cell);
+        assert_eq!(first.as_slice(), &hex!("ffff 00000000 00000000"));
+        assert_eq!(last.as_slice(), &hex!("ffff ffffffff ffffffff"));
+    }
+
+    #[test]
+    fn test_map_key_range_to_cell_range_uniform() {
+        // Create a key shape with 4 cells (2 mutexes, 2 cells per mutex)
+        let (key_shape, ks) = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let ksd = key_shape.ks(ks);
+
+        // Each cell covers (u32::MAX + 1) / 4 = 0x40000000 u32 values
+        // Cell 0: 0x00000000..0x40000000
+        // Cell 1: 0x40000000..0x80000000
+        // Cell 2: 0x80000000..0xC0000000
+        // Cell 3: 0xC0000000..0x100000000
+
+        // Test valid range from cell 0 to cell 1
+        let mut from_key = vec![0u8; 32];
+        from_key[0..4].copy_from_slice(&0x00000000u32.to_be_bytes());
+
+        let mut to_key = vec![0xFFu8; 32];
+        to_key[0..4].copy_from_slice(&0x7FFFFFFFu32.to_be_bytes());
+
+        let (from_cell, to_cell) = ksd.map_key_range_to_cell_range(&from_key, &to_key);
+        assert_eq!(from_cell, CellId::Integer(0));
+        assert_eq!(to_cell, CellId::Integer(1));
+
+        // Test single cell range
+        let mut from_key2 = vec![0u8; 32];
+        from_key2[0..4].copy_from_slice(&0x40000000u32.to_be_bytes());
+
+        let mut to_key2 = vec![0xFFu8; 32];
+        to_key2[0..4].copy_from_slice(&0x7FFFFFFFu32.to_be_bytes());
+
+        let (from_cell2, to_cell2) = ksd.map_key_range_to_cell_range(&from_key2, &to_key2);
+        assert_eq!(from_cell2, CellId::Integer(1));
+        assert_eq!(to_cell2, CellId::Integer(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "from_inclusive is not the first key in its cell")]
+    fn test_map_key_range_invalid_from_key_uniform() {
+        let (key_shape, ks) = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let ksd = key_shape.ks(ks);
+
+        // First key with non-zero byte at position 5
+        let mut from_key = vec![0u8; 32];
+        from_key[5] = 1;
+
+        let to_key = vec![0xFFu8; 32];
+        ksd.map_key_range_to_cell_range(&from_key, &to_key);
+    }
+
+    #[test]
+    #[should_panic(expected = "to_inclusive is not the last key in its cell")]
+    fn test_map_key_range_invalid_to_key_uniform() {
+        let (key_shape, ks) = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let ksd = key_shape.ks(ks);
+
+        let from_key = vec![0u8; 32];
+
+        // Last key with non-FF byte at position 5
+        let mut to_key = vec![0xFFu8; 32];
+        to_key[5] = 0xFE;
+
+        ksd.map_key_range_to_cell_range(&from_key, &to_key);
+    }
+
+    #[test]
+    fn test_map_key_range_to_cell_range_prefixed_uniform() {
+        // Create a key shape with 2-byte prefix
+        let (key_shape, ks) = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let ksd = key_shape.ks(ks);
+
+        // Test range from one cell to another
+        let mut from_key = vec![0u8; 32];
+        from_key[0] = 0x12;
+        from_key[1] = 0x34;
+        // Rest are zeros
+
+        let mut to_key = vec![0xFFu8; 32];
+        to_key[0] = 0x56;
+        to_key[1] = 0x78;
+        // Rest are 0xFF
+
+        let (from_cell, to_cell) = ksd.map_key_range_to_cell_range(&from_key, &to_key);
+        assert_eq!(from_cell, c(&[0x12, 0x34]));
+        assert_eq!(to_cell, c(&[0x56, 0x78]));
+    }
+
+    #[test]
+    #[should_panic(expected = "from_inclusive is not the first key in its cell")]
+    fn test_map_key_range_invalid_from_key_prefixed() {
+        let (key_shape, ks) = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let ksd = key_shape.ks(ks);
+
+        // First key with non-zero byte after prefix
+        let mut from_key = vec![0u8; 32];
+        from_key[0] = 0x12;
+        from_key[1] = 0x34;
+        from_key[2] = 1; // Should be 0
+
+        let to_key = vec![0xFFu8; 32];
+        ksd.map_key_range_to_cell_range(&from_key, &to_key);
+    }
+
+    #[test]
+    #[should_panic(expected = "to_inclusive is not the last key in its cell")]
+    fn test_map_key_range_invalid_to_key_prefixed() {
+        let (key_shape, ks) = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let ksd = key_shape.ks(ks);
+
+        let from_key = vec![0u8; 32];
+
+        // Last key with non-FF byte after prefix
+        let mut to_key = vec![0xFFu8; 32];
+        to_key[0] = 0x56;
+        to_key[1] = 0x78;
+        to_key[2] = 0xFE; // Should be 0xFF
+
+        ksd.map_key_range_to_cell_range(&from_key, &to_key);
     }
 }
