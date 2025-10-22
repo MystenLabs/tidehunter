@@ -819,6 +819,7 @@ fn test_index_based_relocation_with_target_position() {
         let value = format!("value_{}", i).into_bytes();
         db.insert(ks, key, value).unwrap();
     }
+    db.wal_writer.wal_tracker_barrier();
 
     // Force unload to ensure entries are in index (index-based relocation needs this)
     db.rebuild_control_region().unwrap();
