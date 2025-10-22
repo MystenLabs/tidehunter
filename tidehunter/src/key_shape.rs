@@ -615,6 +615,9 @@ impl KeyType {
         );
 
         let prefix_len_bytes = prefix_bits.div_ceil(8) as usize;
+        // Added this allow here to support rust 1.85
+        // TODO: remove this allow once Sui upgrades to rust 1.90
+        #[allow(unknown_lints, clippy::manual_is_multiple_of)]
         let cluster_bits = if prefix_bits % 8 == 0 {
             0
         } else {
