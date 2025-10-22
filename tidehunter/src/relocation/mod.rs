@@ -21,15 +21,63 @@ mod watermark;
 mod relocation_tests;
 pub mod updates;
 
+/// Computes a target WAL position based on a ratio of the total WAL range.
+///
+/// # Arguments
+/// * `db` - The database instance
+/// * `ratio` - A value between 0.0 and 1.0 representing the fraction of WAL to process.
+///             0.0 = start of WAL, 0.5 = middle, 1.0 = end (last_processed)
+///
+/// # Returns
+/// * `Some(position)` - The computed target position in bytes
+/// * `None` - If there is no WAL data to process (last_processed <= min_position)
+///
+/// # Examples
+/// ```ignore
+/// // Relocate the first 30% of the WAL
+/// let target = compute_target_position_from_ratio(&db, 0.3);
+/// db.start_relocation_with_strategy(RelocationStrategy::IndexBased(target));
+/// ```
+pub fn compute_target_position_from_ratio(db: &Arc<Db>, ratio: f64) -> Option<u64> {
+    // Clamp ratio to valid range [0.0, 1.0]
+    let ratio = ratio.clamp(0.0, 1.0);
+
+    // Get the WAL range
+    let min_position = db.wal.min_wal_position();
+    let last_processed = db.wal_writer.last_processed();
+
+    // Handle edge cases
+    if last_processed <= min_position {
+        return None; // WAL is empty or in invalid state
+    }
+
+    // Compute the total range
+    let total_range = last_processed - min_position;
+
+    // Calculate target position
+    let offset = (total_range as f64 * ratio) as u64;
+    let target = min_position + offset;
+
+    // Ensure we don't exceed last_processed
+    Some(target.min(last_processed))
+}
+
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelocationStrategy {
     /// WAL-based sequential relocation
-    #[default]
     WalBased,
     /// Index-based relocation that processes entire cells atomically
-    IndexBased,
+    /// with an optional target position limit
+    IndexBased(Option<u64>),
+}
+
+#[allow(clippy::derivable_impls)] // Can't derive Default with tuple variant
+impl Default for RelocationStrategy {
+    fn default() -> Self {
+        RelocationStrategy::WalBased
+    }
 }
 
 pub enum RelocationCommand {
@@ -155,21 +203,36 @@ impl RelocationDriver {
         };
         match strategy {
             RelocationStrategy::WalBased => self.wal_based_relocation(db),
-            RelocationStrategy::IndexBased => self.index_based_relocation(db),
+            RelocationStrategy::IndexBased(target_position) => {
+                self.index_based_relocation(db, target_position)
+            }
         }
     }
 
-    fn index_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
+    fn index_based_relocation(
+        &mut self,
+        db: Arc<Db>,
+        target_position: Option<u64>,
+    ) -> DbResult<()> {
         let mut watermarks = RelocationWatermarks::read_or_create(&self.path)?;
         // Capture the upper WAL limit to avoid race conditions
         // Only process entries written before this point. This is the last position that was written
         // and made its way into the large table
         let upper_limit = db.wal_writer.last_processed().as_u64();
 
-        // Get starting cell reference from saved progress
-        let mut current_cell_ref = match &watermarks.data.next_to_process {
-            Some(cr) => Some(cr.clone()), // Resume from saved position
-            None => CellReference::first(&db, KeySpace::first()), // Starting from beginning
+        // Compute effective limit based on target_position
+        let effective_limit =
+            target_position.map_or(upper_limit, |t| std::cmp::min(t, upper_limit));
+
+        // Restart from beginning if target_position changed or if previous run completed
+        let should_restart = watermarks.data.next_to_process.is_none()
+            || watermarks.data.target_position != target_position;
+
+        // Get starting cell reference from saved progress or restart
+        let mut current_cell_ref = if should_restart {
+            CellReference::first(&db, KeySpace::first())
+        } else {
+            watermarks.data.next_to_process.clone()
         };
 
         let mut cells_processed = 0;
@@ -184,7 +247,12 @@ impl RelocationDriver {
                 }
                 // Save progress periodically
                 if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
-                    watermarks.set(Some(cell_ref.clone()), highest_wal_position, upper_limit);
+                    watermarks.set(
+                        Some(cell_ref.clone()),
+                        highest_wal_position,
+                        upper_limit,
+                        target_position,
+                    );
                     self.save_progress(&db, &watermarks, true)?;
                     // Save watermark only
                 }
@@ -198,7 +266,7 @@ impl RelocationDriver {
             }
 
             // Process each cell
-            let context = self.process_single_cell(&cell_ref, &db, upper_limit)?;
+            let context = self.process_single_cell(&cell_ref, &db, effective_limit)?;
 
             // Track the highest WAL position seen
             if context.highest_wal_position.offset() > highest_wal_position {
@@ -229,7 +297,12 @@ impl RelocationDriver {
         }
 
         // Save final progress with upper_limit and highest WAL position
-        watermarks.set(current_cell_ref.clone(), highest_wal_position, upper_limit);
+        watermarks.set(
+            current_cell_ref.clone(),
+            highest_wal_position,
+            upper_limit,
+            target_position,
+        );
         self.save_progress(&db, &watermarks, false)?;
         Ok(())
     }
@@ -346,7 +419,7 @@ impl RelocationDriver {
         &self,
         cell_ref: &CellReference,
         db: &Arc<Db>,
-        upper_limit: u64,
+        effective_limit: u64,
     ) -> DbResult<CellProcessingContext> {
         let batch = RelocatedWriteBatch::new(
             cell_ref.keyspace,
@@ -385,7 +458,7 @@ impl RelocationDriver {
         // - Fall back to current value-based approach when needed
         let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
         for (key, position) in index.iter() {
-            if position.offset() >= upper_limit {
+            if position.offset() >= effective_limit {
                 continue;
             }
 

@@ -19,7 +19,7 @@ fn force_unload_config(config: &Config) -> Arc<Config> {
 
 fn index_based_config() -> Arc<Config> {
     let mut config = Config::small();
-    config.relocation_strategy = RelocationStrategy::IndexBased;
+    config.relocation_strategy = RelocationStrategy::IndexBased(None);
     force_unload_config(&config)
 }
 
@@ -40,7 +40,7 @@ fn relocation_cells_processed(metrics: &Metrics, keyspace_name: &str) -> u64 {
 }
 
 fn start_index_based_relocation(db: &Db) {
-    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased)
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(None))
 }
 
 fn list_wal_files(path: &Path) -> Vec<String> {
@@ -194,7 +194,7 @@ fn test_index_based_relocation_filter() {
     let dir = tempdir::TempDir::new("test_index_based_relocation_filter").unwrap();
     let mut config = Config::small();
     config.wal_file_size = 2 * config.frag_size;
-    config.relocation_strategy = RelocationStrategy::IndexBased;
+    config.relocation_strategy = RelocationStrategy::IndexBased(None);
     let config = force_unload_config(&config);
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
@@ -791,4 +791,127 @@ fn test_watermark_highest_wal_position_tracking() {
         highest_wal_position,
         initial_wal_position
     );
+}
+
+#[test]
+fn test_index_based_relocation_with_target_position() {
+    let dir = tempdir::TempDir::new("test_target_position").unwrap();
+    let config = index_based_config();
+    let mut ksb = KeyShapeBuilder::new();
+    let ks = ksb.add_key_space("default", 8, 1, KeyType::uniform(1));
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+
+    // Insert 1000 entries sequentially
+    for i in 0..500u64 {
+        let key = i.to_be_bytes().to_vec();
+        let value = format!("value_{}", i).into_bytes();
+        db.insert(ks, key, value).unwrap();
+    }
+
+    // Capture WAL position at entry 500
+    let mid_position = db.wal_writer.last_processed();
+
+    // Continue inserting entries 501-1000
+    for i in 500..1000u64 {
+        let key = i.to_be_bytes().to_vec();
+        let value = format!("value_{}", i).into_bytes();
+        db.insert(ks, key, value).unwrap();
+    }
+
+    // Force unload to ensure entries are in index (index-based relocation needs this)
+    db.rebuild_control_region().unwrap();
+
+    // Run relocation with target_position
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(Some(mid_position)));
+
+    // Get metrics
+    let kept = metrics
+        .relocation_kept
+        .with_label_values(&["default"])
+        .get();
+
+    // Verify approximately 500 entries were relocated (allow wider margin for WAL position variation)
+    assert!(
+        kept >= 350 && kept <= 650,
+        "Expected ~500 entries relocated, got {}",
+        kept
+    );
+
+    // Verify entries below and above target
+    let key_250 = 250u64.to_be_bytes().to_vec();
+    let key_750 = 750u64.to_be_bytes().to_vec();
+
+    assert_eq!(
+        db.get(ks, &key_250).unwrap(),
+        Some(format!("value_{}", 250).into_bytes().into())
+    );
+    assert_eq!(
+        db.get(ks, &key_750).unwrap(),
+        Some(format!("value_{}", 750).into_bytes().into())
+    );
+
+    // Check watermark file contains target_position
+    let watermark = RelocationWatermarks::read_or_create(dir.path())
+        .unwrap()
+        .data;
+    assert_eq!(watermark.target_position, Some(mid_position));
+}
+
+#[test]
+fn test_compute_target_position_from_ratio() {
+    use crate::relocation::compute_target_position_from_ratio;
+
+    let dir = tempdir::TempDir::new("test_compute_ratio").unwrap();
+    let config = Arc::new(Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    let ks = ksb.add_key_space("default", 8, 1, KeyType::uniform(1));
+    let key_shape = ksb.build();
+    let db = Arc::new(Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap());
+
+    // Initially should return None (empty WAL)
+    assert_eq!(compute_target_position_from_ratio(&db, 0.5), None);
+
+    // Add some data
+    for i in 0..1000u64 {
+        let key = i.to_be_bytes().to_vec();
+        let value = format!("value_{}", i).into_bytes();
+        db.insert(ks, key, value).unwrap();
+    }
+
+    let min_pos = db.wal.min_wal_position();
+    let last_pos = db.wal_writer.last_processed();
+    let range = last_pos - min_pos;
+
+    // Test various ratios
+    let target_0 = compute_target_position_from_ratio(&db, 0.0).unwrap();
+    assert_eq!(target_0, min_pos);
+
+    let target_50 = compute_target_position_from_ratio(&db, 0.5).unwrap();
+    assert!(target_50 > min_pos && target_50 < last_pos);
+    // Allow some margin for byte alignment
+    assert!(
+        (target_50 - min_pos) >= range / 2 - 1000,
+        "target_50 {} should be close to middle of range {}",
+        target_50 - min_pos,
+        range / 2
+    );
+    assert!(
+        (target_50 - min_pos) <= range / 2 + 1000,
+        "target_50 {} should be close to middle of range {}",
+        target_50 - min_pos,
+        range / 2
+    );
+
+    let target_100 = compute_target_position_from_ratio(&db, 1.0).unwrap();
+    assert_eq!(target_100, last_pos);
+
+    // Test clamping - negative ratio should give min_pos
+    let target_negative = compute_target_position_from_ratio(&db, -0.5).unwrap();
+    assert_eq!(target_negative, min_pos);
+
+    // Test clamping - ratio > 1.0 should give last_pos
+    let target_over_one = compute_target_position_from_ratio(&db, 1.5).unwrap();
+    assert_eq!(target_over_one, last_pos);
 }

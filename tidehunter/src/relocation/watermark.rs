@@ -11,6 +11,7 @@ pub(crate) struct WatermarkData {
     pub next_to_process: Option<CellReference>,
     pub highest_wal_position: u64,
     pub upper_limit: u64,
+    pub target_position: Option<u64>,
 }
 
 pub struct RelocationWatermarks {
@@ -84,15 +85,21 @@ impl RelocationWatermarks {
         next_to_process: Option<CellReference>,
         highest_wal_position: u64,
         upper_limit: u64,
+        target_position: Option<u64>,
     ) {
         self.data = WatermarkData {
             next_to_process,
             highest_wal_position,
             upper_limit,
+            target_position,
         };
     }
 
     pub fn gc_watermark(&self) -> u64 {
-        std::cmp::min(self.data.highest_wal_position, self.data.upper_limit)
+        let mut watermark = std::cmp::min(self.data.highest_wal_position, self.data.upper_limit);
+        if let Some(target) = self.data.target_position {
+            watermark = std::cmp::min(watermark, target);
+        }
+        watermark
     }
 }

@@ -34,7 +34,7 @@ mod latch;
 pub use minibytes;
 
 pub use index::index_table::IndexWalPosition;
-pub use relocation::{Decision, RelocationStrategy};
+pub use relocation::{compute_target_position_from_ratio, Decision, RelocationStrategy};
 
 // WAL re-exports
 #[doc(hidden)] // Used by tools and benchmarks
