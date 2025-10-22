@@ -604,6 +604,31 @@ impl KeyType {
         ))
     }
 
+    /// Creates a PrefixedUniform KeyType from the number of prefix bits.
+    pub fn from_prefix_bits(prefix_bits: u64) -> Self {
+        assert!(prefix_bits > 0, "prefix_bits must be greater than 0");
+
+        let max_bits = (MAX_KEY_LEN as u64) * 8;
+        assert!(
+            prefix_bits <= max_bits,
+            "prefix_bits ({}) exceeds maximum key length in bits ({})",
+            prefix_bits,
+            max_bits
+        );
+
+        let prefix_len_bytes = prefix_bits.div_ceil(8) as usize;
+        let cluster_bits = if prefix_bits.is_multiple_of(8) {
+            0
+        } else {
+            (8 - (prefix_bits % 8)) as usize
+        };
+
+        Self::PrefixedUniform(PrefixedUniformKeyConfig::new(
+            prefix_len_bytes,
+            cluster_bits,
+        ))
+    }
+
     fn verify_key_size(&self, key_size: Option<usize>) {
         match (self, key_size) {
             (KeyType::Uniform(_), _) => {}
@@ -998,5 +1023,148 @@ mod tests {
 
     fn c(s: &[u8]) -> CellId {
         CellId::Bytes(CellIdBytesContainer::from(s))
+    }
+
+    #[test]
+    fn test_from_prefix_bits_8_bits() {
+        // Test 8-bit prefix: first byte determines the cell
+        let key_type = KeyType::from_prefix_bits(8);
+        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let ksd = key_shape.ks(ks);
+
+        // Keys with same first byte map to same cell
+        assert_eq!(ksd.cell_id(&[0xAA, 0x00, 0x00, 0x00]), c(&[0xAA]));
+        assert_eq!(ksd.cell_id(&[0xAA, 0xFF, 0x11, 0x22]), c(&[0xAA]));
+
+        // Keys with different first byte map to different cells
+        assert_eq!(ksd.cell_id(&[0xBB, 0x00, 0x00, 0x00]), c(&[0xBB]));
+    }
+
+    #[test]
+    fn test_from_prefix_bits_12_bits() {
+        // Test 12-bit prefix: first byte + top 4 bits of second byte
+        let key_type = KeyType::from_prefix_bits(12);
+        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let ksd = key_shape.ks(ks);
+
+        // Keys with same top 12 bits map to same cell
+        assert_eq!(
+            ksd.cell_id(&[0xAB, 0b11000000, 0x00, 0x00]),
+            c(&[0xAB, 0b11000000])
+        );
+        assert_eq!(
+            ksd.cell_id(&[0xAB, 0b11000101, 0xFF, 0x11]),
+            c(&[0xAB, 0b11000000])
+        );
+
+        // Keys with different top 12 bits map to different cells
+        assert_eq!(
+            ksd.cell_id(&[0xAB, 0b11010000, 0x00, 0x00]),
+            c(&[0xAB, 0b11010000])
+        );
+    }
+
+    #[test]
+    fn test_from_prefix_bits_1_bit() {
+        // Test 1-bit prefix: only the MSB of first byte matters
+        let key_type = KeyType::from_prefix_bits(1);
+        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let ksd = key_shape.ks(ks);
+
+        // Keys with MSB=0 map to same cell
+        assert_eq!(
+            ksd.cell_id(&[0b00000000, 0xFF, 0xFF, 0xFF]),
+            c(&[0b00000000])
+        );
+        assert_eq!(
+            ksd.cell_id(&[0b01111111, 0x00, 0x00, 0x00]),
+            c(&[0b00000000])
+        );
+
+        // Keys with MSB=1 map to same cell (different from MSB=0)
+        assert_eq!(
+            ksd.cell_id(&[0b10000000, 0x00, 0x00, 0x00]),
+            c(&[0b10000000])
+        );
+        assert_eq!(
+            ksd.cell_id(&[0b11111111, 0xFF, 0xFF, 0xFF]),
+            c(&[0b10000000])
+        );
+    }
+
+    #[test]
+    fn test_from_prefix_bits_9_bits() {
+        // Test 9-bit prefix: first byte + top 1 bit of second byte
+        let key_type = KeyType::from_prefix_bits(9);
+        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let ksd = key_shape.ks(ks);
+
+        // Keys with same top 9 bits map to same cell
+        assert_eq!(
+            ksd.cell_id(&[0xAA, 0b10000000, 0x00, 0x00]),
+            c(&[0xAA, 0b10000000])
+        );
+        assert_eq!(
+            ksd.cell_id(&[0xAA, 0b11111111, 0x11, 0x22]),
+            c(&[0xAA, 0b10000000])
+        );
+
+        // Keys with different top 9 bits map to different cells
+        assert_eq!(
+            ksd.cell_id(&[0xAA, 0b01111111, 0x00, 0x00]),
+            c(&[0xAA, 0b00000000])
+        );
+    }
+
+    #[test]
+    fn test_from_prefix_bits_15_bits() {
+        // Test 15-bit prefix: first byte + top 7 bits of second byte
+        let key_type = KeyType::from_prefix_bits(15);
+        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let ksd = key_shape.ks(ks);
+
+        // Keys with same top 15 bits map to same cell
+        assert_eq!(
+            ksd.cell_id(&[0xAB, 0b11111110, 0x00, 0x00]),
+            c(&[0xAB, 0b11111110])
+        );
+        assert_eq!(
+            ksd.cell_id(&[0xAB, 0b11111111, 0x11, 0x22]),
+            c(&[0xAB, 0b11111110])
+        );
+
+        // Keys with different top 15 bits map to different cells
+        assert_eq!(
+            ksd.cell_id(&[0xAB, 0b11111100, 0x00, 0x00]),
+            c(&[0xAB, 0b11111100])
+        );
+    }
+
+    #[test]
+    fn test_from_prefix_bits_16_bits() {
+        // Test 16-bit prefix: first two bytes determine the cell
+        let key_type = KeyType::from_prefix_bits(16);
+        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let ksd = key_shape.ks(ks);
+
+        // Keys with same first two bytes map to same cell
+        assert_eq!(ksd.cell_id(&[0x12, 0x34, 0x00, 0x00]), c(&[0x12, 0x34]));
+        assert_eq!(ksd.cell_id(&[0x12, 0x34, 0xFF, 0xFF]), c(&[0x12, 0x34]));
+
+        // Keys with different first two bytes map to different cells
+        assert_eq!(ksd.cell_id(&[0x12, 0x35, 0x00, 0x00]), c(&[0x12, 0x35]));
+    }
+
+    #[test]
+    #[should_panic(expected = "prefix_bits must be greater than 0")]
+    fn test_from_prefix_bits_zero() {
+        KeyType::from_prefix_bits(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds maximum key length")]
+    fn test_from_prefix_bits_too_large() {
+        let max_bits = (MAX_KEY_LEN as u64) * 8;
+        KeyType::from_prefix_bits(max_bits + 1);
     }
 }
