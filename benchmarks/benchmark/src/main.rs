@@ -159,7 +159,7 @@ pub fn main() {
                         match db_clone.start_relocation_with_strategy(strategy) {
                             Ok(_) => {
                                 // Take a 60 second break between relocations to reduce contention
-                                thread::sleep(Duration::from_secs(60));
+                                thread::sleep(Duration::from_secs(30));
                             }
                             Err(e) => {
                                 eprintln!("Relocation error: {e}");
