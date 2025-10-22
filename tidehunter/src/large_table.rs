@@ -1077,10 +1077,7 @@ impl LargeTableEntry {
         // Use override if provided, otherwise use config value
         let threshold =
             snapshot_unload_threshold_override.unwrap_or(config.snapshot_unload_threshold);
-        // todo this needs to be fixed for ks with self.context.ks_config.unloading_disabled()
-        if (forced_relocation || distance >= threshold)
-            && !self.context.ks_config.unloading_disabled()
-        {
+        if forced_relocation || distance >= threshold {
             self.context
                 .metrics
                 .snapshot_force_unload
@@ -1094,7 +1091,6 @@ impl LargeTableEntry {
     /// Performs a synchronous flush regardless of the config setting.
     /// If forced_relocation is set, the flush happens even for clean state
     /// Caller is responsible for checking to things:
-    /// * ks_config.unloading_disabled is false
     /// * pending_last_processed is None
     fn sync_flush<L: Loader>(
         &mut self,
@@ -1130,6 +1126,7 @@ impl LargeTableEntry {
             return Ok(());
         };
         self.last_processed = last_processed;
+        // todo correctly handle self.context.ks_config.unloading_disabled()
         self.clear_after_flush(position, last_processed);
         Ok(())
     }
