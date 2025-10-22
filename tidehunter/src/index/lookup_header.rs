@@ -10,8 +10,8 @@ use crate::wal::position::WalPosition;
 use crate::{index::index_table::IndexTable, key_shape::KeySpaceDesc, lookup::RandomRead};
 
 use super::index_format::{
-    binary_search, linear_search, Direction, IndexFormat, HEADER_ELEMENTS, HEADER_ELEMENT_SIZE,
-    HEADER_SIZE,
+    Direction, HEADER_ELEMENT_SIZE, HEADER_ELEMENTS, HEADER_SIZE, IndexFormat, binary_search,
+    linear_search,
 };
 
 #[derive(Clone)]
@@ -26,7 +26,9 @@ impl LookupHeaderIndex {
         {
             let prefix = prefix as u64;
             if !cell_prefix_range.contains(&prefix) {
-                panic!("prefix do not fall in prefix range. key {key:?}, cell {cell:?}, prefix {prefix:x}, range {cell_prefix_range:x?}");
+                panic!(
+                    "prefix do not fall in prefix range. key {key:?}, cell {cell:?}, prefix {prefix:x}, range {cell_prefix_range:x?}"
+                );
             }
         }
         let cell_offset = prefix

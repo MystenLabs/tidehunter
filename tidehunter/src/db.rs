@@ -7,8 +7,8 @@ use crate::crc::IntoBytesFixed;
 use crate::flusher::IndexFlusher;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
-use crate::iterators::db_iterator::DbIterator;
 use crate::iterators::IteratorResult;
+use crate::iterators::db_iterator::DbIterator;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
 use crate::metrics::{Metrics, TimerExt};
@@ -25,7 +25,7 @@ use minibytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Weak};
+use std::sync::{Arc, Weak, mpsc};
 use std::time::{Duration, Instant};
 use std::{io, thread};
 

@@ -5,7 +5,7 @@ use crate::flusher::{FlushKind, FlusherCommand, IndexFlusher, IndexFlusherThread
 use crate::index::index_format::Direction;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
-use crate::index::utils::{take_next_entry, NextEntryResult};
+use crate::index::utils::{NextEntryResult, take_next_entry};
 use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
@@ -14,10 +14,10 @@ use crate::primitives::range_from_excluding;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::relocation::updates::RelocationUpdates;
 use crate::runtime;
+use crate::wal::WalRandomRead;
 use crate::wal::position::{LastProcessed, WalPosition};
 use crate::wal::tracker::WalGuard;
-use crate::wal::WalRandomRead;
-use bloom::{BloomFilter, ASMS};
+use bloom::{ASMS, BloomFilter};
 use lru::LruCache;
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
@@ -25,8 +25,8 @@ use rand::rngs::ThreadRng;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use std::{cmp, mem, thread};
 
@@ -309,11 +309,11 @@ impl LargeTable {
     ) -> Result<GetResult, L::Error> {
         let ks = &context.ks_config;
         let (mut row, cell) = self.row(context, k);
-        if let Some(value_lru) = &mut row.value_lru {
-            if let Some(value) = value_lru.get(k) {
-                context.inc_lookup_result(LookupResult::Found, LookupSource::Lru);
-                return Ok(GetResult::Value(value.clone()));
-            }
+        if let Some(value_lru) = &mut row.value_lru
+            && let Some(value) = value_lru.get(k)
+        {
+            context.inc_lookup_result(LookupResult::Found, LookupSource::Lru);
+            return Ok(GetResult::Value(value.clone()));
         }
         let entry = row.try_entry_mut(&cell);
         let Some(entry) = entry else {
@@ -324,16 +324,16 @@ impl LargeTable {
         }
         let index_position = match entry.state {
             LargeTableEntryState::Empty => {
-                return Ok(context.report_lookup_result(None, LookupSource::Cache))
+                return Ok(context.report_lookup_result(None, LookupSource::Cache));
             }
             LargeTableEntryState::Loaded(_) => {
-                return Ok(context.report_lookup_result(entry.get(k), LookupSource::Cache))
+                return Ok(context.report_lookup_result(entry.get(k), LookupSource::Cache));
             }
             LargeTableEntryState::DirtyLoaded(_) => {
                 return Ok(context.report_lookup_result(
                     entry.get(k).and_then(WalPosition::valid),
                     LookupSource::Cache,
-                ))
+                ));
             }
             LargeTableEntryState::DirtyUnloaded(position) => {
                 // optimization: in dirty unloaded state we might not need to load entry
@@ -1539,8 +1539,8 @@ impl LargeTableFailPoints {
 mod tests {
     use super::*;
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
-    use crate::wal::layout::WalKind;
     use crate::wal::Wal;
+    use crate::wal::layout::WalKind;
     use std::io;
 
     #[test]
@@ -1927,15 +1927,17 @@ mod tests {
         assert_eq!(empty_container.pct_wal_position(50), None);
 
         // Test with container having only invalid positions
-        let invalid_container = LargeTableContainer(vec![vec![vec![(
-            CellId::Integer(0),
-            SnapshotEntryData {
-                position: WalPosition::INVALID,
-                last_processed: LastProcessed::none(),
-            },
-        )]
-        .into_iter()
-        .collect()]]);
+        let invalid_container = LargeTableContainer(vec![vec![
+            vec![(
+                CellId::Integer(0),
+                SnapshotEntryData {
+                    position: WalPosition::INVALID,
+                    last_processed: LastProcessed::none(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ]]);
         assert_eq!(invalid_container.pct_wal_position(50), None);
     }
 }

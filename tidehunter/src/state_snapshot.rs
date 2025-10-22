@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::db::{Db, DbResult, CONTROL_REGION_FILE};
+use crate::db::{CONTROL_REGION_FILE, Db, DbResult};
 use crate::key_shape::KeyShape;
 use crate::metrics::Metrics;
 use std::fs;

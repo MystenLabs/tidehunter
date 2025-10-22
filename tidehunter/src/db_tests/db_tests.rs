@@ -1344,7 +1344,7 @@ fn test_concurrent_single_value_update_iteration(
                     if rng.gen_range(0..100u32) < remove_chance_pct {
                         db.remove(ks, key.clone()).unwrap()
                     } else {
-                        let value: u32 = rng.gen();
+                        let value: u32 = rng.r#gen();
                         db.insert(ks, key.clone(), value.to_be_bytes().to_vec())
                             .unwrap();
                     }

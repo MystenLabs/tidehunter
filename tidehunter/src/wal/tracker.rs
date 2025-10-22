@@ -1,15 +1,15 @@
-use super::position::LastProcessed;
 use super::WalPosition;
+use super::position::LastProcessed;
+use crate::WalLayout;
 #[cfg(test)]
 use crate::latch::LatchGuard;
 use crate::wal::allocator::AllocationResult;
 use crate::wal::mapper::WalMapper;
-use crate::WalLayout;
 use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 /// WalTracker tracks "last processed position" for the wal.
@@ -188,12 +188,11 @@ impl WalTrackerThread {
                     self.state.add_processed(message, |result| {
                         if let Some(frag) =
                             self.layout.is_first_in_frag(result.allocated_position())
+                            && let Some(prev_frag) = frag.prev_map()
                         {
-                            if let Some(prev_frag) = frag.prev_map() {
-                                // When the first position for frag is allocated and all positions before it are processed,
-                                // Then the previous fragment can be finalized.
-                                self.mapper.map_finalized(prev_frag);
-                            }
+                            // When the first position for frag is allocated and all positions before it are processed,
+                            // Then the previous fragment can be finalized.
+                            self.mapper.map_finalized(prev_frag);
                         }
                     })
                 }
@@ -242,8 +241,8 @@ impl WalTrackerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wal_allocator::WalAllocator;
     use crate::WalLayout;
+    use crate::wal_allocator::WalAllocator;
     use std::thread;
     use std::time::Duration;
 

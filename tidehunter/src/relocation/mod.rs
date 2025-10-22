@@ -1,3 +1,4 @@
+use crate::WalPosition;
 use crate::batch::RelocatedWriteBatch;
 use crate::db::{Db, DbResult, WalEntry};
 use crate::index::index_table::IndexTable;
@@ -6,12 +7,11 @@ use crate::large_table::Loader;
 use crate::metrics::Metrics;
 use crate::relocation::watermark::RelocationWatermarks;
 use crate::wal::WalError;
-use crate::WalPosition;
 pub use cell_reference::CellReference;
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Weak};
+use std::sync::{Arc, Weak, mpsc};
 use std::thread::JoinHandle;
 
 mod cell_reference;
@@ -332,11 +332,11 @@ impl RelocationDriver {
             }
             if let WalEntry::Record(ks, key, value, _relocated) = WalEntry::from_bytes(raw_entry) {
                 let ksd = db.key_shape.ks(ks);
-                if let Some(filter) = ksd.relocation_filter() {
-                    if let Decision::StopRelocation = filter(&key, &value) {
-                        target_position = Some(position);
-                        break;
-                    }
+                if let Some(filter) = ksd.relocation_filter()
+                    && let Decision::StopRelocation = filter(&key, &value)
+                {
+                    target_position = Some(position);
+                    break;
                 }
             }
         }
@@ -376,14 +376,14 @@ impl RelocationDriver {
                 .get_cell_index(db.ks_context(cell.keyspace), &cell.cell_id, db.as_ref())?
                 .unwrap_or(IndexTable::default().into());
             for (_reduced_key, position) in index.iter() {
-                if position.offset() < target_position.offset() {
-                    if let Some((key, value)) = db.read_record(position)? {
-                        batch.write(key, value);
-                        self.metrics
-                            .relocation_kept
-                            .with_label_values(&[ks.name()])
-                            .inc();
-                    }
+                if position.offset() < target_position.offset()
+                    && let Some((key, value)) = db.read_record(position)?
+                {
+                    batch.write(key, value);
+                    self.metrics
+                        .relocation_kept
+                        .with_label_values(&[ks.name()])
+                        .inc();
                 }
             }
             db.write_relocated_batch(batch)?;

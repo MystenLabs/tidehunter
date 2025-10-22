@@ -1,6 +1,6 @@
 use crate::storage::Storage;
 use minibytes::Bytes;
-use rocksdb::{BlockBasedOptions, Cache, Direction, IteratorMode, Options, DB};
+use rocksdb::{BlockBasedOptions, Cache, DB, Direction, IteratorMode, Options};
 use std::path::Path;
 use std::sync::Arc;
 

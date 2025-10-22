@@ -49,11 +49,7 @@ fn precompute_window_sizes(n_values: &[usize], p_values: &[f64]) -> Vec<Vec<usiz
 
             let (lp, up) = if a <= 0.0 || b <= 0.0 {
                 // fallback if Beta parameters invalid
-                if p < 0.5 {
-                    (0.0, 0.0)
-                } else {
-                    (1.0, 1.0)
-                }
+                if p < 0.5 { (0.0, 0.0) } else { (1.0, 1.0) }
             } else {
                 // Construct Beta distribution
                 let beta_dist = Beta::new(a, b).unwrap_or_else(|_| Beta::new(0.5, 0.5).unwrap());
@@ -133,7 +129,7 @@ fn get_window(
 fn generate_numbers(n: usize, rng: &mut StdRng) -> Vec<u64> {
     let mut nums = Vec::with_capacity(n);
     for _ in 0..n {
-        nums.push(rng.gen::<u64>());
+        nums.push(rng.r#gen::<u64>());
     }
     nums.sort();
     nums
@@ -169,11 +165,7 @@ fn compute_hit_rate_exact(test_keys: &[(u64, usize)], n: usize) -> (f64, f64) {
         let b = (1.0 - p) * (n as f64 + 1.0);
 
         let (lp, up) = if a <= 0.0 || b <= 0.0 {
-            if p < 0.5 {
-                (0.0, 0.0)
-            } else {
-                (1.0, 1.0)
-            }
+            if p < 0.5 { (0.0, 0.0) } else { (1.0, 1.0) }
         } else {
             let beta_dist = Beta::new(a, b).unwrap_or_else(|_| Beta::new(0.5, 0.5).unwrap());
             let lo = beta_dist.inverse_cdf(LOWER_Q).clamp(0.0, 1.0);

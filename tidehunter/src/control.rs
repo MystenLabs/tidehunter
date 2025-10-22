@@ -1,7 +1,7 @@
+use crate::WalPosition;
 use crate::key_shape::KeyShape;
 use crate::large_table::{LargeTableContainer, SnapshotEntryData};
 use crate::metrics::Metrics;
-use crate::WalPosition;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
@@ -61,7 +61,9 @@ impl ControlRegion {
         let snapshot_len = self.snapshot.0.len();
         let num_ks = key_shape.num_ks();
         if snapshot_len != num_ks {
-            panic!("Control region has {snapshot_len} key spaces, while configuration has {num_ks}. Re-configuration is not currently supported");
+            panic!(
+                "Control region has {snapshot_len} key spaces, while configuration has {num_ks}. Re-configuration is not currently supported"
+            );
         }
         // todo more verifications for the key shape
     }

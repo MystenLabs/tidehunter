@@ -1,5 +1,5 @@
-use crate::index::index_table::IndexTable;
 use crate::WalPosition;
+use crate::index::index_table::IndexTable;
 use minibytes::Bytes;
 
 /// Holds wal positions that were relocated.

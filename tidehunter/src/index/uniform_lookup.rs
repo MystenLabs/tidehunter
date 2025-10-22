@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::time::Instant;
 
 use super::index_format::{Direction, IndexFormat};
-use crate::index::index_format::{binary_search, PREFIX_LENGTH};
+use crate::index::index_format::{PREFIX_LENGTH, binary_search};
 use crate::key_shape::CELL_PREFIX_LENGTH;
 use crate::metrics::Metrics;
 use crate::wal::position::WalPosition;
@@ -70,7 +70,9 @@ impl UniformLookupIndex {
         assert!(PREFIX_LENGTH <= 8); // we want the prefix to fit in u64
         let prefix = ks.index_prefix_u64(key);
         if long_prefix_range_start > prefix || prefix > long_prefix_range_end {
-            panic!("Key prefix out of range: key prefix={prefix}, long_prefix_range={long_prefix_range_start}..{long_prefix_range_end}");
+            panic!(
+                "Key prefix out of range: key prefix={prefix}, long_prefix_range={long_prefix_range_start}..{long_prefix_range_end}"
+            );
         }
         let prefix_pos = prefix.saturating_sub(long_prefix_range_start);
         // cannot cause overflow because prefix_pos is always smaller than cell_width
@@ -529,7 +531,7 @@ mod test {
         let mut rng = rand::thread_rng();
         let mut unique_keys = HashSet::with_capacity(num_entries);
         while unique_keys.len() < num_entries {
-            let k = rng.gen::<u64>();
+            let k = rng.r#gen::<u64>();
             unique_keys.insert(k);
         }
 

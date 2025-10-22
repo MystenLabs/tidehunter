@@ -4,8 +4,8 @@ use std::alloc::Layout;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::{fmt, thread};
 

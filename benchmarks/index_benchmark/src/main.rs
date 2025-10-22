@@ -12,7 +12,8 @@ use tidehunter::metrics::print_histogram_stats;
 
 use minibytes::Bytes;
 use std::time::{Duration, Instant};
-use tidehunter::file_reader::{set_direct_options, FileReader};
+use tidehunter::WalPosition;
+use tidehunter::file_reader::{FileReader, set_direct_options};
 use tidehunter::index::index_format::IndexFormat;
 use tidehunter::index::index_table::IndexTable;
 use tidehunter::index::lookup_header::LookupHeaderIndex;
@@ -21,7 +22,6 @@ use tidehunter::key_shape::KeySpace;
 use tidehunter::key_shape::{KeyShape, KeyType};
 use tidehunter::lookup::FileRange;
 use tidehunter::metrics::Metrics;
-use tidehunter::WalPosition;
 
 /// Generates a file with serialized indices for benchmarking
 pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone>(
@@ -113,7 +113,7 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                         rng.fill(&mut key[..]);
 
                         // Create a random WalPosition
-                        let position = WalPosition::test_value(rng.gen());
+                        let position = WalPosition::test_value(rng.r#gen());
 
                         // Insert into the index
                         index.insert(Bytes::from(key), position);

@@ -2,9 +2,9 @@ use crate::utils::format_bytes;
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
-use tidehunter::control::ControlRegion;
-use tidehunter::db::{Db, CONTROL_REGION_FILE};
 use tidehunter::WalKind;
+use tidehunter::control::ControlRegion;
+use tidehunter::db::{CONTROL_REGION_FILE, Db};
 
 pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: bool) -> Result<()> {
     // Load key shape
@@ -27,18 +27,14 @@ pub fn control_region_command(db_path: PathBuf, num_positions: usize, verbose: b
     if let Ok(entries) = fs::read_dir(&db_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    if file_name.starts_with(&index_prefix) {
-                        if let Some(id_str) = file_name.strip_prefix(&index_prefix) {
-                            if u64::from_str_radix(id_str, 16).is_ok() {
-                                if let Ok(metadata) = fs::metadata(&path) {
-                                    total_index_wal_size += metadata.len();
-                                }
-                            }
-                        }
-                    }
-                }
+            if path.is_file()
+                && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                && file_name.starts_with(&index_prefix)
+                && let Some(id_str) = file_name.strip_prefix(&index_prefix)
+                && u64::from_str_radix(id_str, 16).is_ok()
+                && let Ok(metadata) = fs::metadata(&path)
+            {
+                total_index_wal_size += metadata.len();
             }
         }
     }

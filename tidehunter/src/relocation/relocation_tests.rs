@@ -3,11 +3,11 @@ use std::{path::Path, sync::Arc, thread, time::Duration};
 use crate::key_shape::KeySpaceConfig;
 use crate::relocation::watermark::WatermarkData;
 use crate::{
+    RelocationStrategy,
     config::Config,
     db::Db,
     key_shape::{KeyShapeBuilder, KeyType},
     relocation::RelocationWatermarks,
-    RelocationStrategy,
 };
 use crate::{metrics::Metrics, relocation::Decision};
 
@@ -112,9 +112,11 @@ fn test_wal_relocation_basic_flow() {
         db.rebuild_control_region().unwrap();
         db.wait_for_background_threads_to_finish();
     }
-    assert!(list_wal_files(&dir.path())
-        .into_iter()
-        .all(|name| name != "wal_0000000000000000"));
+    assert!(
+        list_wal_files(&dir.path())
+            .into_iter()
+            .all(|name| name != "wal_0000000000000000")
+    );
     let metrics = Metrics::new();
     let db = Db::open(
         dir.path(),

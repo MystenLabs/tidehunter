@@ -1,7 +1,7 @@
 use super::Map;
 use crate::metrics::Metrics;
 use memmap2::MmapMut;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 

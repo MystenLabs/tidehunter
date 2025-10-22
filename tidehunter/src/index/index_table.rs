@@ -2,12 +2,12 @@ use crate::key_shape::KeySpaceDesc;
 use crate::primitives::cursor::SliceCursor;
 use crate::primitives::range_from_excluding::RangeFromExcluding;
 use crate::primitives::slice_buf::SliceBuf;
-use crate::primitives::var_int::{deserialize_u16_varint, serialize_u16_varint, MAX_U16_VARINT};
+use crate::primitives::var_int::{MAX_U16_VARINT, deserialize_u16_varint, serialize_u16_varint};
 use crate::wal::position::{HasOffset, LastProcessed, WalPosition};
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
-use std::collections::btree_map::{Entry, Keys};
 use std::collections::BTreeMap;
+use std::collections::btree_map::{Entry, Keys};
 
 #[derive(Default, Clone, Debug)]
 #[doc(hidden)]
@@ -69,12 +69,12 @@ impl IndexTable {
         for (k, v) in dirty.data.iter() {
             // Strict check for concurrent_test and unit tests
             #[cfg(any(debug_assertions, feature = "test_methods"))]
-            if let Some(found) = self.data.get(k) {
-                if found.offset > v.offset {
-                    // This can't happen - this would mean we somehow have written an
-                    // older entry in a dirty set.
-                    panic!("found.offset {} > v.offset {}", found.offset, v.offset);
-                }
+            if let Some(found) = self.data.get(k)
+                && found.offset > v.offset
+            {
+                // This can't happen - this would mean we somehow have written an
+                // older entry in a dirty set.
+                panic!("found.offset {} > v.offset {}", found.offset, v.offset);
             }
             if v.is_removed() {
                 self.data.remove(k);

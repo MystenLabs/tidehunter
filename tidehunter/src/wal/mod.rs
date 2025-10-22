@@ -9,8 +9,8 @@ pub(crate) mod tracker;
 
 use crate::context::ReadType;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
-use crate::file_reader::set_direct_options;
 use crate::file_reader::FileReader;
+use crate::file_reader::set_direct_options;
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::Metrics;
 use arc_swap::ArcSwap;

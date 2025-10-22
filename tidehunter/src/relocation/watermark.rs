@@ -1,6 +1,6 @@
 use super::CellReference;
 use serde::{Deserialize, Serialize};
-use std::fs::{rename, File, OpenOptions};
+use std::fs::{File, OpenOptions, rename};
 use std::io::{self, Error, Read, Write};
 use std::path::{Path, PathBuf};
 

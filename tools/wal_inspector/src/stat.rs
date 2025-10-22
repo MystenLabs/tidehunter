@@ -1,13 +1,13 @@
-use crate::utils::{format_bytes, format_count};
 use crate::InspectorContext;
+use crate::utils::{format_bytes, format_count};
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
-use tidehunter::key_shape::{KeyShape, KeySpace};
-use tidehunter::test_utils::{list_wal_files_with_sizes, Metrics, Wal, WalEntry, WalError};
 use tidehunter::WalKind;
+use tidehunter::key_shape::{KeyShape, KeySpace};
+use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError, list_wal_files_with_sizes};
 
 pub fn stat_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Statistics");
@@ -156,11 +156,11 @@ fn collect_wal_statistics(context: &InspectorContext) -> Result<WalStatistics> {
 
         // Update progress bar
         let new_bytes_processed = position.offset();
-        if let Some(pb) = &progress_bar {
-            if new_bytes_processed > bytes_processed {
-                pb.set_position(new_bytes_processed);
-                bytes_processed = new_bytes_processed;
-            }
+        if let Some(pb) = &progress_bar
+            && new_bytes_processed > bytes_processed
+        {
+            pb.set_position(new_bytes_processed);
+            bytes_processed = new_bytes_processed;
         }
 
         entry_count += 1;

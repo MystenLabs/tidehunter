@@ -1,7 +1,7 @@
 use crate::configs::METRICS_PORT;
 use crate::metrics::BenchmarkMetrics;
-use crate::storage::rocks::RocksStorage;
 use crate::storage::Storage;
+use crate::storage::rocks::RocksStorage;
 use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
@@ -15,8 +15,8 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_distr::{Distribution, Zipf};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
@@ -290,8 +290,16 @@ impl Stress {
         } else {
             "".to_string()
         };
-        report!(report, "Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}{latency_errors}",
-        p(0), p(1), p(2), p(3), p(4), p(5));
+        report!(
+            report,
+            "Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}{latency_errors}",
+            p(0),
+            p(1),
+            p(2),
+            p(3),
+            p(4),
+            p(5)
+        );
         start.elapsed()
     }
 

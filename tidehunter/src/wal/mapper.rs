@@ -6,7 +6,7 @@ use crate::wal::syncer::WalSyncer;
 use arc_swap::ArcSwap;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Instant;

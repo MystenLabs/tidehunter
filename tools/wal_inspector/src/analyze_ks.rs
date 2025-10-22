@@ -2,12 +2,12 @@ use crate::utils::format_bytes;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
+use tidehunter::WalKind;
 use tidehunter::control::ControlRegion;
-use tidehunter::db::{Db, CONTROL_REGION_FILE};
+use tidehunter::db::{CONTROL_REGION_FILE, Db};
 use tidehunter::index::index_format::IndexFormat;
 use tidehunter::key_shape::KeySpace;
 use tidehunter::test_utils::{Metrics, Wal, WalEntry};
-use tidehunter::WalKind;
 
 pub fn analyze_ks_command(db_path: PathBuf, keyspace_name: String, verbose: bool) -> Result<()> {
     // Load key shape

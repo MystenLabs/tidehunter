@@ -3,8 +3,8 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;
 use tidehunter::config::Config;
@@ -338,13 +338,15 @@ fn main() {
                             (Some(db_val), None) => {
                                 panic!(
                                     "Key {:?} exists in database with value {:?}, but not in in-memory state",
-                                    key, db_val.as_ref()
+                                    key,
+                                    db_val.as_ref()
                                 );
                             }
                             (None, Some(mem_val)) => {
                                 panic!(
                                     "Key {:?} exists in in-memory state with value {:?}, but not in database",
-                                    key, mem_val.as_slice()
+                                    key,
+                                    mem_val.as_slice()
                                 );
                             }
                         }

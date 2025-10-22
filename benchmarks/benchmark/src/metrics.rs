@@ -1,5 +1,5 @@
 use crate::configs::StressTestConfigs;
-use prometheus::{exponential_buckets, Gauge, HistogramVec, IntCounterVec, IntGauge, Registry};
+use prometheus::{Gauge, HistogramVec, IntCounterVec, IntGauge, Registry, exponential_buckets};
 use std::sync::Arc;
 
 pub struct BenchmarkMetrics {

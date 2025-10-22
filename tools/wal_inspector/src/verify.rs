@@ -2,11 +2,11 @@ use crate::InspectorContext;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tidehunter::WalKind;
 use tidehunter::db::Db;
 use tidehunter::key_shape::KeySpace;
 use tidehunter::minibytes::Bytes;
 use tidehunter::test_utils::{Metrics, Wal, WalEntry, WalError};
-use tidehunter::WalKind;
 
 pub fn verify_command(context: &InspectorContext) -> Result<()> {
     println!("WAL Inspector - Verify");
@@ -236,7 +236,10 @@ fn verify_keys_through_iteration(
                     // Just count it as verified if we found it through iteration
                     verified += 1;
                     if verbose {
-                        println!("    ✓ Key {} found through iteration (value not checked - key was missing in direct access)", hex::encode(expected_key));
+                        println!(
+                            "    ✓ Key {} found through iteration (value not checked - key was missing in direct access)",
+                            hex::encode(expected_key)
+                        );
                     }
                 } else if found_value == expected_value {
                     verified += 1;

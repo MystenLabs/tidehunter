@@ -1,13 +1,12 @@
 use crate::config::Config;
 use prometheus::{
-    exponential_buckets, linear_buckets, Histogram as PromHistogram,
-    HistogramVec as PromHistogramVec, IntCounter as PromIntCounter,
+    Histogram as PromHistogram, HistogramVec as PromHistogramVec, IntCounter as PromIntCounter,
     IntCounterVec as PromIntCounterVec, IntGauge as PromIntGauge, IntGaugeVec as PromIntGaugeVec,
-    Registry,
+    Registry, exponential_buckets, linear_buckets,
 };
 use std::fmt;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 // Global dummy wrappers to avoid per-call allocations when metrics are disabled

@@ -82,11 +82,7 @@ impl WalLayout {
     /// Return Some(frag) if this is the first wal position in frag, returns None otherwise.
     pub(super) fn is_first_in_frag(&self, pos: u64) -> Option<MapId> {
         let (frag, offset) = self.locate(pos);
-        if offset == 0 {
-            Some(frag)
-        } else {
-            None
-        }
+        if offset == 0 { Some(frag) } else { None }
     }
 
     /// Return range of a particular mapping

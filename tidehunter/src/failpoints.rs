@@ -1,6 +1,6 @@
 use crate::latch::Latch;
-use rand::prelude::ThreadRng;
 use rand::Rng;
+use rand::prelude::ThreadRng;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;

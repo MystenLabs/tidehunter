@@ -1,8 +1,8 @@
+use super::Wal;
 #[cfg(any(test, feature = "test-utils"))]
 use super::layout::WalKind;
 use super::layout::WalLayout;
 use super::position::WalFileId;
-use super::Wal;
 use arc_swap::ArcSwap;
 use std::fs::File;
 use std::io;
@@ -25,18 +25,17 @@ impl WalFiles {
         let mut files = vec![];
         for entry in std::fs::read_dir(base_path)? {
             let file_path = entry?.path();
-            if file_path.is_file() {
-                if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
-                    if let Some(id_str) = file_name.strip_prefix(layout.kind.name()) {
-                        let Some(id_str) = id_str.strip_prefix("_") else {
-                            panic!("invalid wal file name {file_name:?}(failed to strip _ prefix)");
-                        };
-                        let id = u64::from_str_radix(id_str, 16)
-                            .unwrap_or_else(|_| panic!("invalid wal file name {file_name:?}"));
-                        let file = Wal::open_file(&file_path, layout)?;
-                        files.push((id, file));
-                    }
-                }
+            if file_path.is_file()
+                && let Some(file_name) = file_path.file_name().and_then(|name| name.to_str())
+                && let Some(id_str) = file_name.strip_prefix(layout.kind.name())
+            {
+                let Some(id_str) = id_str.strip_prefix("_") else {
+                    panic!("invalid wal file name {file_name:?}(failed to strip _ prefix)");
+                };
+                let id = u64::from_str_radix(id_str, 16)
+                    .unwrap_or_else(|_| panic!("invalid wal file name {file_name:?}"));
+                let file = Wal::open_file(&file_path, layout)?;
+                files.push((id, file));
             }
         }
         if files.is_empty() {
@@ -102,15 +101,13 @@ pub fn list_wal_files_with_sizes(base_path: &Path) -> io::Result<Vec<(PathBuf, u
 
     for entry in std::fs::read_dir(base_path)? {
         let file_path = entry?.path();
-        if file_path.is_file() {
-            if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
-                if let Some(id_str) = file_name.strip_prefix(&prefix) {
-                    if u64::from_str_radix(id_str, 16).is_ok() {
-                        let metadata = std::fs::metadata(&file_path)?;
-                        files.push((file_path, metadata.len()));
-                    }
-                }
-            }
+        if file_path.is_file()
+            && let Some(file_name) = file_path.file_name().and_then(|name| name.to_str())
+            && let Some(id_str) = file_name.strip_prefix(&prefix)
+            && u64::from_str_radix(id_str, 16).is_ok()
+        {
+            let metadata = std::fs::metadata(&file_path)?;
+            files.push((file_path, metadata.len()));
         }
     }
 

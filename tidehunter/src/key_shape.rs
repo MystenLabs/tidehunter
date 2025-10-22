@@ -202,7 +202,9 @@ impl KeyShapeBuilder {
     fn self_check(&self) {
         for ks in &self.key_spaces {
             if ks.config.bloom_filter.is_some() && ks.config.compactor.is_some() {
-                panic!("Tidehunter currently does not support key space with both compactor and bloom filter enabled");
+                panic!(
+                    "Tidehunter currently does not support key space with both compactor and bloom filter enabled"
+                );
             }
             ks.key_type.verify_key_size(ks.index_key_size());
             if matches!(ks.key_indexing, KeyIndexing::VariableLength) {
@@ -270,7 +272,10 @@ impl KeySpaceDesc {
         match self.key_indexing {
             KeyIndexing::Fixed(_) => (),
             KeyIndexing::Reduction(_, _) => (),
-            KeyIndexing::Hash => panic!("Key space {} does not support iterator bounds and reversal because it uses KeyIndexing::Hash", self.name()),
+            KeyIndexing::Hash => panic!(
+                "Key space {} does not support iterator bounds and reversal because it uses KeyIndexing::Hash",
+                self.name()
+            ),
             KeyIndexing::VariableLength => (),
         }
     }
@@ -883,8 +888,8 @@ mod tests {
     use hex_literal::hex;
     use rand::prelude::StdRng;
     use rand::{Rng, SeedableRng};
-    use std::collections::hash_map::Entry;
     use std::collections::HashMap;
+    use std::collections::hash_map::Entry;
 
     #[test]
     fn test_make_reset_mask() {
@@ -964,7 +969,9 @@ mod tests {
                 formatted_key.push_str(&hex::encode(chunk));
                 formatted_key.push('_');
             }
-            panic!("Failed for key {formatted_key}, cell {cell:x?}, prefix {prefix:x}, range {range:x?}, key type {key_type:?}, mutexes {mutexes}");
+            panic!(
+                "Failed for key {formatted_key}, cell {cell:x?}, prefix {prefix:x}, range {range:x?}, key type {key_type:?}, mutexes {mutexes}"
+            );
         }
     }
 

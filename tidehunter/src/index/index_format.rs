@@ -214,10 +214,10 @@ pub mod test {
     use std::cell::Cell;
 
     use minibytes::Bytes;
-    use rand::{rngs::ThreadRng, Rng, RngCore};
+    use rand::{Rng, RngCore, rngs::ThreadRng};
 
-    use crate::index::index_format::binary_search;
     use crate::index::index_format::Direction;
+    use crate::index::index_format::binary_search;
     use crate::key_shape::{KeyType, MAX_U32_PLUS_ONE};
     use crate::lookup::RandomRead;
     use crate::{

@@ -2,7 +2,7 @@ use std::io;
 use std::path::Path;
 use std::str::FromStr;
 
-use clap::{arg, Parser};
+use clap::{Parser, arg};
 use serde::{Deserialize, Serialize};
 
 /// Port for Prometheus metrics

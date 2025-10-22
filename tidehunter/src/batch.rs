@@ -1,5 +1,5 @@
 use crate::cell::CellId;
-use crate::db::{WalEntry, MAX_KEY_LEN};
+use crate::db::{MAX_KEY_LEN, WalEntry};
 use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::wal::PreparedWalWrite;
 use minibytes::Bytes;
