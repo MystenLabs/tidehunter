@@ -2426,8 +2426,9 @@ fn test_concurrent_index_reclaim() {
     const SLEEP: u64 = 200;
 
     db.insert(ks, vec![1, 2], vec![5, 6]).unwrap();
-    db.index_writer.wal_tracker_barrier();
+    db.wal_writer.wal_tracker_barrier();
     db.force_rebuild_control_region().unwrap();
+    assert!(db.large_table.is_all_clean());
     let (lookup_latch, lookup_latch_guard) = Latch::new();
     db.large_table.fp.0.write().fp_lookup_after_lock_drop = FailPoint::latch(lookup_latch);
     let lookup_thread = {
