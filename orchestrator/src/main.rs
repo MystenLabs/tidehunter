@@ -6,10 +6,10 @@
 use benchmark::BenchmarkParameters;
 use chrono::Utc;
 use clap::Parser;
+use client::ServerProviderClient;
 use client::aws::AwsClient;
 use client::custom::CustomClient;
 use client::vultr::VultrClient;
-use client::ServerProviderClient;
 use eyre::Context;
 use orchestrator::Orchestrator;
 use protocol::ProtocolParameters;

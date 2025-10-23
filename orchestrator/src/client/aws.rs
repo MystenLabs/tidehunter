@@ -188,7 +188,9 @@ impl AwsClient {
         let directory = self.settings.working_dir.display();
         vec![
             // Find the largest NVMe device that's not the root device
-            format!("NVME_DRIVE=$(lsblk -d -n -o NAME,SIZE,TYPE | grep nvme | grep -v $(lsblk -n -o NAME,MOUNTPOINT | grep '/$' | cut -d' ' -f1 | sed 's/[0-9]*$//') | sort -k2 -hr | head -n1 | cut -d' ' -f1)"),
+            format!(
+                "NVME_DRIVE=$(lsblk -d -n -o NAME,SIZE,TYPE | grep nvme | grep -v $(lsblk -n -o NAME,MOUNTPOINT | grep '/$' | cut -d' ' -f1 | sed 's/[0-9]*$//') | sort -k2 -hr | head -n1 | cut -d' ' -f1)"
+            ),
             format!("(sudo mkfs.ext4 -E nodiscard /dev/$NVME_DRIVE || true)"),
             format!("(sudo mount /dev/$NVME_DRIVE {directory} || true)"),
             format!("sudo chmod 777 -R {directory}"),
@@ -223,12 +225,11 @@ impl AwsClient {
         let response = request.send().await?;
 
         // Return true if the response contains references to NVMe drives.
-        if let Some(info) = response.instance_types().first() {
-            if let Some(info) = info.instance_storage_info() {
-                if info.nvme_support() == Some(&EphemeralNvmeSupport::Required) {
-                    return Ok(true);
-                }
-            }
+        if let Some(info) = response.instance_types().first()
+            && let Some(info) = info.instance_storage_info()
+            && info.nvme_support() == Some(&EphemeralNvmeSupport::Required)
+        {
+            return Ok(true);
         }
         Ok(false)
     }

@@ -7,14 +7,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use futures::future::try_join_all;
-use prometheus_http_query::response::Data;
 use prometheus_http_query::Client as PrometheusClient;
+use prometheus_http_query::response::Data;
 use serde::Serialize;
 
+use crate::Config;
 use crate::benchmark::BenchmarkParameters;
 use crate::error::{MonitorError, MonitorResult};
 use crate::settings::Settings;
-use crate::Config;
 
 /// A unique identifier for a job.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize)]
@@ -244,8 +244,8 @@ impl MetricsCollector {
 mod test {
     use std::collections::HashMap;
 
-    use prometheus_http_query::response::{Data, InstantVector};
     use prometheus_http_query::Client as PrometheusClient;
+    use prometheus_http_query::response::{Data, InstantVector};
 
     use crate::benchmark::BenchmarkParameters;
     use crate::collector::{JobId, MetricLabel, MetricsCollector};

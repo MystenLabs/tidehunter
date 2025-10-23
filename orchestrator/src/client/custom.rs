@@ -48,10 +48,10 @@ impl CustomMachine {
         let socket_addr = format!("{}:{}", self.host, self.ssh_port);
         match socket_addr.to_socket_addrs() {
             Ok(mut addrs) => {
-                if let Some(addr) = addrs.next() {
-                    if let std::net::IpAddr::V4(ipv4) = addr.ip() {
-                        return Ok(ipv4);
-                    }
+                if let Some(addr) = addrs.next()
+                    && let std::net::IpAddr::V4(ipv4) = addr.ip()
+                {
+                    return Ok(ipv4);
                 }
                 Err(CloudProviderError::UnexpectedResponse(format!(
                     "Could not resolve hostname '{}' to IPv4 address",
