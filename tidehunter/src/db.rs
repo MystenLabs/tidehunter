@@ -226,7 +226,7 @@ impl Db {
             if timed_snapshot || written > db.config.snapshot_written_bytes() {
                 // todo taint storage instance on failure?
                 let snapshot_position = db
-                    .rebuild_control_region_from(current_wal_position)
+                    .rebuild_control_region()
                     .expect("Failed to rebuild control region");
                 // snapshot_position is now a u64 offset
                 position = snapshot_position;
@@ -706,12 +706,14 @@ impl Db {
     }
 
     pub fn rebuild_control_region(&self) -> DbResult<u64> {
-        self.rebuild_control_region_from(self.wal_writer.position())
+        let current_wal_position = self.wal_writer.position();
+        let threshold_position =
+            current_wal_position.saturating_sub(self.config.snapshot_unload_threshold);
+        self.rebuild_control_region_from(threshold_position)
     }
 
     pub fn force_rebuild_control_region(&self) -> DbResult<u64> {
-        // Force flush by setting snapshot_unload_threshold to 0
-        self.rebuild_control_region_from_with_threshold(self.wal_writer.position(), Some(0))
+        self.rebuild_control_region_from(self.wal_writer.position())
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -719,15 +721,7 @@ impl Db {
         self.large_table.is_all_clean()
     }
 
-    fn rebuild_control_region_from(&self, current_wal_position: u64) -> DbResult<u64> {
-        self.rebuild_control_region_from_with_threshold(current_wal_position, None)
-    }
-
-    fn rebuild_control_region_from_with_threshold(
-        &self,
-        current_wal_position: u64,
-        snapshot_unload_threshold_override: Option<u64>,
-    ) -> DbResult<u64> {
+    pub(crate) fn rebuild_control_region_from(&self, threshold_position: u64) -> DbResult<u64> {
         let mut crs = self.control_region_store.lock();
         let _timer = self
             .metrics
@@ -735,12 +729,9 @@ impl Db {
             .clone()
             .mcs_timer();
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
-        let snapshot = self.large_table.snapshot(
-            current_wal_position,
-            self,
-            crs.force_relocation_position(),
-            snapshot_unload_threshold_override,
-        )?;
+        let snapshot =
+            self.large_table
+                .snapshot(self, crs.force_relocation_position(), threshold_position)?;
         let min_index_position = snapshot.data.iter_valid_val_positions().min();
         if let Some(min_index_position) = min_index_position {
             self.index_writer.gc(min_index_position.offset())?;
@@ -975,6 +966,10 @@ impl Loader for Wal {
         unimplemented!()
     }
 
+    fn current_wal_position(&self) -> u64 {
+        unimplemented!()
+    }
+
     fn min_wal_position(&self) -> u64 {
         self.min_wal_position()
     }
@@ -1012,6 +1007,10 @@ impl Loader for Db {
 
     fn last_processed_wal_position(&self) -> LastProcessed {
         self.wal_writer.last_processed()
+    }
+
+    fn current_wal_position(&self) -> u64 {
+        self.wal_writer.position()
     }
 
     fn min_wal_position(&self) -> u64 {

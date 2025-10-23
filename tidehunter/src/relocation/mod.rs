@@ -388,7 +388,7 @@ impl RelocationDriver {
             }
             db.write_relocated_batch(batch)?;
         }
-        db.rebuild_control_region()?;
+        db.rebuild_control_region_from(target_position.offset())?;
         db.wal_writer.gc(std::cmp::min(
             target_position.offset(),
             db.control_region_store.lock().last_position(),

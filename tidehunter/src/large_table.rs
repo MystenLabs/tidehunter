@@ -32,7 +32,6 @@ use std::{cmp, mem, thread};
 
 pub struct LargeTable {
     table: Vec<KsTable>,
-    config: Arc<Config>,
     pub(crate) flusher: IndexFlusher,
     metrics: Arc<Metrics>,
     pub(crate) fp: LargeTableFailPoints,
@@ -186,7 +185,6 @@ impl LargeTable {
             .collect();
         Self {
             table,
-            config,
             flusher,
             metrics,
             fp: Default::default(),
@@ -500,11 +498,11 @@ impl LargeTable {
     /// Provides a snapshot of this large table along with replay position in the wal for the snapshot.
     pub(crate) fn snapshot<L: Loader>(
         &self,
-        tail_position: u64,
         loader: &L,
         // All entries below this wal positions will be relocated
         force_relocate_below: Option<WalPosition>,
-        snapshot_unload_threshold_override: Option<u64>,
+        // Entries at or before this position should be force unloaded
+        threshold_position: u64,
     ) -> Result<LargeTableSnapshot, L::Error> {
         assert!(loader.flush_supported());
         // Capture the WAL's last_processed position at snapshot time
@@ -515,13 +513,8 @@ impl LargeTable {
         let mut max_position: Option<WalPosition> = None;
         let mut data = Vec::with_capacity(self.table.len());
         for ks_table in self.table.iter() {
-            let (ks_data, ks_replay_from, ks_max_position) = self.ks_snapshot(
-                ks_table,
-                tail_position,
-                loader,
-                force_relocate_below,
-                snapshot_unload_threshold_override,
-            )?;
+            let (ks_data, ks_replay_from, ks_max_position) =
+                self.ks_snapshot(ks_table, loader, force_relocate_below, threshold_position)?;
             data.push(ks_data);
             if let Some(ks_replay_from) = ks_replay_from {
                 replay_from = Some(cmp::min(replay_from.unwrap_or(u64::MAX), ks_replay_from));
@@ -581,10 +574,9 @@ impl LargeTable {
     fn ks_snapshot<L: Loader>(
         &self,
         ks_table: &KsTable,
-        tail_position: u64,
         loader: &L,
         force_relocate_below: Option<WalPosition>,
-        snapshot_unload_threshold_override: Option<u64>,
+        threshold_position: u64,
     ) -> Result<
         (
             Vec<RowContainer<SnapshotEntryData>>,
@@ -600,13 +592,7 @@ impl LargeTable {
             let mut row = mutex.lock();
             let mut row_data = RowContainer::new();
             for entry in row.entries.iter_mut() {
-                entry.maybe_flush_for_snapshot(
-                    loader,
-                    &self.config,
-                    tail_position,
-                    force_relocate_below,
-                    snapshot_unload_threshold_override,
-                )?;
+                entry.maybe_flush_for_snapshot(loader, force_relocate_below, threshold_position)?;
                 let position = entry.state.wal_position();
                 let snapshot_data = SnapshotEntryData {
                     position,
@@ -640,6 +626,7 @@ impl LargeTable {
             Some(position) => {
                 // This can go below 0 because tail_position is not synchronized
                 // and index position can be higher than the tail_position in rare cases
+                let tail_position = loader.current_wal_position();
                 metric.set(tail_position.saturating_sub(position) as i64)
             }
         }
@@ -940,6 +927,10 @@ pub trait Loader {
     /// including that offset have been successfully processed and their guards dropped.
     fn last_processed_wal_position(&self) -> LastProcessed;
 
+    /// Returns the current WAL writer position (tail of the log).
+    /// This is used for metrics and snapshot operations.
+    fn current_wal_position(&self) -> u64;
+
     fn min_wal_position(&self) -> u64;
 }
 
@@ -1099,10 +1090,8 @@ impl LargeTableEntry {
     pub fn maybe_flush_for_snapshot<L: Loader>(
         &mut self,
         loader: &L,
-        config: &Config,
-        tail_position: u64,
         force_relocate_below: Option<WalPosition>,
-        snapshot_unload_threshold_override: Option<u64>,
+        threshold_position: u64,
     ) -> Result<(), L::Error> {
         if self.pending_last_processed.is_some() {
             // todo metric / log?
@@ -1127,12 +1116,9 @@ impl LargeTableEntry {
             return Ok(());
         }
         let position = self.last_processed;
-        // position can actually be great then tail_position due to concurrency
-        let distance = tail_position.saturating_sub(position.as_u64());
-        // Use override if provided, otherwise use config value
-        let threshold =
-            snapshot_unload_threshold_override.unwrap_or(config.snapshot_unload_threshold);
-        if forced_relocation || distance >= threshold {
+        // Check if this entry's position is at or before the threshold position
+        let should_unload = position.as_u64() <= threshold_position;
+        if forced_relocation || should_unload {
             self.context
                 .metrics
                 .snapshot_force_unload
@@ -1721,6 +1707,11 @@ mod tests {
             fn last_processed_wal_position(&self) -> LastProcessed {
                 // Return a test value for mock
                 LastProcessed::none()
+            }
+
+            fn current_wal_position(&self) -> u64 {
+                // Return a test value for mock
+                1000
             }
 
             fn min_wal_position(&self) -> u64 {
