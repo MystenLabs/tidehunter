@@ -5,9 +5,9 @@ use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Serialize};
 
+use crate::Config;
 use crate::protocol::ProtocolParameters;
 use crate::settings::Settings;
-use crate::Config;
 
 /// Shortcut avoiding to use the generic version of the benchmark parameters.
 pub type BenchmarkParameters = BenchmarkParametersGeneric<Config>;

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
+use super::{BINARY_PATH, ProtocolCommands, ProtocolMetrics, ProtocolParameters};
 use crate::benchmark::BenchmarkParameters;
 use crate::client::Instance;
 use crate::collector::MetricLabel;

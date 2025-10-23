@@ -5,8 +5,8 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 
 use eyre::Context;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::benchmark::BenchmarkParameters;
 use crate::client::Instance;
