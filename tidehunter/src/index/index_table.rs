@@ -275,10 +275,10 @@ impl IndexTable {
         self.data.retain(|_k, v| v.offset >= last_processed);
     }
 
-    /// Retain entries based on compactor predicate.
-    /// The predicate is called for each key and should return true to KEEP, false to REMOVE.
-    pub fn retain_with_compactor(&mut self, mut predicate: impl FnMut(&[u8]) -> bool) {
-        self.data.retain(|k, _| predicate(k.as_ref()));
+    // todo compactor API should change so that we don't have to expose IndexWalPosition
+    /// Accessor for self.data, only to be used for the compaction callback.
+    pub fn data_for_compaction(&mut self) -> &mut BTreeMap<Bytes, IndexWalPosition> {
+        &mut self.data
     }
 
     /// Apply given update function to a value with a given key.
@@ -602,39 +602,5 @@ mod tests {
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 6]));
         assert_eq!(next.1, WalPosition::test_value(3));
-    }
-
-    #[test]
-    fn test_retain_with_compactor() {
-        let mut table = IndexTable::default();
-        // Insert entries with prefix pattern (first 2 bytes are ObjectID)
-        table.insert(vec![1, 2, 100].into(), WalPosition::test_value(1));
-        table.insert(vec![1, 2, 101].into(), WalPosition::test_value(2));
-        table.insert(vec![3, 4, 100].into(), WalPosition::test_value(3));
-        table.insert(vec![3, 4, 101].into(), WalPosition::test_value(4));
-        table.insert(vec![5, 6, 100].into(), WalPosition::test_value(5));
-
-        assert_eq!(table.len(), 5);
-
-        // Compactor that keeps only the first entry for each prefix (first 2 bytes)
-        let mut previous: Option<Vec<u8>> = None;
-        table.retain_with_compactor(|key| {
-            const PREFIX_SIZE: usize = 2;
-            if let Some(prev) = &previous {
-                if prev[..PREFIX_SIZE] == key[..PREFIX_SIZE] {
-                    return false; // Remove - same prefix as previous
-                }
-            }
-            previous = Some(key[..PREFIX_SIZE].to_vec());
-            true // Keep - first occurrence of this prefix
-        });
-
-        // Should keep only 3 entries (one per unique prefix)
-        assert_eq!(table.len(), 3);
-        assert!(table.get(&[1, 2, 100]).is_some());
-        assert!(table.get(&[1, 2, 101]).is_none()); // Removed
-        assert!(table.get(&[3, 4, 100]).is_some());
-        assert!(table.get(&[3, 4, 101]).is_none()); // Removed
-        assert!(table.get(&[5, 6, 100]).is_some());
     }
 }

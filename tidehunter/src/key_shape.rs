@@ -1,6 +1,7 @@
 use crate::cell::CellId;
 use crate::db::MAX_KEY_LEN;
 use crate::index::index_format::IndexFormatType;
+use crate::index::index_table::IndexWalPosition;
 use crate::math;
 use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::relocation::RelocationFilter;
@@ -10,6 +11,7 @@ use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Debug;
 use std::num::NonZeroUsize;
@@ -109,11 +111,9 @@ pub(crate) struct BloomFilterParams {
     pub count: u32,
 }
 
-/// Compactor factory function that creates a stateful predicate for index compaction.
-/// Returns a closure that is called for each key during iteration.
-/// The returned closure returns true to KEEP the entry, false to REMOVE it.
-/// Using a factory pattern allows the predicate to maintain state without requiring synchronization.
-pub type Compactor = Box<dyn Fn() -> Box<dyn FnMut(&[u8]) -> bool> + Send + Sync>;
+// todo - we want better compactor API that does not expose too much internal details
+// todo - make mod wal private
+pub type Compactor = Box<dyn Fn(&mut BTreeMap<Bytes, IndexWalPosition>) + Sync + Send>;
 
 #[allow(dead_code)]
 impl Default for KeyShapeBuilder {
@@ -522,15 +522,6 @@ impl KeySpaceConfig {
         Self::default()
     }
 
-    /// Provides optional compactor filter for the key space.
-    /// Compactor is run every time index is written to disk.
-    /// Compactor is called on every key in the index in lexicographical order.
-    /// If compactor returns true the entry is kept, if compactor returns false the entry is deleted.
-    /// The effect of deletion by compactor might not be immediately visible to the user.
-    ///
-    /// Compactor operates on index keys, not on user keys:
-    /// * If key space have index key reduction enabled, the compactor will be called with reduced version of keys.
-    /// * If key space uses Hash indexing, compactor will receive index hashes, not original keys.
     pub fn with_compactor(mut self, compactor: Compactor) -> Self {
         self.compactor = Some(Arc::new(compactor));
         self
