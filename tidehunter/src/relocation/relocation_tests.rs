@@ -867,8 +867,6 @@ fn test_index_based_relocation_with_target_position() {
 #[test]
 fn test_compute_target_position_from_ratio() {
     use crate::relocation::compute_target_position_from_ratio;
-    use std::thread;
-    use std::time::Duration;
 
     let dir = tempdir::TempDir::new("test_compute_ratio").unwrap();
     let config = Arc::new(Config::small());
@@ -886,8 +884,7 @@ fn test_compute_target_position_from_ratio() {
         let value = format!("value_{}", i).into_bytes();
         db.insert(ks, key, value).unwrap();
     }
-    // Wait for background flusher to settle
-    thread::sleep(Duration::from_millis(10));
+    db.large_table.flusher.barrier();
 
     let min_pos = db.wal.min_wal_position();
     let last_pos = db.wal_writer.last_processed().as_u64();
