@@ -319,15 +319,15 @@ impl RelocationDriver {
                 / 100)
                 .max(db.wal.wal_file_size());
         // find target cut-off position
-        let mut target_position = None;
+        let mut terminal_position = 0;
         loop {
             let entry = wal_iterator.next();
             if matches!(entry, Err(WalError::Crc(_))) {
                 break;
             }
             let (position, raw_entry) = entry?;
-            if position.offset() >= max_target_position.min(upper_limit) {
-                target_position = Some(position);
+            if position.offset() >= upper_limit {
+                terminal_position = position.offset();
                 break;
             }
             if let WalEntry::Record(ks, key, value, _relocated) = WalEntry::from_bytes(raw_entry) {
@@ -335,19 +335,21 @@ impl RelocationDriver {
                 if let Some(filter) = ksd.relocation_filter()
                     && let Decision::StopRelocation = filter(&key, &value)
                 {
-                    target_position = Some(position);
+                    terminal_position = position.offset();
                     break;
                 }
             }
         }
-        let Some(target_position) = target_position else {
-            return Ok(());
-        };
+        let mut target_position = terminal_position.min(max_target_position);
+        target_position -= target_position % db.wal.wal_file_size();
         self.metrics
             .relocation_target_position
-            .set(target_position.offset() as i64);
+            .set(target_position as i64);
+        self.metrics
+            .relocation_terminal_position
+            .set(terminal_position as i64);
         // ensure the target position is big enough to cut
-        if target_position.offset() < (db.wal.wal_file_size() + min_wal_position) {
+        if target_position < (db.wal.wal_file_size() + min_wal_position) {
             return Ok(());
         }
         let mut current_cell = CellReference::first(&db, KeySpace::first());
@@ -361,22 +363,19 @@ impl RelocationDriver {
                     &cell.cell_id,
                     db.as_ref(),
                     None,
-                    Some(target_position.offset()),
+                    Some(terminal_position),
                 )?;
                 continue;
             }
             // For keyspaces without relocation filter, relocate entries
-            let mut batch = RelocatedWriteBatch::new(
-                cell.keyspace,
-                cell.cell_id.clone(),
-                target_position.offset(),
-            );
+            let mut batch =
+                RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), target_position);
             let index = db
                 .large_table
                 .get_cell_index(db.ks_context(cell.keyspace), &cell.cell_id, db.as_ref())?
                 .unwrap_or(IndexTable::default().into());
             for (_reduced_key, position) in index.iter() {
-                if position.offset() < target_position.offset()
+                if position.offset() < target_position
                     && let Some((key, value)) = db.read_record(position)?
                 {
                     batch.write(key, value);
@@ -388,9 +387,9 @@ impl RelocationDriver {
             }
             db.write_relocated_batch(batch)?;
         }
-        db.rebuild_control_region_from(target_position.offset())?;
+        db.rebuild_control_region_from(target_position)?;
         db.wal_writer.gc(std::cmp::min(
-            target_position.offset(),
+            target_position,
             db.control_region_store.lock().last_position(),
         ))?;
         Ok(())

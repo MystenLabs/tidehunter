@@ -161,7 +161,7 @@ impl WalMapperThread {
         let mut num_files_deleted = 0;
         for idx in 0..wal_files.files.len() {
             let file_id = WalFileId(wal_files.min_file_id.0 + idx as u64);
-            if self.layout.wal_file_range(file_id).end >= watermark {
+            if self.layout.wal_file_range(file_id).end > watermark {
                 break;
             }
             let path = self.layout.wal_file_name(&wal_files.base_path, file_id);
