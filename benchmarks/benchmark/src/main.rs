@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 use tidehunter::key_shape::{KeyShape, KeySpaceConfig, KeyType};
-use tidehunter::{compute_target_position_from_ratio, RelocationStrategy};
+use tidehunter::{RelocationStrategy, compute_target_position_from_ratio};
 
 mod configs;
 mod metrics;
@@ -557,7 +557,7 @@ impl StressThread {
                 }
             } else {
                 // Perform a write operation
-                let should_overwrite = thread_rng.gen::<f64>() < self.parameters.overwrite_ratio
+                let should_overwrite = thread_rng.r#gen::<f64>() < self.parameters.overwrite_ratio
                     && local_write_pos_counter > 0;
 
                 let pos = if should_overwrite {

@@ -32,7 +32,9 @@ fn parse_relocation_config(s: &str) -> Result<RelocationConfig, anyhow::Error> {
         }
         Ok(RelocationConfig::Index { ratio: Some(ratio) })
     } else {
-        anyhow::bail!("Invalid relocation strategy: use 'wal', 'index', or 'index:<ratio>' (e.g., 'index:0.5')");
+        anyhow::bail!(
+            "Invalid relocation strategy: use 'wal', 'index', or 'index:<ratio>' (e.g., 'index:0.5')"
+        );
     }
 }
 
