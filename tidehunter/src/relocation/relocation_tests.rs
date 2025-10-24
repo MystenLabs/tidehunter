@@ -827,9 +827,7 @@ fn test_index_based_relocation_with_target_position() {
     db.rebuild_control_region().unwrap();
 
     // Run relocation with target_position
-    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(Some(
-        mid_position.as_u64(),
-    )));
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(Some(mid_position)));
 
     // Get metrics
     let kept = metrics
@@ -861,7 +859,7 @@ fn test_index_based_relocation_with_target_position() {
     let watermark = RelocationWatermarks::read_or_create(dir.path())
         .unwrap()
         .data;
-    assert_eq!(watermark.target_position, Some(mid_position.as_u64()));
+    assert_eq!(watermark.target_position, Some(mid_position));
 }
 
 #[test]
