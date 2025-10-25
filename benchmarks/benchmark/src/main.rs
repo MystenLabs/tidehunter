@@ -156,16 +156,10 @@ pub fn main() {
                         };
 
                         // Start relocation and let it run to completion
-                        match db_clone.start_relocation_with_strategy(strategy) {
-                            Ok(_) => {
-                                // Take a 60 second break between relocations to reduce contention
-                                thread::sleep(Duration::from_secs(30));
-                            }
-                            Err(e) => {
-                                eprintln!("Relocation error: {e}");
-                                thread::sleep(Duration::from_secs(1)); // Brief pause on error
-                            }
-                        }
+                        db_clone.start_blocking_relocation_with_strategy(strategy);
+
+                        // Take a 30 second break between relocations
+                        thread::sleep(Duration::from_secs(30));
                     }
                 });
             }

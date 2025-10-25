@@ -858,7 +858,6 @@ impl Db {
         self.start_blocking_relocation_with_strategy(self.config.relocation_strategy)
     }
 
-    #[cfg(test)]
     pub fn start_blocking_relocation_with_strategy(&self, strategy: RelocationStrategy) {
         let (sender, receiver) = mpsc::channel();
         self.relocator
