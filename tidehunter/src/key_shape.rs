@@ -234,10 +234,6 @@ impl KeySpaceDesc {
         cell.mutex_seed() % self.num_mutexes()
     }
 
-    pub(crate) fn next_mutex(&self, mutex: usize, reverse: bool) -> Option<usize> {
-        math::next_bounded(mutex, self.num_mutexes(), reverse)
-    }
-
     // Reverse of locate_cell
     pub(crate) fn cell_by_location(&self, row: usize, offset: usize) -> usize {
         offset * self.num_mutexes() + row
@@ -514,6 +510,12 @@ impl KeySpaceDesc {
         );
 
         (from_cell, to_cell)
+    }
+
+    /// Returns whether this key space uses byte-addressed cells and needs large table cell index.
+    /// assume_bytes_id can be used on cell ids for this key space if this returns true.
+    pub(crate) fn needs_large_table_cell_index(&self) -> bool {
+        matches!(self.key_type, KeyType::PrefixedUniform(_))
     }
 }
 

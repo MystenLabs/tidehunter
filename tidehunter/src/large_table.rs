@@ -10,7 +10,7 @@ use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
-use crate::primitives::range_from_excluding;
+use crate::primitives::range_from_excluding::next_key_in_tree;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::relocation::updates::RelocationUpdates;
 use crate::runtime;
@@ -20,11 +20,12 @@ use crate::wal::tracker::WalGuard;
 use bloom::{ASMS, BloomFilter};
 use lru::LruCache;
 use minibytes::Bytes;
-use parking_lot::MutexGuard;
+use parking_lot::{MutexGuard, RwLock};
 use rand::rngs::ThreadRng;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -62,6 +63,14 @@ enum LargeTableEntryState {
 struct KsTable {
     context: KsContext,
     rows: ShardedMutex<Row>,
+    /// For PrefixedUniform keyspaces, tracks all cells to enable O(log n) iteration.
+    /// For other keyspace types, this is empty.
+    /// This might contain cell that was already deleted from the large table.
+    /// Drop cells currently does not delete from this index.
+    ///
+    /// The write lock on this lock is acquire within scope of row lock.
+    /// No new locks are acquired withing the scope of cell_index lock(read or write).
+    cell_index: RwLock<BTreeSet<CellIdBytesContainer>>,
 }
 
 struct Row {
@@ -180,7 +189,26 @@ impl LargeTable {
                     .large_table_init_mcs
                     .with_label_values(&[ks.name()])
                     .inc_by(bloom_filter_start.elapsed().as_micros() as u64);
-                KsTable { context, rows }
+
+                // For PrefixedUniform keyspaces, build cell index for fast iteration
+                let cell_index = match ks.key_type() {
+                    KeyType::PrefixedUniform(_) => {
+                        let mut cells = BTreeSet::new();
+                        for row_snapshot in ks_snapshot {
+                            for cell in row_snapshot.keys() {
+                                cells.insert(cell.assume_bytes_id().clone());
+                            }
+                        }
+                        RwLock::new(cells)
+                    }
+                    KeyType::Uniform(_) => Default::default(),
+                };
+
+                KsTable {
+                    context,
+                    rows,
+                    cell_index,
+                }
             })
             .collect();
         Self {
@@ -206,7 +234,7 @@ impl LargeTable {
         self.fp.fp_insert_before_lock();
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
-        let entry = row.entry_mut(&cell);
+        let (entry, created) = row.entry_mut(&cell);
         if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
@@ -214,7 +242,17 @@ impl LargeTable {
                 .inc();
             return Ok(());
         }
+
+        if created && context.ks_config.needs_large_table_cell_index() {
+            let ks_table = self.ks_table(&context.ks_config);
+            ks_table
+                .cell_index
+                .write()
+                .insert(cell.assume_bytes_id().clone());
+        }
+
         entry.insert(k.clone(), v);
+
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
             // Drop the guard before flushing to ensure last_processed is updated
@@ -255,7 +293,7 @@ impl LargeTable {
         self.fp.fp_remove_before_lock();
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
-        let entry = row.entry_mut(&cell);
+        let (entry, _) = row.entry_mut(&cell);
         if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
@@ -410,7 +448,7 @@ impl LargeTable {
     }
 
     fn row_by_mutex(&self, context: &KsContext, mutex: usize) -> MutexGuard<'_, Row> {
-        let ks_table = self.ks_table(&context.ks_config);
+        let ks_table = self.ks_rows(&context.ks_config);
         ks_table.lock(mutex, &context.large_table_contention)
     }
 
@@ -426,7 +464,7 @@ impl LargeTable {
         cell: &CellId,
     ) -> MutexGuard<'_, Row> {
         let mutex = context.ks_config.mutex_for_cell(cell);
-        let ks_table = self.ks_table(&context.ks_config);
+        let ks_table = self.ks_rows(&context.ks_config);
 
         loop {
             let mut row = ks_table.lock(mutex, &context.large_table_contention);
@@ -446,7 +484,7 @@ impl LargeTable {
 
     /// Get a shared reference to the index for a specific cell.
     /// Returns None if the cell doesn't exist.
-    pub fn get_cell_index<L: Loader>(
+    pub fn get_index_for_cell<L: Loader>(
         &self,
         context: &KsContext,
         cell_id: &CellId,
@@ -487,12 +525,18 @@ impl LargeTable {
         entry.sync_flush(loader, true, relocation_updates, relocation_cutoff)
     }
 
-    fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
+    fn ks_rows(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
         &self
             .table
             .get(ks.id().as_usize())
             .expect("Table not found for ks")
             .rows
+    }
+
+    fn ks_table(&self, ks: &KeySpaceDesc) -> &KsTable {
+        self.table
+            .get(ks.id().as_usize())
+            .expect("Table not found for ks")
     }
 
     /// Provides a snapshot of this large table along with replay position in the wal for the snapshot.
@@ -645,7 +689,7 @@ impl LargeTable {
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
     ) -> Result<Option<IteratorResult<WalPosition>>, L::Error> {
-        let ks_table = self.ks_table(&context.ks_config);
+        let ks_table = self.ks_rows(&context.ks_config);
         loop {
             let next_in_cell = {
                 let row = context.ks_config.mutex_for_cell(&cell);
@@ -781,16 +825,11 @@ impl LargeTable {
                 config.next_cell(ks, *cell, reverse)
             }
             (KeyType::PrefixedUniform(_), CellId::Bytes(bytes)) => {
-                let mut mutex = ks.mutex_for_cell(cell);
-                loop {
-                    let row = self.row_by_mutex(context, mutex);
-                    if let Some(next) = row.entries.next_tree_cell(bytes, reverse) {
-                        return Some(CellId::Bytes(next.clone()));
-                    };
-                    // todo we can optimize this by keeping hints to a next non-empty mutex in the row
-                    let next_mutex = ks.next_mutex(mutex, reverse)?;
-                    mutex = next_mutex;
-                }
+                let ks_table = self.ks_table(&context.ks_config);
+
+                let next_cell = next_key_in_tree(&ks_table.cell_index.read(), bytes, reverse);
+
+                next_cell.map(CellId::Bytes)
             }
             (KeyType::Uniform(_), CellId::Bytes(_)) => {
                 panic!("next_cell with uniform key type but bytes cell id")
@@ -862,9 +901,9 @@ impl LargeTable {
         position: WalPosition,
     ) {
         let row = context.ks_config.mutex_for_cell(cell);
-        let ks_table = self.ks_table(&context.ks_config);
+        let ks_table = self.ks_rows(&context.ks_config);
         let mut row = ks_table.lock(row, &context.large_table_contention);
-        let entry = row.entry_mut(cell);
+        let (entry, _is_new_cell) = row.entry_mut(cell);
         entry.update_flushed_index(original_index, position);
     }
 
@@ -898,7 +937,7 @@ impl LargeTable {
 }
 
 impl Row {
-    pub fn entry_mut(&mut self, id: &CellId) -> &mut LargeTableEntry {
+    pub fn entry_mut(&mut self, id: &CellId) -> (&mut LargeTableEntry, bool) {
         self.entries.entry_mut(id, &self.context)
     }
 
@@ -1460,38 +1499,39 @@ impl Default for LargeTableEntryState {
 }
 
 impl Entries {
-    pub fn entry_mut(&mut self, cell_id: &CellId, context: &KsContext) -> &mut LargeTableEntry {
+    /// Return cell for the given CellId. Create cell if it does not exist for byte-addressed cell spaces.
+    /// Returns the cell and whether cell was just crated.
+    pub fn entry_mut(
+        &mut self,
+        cell_id: &CellId,
+        context: &KsContext,
+    ) -> (&mut LargeTableEntry, bool) {
         match self {
             Entries::Array(num_mutexes, arr) => {
                 let CellId::Integer(cell) = cell_id else {
                     panic!("Invalid cell id for array entry list: {cell_id:?}");
                 };
                 let offset = *cell / *num_mutexes;
-                arr.get_mut(offset).unwrap()
+                (arr.get_mut(offset).unwrap(), false)
             }
             Entries::Tree(tree) => {
                 let CellId::Bytes(cell) = cell_id else {
                     panic!("Invalid cell id for tree entry list: {cell_id:?}");
                 };
-                // todo this clones key on every get query - need a fix
-                tree.entry(cell.clone()).or_insert_with(|| {
-                    let unload_jitter = context
-                        .config
-                        .gen_dirty_keys_jitter(&mut ThreadRng::default());
-                    // todo unify places where LargeTableEntry is created
-                    LargeTableEntry::new_empty(context.clone(), cell_id.clone(), unload_jitter)
-                })
-                // This is ideally what it should look like(but does not work w/ current borrow checker):
-                // if let Some(entry) = tree.get_mut(cell) {
-                //     entry
-                // } else {
-                //     let Entry::Vacant(va) =  tree.entry(cell.clone()) else {
-                //         unreachable!()
-                //     };
-                //     let unload_jitter = context.config.gen_dirty_keys_jitter(&mut ThreadRng::default());
-                //     let new_entry = LargeTableEntry::new_empty(context.clone(), cell_id.clone(), unload_jitter);
-                //     va.insert(new_entry)
-                // }
+                match tree.entry(cell.clone()) {
+                    Entry::Occupied(o) => (o.into_mut(), false),
+                    Entry::Vacant(v) => {
+                        let unload_jitter = context
+                            .config
+                            .gen_dirty_keys_jitter(&mut ThreadRng::default());
+                        let new_entry = LargeTableEntry::new_empty(
+                            context.clone(),
+                            cell_id.clone(),
+                            unload_jitter,
+                        );
+                        (v.insert(new_entry), true)
+                    }
+                }
             }
         }
     }
@@ -1502,7 +1542,10 @@ impl Entries {
         context: &KsContext,
     ) -> Option<&mut LargeTableEntry> {
         match self {
-            Entries::Array(_, _) => Some(self.entry_mut(cell_id, context)),
+            Entries::Array(_, _) => {
+                let (entry, _) = self.entry_mut(cell_id, context);
+                Some(entry)
+            }
             Entries::Tree(tree) => {
                 let CellId::Bytes(cell) = cell_id else {
                     panic!("Invalid cell id for tree entry list: {cell_id:?}");
@@ -1541,17 +1584,6 @@ impl Entries {
                 }
             }
         }
-    }
-
-    fn next_tree_cell(
-        &self,
-        cell: &CellIdBytesContainer,
-        reverse: bool,
-    ) -> Option<&CellIdBytesContainer> {
-        let Entries::Tree(tree) = self else {
-            panic!("next_cell_id can only be called on tree entries");
-        };
-        range_from_excluding::next_key_in_tree(tree, cell, reverse)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1623,6 +1655,7 @@ mod tests {
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
     use crate::wal::Wal;
     use crate::wal::layout::WalKind;
+    use smallvec::SmallVec;
     use std::io;
 
     #[test]
@@ -1649,9 +1682,9 @@ mod tests {
             wal.as_ref(),
         );
         let (mut row, cell) = l.row(l.ks_context(a), &[]);
-        assert_eq!(row.entry_mut(&cell).context.name(), "a");
+        assert_eq!(row.entry_mut(&cell).0.context.name(), "a");
         let (mut row, cell) = l.row(l.ks_context(b), &[5, 2, 3, 4]);
-        assert_eq!(row.entry_mut(&cell).context.name(), "b");
+        assert_eq!(row.entry_mut(&cell).0.context.name(), "b");
     }
 
     #[test]
@@ -2026,5 +2059,152 @@ mod tests {
             .collect(),
         ]]);
         assert_eq!(invalid_container.pct_wal_position(50), None);
+    }
+
+    #[test]
+    fn test_next_cell_prefixed_uniform() {
+        // This test verifies that next_cell correctly handles PrefixedUniform key types
+        // where cells are distributed across mutexes by hashing.
+        // The fix ensures cells are returned in sorted order regardless of mutex distribution.
+
+        let config = Arc::new(Config::small());
+        let mut ks_builder = KeyShapeBuilder::new();
+
+        // Create a PrefixedUniform keyspace with 3-byte prefix and 1024 mutexes
+        let ks_id = ks_builder.add_key_space(
+            "test",
+            36,   // key_size in bytes
+            1024, // mutexes (must be power of 2)
+            KeyType::prefix_uniform(3, 0),
+        );
+        let shape = ks_builder.build();
+        let tmp_dir = tempdir::TempDir::new("test_next_cell_prefixed").unwrap();
+        let wal = Wal::open(
+            tmp_dir.path(),
+            config.wal_layout(WalKind::Replay),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        let table = LargeTable::from_unloaded(
+            &shape,
+            &LargeTableContainer::new_from_key_shape(&shape, SnapshotEntryData::empty()),
+            config.clone(),
+            IndexFlusher::new_unstarted_for_test(),
+            Metrics::new(),
+            wal.as_ref(),
+        );
+
+        let context = table.ks_context(ks_id);
+
+        // Insert test cells with prefixes that will hash to different mutexes
+        // Using prefixes: [0,0,1], [0,0,2], [0,0,5], [0,0,10], [0,0,255]
+        let test_cells = vec![
+            vec![0u8, 0, 1],
+            vec![0, 0, 2],
+            vec![0, 0, 5],
+            vec![0, 0, 10],
+            vec![0, 0, 255],
+        ];
+
+        // Insert a key into each cell to make them non-empty
+        for cell_bytes in &test_cells {
+            let (mut row, cell) = table.row(&context, cell_bytes);
+            let (entry, _) = row.entry_mut(&cell);
+
+            // Create a key for this cell (prefix + random bytes)
+            let mut key = cell_bytes.clone();
+            key.extend_from_slice(&[0u8; 33]); // Pad to 36 bytes total
+
+            entry
+                .data
+                .make_mut()
+                .insert(Bytes::from(key), WalPosition::test_value(1));
+
+            // Manually update cell_index since we're bypassing LargeTable::insert
+            if let CellId::Bytes(bytes) = &cell {
+                let ks_table = table.ks_table(&context.ks_config);
+                ks_table.cell_index.write().insert(bytes.clone());
+            }
+        }
+
+        // Test forward iteration: should visit cells in sorted order
+        let mut current_cell = CellId::Bytes(SmallVec::from_slice(&[0u8, 0, 0]));
+        let mut visited_cells = Vec::new();
+
+        for _ in 0..10 {
+            // Safety limit
+            match table.next_cell(&context, &current_cell, false) {
+                Some(next_cell) => {
+                    let bytes = next_cell.assume_bytes_id();
+                    visited_cells.push(bytes.to_vec());
+                    current_cell = next_cell;
+                }
+                None => break,
+            }
+        }
+
+        // Verify forward iteration found all cells in sorted order
+        assert_eq!(visited_cells.len(), 5, "Should find all 5 test cells");
+        assert_eq!(visited_cells[0], vec![0u8, 0, 1]);
+        assert_eq!(visited_cells[1], vec![0, 0, 2]);
+        assert_eq!(visited_cells[2], vec![0, 0, 5]);
+        assert_eq!(visited_cells[3], vec![0, 0, 10]);
+        assert_eq!(visited_cells[4], vec![0, 0, 255]);
+
+        // Test reverse iteration: should visit cells in reverse sorted order
+        let mut current_cell = CellId::Bytes(SmallVec::from_slice(&[255u8, 255, 255]));
+        let mut visited_cells_reverse = Vec::new();
+
+        for _ in 0..10 {
+            // Safety limit
+            match table.next_cell(&context, &current_cell, true) {
+                Some(next_cell) => {
+                    let bytes = next_cell.assume_bytes_id();
+                    visited_cells_reverse.push(bytes.to_vec());
+                    current_cell = next_cell;
+                }
+                None => break,
+            }
+        }
+
+        // Verify reverse iteration found all cells in reverse sorted order
+        assert_eq!(
+            visited_cells_reverse.len(),
+            5,
+            "Should find all 5 test cells in reverse"
+        );
+        assert_eq!(visited_cells_reverse[0], vec![0u8, 0, 255]);
+        assert_eq!(visited_cells_reverse[1], vec![0, 0, 10]);
+        assert_eq!(visited_cells_reverse[2], vec![0, 0, 5]);
+        assert_eq!(visited_cells_reverse[3], vec![0, 0, 2]);
+        assert_eq!(visited_cells_reverse[4], vec![0, 0, 1]);
+
+        // Verify reverse is the exact reverse of forward
+        let forward_reversed: Vec<_> = visited_cells.into_iter().rev().collect();
+        assert_eq!(
+            forward_reversed, visited_cells_reverse,
+            "Reverse iteration should be exact reverse of forward"
+        );
+
+        // Test iteration from a specific cell (not the start/end)
+        let start_cell = CellId::Bytes(SmallVec::from_slice(&[0u8, 0, 2]));
+        let next = table
+            .next_cell(&context, &start_cell, false)
+            .expect("Should find next cell after [0,0,2]");
+        assert_eq!(
+            next.assume_bytes_id().as_slice(),
+            &[0u8, 0, 5],
+            "Next cell after [0,0,2] should be [0,0,5]"
+        );
+
+        let prev = table
+            .next_cell(&context, &start_cell, true)
+            .expect("Should find previous cell before [0,0,2]");
+        assert_eq!(
+            prev.assume_bytes_id().as_slice(),
+            &[0u8, 0, 1],
+            "Previous cell before [0,0,2] should be [0,0,1]"
+        );
     }
 }

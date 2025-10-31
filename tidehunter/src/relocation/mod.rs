@@ -372,7 +372,7 @@ impl RelocationDriver {
                 RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), target_position);
             let index = db
                 .large_table
-                .get_cell_index(db.ks_context(cell.keyspace), &cell.cell_id, db.as_ref())?
+                .get_index_for_cell(db.ks_context(cell.keyspace), &cell.cell_id, db.as_ref())?
                 .unwrap_or(IndexTable::default().into());
             for (_reduced_key, position) in index.iter() {
                 if position.offset() < target_position
@@ -429,7 +429,7 @@ impl RelocationDriver {
         let mut removed_count = 0;
 
         // Phase A: Get shared reference to cell index
-        let index = match db.large_table.get_cell_index(
+        let index = match db.large_table.get_index_for_cell(
             db.ks_context(cell_ref.keyspace),
             &cell_ref.cell_id,
             db.as_ref(),
