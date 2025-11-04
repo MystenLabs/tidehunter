@@ -601,6 +601,13 @@ impl Db {
             }
         }
         let Some(record) = self.read_record(position)? else {
+            eprintln!(
+                "tidehunter read; entry {:?} is missing for table {:?} at position {:?} with min position {}",
+                k,
+                context.name(),
+                position.offset(),
+                self.min_wal_position()
+            );
             return Ok(None);
         };
         let (wal_key, v) = record;
@@ -672,11 +679,19 @@ impl Db {
             match entry {
                 WalEntry::Record(ks, k, v, relocated) => {
                     metrics.replayed_wal_records.inc();
+                    let context = contexts.ks_context(ks);
                     if relocated {
+                        let large_table_result = large_table.get(&context, &k, indexes)?;
+                        eprintln!(
+                            "wal relocated replay {:?} {:?} {} {:?}",
+                            context.name(),
+                            k,
+                            position.offset(),
+                            large_table_result,
+                        );
                         // Nothing needs to be done for the relocated record
                         continue;
                     }
-                    let context = contexts.ks_context(ks);
                     let reduced_key = context.ks_config.reduced_key_bytes(k);
                     let guard = WalGuard::replay_guard(position);
                     large_table.insert(context, reduced_key, guard, &v, indexes)?;

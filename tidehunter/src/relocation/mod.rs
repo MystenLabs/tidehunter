@@ -378,6 +378,7 @@ impl RelocationDriver {
                 if position.offset() < target_position
                     && let Some((key, value)) = db.read_record(position)?
                 {
+                    eprintln!("relocating entry {:?} for table {:?}", key, ks.name());
                     batch.write(key, value);
                     self.metrics
                         .relocation_kept
@@ -388,6 +389,12 @@ impl RelocationDriver {
             db.write_relocated_batch(batch)?;
         }
         db.rebuild_control_region_from(target_position)?;
+        eprintln!(
+            "finalizing relocation run with watermarks CR: {}, target: {}, terminal: {}",
+            db.control_region_store.lock().last_position(),
+            target_position,
+            terminal_position
+        );
         db.wal_writer.gc(std::cmp::min(
             target_position,
             db.control_region_store.lock().last_position(),
