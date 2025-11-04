@@ -182,6 +182,10 @@ impl IndexFlusherThread {
             FlushKind::Barrier(_) => return None,
         };
 
+        if let Some(relocation_updates) = relocation_updates {
+            relocation_updates.apply(&mut merged_index);
+        }
+
         match relocation_cutoff {
             Some(cutoff) => {
                 let length = merged_index.len();
@@ -193,12 +197,7 @@ impl IndexFlusherThread {
             // TODO: Used only if relocation doesn't call sync flush. Remove if no such implementation is needed anymore
             None => merged_index.retain_above_position(loader.min_wal_position()),
         }
-        merged_index.retain_above_position(relocation_cutoff.unwrap_or(loader.min_wal_position()));
         Self::run_compactor(ctx, &mut merged_index);
-
-        if let Some(relocation_updates) = relocation_updates {
-            relocation_updates.apply(&mut merged_index);
-        }
 
         // Always flush everything to disk to avoid data loss
         // The filtering will happen during unmerge_flushed
