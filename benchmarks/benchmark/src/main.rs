@@ -179,11 +179,6 @@ pub fn main() {
             let storage = LmdbStorage::open(&path);
             storage as Arc<dyn Storage>
         }
-        Backend::Fjall => {
-            use crate::storage::fjall::FjallStorage;
-            let storage = FjallStorage::open(&path);
-            storage as Arc<dyn Storage>
-        }
         Backend::Faster => {
             #[cfg(all(target_os = "linux", feature = "enable-faster"))]
             {
