@@ -129,6 +129,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         let working_dir = self.settings.working_dir.display();
         let url = &self.settings.repository.url;
+        let repo_name = self.settings.repository_name();
         let basic_commands = [
             "sudo apt-get update",
             "sudo apt-get -y upgrade",
@@ -153,6 +154,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Ensure proper ownership of the working directory
             &format!("sudo chown -R $USER:$USER {working_dir}"),
             // Clone the repo
+            &format!("[ -d {repo_name} ] && rm -rf {repo_name}"),
             &format!("(git clone {url} || true)"),
         ];
 

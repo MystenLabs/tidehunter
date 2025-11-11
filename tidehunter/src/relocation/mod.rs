@@ -83,7 +83,6 @@ impl Default for RelocationStrategy {
 pub enum RelocationCommand {
     Start(RelocationStrategy),
     Cancel(mpsc::Sender<()>),
-    #[cfg(test)]
     StartBlocking(RelocationStrategy, mpsc::Sender<()>),
 }
 
@@ -168,7 +167,6 @@ impl RelocationDriver {
                 RelocationCommand::Cancel(callback) => {
                     callback.send(()).expect("failed to send ");
                 }
-                #[cfg(test)]
                 RelocationCommand::StartBlocking(strategy, cb) => {
                     self.relocation_run(strategy).unwrap();
                     cb.send(()).unwrap()
@@ -407,7 +405,6 @@ impl RelocationDriver {
                 }
                 Err(mpsc::TryRecvError::Empty) => return false,
                 Err(mpsc::TryRecvError::Disconnected) => return true,
-                #[cfg(test)]
                 Ok(RelocationCommand::StartBlocking(_, cb)) => cb.send(()).unwrap(),
             }
         }

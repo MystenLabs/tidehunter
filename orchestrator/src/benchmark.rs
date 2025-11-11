@@ -99,10 +99,8 @@ pub mod test {
 
     #[test]
     fn split_benchmark_parameters() {
-        let parameters = BenchmarkParametersGeneric::<TestConfig>::new(
-            Default::default(),
-            vec![TestConfig::default(); 10],
-        );
+        let parameters =
+            BenchmarkParametersGeneric::<TestConfig>::new(Default::default(), vec![TestConfig; 10]);
         let split = parameters.split(3);
         assert_eq!(split.len(), 4);
         assert_eq!(split[0].target_configs.len(), 3);

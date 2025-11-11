@@ -6,7 +6,8 @@ use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
 use configs::{
-    Backend, KeyLayout, ReadMode, StressArgs, StressClientParameters, StressTestConfigs,
+    Backend, KeyLayout, ReadMode, RelocationConfig, StressArgs, StressClientParameters,
+    StressTestConfigs,
 };
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
@@ -21,6 +22,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 use tidehunter::key_shape::{KeyShape, KeySpaceConfig, KeyType};
+use tidehunter::{RelocationStrategy, compute_target_position_from_ratio};
 
 mod configs;
 mod metrics;
@@ -127,6 +129,41 @@ pub fn main() {
             } else {
                 report!(report, "Periodic snapshot **disabled**");
             }
+
+            // Start continuous relocation if enabled
+            if let Some(ref relocation_config) = config.stress_client_parameters.relocation {
+                report!(
+                    report,
+                    "Starting continuous {:?} relocation",
+                    relocation_config
+                );
+                let db_clone = storage.db.clone();
+                let relocation_config = relocation_config.clone();
+                thread::spawn(move || {
+                    loop {
+                        // Convert RelocationConfig to RelocationStrategy for this iteration
+                        let strategy = match &relocation_config {
+                            RelocationConfig::Wal => RelocationStrategy::WalBased,
+                            RelocationConfig::Index { ratio: None } => {
+                                RelocationStrategy::IndexBased(None)
+                            }
+                            RelocationConfig::Index { ratio: Some(r) } => {
+                                // Compute fresh target position from ratio each iteration
+                                let target_position =
+                                    compute_target_position_from_ratio(&db_clone, *r);
+                                RelocationStrategy::IndexBased(target_position)
+                            }
+                        };
+
+                        // Start relocation and let it run to completion
+                        db_clone.start_blocking_relocation_with_strategy(strategy);
+
+                        // Take a 30 second break between relocations
+                        thread::sleep(Duration::from_secs(30));
+                    }
+                });
+            }
+
             Arc::new(storage)
         }
         Backend::Rocksdb => {
@@ -378,6 +415,26 @@ struct StressThread {
 }
 
 impl StressThread {
+    /// Select an existing key position using either uniform or zipf distribution
+    fn select_existing_key<R: Rng>(&self, rng: &mut R, highest_local_pos: usize) -> u64 {
+        let upper_bound = self.global_pos(highest_local_pos) + 1;
+
+        if self.parameters.zipf_exponent != 0.0 && upper_bound > 1 {
+            // Use zipf distribution (hot keys)
+            let zipf = Zipf::new(upper_bound, self.parameters.zipf_exponent).unwrap();
+            let sample = zipf.sample(rng) as u64;
+            // The Zipf distribution generates number from 1 to N, where lower numbers are
+            // more likely. We want to read higher positions more often, so we subtract
+            // the sample from the upper bound.
+            upper_bound - sample
+        } else if upper_bound > 0 {
+            // Uniform distribution
+            rng.gen_range(0..upper_bound)
+        } else {
+            0
+        }
+    }
+
     pub fn run_writes(self) {
         #[allow(clippy::let_underscore_lock)] // RWLock here acts as a barrier
         let _ = self.start_lock.read();
@@ -391,7 +448,9 @@ impl StressThread {
                 .bench_writes
                 .with_label_values(&[self.db.name()])
                 .observe(latency as f64);
-            self.latency.increment(latency as u64).unwrap();
+            if self.latency.increment(latency as u64).is_err() {
+                self.latency_errors.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -432,22 +491,7 @@ impl StressThread {
                 // Read from the whole keyspace, which expands as writes are made. The highest
                 // key position this thread can read is determined by the latest key it has written.
                 let highest_local_pos = local_write_pos_counter.saturating_sub(1);
-                let read_pos_upper_bound = self.global_pos(highest_local_pos) + 1;
-
-                let pos = if self.parameters.zipf_exponent != 0.0 && read_pos_upper_bound > 1 {
-                    let zipf =
-                        Zipf::new(read_pos_upper_bound, self.parameters.zipf_exponent).unwrap();
-                    let sample = zipf.sample(&mut thread_rng) as u64;
-
-                    // The Zipf distribution generates number from 1 to N, where lower numbers are
-                    // more likely. We want to read higher positions more often, so we subtract
-                    // the sample from the upper bound.
-                    read_pos_upper_bound - sample
-                } else if read_pos_upper_bound > 0 {
-                    thread_rng.gen_range(0..read_pos_upper_bound)
-                } else {
-                    0
-                };
+                let pos = self.select_existing_key(&mut thread_rng, highest_local_pos);
 
                 let timer;
                 match self.parameters.read_mode {
@@ -506,9 +550,20 @@ impl StressThread {
                     self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
-                // Perform a write operation to a new key beyond the initial dataset.
-                let pos = self.global_pos(local_write_pos_counter);
-                local_write_pos_counter += 1;
+                // Perform a write operation
+                let should_overwrite = thread_rng.r#gen::<f64>() < self.parameters.overwrite_ratio
+                    && local_write_pos_counter > 0;
+
+                let pos = if should_overwrite {
+                    // Select existing key to overwrite using same logic as reads
+                    let highest_local_pos = local_write_pos_counter.saturating_sub(1);
+                    self.select_existing_key(&mut thread_rng, highest_local_pos)
+                } else {
+                    // Create new key (current behavior)
+                    let pos = self.global_pos(local_write_pos_counter);
+                    local_write_pos_counter += 1;
+                    pos
+                };
 
                 let (key, value) = self.key_value(pos);
                 let timer = Instant::now();
