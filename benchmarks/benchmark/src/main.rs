@@ -164,20 +164,25 @@ pub fn main() {
                 });
             }
 
-            Arc::new(storage)
+            storage as Arc<dyn Storage>
         }
         Backend::Rocksdb => {
             let storage = RocksStorage::open(&path, false, config.db_parameters.metrics_enabled);
-            Arc::new(storage)
+            storage as Arc<dyn Storage>
         }
         Backend::Blobdb => {
             let storage = RocksStorage::open(&path, true, config.db_parameters.metrics_enabled);
-            Arc::new(storage)
+            storage as Arc<dyn Storage>
         }
         Backend::Lmdb => {
             use crate::storage::lmdb::LmdbStorage;
             let storage = LmdbStorage::open(&path);
-            Arc::new(storage)
+            storage as Arc<dyn Storage>
+        }
+        Backend::Fjall => {
+            use crate::storage::fjall::FjallStorage;
+            let storage = FjallStorage::open(&path);
+            storage as Arc<dyn Storage>
         }
         Backend::Faster => {
             #[cfg(all(target_os = "linux", feature = "enable-faster"))]
