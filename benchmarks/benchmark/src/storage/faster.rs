@@ -3,8 +3,8 @@ use faster_rs::{FasterKv, FasterKvBuilder};
 use minibytes::Bytes;
 use std::cell::Cell;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 // Thread-local state for FASTER session and operation tracking
@@ -18,7 +18,7 @@ thread_local! {
 static SERIAL: AtomicU64 = AtomicU64::new(1);
 
 // Periodic maintenance intervals matching FASTER C++ benchmark patterns
-const REFRESH_INTERVAL: u64 = 64;           // Advance epoch
+const REFRESH_INTERVAL: u64 = 64; // Advance epoch
 const COMPLETE_PENDING_INTERVAL: u64 = 1600; // Flush pending operations
 
 pub struct FasterStorage {
@@ -33,7 +33,7 @@ impl FasterStorage {
         // Create FASTER store with configurable storage directory
         // Using builder pattern to specify disk storage location
         // Configuration matching faster-rs examples
-        let table_size = 1 << 15;  // 32K entries
+        let table_size = 1 << 15; // 32K entries
         let log_size = 17179869184; // 16GB - matches faster-rs examples
 
         let store = FasterKvBuilder::new(table_size, log_size)

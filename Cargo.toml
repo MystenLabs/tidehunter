@@ -9,6 +9,7 @@ members = [
     "scripts/generate_target_configs",
     "tests/concurrent_test",
     "tools/wal_inspector",
+    "orchestrator",
 ]
 resolver = "2"
 

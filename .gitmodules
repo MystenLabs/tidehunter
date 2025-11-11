@@ -1,3 +1,0 @@
-[submodule "third-party/faster-rs"]
-	path = third-party/faster-rs
-	url = https://github.com/zablotchi/faster-rs.git
