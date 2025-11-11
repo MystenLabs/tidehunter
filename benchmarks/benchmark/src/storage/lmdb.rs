@@ -41,11 +41,9 @@ impl Storage for LmdbStorage {
 
     fn get(&self, k: &[u8]) -> Option<Bytes> {
         let txn = self.env.begin_ro_txn().unwrap();
-        let result = txn
-            .get(self.db, &k)
+        txn.get(self.db, &k)
             .ok()
-            .map(|data| Bytes::from(data.to_vec()));
-        result
+            .map(|data| Bytes::from(data.to_vec()))
     }
 
     fn get_lt(&self, k: &[u8], iterations: usize) -> Vec<Bytes> {
@@ -82,8 +80,7 @@ impl Storage for LmdbStorage {
 
     fn exists(&self, k: &[u8]) -> bool {
         let txn = self.env.begin_ro_txn().unwrap();
-        let result = txn.get(self.db, &k).is_ok();
-        result
+        txn.get(self.db, &k).is_ok()
     }
 
     fn name(&self) -> &'static str {
