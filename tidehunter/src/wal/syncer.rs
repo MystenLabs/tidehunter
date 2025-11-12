@@ -46,6 +46,10 @@ impl WalSyncer {
 impl WalSyncerThread {
     pub fn run(self) {
         while let Ok(request) = self.receiver.recv() {
+            // Most of the time maps here are received in order of map id and without gaps.
+            // However, in some rare cases it is possible to have a 'gap' where some map ids are skipped
+            // See WalMapperMessage::MapFinalized handling in wal mapper
+
             let map = request
                 .map
                 .data

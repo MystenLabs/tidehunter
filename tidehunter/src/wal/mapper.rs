@@ -135,8 +135,14 @@ impl WalMapperThread {
                     let map_to_sync = self
                         .maps
                         .maps
-                        .get_mut(&map_to_sync_id)
-                        .expect("Map to finalize not found");
+                        .get_mut(&map_to_sync_id);
+                    let Some(map_to_sync) = map_to_sync else {
+                        // It is possible (mostly in tests) that map is removed 
+                        // via min_wal_position_updated before it is finalized.
+                        // In this case we simply drop the map since underlining file 
+                        // is already deleted.
+                        continue;
+                    };
                     map_to_sync.writeable = false;
                     self.syncer.send(
                         map_to_sync.clone(),
