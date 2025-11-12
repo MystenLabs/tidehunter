@@ -132,14 +132,11 @@ impl WalMapperThread {
             let timer = Instant::now();
             match message {
                 WalMapperMessage::MapFinalized(map_to_sync_id) => {
-                    let map_to_sync = self
-                        .maps
-                        .maps
-                        .get_mut(&map_to_sync_id);
+                    let map_to_sync = self.maps.maps.get_mut(&map_to_sync_id);
                     let Some(map_to_sync) = map_to_sync else {
-                        // It is possible (mostly in tests) that map is removed 
+                        // It is possible (mostly in tests) that map is removed
                         // via min_wal_position_updated before it is finalized.
-                        // In this case we simply drop the map since underlining file 
+                        // In this case we simply drop the map since underlining file
                         // is already deleted.
                         continue;
                     };
