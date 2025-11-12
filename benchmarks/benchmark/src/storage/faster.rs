@@ -1,16 +1,30 @@
 use crate::storage::Storage;
 use faster_rs::{FasterKv, FasterKvBuilder};
 use minibytes::Bytes;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Guard that ensures FASTER session is properly stopped when thread exits.
+/// This is critical - FASTER requires explicit stop_session() calls before threads terminate,
+/// otherwise subsequent threads may fail to start sessions (hitting session limits).
+struct SessionGuard {
+    store: Arc<FasterKv>,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        // Clean up FASTER session when thread exits
+        self.store.stop_session();
+    }
+}
+
 // Thread-local state for FASTER session and operation tracking
 // Each thread manages its own session and tracks operations for periodic maintenance
 thread_local! {
-    static SESSION_STARTED: Cell<bool> = const { Cell::new(false) };
+    static SESSION_GUARD: RefCell<Option<SessionGuard>> = const { RefCell::new(None) };
     static OPERATION_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -45,11 +59,15 @@ impl FasterStorage {
 
     /// Ensure the current thread has started a FASTER session.
     /// Sessions are per-thread and started lazily on first operation.
+    /// The SessionGuard ensures stop_session() is called when the thread exits.
     fn ensure_session_started(&self) {
-        SESSION_STARTED.with(|started| {
-            if !started.get() {
+        SESSION_GUARD.with(|guard| {
+            if guard.borrow().is_none() {
                 self.store.start_session();
-                started.set(true);
+                // Store guard to ensure stop_session() is called on thread exit
+                *guard.borrow_mut() = Some(SessionGuard {
+                    store: self.store.clone(),
+                });
             }
         });
     }
@@ -140,7 +158,7 @@ impl Storage for FasterStorage {
     }
 }
 
-// Note: We don't implement Drop to call stop_session() because:
-// 1. Sessions are per-thread, not per-store instance
-// 2. We don't have thread lifecycle hooks in the Storage trait
-// 3. FASTER will clean up sessions automatically on process exit
+// Note: Session cleanup is handled via SessionGuard's Drop implementation.
+// When a thread exits, the thread_local SESSION_GUARD is dropped, which calls
+// stop_session() to properly clean up the FASTER session for that thread.
+// This is critical to prevent session limit errors when new threads are spawned.
