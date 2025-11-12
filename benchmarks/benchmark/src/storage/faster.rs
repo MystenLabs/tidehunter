@@ -10,8 +10,8 @@ use std::time::Duration;
 // Thread-local state for FASTER session and operation tracking
 // Each thread manages its own session and tracks operations for periodic maintenance
 thread_local! {
-    static SESSION_STARTED: Cell<bool> = Cell::new(false);
-    static OPERATION_COUNT: Cell<u64> = Cell::new(0);
+    static SESSION_STARTED: Cell<bool> = const { Cell::new(false) };
+    static OPERATION_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 // Global monotonic serial number for operation ordering
@@ -30,11 +30,8 @@ impl FasterStorage {
     pub fn open(path: &Path) -> Arc<Self> {
         std::fs::create_dir_all(path).unwrap();
 
-        // Create FASTER store with configurable storage directory
-        // Using builder pattern to specify disk storage location
-        // Configuration matching faster-rs examples
-        let table_size = 1 << 15; // 32K entries
-        let log_size = 17179869184; // 16GB - matches faster-rs examples
+        let table_size = 1 << 27; // 134M entries 
+        let log_size = 137438953472; // 128GB
 
         let store = FasterKvBuilder::new(table_size, log_size)
             .with_disk(path.to_str().unwrap())
@@ -74,6 +71,16 @@ impl FasterStorage {
                 }
             }
         });
+    }
+
+    /// Trigger a FASTER checkpoint operation.
+    /// This creates a consistent snapshot of both the index and hybrid log.
+    /// Matches the C++ benchmark pattern of periodic checkpointing.
+    pub fn checkpoint(&self) -> Result<(), String> {
+        self.store
+            .checkpoint()
+            .map(|_| ())
+            .map_err(|e| format!("Checkpoint failed: {:?}", e))
     }
 }
 
