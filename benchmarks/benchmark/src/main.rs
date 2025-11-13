@@ -187,28 +187,28 @@ pub fn main() {
 
                 // Start background checkpoint thread (matches C++ FASTER benchmark pattern)
                 // Checkpoints every 1 second, similar to continuous relocation for Tidehunter
-                report!(
-                    report,
-                    "Starting background FASTER checkpointing (1 second interval)"
-                );
-                let storage_clone = storage.clone();
-                thread::spawn(move || {
-                    let mut checkpoint_count = 0;
-                    loop {
-                        thread::sleep(Duration::from_secs(1));
-                        match storage_clone.checkpoint() {
-                            Ok(_) => {
-                                checkpoint_count += 1;
-                                if checkpoint_count % 10 == 0 {
-                                    println!("FASTER checkpoint {} completed", checkpoint_count);
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("FASTER checkpoint failed: {}", e);
-                            }
-                        }
-                    }
-                });
+                // report!(
+                //     report,
+                //     "Starting background FASTER checkpointing (1 second interval)"
+                // );
+                // let storage_clone = storage.clone();
+                // thread::spawn(move || {
+                //     let mut checkpoint_count = 0;
+                //     loop {
+                //         thread::sleep(Duration::from_secs(1));
+                //         match storage_clone.checkpoint() {
+                //             Ok(_) => {
+                //                 checkpoint_count += 1;
+                //                 if checkpoint_count % 10 == 0 {
+                //                     println!("FASTER checkpoint {} completed", checkpoint_count);
+                //                 }
+                //             }
+                //             Err(e) => {
+                //                 eprintln!("FASTER checkpoint failed: {}", e);
+                //             }
+                //         }
+                //     }
+                // });
 
                 storage as Arc<dyn Storage>
             }
