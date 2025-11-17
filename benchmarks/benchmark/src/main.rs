@@ -193,12 +193,17 @@ pub fn main() {
                     let mut checkpoint_count = 0;
                     loop {
                         thread::sleep(Duration::from_secs(30));
+
+                        let start = Instant::now();
                         match storage_clone.checkpoint() {
                             Ok(_) => {
                                 checkpoint_count += 1;
-                                if checkpoint_count % 10 == 0 {
-                                    println!("FASTER checkpoint {} completed", checkpoint_count);
-                                }
+                                let duration = start.elapsed();
+                                println!(
+                                    "FASTER checkpoint {} done: {:.2} seconds",
+                                    checkpoint_count,
+                                    duration.as_secs_f64()
+                                );
                             }
                             Err(e) => {
                                 eprintln!("FASTER checkpoint failed: {}", e);
