@@ -738,7 +738,12 @@ impl Db {
         }
         self.indexes.fsync()?;
         self.wal.fsync()?;
-        crs.store(snapshot.data, snapshot.replay_from, &self.metrics);
+        crs.store(
+            snapshot.data,
+            snapshot.replay_from,
+            &self.key_shape,
+            &self.metrics,
+        );
         Ok(snapshot.replay_from)
     }
 

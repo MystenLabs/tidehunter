@@ -1430,11 +1430,7 @@ impl<T: Copy> LargeTableContainer<T> {
         Self(
             key_shape
                 .iter_ks()
-                .map(|ks| {
-                    (0..ks.num_mutexes())
-                        .map(|row| Self::new_row(ks, row, value))
-                        .collect()
-                })
+                .map(|ks| Self::new_keyspace(ks, value))
                 .collect(),
         )
     }
@@ -1449,6 +1445,12 @@ impl<T: Copy> LargeTableContainer<T> {
             }
             KeyType::PrefixedUniform(_) => RowContainer::new(),
         }
+    }
+
+    pub(crate) fn new_keyspace(ks: &KeySpaceDesc, value: T) -> Vec<RowContainer<T>> {
+        (0..ks.num_mutexes())
+            .map(|row| Self::new_row(ks, row, value))
+            .collect()
     }
 
     pub fn iter_cells(&self) -> impl Iterator<Item = &T> {

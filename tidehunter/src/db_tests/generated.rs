@@ -4,6 +4,9 @@
 mod db_tests;
 use db_tests::*;
 
+#[path = "test_add_keyspace.rs"]
+mod test_add_keyspace;
+
 #[test]
 fn db_test_prefixed() {
     db_test(prefix_key_shape())
