@@ -30,7 +30,7 @@ struct WalMapperThread {
     syncer: WalSyncer,
     metrics: Arc<Metrics>,
 }
-const INITIAL_MAPS_BUFFER: usize = 2;
+const INITIAL_MAPS_BUFFER: usize = 10;
 
 #[derive(Clone, Default)]
 pub struct WalMaps {
