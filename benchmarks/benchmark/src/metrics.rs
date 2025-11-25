@@ -14,7 +14,7 @@ pub struct BenchmarkMetrics {
     pub param_mixed_threads: IntGauge,
     pub param_write_size: IntGauge,
     pub param_key_len: IntGauge,
-    pub param_operations: IntGauge,
+    pub param_mixed_duration_secs: IntGauge,
     pub param_writes: IntGauge,
     pub param_background_writes: IntGauge,
     pub param_direct_io: IntGauge,
@@ -89,9 +89,9 @@ impl BenchmarkMetrics {
                 registry
             )
             .unwrap(),
-            param_operations: prometheus::register_int_gauge_with_registry!(
-                "benchmark_param_operations",
-                "Number of operations per thread in mixed phase",
+            param_mixed_duration_secs: prometheus::register_int_gauge_with_registry!(
+                "benchmark_param_mixed_duration_secs",
+                "Duration of mixed phase in seconds",
                 registry
             )
             .unwrap(),
@@ -152,8 +152,8 @@ impl BenchmarkMetrics {
             .set(config.stress_client_parameters.write_size as i64);
         this.param_key_len
             .set(config.stress_client_parameters.key_len as i64);
-        this.param_operations
-            .set(config.stress_client_parameters.operations as i64);
+        this.param_mixed_duration_secs
+            .set(config.stress_client_parameters.mixed_duration_secs as i64);
         this.param_writes
             .set(config.stress_client_parameters.writes as i64);
         this.param_background_writes
