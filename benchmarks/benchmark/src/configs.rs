@@ -140,9 +140,9 @@ pub struct StressClientParameters {
     /// The number of blocks to write per thread
     #[serde(default = "defaults::default_writes")]
     pub writes: usize,
-    /// The number of operations per thread in the mixed phase
-    #[serde(default = "defaults::default_operations")]
-    pub operations: usize,
+    /// Duration of the mixed phase in seconds
+    #[serde(default = "defaults::default_mixed_duration_secs")]
+    pub mixed_duration_secs: u64,
     /// Background writes per second during mixed test
     #[serde(default = "defaults::default_background_writes")]
     pub background_writes: usize,
@@ -193,7 +193,7 @@ impl Default for StressClientParameters {
             write_size: defaults::default_write_size(),
             key_len: defaults::default_key_len(),
             writes: defaults::default_writes(),
-            operations: defaults::default_operations(),
+            mixed_duration_secs: defaults::default_mixed_duration_secs(),
             background_writes: defaults::default_background_writes(),
             no_snapshot: defaults::default_no_snapshot(),
             path: None,
@@ -236,8 +236,8 @@ pub mod defaults {
         1_000_000
     }
 
-    pub fn default_operations() -> usize {
-        1_000_000
+    pub fn default_mixed_duration_secs() -> u64 {
+        60
     }
 
     pub fn default_background_writes() -> usize {
@@ -343,8 +343,8 @@ pub struct StressArgs {
     key_len: Option<usize>,
     #[arg(long, short = 'w', help = "Blocks to write per thread")]
     writes: Option<usize>,
-    #[arg(long, help = "Operations per thread in mixed phase")]
-    operations: Option<usize>,
+    #[arg(long, help = "Duration of mixed phase in seconds")]
+    mixed_duration_secs: Option<u64>,
     #[arg(long, short = 'u', help = "Background writes/s during mixed test")]
     background_writes: Option<usize>,
     #[arg(long, short = 'n', help = "Disable periodic snapshot")]
@@ -408,8 +408,8 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     if let Some(writes) = args.writes {
         config.stress_client_parameters.writes = writes;
     }
-    if let Some(operations) = args.operations {
-        config.stress_client_parameters.operations = operations;
+    if let Some(mixed_duration_secs) = args.mixed_duration_secs {
+        config.stress_client_parameters.mixed_duration_secs = mixed_duration_secs;
     }
     if let Some(background_writes) = args.background_writes {
         config.stress_client_parameters.background_writes = background_writes;
