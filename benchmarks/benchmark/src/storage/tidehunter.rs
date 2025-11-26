@@ -52,11 +52,11 @@ impl TidehunterStorage {
         config: Config,
         path: &Path,
         (key_shape, ks): (KeyShape, KeySpace),
-    ) -> Arc<Self> {
+    ) -> (Arc<Self>, Arc<Metrics>) {
         let config = Arc::new(config);
         let metrics = Metrics::from_config_registry(registry, &config);
-        let db = Db::open(path, key_shape, config, metrics).unwrap();
+        let db = Db::open(path, key_shape, config, metrics.clone()).unwrap();
         let this = Self { db, ks };
-        Arc::new(this)
+        (Arc::new(this), metrics)
     }
 }
