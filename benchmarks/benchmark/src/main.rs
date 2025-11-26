@@ -98,6 +98,9 @@ pub fn main() {
         format!("0.0.0.0:{METRICS_PORT}").parse().unwrap(),
         &registry,
     );
+    // Store tidehunter metrics for printing at the end (only set for Tidehunter backend)
+    let mut tidehunter_metrics: Option<Arc<tidehunter::metrics::Metrics>> = None;
+
     let storage: Arc<dyn Storage> = match config.stress_client_parameters.backend {
         Backend::Tidehunter => {
             if config.db_parameters.direct_io {
@@ -121,8 +124,9 @@ pub fn main() {
                     KeyShape::new_single_config(32, mutexes, key_type, key_space_config())
                 }
             };
-            let storage =
+            let (storage, metrics) =
                 TidehunterStorage::open(&registry, config.db_parameters, &path, (key_shape, ks));
+            tidehunter_metrics = Some(metrics);
             if !config.stress_client_parameters.no_snapshot {
                 report!(report, "Periodic snapshot **enabled**");
                 storage.db.start_periodic_snapshot();
@@ -316,6 +320,32 @@ pub fn main() {
         .unwrap();
     }
     report!(report, "BENCHMARK_END");
+
+    // Print tidehunter index lookup metrics if available
+    if let Some(metrics) = tidehunter_metrics {
+        use tidehunter::metrics::get_histogram_sum_count;
+        report!(report, "--- Index Lookup Metrics ---");
+        report!(report, "  Window size: 744 elements (half_window=372)");
+
+        if let Some((sum, count)) = get_histogram_sum_count(&metrics.lookup_iterations) {
+            let avg = if count > 0 { sum / count as f64 } else { 0.0 };
+            report!(
+                report,
+                "  Lookup iterations: avg={:.3}, total_lookups={}",
+                avg,
+                count
+            );
+        }
+
+        let io_bytes = metrics.lookup_io_bytes.get();
+        let io_mcs = metrics.lookup_io_mcs.get();
+        report!(
+            report,
+            "  Lookup I/O: {:.2} GB total, {:.2} sec total",
+            io_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+            io_mcs as f64 / 1_000_000.0
+        );
+    }
 
     if stress.parameters.preserve {
         temp_dir.into_path();
