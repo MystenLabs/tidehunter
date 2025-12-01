@@ -183,6 +183,9 @@ pub struct StressClientParameters {
     /// Ratio of writes that overwrite existing keys (0.0 to 1.0, default 0.0)
     #[serde(default = "defaults::default_overwrite_ratio")]
     pub overwrite_ratio: f64,
+    /// Pause duration in seconds between write and mixed phases
+    #[serde(default = "defaults::default_phase_pause_secs")]
+    pub phase_pause_secs: u64,
 }
 
 impl Default for StressClientParameters {
@@ -208,6 +211,7 @@ impl Default for StressClientParameters {
             zipf_exponent: defaults::default_zipf_exponent(),
             relocation: None,
             overwrite_ratio: defaults::default_overwrite_ratio(),
+            phase_pause_secs: defaults::default_phase_pause_secs(),
         }
     }
 }
@@ -282,6 +286,10 @@ pub mod defaults {
 
     pub fn default_overwrite_ratio() -> f64 {
         0.0
+    }
+
+    pub fn default_phase_pause_secs() -> u64 {
+        600 // 10 minutes
     }
 }
 
@@ -389,6 +397,11 @@ pub struct StressArgs {
         help = "Ratio of writes that overwrite existing keys (0.0 to 1.0)"
     )]
     overwrite_ratio: Option<f64>,
+    #[arg(
+        long,
+        help = "Pause duration in seconds between write and mixed phases"
+    )]
+    phase_pause_secs: Option<u64>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -476,6 +489,9 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
             std::process::exit(1);
         }
         config.stress_client_parameters.overwrite_ratio = overwrite_ratio;
+    }
+    if let Some(phase_pause_secs) = args.phase_pause_secs {
+        config.stress_client_parameters.phase_pause_secs = phase_pause_secs;
     }
 
     config

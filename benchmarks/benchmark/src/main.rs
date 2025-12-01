@@ -259,6 +259,16 @@ pub fn main() {
             storage_len as f64 / 1024. / 1024. / 1024.
         );
     }
+    if stress.parameters.phase_pause_secs > 0 {
+        report!(
+            report,
+            "Pausing for {} seconds between phases",
+            stress.parameters.phase_pause_secs
+        );
+        std::thread::sleep(std::time::Duration::from_secs(
+            stress.parameters.phase_pause_secs,
+        ));
+    }
     report!(
         report,
         "Starting mixed read/write test for {} seconds ({}% reads, {}% writes)",
