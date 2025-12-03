@@ -159,8 +159,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Ensure proper ownership of the working directory
             &format!("sudo chown -R $USER:$USER {working_dir}"),
             // Clone the repo
-            &format!("[ -d {repo_name} ] && rm -rf {repo_name}"),
-            &format!("(git clone {url} || true)"),
+            &format!("[ -d {repo_name} ] && rm -rf {repo_name} || true"),
+            &format!("git clone {url}"),
         ];
 
         let command = [
