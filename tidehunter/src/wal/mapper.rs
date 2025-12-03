@@ -221,6 +221,18 @@ impl WalMaps {
         self.maps.get(&map_id)
     }
 
+    pub fn min_map_id(&self) -> Option<MapId> {
+        self.maps.keys().next().copied()
+    }
+
+    pub fn max_map_id(&self) -> Option<MapId> {
+        self.maps.keys().last().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.maps.len()
+    }
+
     pub fn map(&mut self, file: &File, layout: &WalLayout, map_id: MapId) -> &Map {
         let range = layout.map_range(map_id);
         let data = unsafe {
