@@ -69,8 +69,30 @@ impl ControlRegion {
     #[doc(hidden)] // Used by tools/wal_inspector for control region inspection
     pub fn read(path: &Path, key_shape: &KeyShape) -> io::Result<Self> {
         let bytes = fs::read(path)?;
-        let mut control_region: ControlRegion =
-            bincode::deserialize(&bytes).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+        
+        // Try to deserialize as current format
+        let mut control_region = match bincode::deserialize::<ControlRegion>(&bytes) {
+            Ok(cr) => cr,
+            Err(_) => {
+                // Try deserializing as old format (without keyspace_names)
+                #[derive(Deserialize)]
+                struct LegacyControlRegion {
+                    last_position: u64,
+                    snapshot: LargeTableContainer<SnapshotEntryData>,
+                }
+                
+                let legacy: LegacyControlRegion = bincode::deserialize(&bytes)
+                    .map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+                
+                // Create current format with empty keyspace_names (will be populated below)
+                ControlRegion {
+                    last_position: legacy.last_position,
+                    snapshot: legacy.snapshot,
+                    keyspace_names: Vec::new(),
+                }
+            }
+        };
+        
         control_region.populate_keyspace_names_if_empty(key_shape);
         control_region.verify_shape(key_shape);
         control_region.extend_snapshot_if_needed(key_shape);
