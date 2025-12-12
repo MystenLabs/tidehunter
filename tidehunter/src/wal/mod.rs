@@ -152,6 +152,20 @@ impl WalWriter {
 
         let meminfo = read_meminfo_summary();
 
+        // Tracker diagnostics to help determine if this is a speed mismatch or deadlock
+        let tracker_pending = self.wal_tracker.pending_count();
+        let tracker_last_processed = self.wal_tracker.last_processed().as_u64();
+        let (last_processed_map, _) = self.wal.layout.locate(tracker_last_processed);
+        let maps_behind = map_id.0.saturating_sub(last_processed_map.0);
+
+        let tracker_diagnosis = if tracker_pending > 100 {
+            "SPEED MISMATCH: Tracker has large backlog - messages queued but not processed"
+        } else if tracker_pending < 10 && maps_behind > 5 {
+            "POSSIBLE DEADLOCK: Tracker queue nearly empty but far behind - message may not have been sent"
+        } else {
+            "MODERATE BACKLOG: Tracker has some pending messages"
+        };
+
         panic!(
             "Could not receive writable map {map_id:?}\n\
              Diagnosis: {diagnosis}\n\
@@ -160,7 +174,13 @@ impl WalWriter {
              Allocator position: {allocator_pos} (map {allocator_map:?})\n\
              Requested position: {position}\n\
              Layout: frag_size={}, max_maps={}\n\
-             Memory: {meminfo}",
+             Memory: {meminfo}\n\
+             \n\
+             === TRACKER DIAGNOSTICS ===\n\
+             Pending messages in queue: {tracker_pending}\n\
+             Last processed position: {tracker_last_processed} (map {last_processed_map:?})\n\
+             Maps behind: {maps_behind}\n\
+             Tracker diagnosis: {tracker_diagnosis}",
             self.wal.layout.frag_size, self.wal.layout.max_maps,
         );
     }
