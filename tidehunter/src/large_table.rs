@@ -255,7 +255,7 @@ impl LargeTable {
 
         // Apply backpressure if too many async flushes are pending
         if !context.config.sync_flush {
-            while self.metrics.flush_pending.get() > 128 {
+            while self.metrics.flush_pending_count.load(Ordering::Relaxed) > 128 {
                 std::thread::sleep(std::time::Duration::from_micros(36));
             }
         }
