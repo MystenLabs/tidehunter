@@ -8,7 +8,7 @@ use crate::wal::mapper::WalMapper;
 use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
@@ -32,6 +32,7 @@ pub struct WalTracker {
     sender: Option<mpsc::Sender<WalTrackerMessage>>,
     last_processed: Arc<AtomicU64>,
     mapper: Arc<WalMapper>,
+    pending_count: Arc<AtomicUsize>,
 }
 
 pub struct WalGuard {
@@ -49,6 +50,7 @@ struct WalTrackerThread {
     state: WalTrackerState,
     mapper: Arc<WalMapper>,
     layout: WalLayout,
+    pending_count: Arc<AtomicUsize>,
 }
 
 struct WalTrackerState {
@@ -71,6 +73,7 @@ impl WalTracker {
     pub fn start(layout: WalLayout, mapper: WalMapper, last_processed: LastProcessed) -> Self {
         let (sender, receiver) = mpsc::channel();
         let atomic_last_processed = Arc::new(AtomicU64::new(last_processed.as_u64()));
+        let pending_count = Arc::new(AtomicUsize::new(0));
         let mapper = Arc::new(mapper);
         let thread = WalTrackerThread {
             receiver,
@@ -78,6 +81,7 @@ impl WalTracker {
             last_processed: atomic_last_processed.clone(),
             mapper: mapper.clone(),
             layout,
+            pending_count: pending_count.clone(),
         };
         let jh = thread::Builder::new()
             .name("wal-tracker".to_string())
@@ -88,6 +92,7 @@ impl WalTracker {
             sender: Some(sender),
             last_processed: atomic_last_processed,
             mapper,
+            pending_count,
         }
     }
 
@@ -98,6 +103,7 @@ impl WalTracker {
             mutex,
             kind: WalTrackerMessageKind::AllocationMessage(allocation_result),
         };
+        self.pending_count.fetch_add(1, Ordering::Relaxed);
         self.sender
             .as_ref()
             .expect("WalTracker already dropped")
@@ -110,6 +116,12 @@ impl WalTracker {
 
     pub fn last_processed(&self) -> LastProcessed {
         LastProcessed::new(self.last_processed.load(Ordering::SeqCst))
+    }
+
+    /// Returns the number of messages sent to tracker but not yet processed.
+    /// Used for diagnostics to determine if tracker is backlogged.
+    pub fn pending_count(&self) -> usize {
+        self.pending_count.load(Ordering::Relaxed)
     }
 
     pub fn min_wal_position_updated(&self, watermark: u64) {
@@ -183,6 +195,7 @@ impl WalTrackerThread {
         for message in self.receiver {
             #[allow(clippy::let_underscore_lock)]
             let _ = message.mutex.lock();
+            self.pending_count.fetch_sub(1, Ordering::Relaxed);
             let position = match message.kind {
                 WalTrackerMessageKind::AllocationMessage(message) => {
                     self.state.add_processed(message, |result| {
