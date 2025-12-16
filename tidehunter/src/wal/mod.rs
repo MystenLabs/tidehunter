@@ -124,6 +124,10 @@ impl WalWriter {
         let (map_id, offset) = self.wal.layout.locate(position);
         const MAX_ATTEMPTS: usize = 10 * 1000;
         let start_time = std::time::Instant::now();
+
+        // Capture max_map at start of wait to measure mapper progress during wait
+        let max_map_at_start = self.wal.maps.load().max_map_id();
+
         for _ in 0..MAX_ATTEMPTS {
             let Some(map) = self.wal.get_map(map_id) else {
                 self.wal.metrics.wal_write_wait.inc();
@@ -166,6 +170,20 @@ impl WalWriter {
             "MODERATE BACKLOG: Tracker has some pending messages"
         };
 
+        // Calculate mapper progress during wait
+        let maps_created_during_wait = match (max_map_at_start, max_map) {
+            (Some(start), Some(end)) => end.0.saturating_sub(start.0),
+            _ => 0,
+        };
+
+        let mapper_diagnosis = if maps_created_during_wait == 0 {
+            "MAPPER STALLED: No maps created during wait - mapper may be stuck"
+        } else if maps_created_during_wait < 5 {
+            "MAPPER SLOW: Few maps created during wait"
+        } else {
+            "MAPPER ACTIVE: Maps being created but not fast enough"
+        };
+
         panic!(
             "Could not receive writable map {map_id:?}\n\
              Diagnosis: {diagnosis}\n\
@@ -175,6 +193,12 @@ impl WalWriter {
              Requested position: {position}\n\
              Layout: frag_size={}, max_maps={}\n\
              Memory: {meminfo}\n\
+             \n\
+             === MAPPER PROGRESS ===\n\
+             max_map at wait start: {max_map_at_start:?}\n\
+             max_map at timeout: {max_map:?}\n\
+             Maps created during wait: {maps_created_during_wait}\n\
+             Mapper diagnosis: {mapper_diagnosis}\n\
              \n\
              === TRACKER DIAGNOSTICS ===\n\
              Pending messages in queue: {tracker_pending}\n\
