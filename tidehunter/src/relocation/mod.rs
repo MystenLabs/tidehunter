@@ -306,6 +306,7 @@ impl RelocationDriver {
     }
 
     fn wal_based_relocation(&mut self, db: Arc<Db>) -> DbResult<()> {
+        eprintln!("relocation: wal based start");
         let upper_limit = db.wal_writer.last_processed().as_u64();
         let min_wal_position = db.wal.min_wal_position();
         let mut wal_iterator = db.wal.wal_iterator(min_wal_position)?;
@@ -316,6 +317,11 @@ impl RelocationDriver {
                 * db.config.relocation_max_reclaim_pct as u64
                 / 100)
                 .max(db.wal.wal_file_size());
+
+        eprintln!(
+            "relocation. upper_limit: {} min_wal_position: {}, max_target_position: {}",
+            upper_limit, min_wal_position, max_target_position
+        );
         // find target cut-off position
         let mut terminal_position = 0;
         loop {
@@ -325,6 +331,7 @@ impl RelocationDriver {
             }
             let (position, raw_entry) = entry?;
             if position.offset() >= upper_limit {
+                eprintln!("relocation: early break {}", position.offset());
                 terminal_position = position.offset();
                 break;
             }
@@ -333,6 +340,12 @@ impl RelocationDriver {
                 if let Some(filter) = ksd.relocation_filter()
                     && let Decision::StopRelocation = filter(&key, &value)
                 {
+                    eprintln!(
+                        "relocation absorbing value {:?} {:?} {:?}",
+                        key,
+                        value,
+                        ksd.name()
+                    );
                     terminal_position = position.offset();
                     break;
                 }
@@ -346,8 +359,13 @@ impl RelocationDriver {
         self.metrics
             .relocation_terminal_position
             .set(terminal_position as i64);
+        eprintln!(
+            "relocation. terminal_position: {} target_position: {}",
+            terminal_position, target_position
+        );
         // ensure the target position is big enough to cut
         if target_position < (db.wal.wal_file_size() + min_wal_position) {
+            eprintln!("relocation: not enough space to reclain");
             return Ok(());
         }
         let mut current_cell = CellReference::first(&db, KeySpace::first());
