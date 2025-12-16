@@ -143,10 +143,21 @@ impl WalMapperThread {
                         self.layout.map_range(map_to_sync_id).end,
                     );
                     map_id = map_id.next_map();
+                    let make_map_start = Instant::now();
                     self.make_map(map_id);
+                    eprintln!(
+                        "[MAPPER] make_map({}) took {:?}",
+                        map_id.0,
+                        make_map_start.elapsed()
+                    );
                 }
                 WalMapperMessage::MinWalPositionUpdated(watermark) => {
+                    let cleanup_start = Instant::now();
                     self.min_wal_position_updated(watermark);
+                    let cleanup_time = cleanup_start.elapsed();
+                    if cleanup_time > std::time::Duration::from_secs(1) {
+                        eprintln!("[MAPPER] min_wal_position_updated took {:?}", cleanup_time);
+                    }
                 }
             }
             self.metrics
