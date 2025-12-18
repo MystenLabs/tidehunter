@@ -6,6 +6,7 @@ use crate::wal::syncer::WalSyncer;
 use arc_swap::ArcSwap;
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
@@ -14,6 +15,53 @@ use std::time::Instant;
 pub(crate) enum WalMapperMessage {
     MapFinalized(MapId),
     MinWalPositionUpdated(u64),
+}
+
+pub(crate) struct WalFileDeleter {
+    jh: Option<JoinHandle<()>>,
+    sender: Option<mpsc::Sender<PathBuf>>,
+}
+
+struct WalFileDeleterThread {
+    receiver: mpsc::Receiver<PathBuf>,
+}
+
+impl WalFileDeleter {
+    pub fn start() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let deleter_thread = WalFileDeleterThread { receiver };
+        let jh = thread::Builder::new()
+            .name("wal-file-deleter".to_string())
+            .spawn(move || deleter_thread.run())
+            .expect("failed to start wal-file-deleter thread");
+        Self {
+            jh: Some(jh),
+            sender: Some(sender),
+        }
+    }
+
+    pub fn delete(&self, path: PathBuf) {
+        if let Some(sender) = &self.sender {
+            sender.send(path).ok();
+        }
+    }
+}
+
+impl Drop for WalFileDeleter {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(jh) = self.jh.take() {
+            crate::thread_util::join_thread_with_timeout(jh, "wal-file-deleter", 10);
+        }
+    }
+}
+
+impl WalFileDeleterThread {
+    pub fn run(self) {
+        while let Ok(path) = self.receiver.recv() {
+            std::fs::remove_file(&path).expect("Failed to remove wal file");
+        }
+    }
 }
 
 pub(crate) struct WalMapper {
@@ -29,6 +77,7 @@ struct WalMapperThread {
     layout: WalLayout,
     syncer: WalSyncer,
     metrics: Arc<Metrics>,
+    file_deleter: WalFileDeleter,
 }
 const INITIAL_MAPS_BUFFER: usize = 10;
 
@@ -60,6 +109,7 @@ impl WalMapper {
         }
         let maps = WalMaps::clone(&maps);
         let (sender, receiver) = mpsc::sync_channel(5);
+        let file_deleter = WalFileDeleter::start();
         let this = WalMapperThread {
             maps,
             maps_arc,
@@ -68,6 +118,7 @@ impl WalMapper {
             receiver,
             metrics,
             syncer,
+            file_deleter,
         };
         let jh = thread::Builder::new()
             .name("wal-mapper".to_string())
@@ -177,7 +228,7 @@ impl WalMapperThread {
             }
             let path = self.layout.wal_file_name(&wal_files.base_path, file_id);
             if path.exists() {
-                std::fs::remove_file(path).expect("Failed to remove wal file");
+                self.file_deleter.delete(path);
             }
             num_files_deleted += 1;
         }
