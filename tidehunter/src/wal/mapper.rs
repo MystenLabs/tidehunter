@@ -196,19 +196,13 @@ impl WalMapperThread {
                     map_id = map_id.next_map();
                     let make_map_start = Instant::now();
                     self.make_map(map_id);
-                    eprintln!(
-                        "[MAPPER] make_map({}) took {:?}",
-                        map_id.0,
-                        make_map_start.elapsed()
-                    );
+                    let make_map_time = make_map_start.elapsed();
+                    if make_map_time > std::time::Duration::from_secs(1) {
+                        eprintln!("[MAPPER] make_map({}) took {:?}", map_id.0, make_map_time);
+                    }
                 }
                 WalMapperMessage::MinWalPositionUpdated(watermark) => {
-                    let cleanup_start = Instant::now();
                     self.min_wal_position_updated(watermark);
-                    let cleanup_time = cleanup_start.elapsed();
-                    if cleanup_time > std::time::Duration::from_secs(1) {
-                        eprintln!("[MAPPER] min_wal_position_updated took {:?}", cleanup_time);
-                    }
                 }
             }
             self.metrics
@@ -219,6 +213,7 @@ impl WalMapperThread {
 
     /// Delete files up to the watermark
     fn min_wal_position_updated(&mut self, watermark: u64) {
+        let start = Instant::now();
         let wal_files = self.files.load();
         let mut num_files_deleted = 0;
         for idx in 0..wal_files.files.len() {
@@ -232,6 +227,7 @@ impl WalMapperThread {
             }
             num_files_deleted += 1;
         }
+        let loop_time = start.elapsed();
         // Update the WalFiles structure and maps by removing deleted files
         if num_files_deleted > 0 {
             let new_files = wal_files.skip_first_n_files(num_files_deleted);
@@ -239,11 +235,30 @@ impl WalMapperThread {
             self.files.store(Arc::new(new_files));
 
             // Remove all maps that belonged to deleted files
+            let retain_start = Instant::now();
+            let maps_before = self.maps.maps.len();
             self.maps
                 .maps
                 .retain(|&map_id, _| self.layout.file_for_map(map_id) >= new_min_file_id);
+            let maps_after = self.maps.maps.len();
+            let retain_time = retain_start.elapsed();
 
+            let publish_start = Instant::now();
             self.publish_maps();
+            let publish_time = publish_start.elapsed();
+
+            let total_time = start.elapsed();
+            if total_time > std::time::Duration::from_secs(1) {
+                eprintln!(
+                    "[MAPPER] min_wal_position_updated breakdown: loop={:?}, retain={:?} (dropped {} maps), publish={:?}, total={:?}, files_deleted={}",
+                    loop_time,
+                    retain_time,
+                    maps_before - maps_after,
+                    publish_time,
+                    total_time,
+                    num_files_deleted
+                );
+            }
         }
     }
 
