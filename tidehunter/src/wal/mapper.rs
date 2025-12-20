@@ -17,49 +17,68 @@ pub(crate) enum WalMapperMessage {
     MinWalPositionUpdated(u64),
 }
 
-pub(crate) struct WalFileDeleter {
+/// Messages for the WAL cleanup background thread
+enum WalCleanupMessage {
+    DeleteFile(PathBuf),
+    DropMaps(Arc<WalMaps>),
+}
+
+pub(crate) struct WalCleanupThread {
     jh: Option<JoinHandle<()>>,
-    sender: Option<mpsc::Sender<PathBuf>>,
+    sender: Option<mpsc::Sender<WalCleanupMessage>>,
 }
 
-struct WalFileDeleterThread {
-    receiver: mpsc::Receiver<PathBuf>,
+struct WalCleanupWorker {
+    receiver: mpsc::Receiver<WalCleanupMessage>,
 }
 
-impl WalFileDeleter {
+impl WalCleanupThread {
     pub fn start() -> Self {
         let (sender, receiver) = mpsc::channel();
-        let deleter_thread = WalFileDeleterThread { receiver };
+        let worker = WalCleanupWorker { receiver };
         let jh = thread::Builder::new()
-            .name("wal-file-deleter".to_string())
-            .spawn(move || deleter_thread.run())
-            .expect("failed to start wal-file-deleter thread");
+            .name("wal-cleanup".to_string())
+            .spawn(move || worker.run())
+            .expect("failed to start wal-cleanup thread");
         Self {
             jh: Some(jh),
             sender: Some(sender),
         }
     }
 
-    pub fn delete(&self, path: PathBuf) {
+    pub fn delete_file(&self, path: PathBuf) {
         if let Some(sender) = &self.sender {
-            sender.send(path).ok();
+            sender.send(WalCleanupMessage::DeleteFile(path)).ok();
+        }
+    }
+
+    pub fn drop_maps(&self, maps: Arc<WalMaps>) {
+        if let Some(sender) = &self.sender {
+            sender.send(WalCleanupMessage::DropMaps(maps)).ok();
         }
     }
 }
 
-impl Drop for WalFileDeleter {
+impl Drop for WalCleanupThread {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(jh) = self.jh.take() {
-            crate::thread_util::join_thread_with_timeout(jh, "wal-file-deleter", 10);
+            crate::thread_util::join_thread_with_timeout(jh, "wal-cleanup", 10);
         }
     }
 }
 
-impl WalFileDeleterThread {
+impl WalCleanupWorker {
     pub fn run(self) {
-        while let Ok(path) = self.receiver.recv() {
-            std::fs::remove_file(&path).expect("Failed to remove wal file");
+        while let Ok(msg) = self.receiver.recv() {
+            match msg {
+                WalCleanupMessage::DeleteFile(path) => {
+                    std::fs::remove_file(&path).expect("Failed to remove wal file");
+                }
+                WalCleanupMessage::DropMaps(maps) => {
+                    drop(maps); // Explicit drop; munmap happens here in background
+                }
+            }
         }
     }
 }
@@ -77,7 +96,7 @@ struct WalMapperThread {
     layout: WalLayout,
     syncer: WalSyncer,
     metrics: Arc<Metrics>,
-    file_deleter: WalFileDeleter,
+    cleanup_thread: WalCleanupThread,
 }
 const INITIAL_MAPS_BUFFER: usize = 10;
 
@@ -109,7 +128,7 @@ impl WalMapper {
         }
         let maps = WalMaps::clone(&maps);
         let (sender, receiver) = mpsc::sync_channel(5);
-        let file_deleter = WalFileDeleter::start();
+        let cleanup_thread = WalCleanupThread::start();
         let this = WalMapperThread {
             maps,
             maps_arc,
@@ -118,7 +137,7 @@ impl WalMapper {
             receiver,
             metrics,
             syncer,
-            file_deleter,
+            cleanup_thread,
         };
         let jh = thread::Builder::new()
             .name("wal-mapper".to_string())
@@ -223,7 +242,7 @@ impl WalMapperThread {
             }
             let path = self.layout.wal_file_name(&wal_files.base_path, file_id);
             if path.exists() {
-                self.file_deleter.delete(path);
+                self.cleanup_thread.delete_file(path);
             }
             num_files_deleted += 1;
         }
@@ -289,7 +308,8 @@ impl WalMapperThread {
 
     fn publish_maps(&self) {
         let new_maps = self.maps.clone();
-        self.maps_arc.store(Arc::new(new_maps));
+        let old = self.maps_arc.swap(Arc::new(new_maps));
+        self.cleanup_thread.drop_maps(old);
     }
 }
 
