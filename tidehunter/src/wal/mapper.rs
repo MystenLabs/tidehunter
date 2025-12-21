@@ -282,14 +282,27 @@ impl WalMapperThread {
     }
 
     fn make_map(&mut self, map_id: MapId) {
+        // Progress indicator: print every 100 maps to track mapper progress
+        if map_id.0.is_multiple_of(100) {
+            eprintln!("[MAPPER] Progress: creating map {}", map_id.0);
+        }
+
         let file_id = self.layout.file_for_map(map_id);
         let mut files = self.files.load();
         if file_id > files.current_file_id() {
             assert_eq!(file_id, WalFileId(files.current_file_id().0 + 1));
             let mut new_files = files.files.clone();
             let new_file_path = self.layout.wal_file_name(&files.base_path, file_id);
+            let open_start = Instant::now();
             let new_file = Wal::open_file(&new_file_path, &self.layout)
                 .expect("Failed to create new wal file");
+            let open_time = open_start.elapsed();
+            if open_time > std::time::Duration::from_secs(1) {
+                eprintln!(
+                    "[MAPPER] make_map({}) open_file took {:?}",
+                    map_id.0, open_time
+                );
+            }
             new_files.push(Arc::new(new_file));
 
             let new_wal_files = WalFiles {
@@ -300,10 +313,32 @@ impl WalMapperThread {
             self.files.store(Arc::new(new_wal_files));
             files = self.files.load();
         }
+        let extend_start = Instant::now();
         Wal::extend_to_map_id(&self.layout, &files, map_id).expect("Failed to extend wal file");
-        self.maps.map(files.get(file_id), &self.layout, map_id);
+        let extend_time = extend_start.elapsed();
+        if extend_time > std::time::Duration::from_secs(1) {
+            eprintln!(
+                "[MAPPER] make_map({}) extend took {:?}",
+                map_id.0, extend_time
+            );
+        }
 
+        let mmap_start = Instant::now();
+        self.maps.map(files.get(file_id), &self.layout, map_id);
+        let mmap_time = mmap_start.elapsed();
+        if mmap_time > std::time::Duration::from_secs(1) {
+            eprintln!("[MAPPER] make_map({}) mmap took {:?}", map_id.0, mmap_time);
+        }
+
+        let publish_start = Instant::now();
         self.publish_maps();
+        let publish_time = publish_start.elapsed();
+        if publish_time > std::time::Duration::from_secs(1) {
+            eprintln!(
+                "[MAPPER] make_map({}) publish took {:?}",
+                map_id.0, publish_time
+            );
+        }
     }
 
     fn publish_maps(&self) {
