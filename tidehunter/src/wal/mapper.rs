@@ -372,8 +372,11 @@ impl WalMaps {
             options
                 .offset(layout.offset_in_wal_file(range.start))
                 .len(layout.frag_size as usize);
+            // NOTE: .populate() commented out to avoid blocking mmap calls under I/O pressure.
+            // With .populate(), the kernel pre-faults all 1GB of pages which can hang for 10+ seconds.
+            // Without it, pages fault lazily on first write (fast for new file regions).
+            // options.populate();
             options
-                .populate()
                 .map_mut(file)
                 .expect("Failed to mmap on wal file")
                 .into()
