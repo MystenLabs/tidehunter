@@ -122,7 +122,7 @@ impl WalWriter {
 
     fn get_writeable_map(&self, position: u64) -> (Map, usize) {
         let (map_id, offset) = self.wal.layout.locate(position);
-        const MAX_ATTEMPTS: usize = 10 * 1000;
+        const MAX_ATTEMPTS: usize = 60 * 1000;
         let start_time = std::time::Instant::now();
 
         // Capture max_map at start of wait to measure mapper progress during wait
