@@ -6,8 +6,8 @@ use crate::primitives::var_int::{MAX_U16_VARINT, deserialize_u16_varint, seriali
 use crate::wal::position::{HasOffset, LastProcessed, WalPosition};
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
-use std::collections::BTreeMap;
 use std::collections::btree_map::{Entry, Keys};
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Default, Clone, Debug)]
 #[doc(hidden)]
@@ -275,10 +275,15 @@ impl IndexTable {
         self.data.retain(|_k, v| v.offset >= last_processed);
     }
 
-    // todo compactor API should change so that we don't have to expose IndexWalPosition
-    /// Accessor for self.data, only to be used for the compaction callback.
-    pub fn data_for_compaction(&mut self) -> &mut BTreeMap<Bytes, IndexWalPosition> {
-        &mut self.data
+    /// Compact index by retaining keys identified by the compactor.
+    /// The compactor receives a double-ended iterator over all keys and returns keys to retain.
+    pub fn compact_with<F>(&mut self, compactor: F)
+    where
+        F: FnOnce(&mut dyn DoubleEndedIterator<Item = &Bytes>) -> HashSet<Bytes>,
+    {
+        let mut iter = self.data.keys();
+        let to_retain = compactor(&mut iter);
+        self.data.retain(|k, _| to_retain.contains(k));
     }
 
     /// Apply given update function to a value with a given key.

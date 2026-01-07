@@ -208,12 +208,11 @@ impl IndexFlusherThread {
         Some((original_index, position))
     }
 
-    // todo - code duplicate with LargeTable::run_compactor
     // todo - result of compactor is not applied to in-memory index for DirtyLoaded
     fn run_compactor(ctx: &KsContext, index: &mut IndexTable) {
         if let Some(compactor) = ctx.ks_config.compactor() {
             let pre_compact_len = index.len();
-            compactor(index.data_for_compaction());
+            index.compact_with(|iter| (compactor)(iter));
             let compacted = pre_compact_len.saturating_sub(index.len());
             ctx.metrics
                 .compacted_keys

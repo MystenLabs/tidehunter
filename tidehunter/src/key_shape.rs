@@ -1,7 +1,6 @@
 use crate::cell::CellId;
 use crate::db::MAX_KEY_LEN;
 use crate::index::index_format::IndexFormatType;
-use crate::index::index_table::IndexWalPosition;
 use crate::math;
 use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::relocation::RelocationFilter;
@@ -11,7 +10,7 @@ use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Debug;
 use std::num::NonZeroUsize;
@@ -111,9 +110,11 @@ pub(crate) struct BloomFilterParams {
     pub count: u32,
 }
 
-// todo - we want better compactor API that does not expose too much internal details
-// todo - make mod wal private
-pub type Compactor = Box<dyn Fn(&mut BTreeMap<Bytes, IndexWalPosition>) + Sync + Send>;
+/// Compactor function for index compaction.
+/// Takes a double-ended iterator over index keys (as Bytes references) and returns a HashSet of keys to retain.
+/// The iterator supports both forward and reverse iteration for flexible compaction strategies.
+pub type Compactor =
+    Box<dyn Fn(&mut dyn DoubleEndedIterator<Item = &Bytes>) -> HashSet<Bytes> + Send + Sync>;
 
 #[allow(dead_code)]
 impl Default for KeyShapeBuilder {
