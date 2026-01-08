@@ -471,6 +471,14 @@ impl KeySpaceDesc {
                 first_key[0..prefix_len].copy_from_slice(prefix);
                 last_key[0..prefix_len].copy_from_slice(prefix);
 
+                // For non-byte aligned prefixes (cluster_bits > 0), the last byte of the prefix
+                // in last_key should be the maximum value in the cluster
+                if config.has_cluster_bits() {
+                    let last_byte_of_prefix = prefix[prefix_len - 1];
+                    let range = config.prefix_range_u8(last_byte_of_prefix);
+                    last_key[prefix_len - 1] = *range.end();
+                }
+
                 (first_key, last_key)
             }
         }
@@ -1405,5 +1413,47 @@ mod tests {
         to_key[2] = 0xFE; // Should be 0xFF
 
         ksd.map_key_range_to_cell_range(&from_key, &to_key);
+    }
+
+    #[test]
+    fn test_cell_range_non_byte_aligned_prefix() {
+        // Test with 4-bit prefix (non-byte aligned)
+        // Key length = 2 bytes, prefix = 4 bits
+        // This means prefix_len_bytes = 1, cluster_bits = 4
+        let key_type = KeyType::from_prefix_bits(4);
+        let (key_shape, ks) = KeyShape::new_single(2, 16, key_type);
+        let ksd = key_shape.ks(ks);
+
+        // Test edge case: prefix 0b0000_0000 should cover 0b0000_xxxx
+        let cell0 = c(&[0b0000_0000]);
+        let (first_key0, last_key0) = ksd.cell_range(&cell0);
+
+        assert_eq!(first_key0.as_slice(), &[0b0000_0000, 0b0000_0000]);
+        assert_eq!(last_key0.as_slice(), &[0b0000_1111, 0b1111_1111]);
+
+        // Test cell with prefix 0b0011_0000
+        // With 4-bit prefix and 4 cluster bits, this cell should cover 0b0011_xxxx
+        let cell = c(&[0b0011_0000]);
+        let (first_key, last_key) = ksd.cell_range(&cell);
+
+        assert_eq!(first_key.as_slice(), &[0b0011_0000, 0b0000_0000]);
+        // Last key should be 0b0011_1111 (not 0b0011_0000!)
+        // because the 4-bit prefix 0b0011 covers 0b0011_0000 through 0b0011_1111
+        assert_eq!(last_key.as_slice(), &[0b0011_1111, 0b1111_1111]);
+
+        // Test another cell with prefix 0b1010_0000
+        // Should cover 0b1010_xxxx
+        let cell2 = c(&[0b1010_0000]);
+        let (first_key2, last_key2) = ksd.cell_range(&cell2);
+
+        assert_eq!(first_key2.as_slice(), &[0b1010_0000, 0b0000_0000]);
+        assert_eq!(last_key2.as_slice(), &[0b1010_1111, 0b1111_1111]);
+
+        // Test edge case: prefix 0b1111_0000 should cover 0b1111_xxxx
+        let cell3 = c(&[0b1111_0000]);
+        let (first_key3, last_key3) = ksd.cell_range(&cell3);
+
+        assert_eq!(first_key3.as_slice(), &[0b1111_0000, 0b0000_0000]);
+        assert_eq!(last_key3.as_slice(), &[0b1111_1111, 0b1111_1111]);
     }
 }
