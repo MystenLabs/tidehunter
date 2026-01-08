@@ -32,3 +32,9 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_yaml = "0.9.33"
 fdlimit = "0.2.1"
 rand_distr = "0.4"
+faster-rs = { git = "https://github.com/zablotchi/faster-rs.git", branch = "main", optional = true }
+
+[features]
+default = []
+# Enable FASTER backend (Linux only)
+enable-faster = ["faster-rs"]
