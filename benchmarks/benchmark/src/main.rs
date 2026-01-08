@@ -183,7 +183,7 @@ pub fn main() {
     report!(report, "Starting write test");
     let write_sec;
     if stress.parameters.reuse.is_none() {
-        let elapsed = stress.measure(
+        let (elapsed, _) = stress.measure(
             stress.parameters.write_threads,
             StressThread::run_writes,
             &mut report,
@@ -210,9 +210,20 @@ pub fn main() {
             storage_len as f64 / 1024. / 1024. / 1024.
         );
     }
+    if stress.parameters.pause_between_phases_secs > 0 {
+        report!(
+            report,
+            "Pausing for {} seconds between phases",
+            stress.parameters.pause_between_phases_secs
+        );
+        thread::sleep(Duration::from_secs(
+            stress.parameters.pause_between_phases_secs,
+        ));
+    }
     report!(
         report,
-        "Starting mixed read/write test ({}% reads, {}% writes)",
+        "Starting mixed read/write test for {} seconds ({}% reads, {}% writes)",
+        stress.parameters.mixed_duration_secs,
         stress.parameters.read_percentage,
         100 - stress.parameters.read_percentage
     );
@@ -224,13 +235,12 @@ pub fn main() {
     } else {
         Default::default()
     };
-    let elapsed = stress.measure(
+    let (elapsed, total_ops) = stress.measure(
         stress.parameters.mixed_threads,
         StressThread::run_mixed_operations,
         &mut report,
     );
     manual_stop.store(true, Ordering::Relaxed);
-    let total_ops = stress.parameters.operations * stress.parameters.mixed_threads;
     let total_bytes = total_ops * stress.parameters.write_size;
     let msecs = elapsed.as_millis() as usize;
     let ops_sec = dec_div(total_ops / msecs * 1000);
@@ -300,7 +310,7 @@ impl Stress {
         n: usize,
         f: F,
     ) -> Arc<AtomicBool> {
-        let (_, manual_stop, _, _) = self.start_threads(n, f);
+        let (_, manual_stop, _, _, _) = self.start_threads(n, f);
         manual_stop
     }
 
@@ -309,12 +319,13 @@ impl Stress {
         n: usize,
         f: F,
         report: &mut Report,
-    ) -> Duration {
-        let (threads, _, latency, latency_errors) = self.start_threads(n, f);
+    ) -> (Duration, usize) {
+        let (threads, _, latency, latency_errors, operations_counter) = self.start_threads(n, f);
         let start = Instant::now();
         for t in threads {
             t.join().unwrap();
         }
+        let total_ops = operations_counter.load(Ordering::Relaxed);
         let latency = latency.drain();
         let percentiles = latency
             .percentiles(&[50., 90., 99., 99.9, 99.99, 99.999])
@@ -337,9 +348,10 @@ impl Stress {
             p(4),
             p(5)
         );
-        start.elapsed()
+        (start.elapsed(), total_ops)
     }
 
+    #[allow(clippy::type_complexity)]
     fn start_threads<F: FnOnce(StressThread) + Clone + Send + 'static>(
         &self,
         n: usize,
@@ -349,6 +361,7 @@ impl Stress {
         Arc<AtomicBool>,
         Arc<AtomicHistogram>,
         Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
     ) {
         let mut threads = Vec::with_capacity(n);
         let start_lock = Arc::new(RwLock::new(()));
@@ -357,6 +370,7 @@ impl Stress {
         let latency = AtomicHistogram::new(12, 26).unwrap();
         let latency = Arc::new(latency);
         let latency_errors = Arc::new(AtomicUsize::default());
+        let operations_counter = Arc::new(AtomicUsize::new(0));
         for index in 0..n {
             let thread = StressThread {
                 db: self.storage.clone(),
@@ -368,13 +382,20 @@ impl Stress {
                 latency: latency.clone(),
                 latency_errors: latency_errors.clone(),
                 benchmark_metrics: self.benchmark_metrics.clone(),
+                operations_counter: operations_counter.clone(),
             };
             let f = f.clone();
             let thread = thread::spawn(move || f(thread));
             threads.push(thread);
         }
         drop(start_w);
-        (threads, manual_stop, latency, latency_errors)
+        (
+            threads,
+            manual_stop,
+            latency,
+            latency_errors,
+            operations_counter,
+        )
     }
 }
 
@@ -412,6 +433,7 @@ struct StressThread {
     latency: Arc<AtomicHistogram>,
     latency_errors: Arc<AtomicUsize>,
     benchmark_metrics: Arc<BenchmarkMetrics>,
+    operations_counter: Arc<AtomicUsize>,
 }
 
 impl StressThread {
@@ -443,7 +465,7 @@ impl StressThread {
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             self.db.insert(key.into(), value.into());
-            let latency = timer.elapsed().as_micros();
+            let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
             self.benchmark_metrics
                 .bench_writes
                 .with_label_values(&[self.db.name()])
@@ -451,6 +473,7 @@ impl StressThread {
             if self.latency.increment(latency as u64).is_err() {
                 self.latency_errors.fetch_add(1, Ordering::Relaxed);
             }
+            self.operations_counter.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -482,7 +505,13 @@ impl StressThread {
         // Start writing new keys just after the ones written in the initial phase.
         let mut local_write_pos_counter = self.parameters.writes;
 
-        for _ in 0..self.parameters.operations {
+        let deadline = Instant::now() + Duration::from_secs(self.parameters.mixed_duration_secs);
+
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+
             // Randomly decide whether to read or write based on percentage
             let do_read = thread_rng.gen_range(0..100) < read_percentage;
 
@@ -541,7 +570,7 @@ impl StressThread {
                         // see comment above for get mode.
                     }
                 }
-                let latency = timer.elapsed().as_micros();
+                let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
                 self.benchmark_metrics
                     .bench_reads
                     .with_label_values(&[self.db.name()])
@@ -568,7 +597,7 @@ impl StressThread {
                 let (key, value) = self.key_value(pos);
                 let timer = Instant::now();
                 self.db.insert(key.into(), value.into());
-                let latency = timer.elapsed().as_micros();
+                let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
                 self.benchmark_metrics
                     .bench_writes
                     .with_label_values(&[self.db.name()])
@@ -577,6 +606,9 @@ impl StressThread {
                     self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
+
+            // Track operations for reporting
+            self.operations_counter.fetch_add(1, Ordering::Relaxed);
         }
     }
 

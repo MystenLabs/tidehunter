@@ -12,7 +12,7 @@ fn main() -> Result<()> {
     base_item.stress_client_parameters.write_size = 512;
     base_item.stress_client_parameters.key_len = 32;
     base_item.stress_client_parameters.writes = 83_000_000;
-    base_item.stress_client_parameters.operations = 10_000_000;
+    base_item.stress_client_parameters.mixed_duration_secs = 600;
     base_item.stress_client_parameters.background_writes = 0;
     base_item.stress_client_parameters.no_snapshot = false;
     base_item.stress_client_parameters.report = true;
