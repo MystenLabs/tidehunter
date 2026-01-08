@@ -2,6 +2,7 @@
 #[cfg(all(target_os = "linux", feature = "enable-faster"))]
 pub mod faster;
 
+pub mod lmdb;
 pub mod rocks;
 pub mod tidehunter;
 

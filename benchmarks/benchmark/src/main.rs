@@ -174,6 +174,11 @@ pub fn main() {
             let storage = RocksStorage::open(&path, true, config.db_parameters.metrics_enabled);
             Arc::new(storage)
         }
+        Backend::Lmdb => {
+            use crate::storage::lmdb::LmdbStorage;
+            let storage = LmdbStorage::open(&path);
+            storage as Arc<dyn Storage>
+        }
         Backend::Faster => {
             #[cfg(all(target_os = "linux", feature = "enable-faster"))]
             {
