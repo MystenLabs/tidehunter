@@ -128,10 +128,10 @@ impl WalWriter {
     }
 
     fn get_writeable_map(&self, position: u64) -> (Map, usize) {
-        let (map, offset) = self.wal.layout.locate(position);
-        const MAX_ATTEMPTS: usize = 10 * 1000;
+        let (map_id, offset) = self.wal.layout.locate(position);
+        const MAX_ATTEMPTS: usize = 60 * 1000;
         for _ in 0..MAX_ATTEMPTS {
-            let Some(map) = self.wal.get_map(map) else {
+            let Some(map) = self.wal.get_map(map_id) else {
                 self.wal.metrics.wal_write_wait.inc();
                 thread::sleep(Duration::from_millis(1));
                 continue;
@@ -139,7 +139,7 @@ impl WalWriter {
             assert!(map.writeable, "Map is not writable");
             return (map, offset as usize);
         }
-        panic!("Could not receive writable map {map:?}")
+        panic!("Could not receive writable map {map_id:?}")
     }
 
     /// Current un-initialized position,
@@ -606,7 +606,7 @@ mod tests {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let layout = WalLayout {
             frag_size: 1024,
-            max_maps: 3,
+            max_maps: 16,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -668,7 +668,7 @@ mod tests {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let layout = WalLayout {
             frag_size: 512,
-            max_maps: 4,
+            max_maps: 16,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -784,7 +784,7 @@ mod tests {
         let frag_size = 512;
         let layout = WalLayout {
             frag_size,
-            max_maps: 3,
+            max_maps: 16,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -819,7 +819,7 @@ mod tests {
         let dir = tempdir::TempDir::new("test-multi-file-wal").unwrap();
         let layout = WalLayout {
             frag_size: 1024,
-            max_maps: 3,
+            max_maps: 16,
             direct_io: false,
             wal_file_size: 8192,
             kind: WalKind::Replay,
