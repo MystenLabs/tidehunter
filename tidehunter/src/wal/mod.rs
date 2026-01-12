@@ -353,10 +353,15 @@ impl Wal {
         self.layout.wal_file_size
     }
 
-    /// Returns the file descriptor of the wal file
+    /// Returns the file descriptor of the wal file containing the given position,
+    /// along with the offset within that file.
     #[cfg(test)]
-    pub(crate) fn file(&self) -> File {
-        self.files.load().current_file().try_clone().unwrap()
+    pub(crate) fn file_at_position(&self, position: u64) -> (File, u64) {
+        let file_id = self.layout.locate_file(position);
+        let offset = self.layout.offset_in_wal_file(position);
+        let files = self.files.load();
+        let file = files.get(file_id).try_clone().unwrap();
+        (file, offset)
     }
 }
 
