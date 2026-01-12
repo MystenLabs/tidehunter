@@ -348,12 +348,13 @@ fn test_corrupted_batch_replay() {
         batch.write(ks, key_b.clone(), vec![23]);
         batch.commit().unwrap();
 
-        let position = db.wal_writer.position();
+        let wal_position = db.wal_writer.position();
         let record_length = CrcFrame::CRC_HEADER_LENGTH as u64 + 4 + 1 + 4;
         let offset = config.wal_layout(WalKind::Replay).align(record_length) - record_length;
-        let file = db.wal.file().try_clone().unwrap();
-
-        (position - offset - 1, file)
+        let corruption_wal_position = wal_position - offset - 1;
+        // Get the file containing the position we want to corrupt, and the offset within that file
+        let (file, file_offset) = db.wal.file_at_position(corruption_wal_position);
+        (file_offset, file)
     };
     // Corrupt the last byte of the final entry in the last batch
     let mut data = [0u8; 1];
@@ -1952,16 +1953,17 @@ fn test_value_corruption() {
         let position = db.wal_writer.position();
         db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
 
-        let file = db.wal.file().try_clone().unwrap();
-        (position, file)
+        // Get the file containing the position we want to corrupt, and the offset within that file
+        let (file, file_offset) = db.wal.file_at_position(position);
+        (file_offset, file)
     };
 
-    // Insert a corruption in the last byte of the last database entry
+    // Insert a corruption in the data portion of the last database entry
     let mut data = [0u8; 1];
-    let position = last_position + CrcFrame::CRC_HEADER_LENGTH as u64;
-    file.read_exact_at(&mut data, position).unwrap();
+    let corruption_offset = last_position + CrcFrame::CRC_HEADER_LENGTH as u64;
+    file.read_exact_at(&mut data, corruption_offset).unwrap();
     data[0] = !data[0];
-    file.write_all_at(&mut data, position).unwrap();
+    file.write_all_at(&mut data, corruption_offset).unwrap();
 
     // Re-open the database and insert some new data
     {
@@ -2020,11 +2022,12 @@ fn test_header_corruption() {
         let position = db.wal_writer.position();
         db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
 
-        let file = db.wal.file().try_clone().unwrap();
-        (position, file)
+        // Get the file containing the position we want to corrupt, and the offset within that file
+        let (file, file_offset) = db.wal.file_at_position(position);
+        (file_offset, file)
     };
 
-    // Insert a corruption in the first byte of the last database entry
+    // Insert a corruption in the first byte of the last database entry (the header)
     let mut data = [0u8; 1];
     file.read_exact_at(&mut data, last_position).unwrap();
     data[0] = !data[0];
@@ -2087,11 +2090,12 @@ fn test_max_value_header_corruption() {
         let position = db.wal_writer.position();
         db.insert(ks, key_3.clone(), value_3.clone()).unwrap();
 
-        let file = db.wal.file().try_clone().unwrap();
-        (position, file)
+        // Get the file containing the position we want to corrupt, and the offset within that file
+        let (file, file_offset) = db.wal.file_at_position(position);
+        (file_offset, file)
     };
 
-    // Insert a corruption in the first byte of the last database entry
+    // Insert a corruption by writing max values to the header (simulates worst case corruption)
     let data = [0xffu8; 8];
     file.write_all_at(&data, last_position).unwrap();
 
