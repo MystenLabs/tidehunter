@@ -234,21 +234,13 @@ impl LargeTable {
         self.fp.fp_insert_before_lock();
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
-        let (entry, created) = row.entry_mut(&cell);
+        let entry = self.entry_mut(&mut row, &cell);
         if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
                 .with_label_values(&[context.name(), "insert"])
                 .inc();
             return Ok(());
-        }
-
-        if created && context.ks_config.needs_large_table_cell_index() {
-            let ks_table = self.ks_table(&context.ks_config);
-            ks_table
-                .cell_index
-                .write()
-                .insert(cell.assume_bytes_id().clone());
         }
 
         entry.insert(k.clone(), v);
@@ -293,7 +285,7 @@ impl LargeTable {
         self.fp.fp_remove_before_lock();
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
-        let (entry, _) = row.entry_mut(&cell);
+        let entry = self.entry_mut(&mut row, &cell);
         if self.skip_stale_update(entry, &k, v) {
             self.metrics
                 .skip_stale_update
@@ -400,6 +392,22 @@ impl LargeTable {
             .lookup_mcs_histogram(index_reader.read_type())
             .observe(now.elapsed().as_micros() as f64);
         Ok(context.report_lookup_result(result, LookupSource::Lookup))
+    }
+
+    fn entry_mut<'a>(&self, row: &'a mut Row, cell: &CellId) -> &'a mut LargeTableEntry {
+        let ks_table = if row.context.ks_config.needs_large_table_cell_index() {
+            Some(self.ks_table(&row.context.ks_config))
+        } else {
+            None
+        };
+        let (entry, created) = row.entry_mut(cell);
+        if created && let Some(ks_table) = ks_table {
+            ks_table
+                .cell_index
+                .write()
+                .insert(cell.assume_bytes_id().clone());
+        }
+        entry
     }
 
     /// Checks if the update is potentially stale and the operation needs to be canceled.
@@ -903,7 +911,7 @@ impl LargeTable {
         let row = context.ks_config.mutex_for_cell(cell);
         let ks_table = self.ks_rows(&context.ks_config);
         let mut row = ks_table.lock(row, &context.large_table_contention);
-        let (entry, _is_new_cell) = row.entry_mut(cell);
+        let entry = self.entry_mut(&mut row, cell);
         entry.update_flushed_index(original_index, position);
     }
 
@@ -937,6 +945,8 @@ impl LargeTable {
 }
 
 impl Row {
+    /// Get mutable entry.
+    /// You should normally use LargeTable:entry_mut rather than this function.
     pub fn entry_mut(&mut self, id: &CellId) -> (&mut LargeTableEntry, bool) {
         self.entries.entry_mut(id, &self.context)
     }
