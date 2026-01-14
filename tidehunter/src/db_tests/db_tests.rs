@@ -436,8 +436,15 @@ fn test_iterator_run(data: Vec<u128>, key_indexing: KeyIndexing) {
         Metrics::new(),
     )
     .unwrap();
-    for k in &data {
-        db.insert(ks, ku128(*k), vu128(*k)).unwrap();
+    for (i, k) in data.iter().enumerate() {
+        if i % 2 == 0 {
+            db.insert(ks, ku128(*k), vu128(*k)).unwrap();
+        } else {
+            // Write some values with batch write to make sure there is no difference with regular write
+            let mut batch = db.write_batch();
+            batch.write(ks, ku128(*k), vu128(*k));
+            batch.commit().unwrap();
+        }
     }
     let mut rng = ThreadRng::default();
     for reverse in [true, false] {

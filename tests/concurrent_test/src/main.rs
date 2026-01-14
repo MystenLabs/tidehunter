@@ -154,7 +154,7 @@ fn main() {
     let keys: Vec<Vec<u8>> = (0u8..25).map(|i| vec![i + b'a']).collect();
 
     let num_threads = 8;
-    let operations_per_thread = 16 * 5000;
+    let operations_per_thread = 32 * 5000;
     let total_operations = num_threads * operations_per_thread;
 
     // Check if progress bars should be disabled
@@ -297,9 +297,16 @@ fn main() {
                         {
                             let db_read = db.read();
                             let db_instance = db_read.as_ref().unwrap();
-                            db_instance
-                                .insert(key_space, key.clone(), value.clone())
-                                .unwrap();
+                            if rng.r#gen() {
+                                db_instance
+                                    .insert(key_space, key.clone(), value.clone())
+                                    .unwrap();
+                            } else {
+                                // Some of the writes are done via batch
+                                let mut batch = db_instance.write_batch();
+                                batch.write(key_space, key.clone(), value.clone());
+                                batch.commit().unwrap();
+                            }
                         }
                         in_memory_state.insert(key.clone(), value);
                     }
@@ -357,7 +364,14 @@ fn main() {
                         {
                             let db_read = db.read();
                             let db_instance = db_read.as_ref().unwrap();
-                            db_instance.remove(key_space, key.clone()).unwrap();
+                            if rng.r#gen() {
+                                db_instance.remove(key_space, key.clone()).unwrap();
+                            } else {
+                                // Some of the deletes are done via batch
+                                let mut batch = db_instance.write_batch();
+                                batch.delete(key_space, key.clone());
+                                batch.commit().unwrap();
+                            }
                         }
                         in_memory_state.remove(&key);
                     }
