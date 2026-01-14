@@ -5,6 +5,7 @@ use crate::flusher::{FlushKind, FlusherCommand, IndexFlusher, IndexFlusherThread
 use crate::index::index_format::Direction;
 use crate::index::index_format::IndexFormat;
 use crate::index::index_table::IndexTable;
+use crate::index::pending_table::{PendingTable, Transaction};
 use crate::index::utils::{NextEntryResult, take_next_entry};
 use crate::iterators::IteratorResult;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
@@ -41,6 +42,7 @@ pub struct LargeTable {
 pub struct LargeTableEntry {
     cell: CellId,
     pub(crate) data: ArcCow<IndexTable>,
+    pending_data: PendingTable,
     state: LargeTableEntryState,
     context: KsContext,
     bloom_filter: Option<BloomFilter>,
@@ -235,15 +237,12 @@ impl LargeTable {
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
-        if self.skip_stale_update(entry, &k, v) {
-            self.metrics
-                .skip_stale_update
-                .with_label_values(&[context.name(), "insert"])
-                .inc();
+
+        entry.promote_pending(); // todo promote one key
+
+        if !entry.insert(k.clone(), v) {
             return Ok(());
         }
-
-        entry.insert(k.clone(), v);
 
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
@@ -286,19 +285,29 @@ impl LargeTable {
         let v = *guard.wal_position();
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
-        if self.skip_stale_update(entry, &k, v) {
-            self.metrics
-                .skip_stale_update
-                .with_label_values(&[context.name(), "remove"])
-                .inc();
+
+        entry.promote_pending(); // todo promote one key
+
+        if !entry.remove(k.clone(), v) {
             return Ok(());
         }
-        entry.remove(k.clone(), v);
         if let Some(value_lru) = &mut row.value_lru {
             let previous = value_lru.pop(&k);
             self.update_lru_metric(context, previous.map(|v| (k, v)), 0);
         }
         Ok(())
+    }
+
+    pub fn insert_pending(&self, context: &KsContext, k: Bytes, transaction: &mut Transaction) {
+        let (mut row, cell) = self.row(context, &k);
+        let entry = self.entry_mut(&mut row, &cell);
+        entry.pending_data.insert(k, transaction);
+    }
+
+    pub fn remove_pending(&self, context: &KsContext, k: Bytes, transaction: &mut Transaction) {
+        let (mut row, cell) = self.row(context, &k);
+        let entry = self.entry_mut(&mut row, &cell);
+        entry.pending_data.remove(k, transaction);
     }
 
     pub fn update_lru(&self, context: &KsContext, key: Bytes, value: Bytes) {
@@ -347,6 +356,10 @@ impl LargeTable {
         let Some(entry) = entry else {
             return Ok(context.report_lookup_result(None, LookupSource::Prefix));
         };
+
+        // todo correctness - LRU cache removal does not apply correctly
+        entry.promote_pending(); // todo promote one key
+
         if entry.bloom_filter_not_found(k) {
             return Ok(context.report_lookup_result(None, LookupSource::Bloom));
         }
@@ -408,23 +421,6 @@ impl LargeTable {
                 .insert(cell.assume_bytes_id().clone());
         }
         entry
-    }
-
-    /// Checks if the update is potentially stale and the operation needs to be canceled.
-    /// This can happen if there are multiple concurrent updates for the same key.
-    /// Returns true if the update is outdated and should be skipped
-    fn skip_stale_update(
-        &self,
-        entry: &LargeTableEntry,
-        key: &Bytes,
-        wal_position: WalPosition,
-    ) -> bool {
-        // check the existing loaded WAL position first, if present
-        if let Some(last_position) = entry.data.get_update_position(key) {
-            last_position > wal_position
-        } else {
-            false
-        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -506,6 +502,8 @@ impl LargeTable {
             None => return Ok(None), // Cell doesn't exist
         };
 
+        entry.promote_pending();
+
         // Load the entry if it's unloaded
         // TODO: doing this will mean all entries will be loaded in memory during relocation
         // and at some point we might want to find a way to avoid it
@@ -529,6 +527,8 @@ impl LargeTable {
             Some(entry) => entry,
             None => return Ok(()), // Cell doesn't exist
         };
+
+        entry.promote_pending();
 
         entry.sync_flush(loader, true, relocation_updates, relocation_cutoff)
     }
@@ -644,6 +644,8 @@ impl LargeTable {
             let mut row = mutex.lock();
             let mut row_data = RowContainer::new();
             for entry in row.entries.iter_mut() {
+                entry.promote_pending();
+
                 entry.maybe_flush_for_snapshot(loader, force_relocate_below, threshold_position)?;
                 let position = entry.state.wal_position();
                 let snapshot_data = SnapshotEntryData {
@@ -740,6 +742,8 @@ impl LargeTable {
         let Some(entry) = row.try_entry_mut(cell) else {
             return Ok(None);
         };
+
+        entry.promote_pending();
 
         if !entry.context.ks_config.unloaded_iterator_enabled() {
             entry.maybe_load(loader)?;
@@ -1026,6 +1030,7 @@ impl LargeTableEntry {
             cell,
             state,
             data: Default::default(),
+            pending_data: Default::default(),
             bloom_filter,
             unload_jitter,
             pending_last_processed: None,
@@ -1055,17 +1060,65 @@ impl LargeTableEntry {
         entry
     }
 
-    pub fn insert(&mut self, k: Bytes, v: WalPosition) {
+    /// Checks if the update is potentially stale and the operation needs to be canceled.
+    /// This can happen if there are multiple concurrent updates for the same key.
+    /// Returns true if the update is outdated and should be skipped
+    fn skip_stale_update(&self, key: &Bytes, wal_position: &WalPosition, op: &'static str) -> bool {
+        // check the existing loaded WAL position first, if present
+        let skip = if let Some(last_position) = self.data.get_update_position(key) {
+            &last_position > wal_position
+        } else {
+            false
+        };
+        if skip {
+            self.context
+                .metrics
+                .skip_stale_update
+                .with_label_values(&[self.context.name(), op])
+                .inc();
+        }
+        skip
+    }
+
+    /// Returns true if successful, false if update was skipped
+    pub fn insert(&mut self, k: Bytes, v: WalPosition) -> bool {
+        if self.skip_stale_update(&k, &v, "insert") {
+            return false;
+        }
         self.state.mark_dirty();
         self.insert_bloom_filter(&k);
         self.data.make_mut().insert(k, v);
         self.report_loaded_keys_count();
+        true
     }
 
-    pub fn remove(&mut self, k: Bytes, v: WalPosition) {
+    /// Returns true if successful, false if update was skipped
+    pub fn remove(&mut self, k: Bytes, v: WalPosition) -> bool {
+        if self.skip_stale_update(&k, &v, "remove") {
+            return false;
+        }
         self.state.mark_dirty();
         self.data.make_mut().remove(k, v);
         self.report_loaded_keys_count();
+        true
+    }
+
+    fn promote_pending(&mut self) {
+        let committed = self.pending_data.take_committed();
+        if committed.is_empty() {
+            return;
+        }
+        for committed_change in committed {
+            // changes from the committed batch goes over
+            // the same skip_stale_update logic as regular updates
+            if committed_change.is_modified {
+                // todo perf - LRU cache is not updated here
+                // todo perf - report_loaded_keys_count and make_mut calls can be done once
+                self.insert(committed_change.key, committed_change.value);
+            } else {
+                self.remove(committed_change.key, committed_change.value);
+            }
+        }
     }
 
     fn report_loaded_keys_count(&self) {
