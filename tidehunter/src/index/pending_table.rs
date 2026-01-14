@@ -106,7 +106,7 @@ impl PendingTable {
     ) -> usize {
         let mut removed = 0;
         updates.retain(|update| {
-            if update.transaction_status.status.load(Ordering::Acquire) {
+            if update.transaction_status.status.load(Ordering::SeqCst) {
                 let inner = update.inner.update.load();
                 if let Some(value) = inner.as_ref() {
                     let committed_change = CommittedChange {
@@ -142,7 +142,7 @@ impl Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
-        self.status.status.store(true, Ordering::Release);
+        self.status.status.store(true, Ordering::SeqCst);
     }
 }
 
