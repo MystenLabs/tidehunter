@@ -66,10 +66,7 @@ impl PendingTable {
     }
 
     fn insert_pending(&mut self, key: Bytes, is_modified: bool, transaction: &mut Transaction) {
-        #[cfg(test)]
-        {
-            self.len += 1;
-        }
+        self.len += 1;
         let update = PendingUpdate::new(transaction.status.clone(), is_modified);
         transaction.updates.push(update.inner.clone());
         self.data.entry(key).or_default().push(update);
@@ -81,7 +78,7 @@ impl PendingTable {
         };
         let mut committed = Vec::with_capacity(updates.len());
         let removed = Self::do_take_committed(key, updates, &mut committed);
-        self.len -= removed;
+        self.len = self.len.checked_sub(removed).expect("len overflow");
         if updates.is_empty() {
             self.data.remove(key);
         }
@@ -92,7 +89,7 @@ impl PendingTable {
         let mut committed = Vec::with_capacity(self.len);
         self.data.retain(|key, updates| {
             let removed = Self::do_take_committed(key, updates, &mut committed);
-            self.len -= removed;
+            self.len = self.len.checked_sub(removed).expect("len overflow");
             !updates.is_empty()
         });
         committed
