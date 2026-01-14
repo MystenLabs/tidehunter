@@ -423,11 +423,12 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("Failed to create test database: {:?}", e))?;
 
         // Write some test records (8-byte keys to match KeyShape)
-        let mut batch = WriteBatch::new();
+        let mut batch = db.write_batch();
         batch.write(ks, b"key00001".to_vec(), b"value1".to_vec());
         batch.write(ks, b"key00002".to_vec(), b"value2".to_vec());
         batch.write(ks, b"key00003".to_vec(), b"value3".to_vec());
-        db.write_batch(batch)
+        batch
+            .commit()
             .map_err(|e| anyhow::anyhow!("Failed to write batch: {:?}", e))?;
 
         // Close the database
@@ -472,17 +473,19 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("Failed to create test database: {:?}", e))?;
 
         // Write some test records (8-byte keys to match KeyShape)
-        let mut batch = WriteBatch::new();
+        let mut batch = db.write_batch();
         batch.write(ks, b"key00001".to_vec(), b"value1".to_vec());
         batch.write(ks, b"key00002".to_vec(), b"value2".to_vec());
         batch.write(ks, b"key00003".to_vec(), b"value3".to_vec());
-        db.write_batch(batch)
+        batch
+            .commit()
             .map_err(|e| anyhow::anyhow!("Failed to write batch: {:?}", e))?;
 
         // Delete one key (8-byte key to match KeyShape)
-        let mut delete_batch = WriteBatch::new();
+        let mut delete_batch = db.write_batch();
         delete_batch.delete(ks, b"key00002".to_vec());
-        db.write_batch(delete_batch)
+        delete_batch
+            .commit()
             .map_err(|e| anyhow::anyhow!("Failed to write delete batch: {:?}", e))?;
 
         // Close the database

@@ -499,22 +499,24 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("Failed to create test database: {:?}", e))?;
 
         // Write some test records
-        let mut batch = WriteBatch::new();
+        let mut batch = db.write_batch();
         for i in 0..10 {
             let key = format!("key{i:05}");
             let value = format!("value{i}");
             batch.write(ks, key.into_bytes(), value.into_bytes());
         }
-        db.write_batch(batch)
+        batch
+            .commit()
             .map_err(|e| anyhow::anyhow!("Failed to write batch: {:?}", e))?;
 
         // Add some removes
-        let mut batch = WriteBatch::new();
+        let mut batch = db.write_batch();
         for i in 2..5 {
             let key = format!("key{i:05}");
             batch.delete(ks, key.into_bytes());
         }
-        db.write_batch(batch)
+        batch
+            .commit()
             .map_err(|e| anyhow::anyhow!("Failed to write batch: {:?}", e))?;
 
         // Note: We don't have a public flush method, but index entries

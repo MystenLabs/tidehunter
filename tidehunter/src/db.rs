@@ -1,4 +1,4 @@
-use crate::batch::{RelocatedWriteBatch, Update, WriteBatch};
+use crate::batch::{RelocatedWriteBatch, WriteBatch, WriteBatchWrite};
 use crate::cell::CellId;
 use crate::config::Config;
 use crate::context::{DbOpKind, KsContext, KsContextVec, ReadType, WalEntryKind};
@@ -357,13 +357,18 @@ impl Db {
         Ok(())
     }
 
-    pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
+    pub fn write_batch(self: &Arc<Db>) -> WriteBatch {
+        WriteBatch::new(Arc::clone(self))
+    }
+
+    pub(crate) fn do_write_batch(&self, batch: WriteBatch) -> DbResult<()> {
         let WriteBatch {
-            updates,
-            prepared_writes,
+            transaction,
+            writes,
             tag,
+            ..
         } = batch;
-        if updates.is_empty() {
+        if writes.is_empty() {
             return Ok(());
         }
         let _timer = self
@@ -371,38 +376,30 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["write_batch", &tag])
             .mcs_timer();
-        let mut last_position = WalPosition::INVALID;
-        let mut update_writes = Vec::with_capacity(updates.len());
         let _write_timer = self
             .metrics
             .write_batch_times
             .with_label_values(&[&tag, "write"])
             .mcs_timer();
 
-        let guards = self.write_batch_into_wal(&prepared_writes)?;
+        let guards = self.write_batch_into_wal(&writes)?;
 
         let mut num_inserts = 0;
         let mut num_deletes = 0;
         // Create iterator and skip the first guard (batch start)
-        let mut guards_iter = guards.into_iter();
-        guards_iter.next(); // Skip batch start guard
 
-        for (idx, (update, guard)) in updates.iter().zip(guards_iter).enumerate() {
-            let ks = update.ks();
-            let context = self.ks_context(ks);
-            let wal_kind = match update {
-                Update::Record(..) => {
-                    num_inserts += 1;
-                    WalEntryKind::Record
-                }
-                Update::Remove(..) => {
-                    num_deletes += 1;
-                    WalEntryKind::Tombstone
-                }
+        for write in writes.iter() {
+            let context = self.ks_context(write.ks);
+            let wal_kind = if write.is_modified {
+                num_inserts += 1;
+                WalEntryKind::Record
+            } else {
+                num_deletes += 1;
+                WalEntryKind::Tombstone
             };
-            context.inc_wal_written(wal_kind, prepared_writes[idx].len() as u64);
-            update_writes.push((update, guard));
+            context.inc_wal_written(wal_kind, write.prepared_write.len() as u64);
         }
+
         drop(_write_timer);
         self.metrics
             .write_batch_operations
@@ -412,29 +409,24 @@ impl Db {
             .write_batch_operations
             .with_label_values(&[&tag, "delete"])
             .inc_by(num_deletes as u64);
-        let _update_timer = self
+        let _commit_timer = self
             .metrics
             .write_batch_times
-            .with_label_values(&[&tag, "update"])
+            .with_label_values(&[&tag, "commit"])
             .mcs_timer();
 
-        for (update, guard) in update_writes {
-            let context = self.ks_context(update.ks());
-            let reduced_key = update.reduced_key(&context.ks_config);
-            last_position = *guard.wal_position();
-            match update {
-                Update::Record(_, _, value) => {
-                    self.large_table
-                        .insert(context, reduced_key, guard, value, self)?
-                }
-                Update::Remove(..) => self.large_table.remove(context, reduced_key, guard, self)?,
-            }
-        }
-        if last_position != WalPosition::INVALID {
-            self.metrics
-                .wal_written_bytes
-                .set(last_position.offset() as i64);
-        }
+        // keep all guards active until transaction is committed
+        // positions for transaction commit starts with 1 (skip batch start wal entry)
+        let iter = &guards[1..];
+        transaction.commit(iter.iter().map(|g| *g.wal_position()));
+
+        self.metrics.wal_written_bytes.set(
+            guards
+                .last()
+                .expect("Guards can't be empty")
+                .wal_position()
+                .offset() as i64,
+        );
 
         Ok(())
     }
@@ -465,15 +457,13 @@ impl Db {
         Ok(())
     }
 
-    fn write_batch_into_wal(
-        &self,
-        prepared_writes: &[PreparedWalWrite],
-    ) -> DbResult<Vec<WalGuard>> {
+    fn write_batch_into_wal(&self, prepared_writes: &[WriteBatchWrite]) -> DbResult<Vec<WalGuard>> {
         let batch_start_entry =
             PreparedWalWrite::new(&WalEntry::BatchStart(prepared_writes.len() as u32));
-        let guards = self
-            .wal_writer
-            .multi_write(std::iter::once(&batch_start_entry).chain(prepared_writes))?;
+        let guards = self.wal_writer.multi_write(
+            std::iter::once(&batch_start_entry)
+                .chain(prepared_writes.iter().map(|pw| &pw.prepared_write)),
+        )?;
         Ok(guards)
     }
 

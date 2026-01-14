@@ -15,7 +15,7 @@ pub struct IndexTable {
     data: BTreeMap<Bytes, IndexWalPosition>,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct IndexWalPosition {
     offset: u64,
     len: u32,

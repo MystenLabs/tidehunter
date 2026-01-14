@@ -1,5 +1,4 @@
 use super::super::*;
-use crate::batch::WriteBatch;
 use crate::config::Config;
 use crate::crc::CrcFrame;
 use crate::failpoints::FailPoint;
@@ -137,10 +136,10 @@ fn test_batch() {
     let config = Arc::new(Config::small());
     let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
-    let mut batch = WriteBatch::new();
+    let mut batch = db.write_batch();
     batch.write(ks, vec![5, 6, 7, 8], vec![15]);
     batch.write(ks, vec![6, 7, 8, 9], vec![17]);
-    db.write_batch(batch).unwrap();
+    batch.commit().unwrap();
     assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
     assert_eq!(Some(vec![17].into()), db.get(ks, &[6, 7, 8, 9]).unwrap());
 }
@@ -158,10 +157,10 @@ fn test_batch_replay() {
             Metrics::new(),
         )
         .unwrap();
-        let mut batch = WriteBatch::new();
+        let mut batch = db.write_batch();
         batch.write(ks, vec![5, 6, 7, 8], vec![15]);
         batch.write(ks, vec![6, 7, 8, 9], vec![17]);
-        db.write_batch(batch).unwrap();
+        batch.commit().unwrap();
     }
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
     assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
@@ -184,14 +183,14 @@ fn test_corrupted_batch_replay() {
             Metrics::new(),
         )
         .unwrap();
-        let mut batch = WriteBatch::new();
+        let mut batch = db.write_batch();
         batch.write(ks, key_a.clone(), value_a.clone());
         batch.write(ks, key_b.clone(), value_b.clone());
-        db.write_batch(batch).unwrap();
-        let mut batch = WriteBatch::new();
+        batch.commit().unwrap();
+        let mut batch = db.write_batch();
         batch.write(ks, key_a.clone(), vec![20]);
         batch.write(ks, key_b.clone(), vec![23]);
-        db.write_batch(batch).unwrap();
+        batch.commit().unwrap();
 
         let position = db.wal_writer.position();
         let record_length = CrcFrame::CRC_HEADER_LENGTH as u64 + 4 + 1 + 4;
@@ -235,12 +234,12 @@ fn test_concurrent_batch() {
             let db = db.clone();
             let (key_a, key_b, key_c) = (key_a.clone(), key_b.clone(), key_c.clone());
             let handle = thread::spawn(move || {
-                let mut batch = WriteBatch::new();
+                let mut batch = db.write_batch();
                 let (a, b) = (thread_id, thread_id * 2);
                 batch.write(ks, key_a, thread_id.to_be_bytes().to_vec());
                 batch.write(ks, key_b, (thread_id * 2).to_be_bytes().to_vec());
                 batch.write(ks, key_c, (a + b).to_be_bytes().to_vec());
-                db.write_batch(batch).unwrap();
+                batch.commit().unwrap();
             });
             handles.push(handle);
         }
@@ -2577,14 +2576,14 @@ fn setup_corrupted_db(
     }));
 
     // Create a batch with 3 records
-    let mut batch = WriteBatch::new();
+    let mut batch = db.write_batch();
     batch.write(ks, vec![1, 2, 3, 4], vec![10]);
     batch.write(ks, vec![2, 3, 4, 5], vec![20]);
     batch.write(ks, vec![3, 4, 5, 6], vec![30]);
 
     // Attempt to write the batch - this should panic on the 3rd write
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        db.write_batch(batch).unwrap();
+        batch.commit().unwrap();
     }));
 
     assert!(result.is_err(), "Expected panic during batch write");
@@ -2616,11 +2615,11 @@ fn test_batch_after_incomplete_batch() {
         assert_eq!(None, db.get(ks, &[3, 4, 5, 6]).unwrap());
 
         // Now write the batch again without the failpoint
-        let mut batch = WriteBatch::new();
+        let mut batch = db.write_batch();
         batch.write(ks, vec![1, 2, 3, 4], vec![10]);
         batch.write(ks, vec![2, 3, 4, 5], vec![20]);
         batch.write(ks, vec![3, 4, 5, 6], vec![30]);
-        db.write_batch(batch).unwrap();
+        batch.commit().unwrap();
     }
 
     // Reopen the database again and verify all keys are accessible
