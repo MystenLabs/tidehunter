@@ -109,8 +109,7 @@ impl PendingTable {
     ) -> usize {
         let mut removed = 0;
         updates.retain(|update| {
-            // todo correct Ordering
-            if update.transaction_status.status.load(Ordering::Relaxed) {
+            if update.transaction_status.status.load(Ordering::Acquire) {
                 let inner = update.inner.update.load();
                 if let Some(value) = inner.as_ref() {
                     let committed_change = CommittedChange {
@@ -146,8 +145,7 @@ impl Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
-        // todo correct ordering
-        self.status.status.store(true, Ordering::Relaxed);
+        self.status.status.store(true, Ordering::Release);
     }
 }
 
