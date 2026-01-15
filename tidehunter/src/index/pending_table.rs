@@ -3,7 +3,7 @@ use arc_swap::ArcSwapOption;
 use minibytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// PendingTable stores key-value pairs that can be committed at once via Transaction.
 ///
@@ -29,6 +29,7 @@ pub struct PendingTable {
 pub struct Transaction {
     status: TransactionStatus,
     updates: Vec<PendingUpdateInner>,
+    committed: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -46,8 +47,12 @@ struct PendingUpdateInner {
 
 #[derive(Default, Clone)]
 struct TransactionStatus {
-    status: Arc<AtomicBool>,
+    status: Arc<AtomicUsize>,
 }
+
+const TRANSACTION_STATUS_PENDING: usize = 0;
+const TRANSACTION_STATUS_COMMITTED: usize = 1;
+const TRANSACTION_STATUS_REVERTED: usize = 2;
 
 #[derive(Clone)]
 struct PendingUpdate {
@@ -106,21 +111,30 @@ impl PendingTable {
     ) -> usize {
         let mut removed = 0;
         updates.retain(|update| {
-            if update.transaction_status.status.load(Ordering::SeqCst) {
-                let inner = update.inner.update.load();
-                if let Some(value) = inner.as_ref() {
-                    let committed_change = CommittedChange {
-                        key: key.clone(),
-                        is_modified: update.is_modified,
-                        value: *value.as_ref(),
-                    };
-                    committed.push(committed_change);
-                }
-                removed += 1;
-                false
-            } else {
-                true
+            let status = update.transaction_status.status.load(Ordering::SeqCst);
+            if status == TRANSACTION_STATUS_PENDING {
+                return true;
             }
+            let inner = update.inner.update.load();
+            if let Some(value) = inner.as_ref() {
+                assert_eq!(
+                    status, TRANSACTION_STATUS_COMMITTED,
+                    "Expected committed transaction"
+                );
+                let committed_change = CommittedChange {
+                    key: key.clone(),
+                    is_modified: update.is_modified,
+                    value: *value.as_ref(),
+                };
+                committed.push(committed_change);
+            } else {
+                assert_eq!(
+                    status, TRANSACTION_STATUS_REVERTED,
+                    "Expected reverted transaction"
+                );
+            }
+            removed += 1;
+            false
         });
         removed
     }
@@ -136,13 +150,21 @@ impl Transaction {
         for (update, value) in self.updates.drain(..).zip(values) {
             update.update.store(Some(Arc::new(value)));
         }
+        self.status
+            .status
+            .store(TRANSACTION_STATUS_COMMITTED, Ordering::SeqCst);
+        self.committed = true;
         // Dropping transaction here will set its status to complete
     }
 }
 
 impl Drop for Transaction {
     fn drop(&mut self) {
-        self.status.status.store(true, Ordering::SeqCst);
+        if !self.committed {
+            self.status
+                .status
+                .store(TRANSACTION_STATUS_REVERTED, Ordering::SeqCst);
+        }
     }
 }
 
