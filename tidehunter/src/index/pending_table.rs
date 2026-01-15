@@ -154,7 +154,6 @@ impl Transaction {
             .status
             .store(TRANSACTION_STATUS_COMMITTED, Ordering::SeqCst);
         self.committed = true;
-        // Dropping transaction here will set its status to complete
     }
 }
 
@@ -182,6 +181,12 @@ impl PendingUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use rand::prelude::SliceRandom;
+    use rand::{Rng, thread_rng};
+    use std::collections::{BTreeMap, HashSet};
+    use std::sync::mpsc;
+    use std::thread;
 
     #[test]
     fn pending_table_tests() {
@@ -253,6 +258,108 @@ mod tests {
                 value: WalPosition::test_value(4),
             }
         );
+    }
+
+    #[test]
+    fn pending_table_concurrent_test() {
+        let num_tables = 32;
+        let num_mutators = 16;
+        let iterations = 5000;
+        let tables: Vec<_> = (0..num_tables)
+            .map(|_| Arc::new(Mutex::new(PendingTable::default())))
+            .collect();
+        let (senders, receivers): (Vec<_>, Vec<_>) =
+            tables.iter().map(|_| mpsc::channel::<Vec<u64>>()).unzip();
+        let threads: Vec<_> = tables
+            .clone()
+            .into_iter()
+            .zip(receivers.into_iter())
+            .enumerate()
+            .map(|(id, (table, receiver))| {
+                thread::spawn(move || {
+                    let mut committed = HashSet::new();
+                    while let Ok(expected_to_commit) = receiver.recv() {
+                        for c in table.lock().take_committed() {
+                            println!("[{id}] committed {}", c.value.offset());
+                            committed.insert(c.value.offset());
+                        }
+                        for num in expected_to_commit.into_iter() {
+                            if !committed.remove(&num) {
+                                println!("[{id}] Expected {num} to be committed but it is not");
+                                std::process::exit(1);
+                            };
+                        }
+                    }
+                    if !committed.is_empty() {
+                        panic!("[{id}] something is not committed: {:?}", committed);
+                    }
+                })
+            })
+            .collect();
+        let max_transactions = 32;
+        let senders = Arc::new(senders);
+        let tables = Arc::new(tables);
+        let mut mutator_threads = vec![];
+        for _ in 0..num_mutators {
+            let senders = Arc::clone(&senders);
+            let tables = Arc::clone(&tables);
+            let thread = thread::spawn(move || {
+                let mut transactions: Vec<(Vec<u64>, Transaction)> = vec![];
+                let mut rng = thread_rng();
+                for _ in 0..iterations {
+                    let (transaction_changes, transaction) = if rng.gen_bool(
+                        (max_transactions - transactions.len()) as f64 / (max_transactions as f64),
+                    ) {
+                        println!("new txn(total {})", transactions.len());
+                        transactions.push(Default::default());
+                        transactions.last_mut().unwrap()
+                    } else {
+                        println!("existing txn");
+                        transactions.choose_mut(&mut rng).unwrap()
+                    };
+                    let num: u64 = rng.r#gen();
+                    transaction_changes.push(num);
+                    let table = tables.get(num as usize % tables.len()).unwrap();
+                    table
+                        .lock()
+                        .insert(Bytes::from(num.to_be_bytes()), transaction);
+
+                    let transaction_to_commit = rng.gen_range(0..(transactions.len() * 4));
+                    if transaction_to_commit >= transactions.len() {
+                        continue;
+                    }
+                    println!("Committing random txn");
+                    let (nums_to_commit, transaction_to_commit) =
+                        transactions.remove(transaction_to_commit);
+                    let mut tables_to_commit: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+                    for num_to_commit in nums_to_commit.iter() {
+                        tables_to_commit
+                            .entry((*num_to_commit as usize) % tables.len())
+                            .or_default()
+                            .push(*num_to_commit);
+                    }
+                    println!("Committing");
+                    transaction_to_commit.commit(
+                        nums_to_commit
+                            .iter()
+                            .map(|num| WalPosition::test_value(*num)),
+                    );
+                    for (table_id, message) in tables_to_commit {
+                        println!("Sending to {table_id}: {message:?}");
+                        senders[table_id].send(message).unwrap();
+                    }
+                }
+            });
+            mutator_threads.push(thread);
+        }
+        for thread in mutator_threads {
+            thread.join().unwrap();
+        }
+        drop(senders);
+        println!("Waiting for threads");
+        for thread in threads {
+            thread.join().unwrap();
+        }
     }
 
     fn b(v: u64) -> Bytes {
