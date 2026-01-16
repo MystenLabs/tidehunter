@@ -187,6 +187,7 @@ pub struct Metrics {
     pub flushed_bytes: MetricIntCounterVec,
     pub flush_pending: MetricIntGauge,
     pub flush_pending_count: AtomicI64, // Always active, used for backpressure
+    pub flush_backpressure_count: MetricIntCounter,
 
     pub relocation_target_position: MetricIntGauge,
     pub relocation_terminal_position: MetricIntGauge,
@@ -397,6 +398,7 @@ impl Metrics {
             flushed_bytes: counter_vec!("flushed_bytes", &["ks"], registry, enabled),
             flush_pending: gauge!("flush_pending", registry, enabled),
             flush_pending_count: AtomicI64::new(0),
+            flush_backpressure_count: counter!("flush_backpressure_count", registry, enabled),
 
             relocation_target_position: gauge!("relocation_target_position", registry, enabled),
             relocation_terminal_position: gauge!("relocation_terminal_position", registry, enabled),
