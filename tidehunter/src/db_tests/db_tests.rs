@@ -193,12 +193,11 @@ fn test_corrupted_batch_replay() {
         batch.write(ks, key_b.clone(), vec![23]);
         db.write_batch(batch).unwrap();
 
-        let wal_position = db.wal_writer.position();
+        let position = db.wal_writer.position();
         let record_length = CrcFrame::CRC_HEADER_LENGTH as u64 + 4 + 1 + 4;
         let offset = config.wal_layout(WalKind::Replay).align(record_length) - record_length;
-        let corruption_wal_position = wal_position - offset - 1;
         // Get the file containing the position we want to corrupt, and the offset within that file
-        let (file, file_offset) = db.wal.file_at_position(corruption_wal_position);
+        let (file, file_offset) = db.wal.file_at_position(position - offset - 1);
         (file_offset, file)
     };
     // Corrupt the last byte of the final entry in the last batch
@@ -1798,10 +1797,10 @@ fn test_value_corruption() {
 
     // Insert a corruption in the data portion of the last database entry
     let mut data = [0u8; 1];
-    let corruption_offset = last_position + CrcFrame::CRC_HEADER_LENGTH as u64;
-    file.read_exact_at(&mut data, corruption_offset).unwrap();
+    let position = last_position + CrcFrame::CRC_HEADER_LENGTH as u64;
+    file.read_exact_at(&mut data, position).unwrap();
     data[0] = !data[0];
-    file.write_all_at(&mut data, corruption_offset).unwrap();
+    file.write_all_at(&mut data, position).unwrap();
 
     // Re-open the database and insert some new data
     {
