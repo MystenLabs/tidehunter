@@ -121,10 +121,15 @@ impl WalWriter {
     }
 
     fn get_writeable_map(&self, position: u64) -> (Map, usize) {
-        let (map, offset) = self.wal.layout.locate(position);
-        const MAX_ATTEMPTS: usize = 10 * 1000;
+        let (map_id, offset) = self.wal.layout.locate(position);
+        const MAX_ATTEMPTS: usize = 60 * 1000;
+        let start_time = std::time::Instant::now();
+
+        // Capture max_map at start of wait to measure mapper progress during wait
+        let max_map_at_start = self.wal.maps.load().max_map_id();
+
         for _ in 0..MAX_ATTEMPTS {
-            let Some(map) = self.wal.get_map(map) else {
+            let Some(map) = self.wal.get_map(map_id) else {
                 self.wal.metrics.wal_write_wait.inc();
                 thread::sleep(Duration::from_millis(1));
                 continue;
@@ -132,7 +137,76 @@ impl WalWriter {
             assert!(map.writeable, "Map is not writable");
             return (map, offset as usize);
         }
-        panic!("Could not receive writable map {map:?}")
+        let wait_duration = start_time.elapsed();
+
+        // Gather diagnostic info to determine if map was evicted (too old) or not yet created (too new)
+        let maps = self.wal.maps.load();
+        let min_map = maps.min_map_id();
+        let max_map = maps.max_map_id();
+        let num_maps = maps.len();
+        let allocator_pos = self.allocator.position();
+        let (allocator_map, _) = self.wal.layout.locate(allocator_pos);
+
+        let diagnosis = match (min_map, max_map) {
+            (Some(min), _) if map_id < min => "TOO OLD (evicted)",
+            (_, Some(max)) if map_id > max => "TOO NEW (not yet created)",
+            (Some(_), Some(_)) => "IN RANGE BUT MISSING (unexpected)",
+            _ => "CACHE EMPTY",
+        };
+
+        let meminfo = read_meminfo_summary();
+
+        // Tracker diagnostics to help determine if this is a speed mismatch or deadlock
+        let tracker_pending = self.wal_tracker.pending_count();
+        let tracker_last_processed = self.wal_tracker.last_processed().as_u64();
+        let (last_processed_map, _) = self.wal.layout.locate(tracker_last_processed);
+        let maps_behind = map_id.0.saturating_sub(last_processed_map.0);
+
+        let tracker_diagnosis = if tracker_pending > 100 {
+            "SPEED MISMATCH: Tracker has large backlog - messages queued but not processed"
+        } else if tracker_pending < 10 && maps_behind > 5 {
+            "POSSIBLE DEADLOCK: Tracker queue nearly empty but far behind - message may not have been sent"
+        } else {
+            "MODERATE BACKLOG: Tracker has some pending messages"
+        };
+
+        // Calculate mapper progress during wait
+        let maps_created_during_wait = match (max_map_at_start, max_map) {
+            (Some(start), Some(end)) => end.0.saturating_sub(start.0),
+            _ => 0,
+        };
+
+        let mapper_diagnosis = if maps_created_during_wait == 0 {
+            "MAPPER STALLED: No maps created during wait - mapper may be stuck"
+        } else if maps_created_during_wait < 5 {
+            "MAPPER SLOW: Few maps created during wait"
+        } else {
+            "MAPPER ACTIVE: Maps being created but not fast enough"
+        };
+
+        panic!(
+            "Could not receive writable map {map_id:?}\n\
+             Diagnosis: {diagnosis}\n\
+             Waited: {wait_duration:?}\n\
+             Cache state: {num_maps} maps, min={min_map:?}, max={max_map:?}\n\
+             Allocator position: {allocator_pos} (map {allocator_map:?})\n\
+             Requested position: {position}\n\
+             Layout: frag_size={}, max_maps={}\n\
+             Memory: {meminfo}\n\
+             \n\
+             === MAPPER PROGRESS ===\n\
+             max_map at wait start: {max_map_at_start:?}\n\
+             max_map at timeout: {max_map:?}\n\
+             Maps created during wait: {maps_created_during_wait}\n\
+             Mapper diagnosis: {mapper_diagnosis}\n\
+             \n\
+             === TRACKER DIAGNOSTICS ===\n\
+             Pending messages in queue: {tracker_pending}\n\
+             Last processed position: {tracker_last_processed} (map {last_processed_map:?})\n\
+             Maps behind: {maps_behind}\n\
+             Tracker diagnosis: {tracker_diagnosis}",
+            self.wal.layout.frag_size, self.wal.layout.max_maps,
+        );
     }
 
     /// Current un-initialized position,
@@ -572,6 +646,19 @@ impl WalFailPoints {
     pub fn fp_multi_write_before_write_buf(&self) {
         self.0.load().fp_multi_write_before_write_buf.fp();
     }
+}
+
+/// Read key fields from /proc/meminfo for diagnostic purposes
+fn read_meminfo_summary() -> String {
+    let Ok(content) = std::fs::read_to_string("/proc/meminfo") else {
+        return "Failed to read /proc/meminfo".to_string();
+    };
+    let keys = ["MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached"];
+    content
+        .lines()
+        .filter(|line| keys.iter().any(|k| line.starts_with(k)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]

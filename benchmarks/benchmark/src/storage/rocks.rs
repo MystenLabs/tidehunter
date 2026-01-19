@@ -127,7 +127,7 @@ impl RocksStorage {
     }
 }
 
-impl Storage for Arc<RocksStorage> {
+impl Storage for RocksStorage {
     fn insert(&self, k: Bytes, v: Bytes) {
         self.db.put(&k, &v).unwrap()
     }

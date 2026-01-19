@@ -144,6 +144,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // TODO: Remove libssl-dev dependency #7
             "sudo apt-get -y install build-essential clang libclang-dev llvm-dev cmake sysstat iftop libssl-dev",
             "sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config",
+            // Required for FASTER and F2 backends
+            // * libaio-dev - Asynchronous I/O library
+            // * uuid-dev - UUID generation library
+            // * libtbb-dev - Intel Threading Building Blocks
+            "sudo apt-get -y install libaio-dev uuid-dev libtbb-dev",
             // Install rust (non-interactive).
             "curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
             "echo \"source $HOME/.cargo/env\" | tee -a ~/.bashrc",
@@ -154,8 +159,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Ensure proper ownership of the working directory
             &format!("sudo chown -R $USER:$USER {working_dir}"),
             // Clone the repo
-            &format!("[ -d {repo_name} ] && rm -rf {repo_name}"),
-            &format!("(git clone {url} || true)"),
+            &format!("[ -d {repo_name} ] && rm -rf {repo_name} || true"),
+            &format!("git clone {url}"),
         ];
 
         let command = [
@@ -198,7 +203,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 "git checkout -B {commit} origin/{commit} 2>/dev/null || git checkout {commit}"
             ),
             "source $HOME/.cargo/env",
-            "RUSTFLAGS=-Ctarget-cpu=native cargo build --release",
+            "RUSTFLAGS=-Ctarget-cpu=native cargo build --release --features enable-faster",
         ]
         .join(" && ");
 

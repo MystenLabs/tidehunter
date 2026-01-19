@@ -97,6 +97,8 @@ pub enum Backend {
     Tidehunter,
     Rocksdb,
     Blobdb,
+    Lmdb,
+    Faster,
 }
 
 impl FromStr for Backend {
@@ -109,9 +111,13 @@ impl FromStr for Backend {
             Ok(Self::Rocksdb)
         } else if s == "blobdb" {
             Ok(Self::Blobdb)
+        } else if s == "lmdb" {
+            Ok(Self::Lmdb)
+        } else if s == "faster" {
+            Ok(Self::Faster)
         } else {
             anyhow::bail!(
-                "Only allowed choices for backend are 'thdb'(Tidehunter), 'rocks'(RocksDB), or 'blobdb'(RocksDB BlobDB)"
+                "Only allowed choices for backend are 'thdb'(Tidehunter), 'rocks'(RocksDB), 'blobdb'(RocksDB BlobDB), 'lmdb'(LMDB), or 'faster'(FASTER)"
             );
         }
     }
@@ -134,9 +140,9 @@ pub struct StressClientParameters {
     /// The number of blocks to write per thread
     #[serde(default = "defaults::default_writes")]
     pub writes: usize,
-    /// The number of operations per thread in the mixed phase
-    #[serde(default = "defaults::default_operations")]
-    pub operations: usize,
+    /// Duration of the mixed phase in seconds
+    #[serde(default = "defaults::default_mixed_duration_secs")]
+    pub mixed_duration_secs: u64,
     /// Background writes per second during mixed test
     #[serde(default = "defaults::default_background_writes")]
     pub background_writes: usize,
@@ -177,6 +183,9 @@ pub struct StressClientParameters {
     /// Ratio of writes that overwrite existing keys (0.0 to 1.0, default 0.0)
     #[serde(default = "defaults::default_overwrite_ratio")]
     pub overwrite_ratio: f64,
+    /// Pause duration in seconds between write and mixed phases
+    #[serde(default = "defaults::default_phase_pause_secs")]
+    pub phase_pause_secs: u64,
 }
 
 impl Default for StressClientParameters {
@@ -187,7 +196,7 @@ impl Default for StressClientParameters {
             write_size: defaults::default_write_size(),
             key_len: defaults::default_key_len(),
             writes: defaults::default_writes(),
-            operations: defaults::default_operations(),
+            mixed_duration_secs: defaults::default_mixed_duration_secs(),
             background_writes: defaults::default_background_writes(),
             no_snapshot: defaults::default_no_snapshot(),
             path: None,
@@ -202,6 +211,7 @@ impl Default for StressClientParameters {
             zipf_exponent: defaults::default_zipf_exponent(),
             relocation: None,
             overwrite_ratio: defaults::default_overwrite_ratio(),
+            phase_pause_secs: defaults::default_phase_pause_secs(),
         }
     }
 }
@@ -230,8 +240,8 @@ pub mod defaults {
         1_000_000
     }
 
-    pub fn default_operations() -> usize {
-        1_000_000
+    pub fn default_mixed_duration_secs() -> u64 {
+        60
     }
 
     pub fn default_background_writes() -> usize {
@@ -276,6 +286,10 @@ pub mod defaults {
 
     pub fn default_overwrite_ratio() -> f64 {
         0.0
+    }
+
+    pub fn default_phase_pause_secs() -> u64 {
+        600 // 10 minutes
     }
 }
 
@@ -337,8 +351,8 @@ pub struct StressArgs {
     key_len: Option<usize>,
     #[arg(long, short = 'w', help = "Blocks to write per thread")]
     writes: Option<usize>,
-    #[arg(long, help = "Operations per thread in mixed phase")]
-    operations: Option<usize>,
+    #[arg(long, help = "Duration of mixed phase in seconds")]
+    mixed_duration_secs: Option<u64>,
     #[arg(long, short = 'u', help = "Background writes/s during mixed test")]
     background_writes: Option<usize>,
     #[arg(long, short = 'n', help = "Disable periodic snapshot")]
@@ -383,6 +397,11 @@ pub struct StressArgs {
         help = "Ratio of writes that overwrite existing keys (0.0 to 1.0)"
     )]
     overwrite_ratio: Option<f64>,
+    #[arg(
+        long,
+        help = "Pause duration in seconds between write and mixed phases"
+    )]
+    phase_pause_secs: Option<u64>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -402,8 +421,8 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     if let Some(writes) = args.writes {
         config.stress_client_parameters.writes = writes;
     }
-    if let Some(operations) = args.operations {
-        config.stress_client_parameters.operations = operations;
+    if let Some(mixed_duration_secs) = args.mixed_duration_secs {
+        config.stress_client_parameters.mixed_duration_secs = mixed_duration_secs;
     }
     if let Some(background_writes) = args.background_writes {
         config.stress_client_parameters.background_writes = background_writes;
@@ -470,6 +489,9 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
             std::process::exit(1);
         }
         config.stress_client_parameters.overwrite_ratio = overwrite_ratio;
+    }
+    if let Some(phase_pause_secs) = args.phase_pause_secs {
+        config.stress_client_parameters.phase_pause_secs = phase_pause_secs;
     }
 
     config

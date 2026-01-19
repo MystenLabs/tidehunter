@@ -1,3 +1,8 @@
+// FASTER backend - only available on Linux with the feature enabled
+#[cfg(all(target_os = "linux", feature = "enable-faster"))]
+pub mod faster;
+
+pub mod lmdb;
 pub mod rocks;
 pub mod tidehunter;
 

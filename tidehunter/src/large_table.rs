@@ -245,6 +245,13 @@ impl LargeTable {
 
         entry.insert(k.clone(), v);
 
+        // Apply backpressure if too many async flushes are pending
+        if !context.config.sync_flush {
+            while self.metrics.flush_pending_count.load(Ordering::Relaxed) > 128 {
+                std::thread::sleep(std::time::Duration::from_micros(36));
+            }
+        }
+
         let index_size = entry.data.len();
         if loader.flush_supported() && self.too_many_dirty(entry) {
             // Drop the guard before flushing to ensure last_processed is updated
