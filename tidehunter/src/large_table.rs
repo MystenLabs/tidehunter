@@ -916,6 +916,7 @@ impl LargeTable {
         let ks_table = self.ks_rows(&context.ks_config);
         let mut row = ks_table.lock(row, &context.large_table_contention);
         let entry = self.entry_mut(&mut row, cell);
+        entry.promote_pending();
         entry.update_flushed_index(original_index, position);
     }
 
