@@ -26,6 +26,9 @@ use tidehunter::{RelocationStrategy, compute_target_position_from_ratio};
 
 mod configs;
 mod metrics;
+
+/// Maximum value power for the latency histogram (max recordable value is 2^26 microseconds ≈ 67s)
+const LATENCY_HISTOGRAM_MAX_VALUE_POWER: u8 = 26;
 #[allow(dead_code)]
 mod prometheus;
 mod storage;
@@ -367,7 +370,7 @@ impl Stress {
         let start_lock = Arc::new(RwLock::new(()));
         let start_w = start_lock.write();
         let manual_stop = Arc::new(AtomicBool::new(false));
-        let latency = AtomicHistogram::new(12, 26).unwrap();
+        let latency = AtomicHistogram::new(12, LATENCY_HISTOGRAM_MAX_VALUE_POWER).unwrap();
         let latency = Arc::new(latency);
         let latency_errors = Arc::new(AtomicUsize::default());
         let operations_counter = Arc::new(AtomicUsize::new(0));
@@ -465,7 +468,11 @@ impl StressThread {
             let (key, value) = self.key_value(pos);
             let timer = Instant::now();
             self.db.insert(key.into(), value.into());
-            let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
+            // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
+            let latency = timer
+                .elapsed()
+                .as_micros()
+                .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
             self.benchmark_metrics
                 .bench_writes
                 .with_label_values(&[self.db.name()])
@@ -570,7 +577,11 @@ impl StressThread {
                         // see comment above for get mode.
                     }
                 }
-                let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
+                // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
+                let latency = timer
+                    .elapsed()
+                    .as_micros()
+                    .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
                 self.benchmark_metrics
                     .bench_reads
                     .with_label_values(&[self.db.name()])
@@ -597,7 +608,11 @@ impl StressThread {
                 let (key, value) = self.key_value(pos);
                 let timer = Instant::now();
                 self.db.insert(key.into(), value.into());
-                let latency = timer.elapsed().as_micros().min((1u128 << 32) - 1);
+                // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
+                let latency = timer
+                    .elapsed()
+                    .as_micros()
+                    .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
                 self.benchmark_metrics
                     .bench_writes
                     .with_label_values(&[self.db.name()])
