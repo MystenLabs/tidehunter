@@ -254,7 +254,7 @@ impl LargeTable {
         entry.insert(k.clone(), v);
 
         // Apply backpressure if too many async flushes are pending
-        if !context.config.sync_flush {
+        if !context.config.sync_flush && context.config.max_flush_pending > 0 {
             while self.metrics.flush_pending_count.load(Ordering::Relaxed)
                 > context.config.max_flush_pending
             {
