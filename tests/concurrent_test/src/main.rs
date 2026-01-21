@@ -240,11 +240,13 @@ fn main() {
 
                         if should_check_fds {
                             // Check file descriptors before stopping
-                            assert_ne!(
-                                count_open_file_descriptors(&db_path),
-                                0,
-                                "Expected at least 1 open file descriptors before stopping database"
-                            );
+                            let fd_count = count_open_file_descriptors(&db_path);
+                            if fd_count == 0 {
+                                eprintln!(
+                                    "ERROR: Expected at least 1 open file descriptors before stopping database, but got 0"
+                                );
+                                std::process::exit(1);
+                            }
                         }
 
                         // Wait for all background threads to finish while holding the lock
@@ -252,11 +254,14 @@ fn main() {
 
                         if should_check_fds {
                             // Verify all file descriptors are released after background threads finish
-                            assert_eq!(
-                                count_open_file_descriptors(&db_path),
-                                0,
-                                "Expected 0 open file descriptors after stopping database"
-                            );
+                            let fd_count = count_open_file_descriptors(&db_path);
+                            if fd_count != 0 {
+                                eprintln!(
+                                    "ERROR: Expected 0 open file descriptors after stopping database, but got {}",
+                                    fd_count
+                                );
+                                std::process::exit(1);
+                            }
                         }
 
                         // Create new database while still holding the write lock
@@ -332,29 +337,32 @@ fn main() {
                         let key = Bytes::from(key);
                         match (db_value, in_memory_value) {
                             (Some(db_val), Some(mem_val)) => {
-                                assert_eq!(
-                                    db_val.as_ref(),
-                                    mem_val.as_slice(),
-                                    "Value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
-                                    key,
-                                    db_val.as_ref(),
-                                    mem_val.as_slice()
-                                );
+                                if db_val.as_ref() != mem_val.as_slice() {
+                                    eprintln!(
+                                        "ERROR: Value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
+                                        key,
+                                        db_val.as_ref(),
+                                        mem_val.as_slice()
+                                    );
+                                    std::process::exit(1);
+                                }
                             }
                             (None, None) => {} // Both agree key doesn't exist
                             (Some(db_val), None) => {
-                                panic!(
-                                    "Key {:?} exists in database with value {:?}, but not in in-memory state",
+                                eprintln!(
+                                    "ERROR: Key {:?} exists in database with value {:?}, but not in in-memory state",
                                     key,
                                     db_val.as_ref()
                                 );
+                                std::process::exit(1);
                             }
                             (None, Some(mem_val)) => {
-                                panic!(
-                                    "Key {:?} exists in in-memory state with value {:?}, but not in database",
+                                eprintln!(
+                                    "ERROR: Key {:?} exists in in-memory state with value {:?}, but not in database",
                                     key,
                                     mem_val.as_slice()
                                 );
+                                std::process::exit(1);
                             }
                         }
                     }
@@ -412,18 +420,22 @@ fn main() {
         };
         match db_value {
             Some(actual_value) => {
-                assert_eq!(
-                    actual_value.as_ref(),
-                    expected_value.as_slice(),
-                    "Final verification: Value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
-                    key,
-                    actual_value.as_ref(),
-                    expected_value.as_slice()
-                );
+                if actual_value.as_ref() != expected_value.as_slice() {
+                    eprintln!(
+                        "ERROR: Final verification: Value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
+                        key,
+                        actual_value.as_ref(),
+                        expected_value.as_slice()
+                    );
+                    std::process::exit(1);
+                }
             }
-            None => panic!(
-                "Key {key:?} exists in in-memory state with value {expected_value:?}, but not in database"
-            ),
+            None => {
+                eprintln!(
+                    "ERROR: Key {key:?} exists in in-memory state with value {expected_value:?}, but not in database"
+                );
+                std::process::exit(1);
+            }
         }
     }
 
@@ -444,11 +456,12 @@ fn main() {
             let db_read = db.read();
             let db_instance = db_read.as_ref().unwrap();
             let db_value = db_instance.get(key_space, db_key).unwrap();
-            panic!(
-                "Key {:?} exists in database with value {:?}, but not in in-memory state",
+            eprintln!(
+                "ERROR: Key {:?} exists in database with value {:?}, but not in in-memory state",
                 db_key,
                 db_value.map(|v| v.as_ref().to_vec())
             );
+            std::process::exit(1);
         }
     }
 
