@@ -291,7 +291,10 @@ mod tests {
                         }
                     }
                     if !committed.is_empty() {
-                        panic!("[{id}] something is committed but should not be: {:?}", committed);
+                        panic!(
+                            "[{id}] something is committed but should not be: {:?}",
+                            committed
+                        );
                     }
                 })
             })
