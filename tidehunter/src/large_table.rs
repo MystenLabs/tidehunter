@@ -644,9 +644,17 @@ impl LargeTable {
             let mut row = mutex.lock();
             let mut row_data = RowContainer::new();
             for entry in row.entries.iter_mut() {
+                // Important - read Loader::last_processed_wal_position before calling promote_pending.
+                // See also comments in unload_if_ks_enabled.
+                let loader_last_processed = loader.last_processed_wal_position();
                 entry.promote_pending();
 
-                entry.maybe_flush_for_snapshot(loader, force_relocate_below, threshold_position)?;
+                entry.maybe_flush_for_snapshot(
+                    loader,
+                    force_relocate_below,
+                    threshold_position,
+                    loader_last_processed,
+                )?;
                 let position = entry.state.wal_position();
                 let snapshot_data = SnapshotEntryData {
                     position,
@@ -1195,6 +1203,7 @@ impl LargeTableEntry {
         loader: &L,
         force_relocate_below: Option<WalPosition>,
         threshold_position: u64,
+        loader_last_processed: LastProcessed,
     ) -> Result<(), L::Error> {
         if self.pending_last_processed.is_some() {
             // todo metric / log?
@@ -1215,7 +1224,7 @@ impl LargeTableEntry {
                 .inc();
         }
         if !forced_relocation && !self.state.is_dirty() {
-            self.last_processed = loader.last_processed_wal_position();
+            self.last_processed = loader_last_processed;
             return Ok(());
         }
         let position = self.last_processed;
@@ -1288,10 +1297,15 @@ impl LargeTableEntry {
                 self.sync_flush(loader, false, None, None)?;
             } else {
                 // Perform async flush - store the captured value for later
+                self.pending_last_processed = Some(loader.last_processed_wal_position());
+                // Important - it is required to call promote_pending once
+                // more after acquiring Loader::last_processed_wal_position.
+                // This ensures that all batch writes committed
+                // before last_processed_wal_position are propagated to the index.
+                self.promote_pending();
                 let flush_kind = self
                     .flush_kind()
                     .expect("unload_if_ks_enabled is called in clean state");
-                self.pending_last_processed = Some(loader.last_processed_wal_position());
                 flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
             }
         }
