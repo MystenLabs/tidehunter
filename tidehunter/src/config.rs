@@ -25,7 +25,7 @@ pub struct Config {
     /// Whether to perform flushing synchronously instead of async (default: false)
     pub sync_flush: bool,
     /// Maximum pending flush count before backpressure is applied
-    pub max_flush_pending: i64,
+    pub max_flush_pending: u64,
     /// Sleep duration in microseconds when backpressure is triggered
     pub flush_pending_backpressure_sleep_us: u64,
     /// Maximum size of a single WAL file

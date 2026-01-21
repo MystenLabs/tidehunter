@@ -84,7 +84,7 @@ impl IndexFlusher {
             .flush_pending_count
             .fetch_add(1, Ordering::Relaxed)
             + 1;
-        self.metrics.flush_pending.set(count);
+        self.metrics.flush_pending.set(count as i64);
         self.senders[thread_index]
             .send(command)
             .expect("Flusher has stopped unexpectedly")
@@ -119,7 +119,7 @@ impl IndexFlusher {
                 .flush_pending_count
                 .fetch_add(1, Ordering::Relaxed)
                 + 1;
-            self.metrics.flush_pending.set(count);
+            self.metrics.flush_pending.set(count as i64);
             sender.send(command).unwrap();
         }
 
@@ -150,7 +150,7 @@ impl IndexFlusherThread {
                 .flush_pending_count
                 .fetch_sub(1, Ordering::Relaxed)
                 - 1;
-            self.metrics.flush_pending.set(count);
+            self.metrics.flush_pending.set(count as i64);
             let now = Instant::now();
             let Some(db) = self.db.upgrade() else {
                 return;
