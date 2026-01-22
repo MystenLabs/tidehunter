@@ -1256,6 +1256,10 @@ impl LargeTableEntry {
             self.pending_last_processed.is_none(),
             "sync_flush is called while async flush is in progress"
         );
+        let last_processed = loader.last_processed_wal_position();
+        // Important: promote pending should be called after last_processed_wal_position read from loader
+        // See also comments in unload_if_ks_enabled.
+        self.promote_pending();
         let flush_kind = match self.flush_kind() {
             Some(kind) => kind,
             None => {
@@ -1267,7 +1271,6 @@ impl LargeTableEntry {
             }
         };
 
-        let last_processed = loader.last_processed_wal_position();
         // Perform a synchronous flush
         let Some((_original_index, position)) = IndexFlusherThread::handle_command(
             loader,
