@@ -175,6 +175,10 @@ impl WalMapperThread {
         }
         // Update the WalFiles structure and maps by removing deleted files
         if num_files_deleted > 0 {
+            // Track bytes deleted
+            let bytes_deleted = (num_files_deleted as u64) * self.layout.wal_file_size;
+            self.metrics.wal_deleted_bytes.inc_by(bytes_deleted);
+
             let new_files = wal_files.skip_first_n_files(num_files_deleted);
             let new_min_file_id = new_files.min_file_id;
             self.files.store(Arc::new(new_files));

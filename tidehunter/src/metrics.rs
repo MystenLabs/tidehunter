@@ -192,6 +192,7 @@ pub struct Metrics {
     pub relocation_target_position: MetricIntGauge,
     pub relocation_terminal_position: MetricIntGauge,
     pub gc_position: MetricIntGaugeVec,
+    pub wal_deleted_bytes: MetricIntCounter,
     pub relocation_kept: MetricIntCounterVec,
     pub relocation_removed: MetricIntCounterVec,
 
@@ -403,6 +404,7 @@ impl Metrics {
             relocation_target_position: gauge!("relocation_target_position", registry, enabled),
             relocation_terminal_position: gauge!("relocation_terminal_position", registry, enabled),
             gc_position: gauge_vec!("gc_position", &["kind"], registry, enabled),
+            wal_deleted_bytes: counter!("wal_deleted_bytes", registry, enabled),
             relocation_kept: counter_vec!("relocation_kept", &["ks"], registry, enabled),
             relocation_removed: counter_vec!("relocation_removed", &["ks"], registry, enabled),
 

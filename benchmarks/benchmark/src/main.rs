@@ -253,6 +253,24 @@ pub fn main() {
         ops_sec,
         byte_div(total_bytes / msecs * 1000),
     );
+    // Cooldown phase - let relocation/GC complete
+    if stress.parameters.cooldown_secs > 0 {
+        report!(
+            report,
+            "Starting cooldown phase for {} seconds to let relocation/GC complete",
+            stress.parameters.cooldown_secs
+        );
+        thread::sleep(Duration::from_secs(stress.parameters.cooldown_secs));
+        report!(report, "Cooldown phase complete");
+
+        // Measure storage after cooldown
+        let storage_len = fs_extra::dir::get_size(&path).unwrap();
+        report!(
+            report,
+            "Storage used after cooldown {:.1} Gb",
+            storage_len as f64 / 1024. / 1024. / 1024.
+        );
+    }
     if print_report {
         report!(report, "Writing report file");
         fs::write("report.txt", &report.lines).unwrap();
