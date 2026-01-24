@@ -1070,13 +1070,23 @@ impl LargeTableEntry {
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         self.state.mark_dirty();
         self.insert_bloom_filter(&k);
-        self.data.make_mut().insert(k, v);
+        if let Some(old_position) = self.data.make_mut().insert(k, v) {
+            self.context
+                .metrics
+                .stale_index_bytes
+                .inc_by(old_position.frame_len_u32() as u64);
+        }
         self.report_loaded_keys_count();
     }
 
     pub fn remove(&mut self, k: Bytes, v: WalPosition) {
         self.state.mark_dirty();
-        self.data.make_mut().remove(k, v);
+        if let Some(old_position) = self.data.make_mut().remove(k, v) {
+            self.context
+                .metrics
+                .stale_index_bytes
+                .inc_by(old_position.frame_len_u32() as u64);
+        }
         self.report_loaded_keys_count();
     }
 

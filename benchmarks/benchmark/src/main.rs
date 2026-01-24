@@ -101,6 +101,7 @@ pub fn main() {
         format!("0.0.0.0:{METRICS_PORT}").parse().unwrap(),
         &registry,
     );
+    let mut tidehunter_db: Option<Arc<tidehunter::db::Db>> = None;
     let storage: Arc<dyn Storage> = match config.stress_client_parameters.backend {
         Backend::Tidehunter => {
             if config.db_parameters.direct_io {
@@ -167,6 +168,7 @@ pub fn main() {
                 });
             }
 
+            tidehunter_db = Some(storage.db.clone());
             Arc::new(storage)
         }
         Backend::Rocksdb => {
@@ -297,6 +299,11 @@ pub fn main() {
         )
         .unwrap();
     }
+    // Dump relocation metrics at the end of benchmark
+    if let Some(db) = &tidehunter_db {
+        dump_relocation_metrics(db, &mut report);
+    }
+
     report!(report, "BENCHMARK_END");
 
     if stress.parameters.preserve {
@@ -691,4 +698,63 @@ impl StressThread {
         writer.put_u64(pos);
         StdRng::from_seed(seed)
     }
+}
+
+fn dump_relocation_metrics(db: &tidehunter::db::Db, report: &mut Report) {
+    let metrics = db.test_get_metrics();
+
+    report!(report, "=== Relocation Metrics ===");
+    report!(
+        report,
+        "relocation_target_position: {}",
+        metrics.relocation_target_position.get()
+    );
+    report!(
+        report,
+        "relocation_terminal_position: {}",
+        metrics.relocation_terminal_position.get()
+    );
+    report!(
+        report,
+        "gc_position[Replay]: {}",
+        metrics.gc_position.with_label_values(&["Replay"]).get()
+    );
+    report!(
+        report,
+        "gc_position[Index]: {}",
+        metrics.gc_position.with_label_values(&["Index"]).get()
+    );
+    report!(
+        report,
+        "wal_deleted_bytes: {}",
+        metrics.wal_deleted_bytes.get()
+    );
+    report!(
+        report,
+        "stale_index_bytes: {}",
+        metrics.stale_index_bytes.get()
+    );
+    report!(
+        report,
+        "relocation_kept[0]: {}",
+        metrics.relocation_kept.with_label_values(&["0"]).get()
+    );
+    report!(
+        report,
+        "relocation_removed[0]: {}",
+        metrics.relocation_removed.with_label_values(&["0"]).get()
+    );
+    report!(
+        report,
+        "relocation_cells_processed[0]: {}",
+        metrics
+            .relocation_cells_processed
+            .with_label_values(&["0"])
+            .get()
+    );
+    report!(
+        report,
+        "relocation_current_keyspace: {}",
+        metrics.relocation_current_keyspace.get()
+    );
 }
