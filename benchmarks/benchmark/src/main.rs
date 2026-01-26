@@ -716,13 +716,13 @@ fn dump_relocation_metrics(db: &tidehunter::db::Db, report: &mut Report) {
     );
     report!(
         report,
-        "gc_position[Replay]: {}",
-        metrics.gc_position.with_label_values(&["Replay"]).get()
+        "gc_position[wal]: {}",
+        metrics.gc_position.with_label_values(&["wal"]).get()
     );
     report!(
         report,
-        "gc_position[Index]: {}",
-        metrics.gc_position.with_label_values(&["Index"]).get()
+        "gc_position[index]: {}",
+        metrics.gc_position.with_label_values(&["index"]).get()
     );
     report!(
         report,
@@ -736,20 +736,23 @@ fn dump_relocation_metrics(db: &tidehunter::db::Db, report: &mut Report) {
     );
     report!(
         report,
-        "relocation_kept[0]: {}",
-        metrics.relocation_kept.with_label_values(&["0"]).get()
+        "relocation_kept[root]: {}",
+        metrics.relocation_kept.with_label_values(&["root"]).get()
     );
     report!(
         report,
-        "relocation_removed[0]: {}",
-        metrics.relocation_removed.with_label_values(&["0"]).get()
+        "relocation_removed[root]: {}",
+        metrics
+            .relocation_removed
+            .with_label_values(&["root"])
+            .get()
     );
     report!(
         report,
-        "relocation_cells_processed[0]: {}",
+        "relocation_cells_processed[root]: {}",
         metrics
             .relocation_cells_processed
-            .with_label_values(&["0"])
+            .with_label_values(&["root"])
             .get()
     );
     report!(
