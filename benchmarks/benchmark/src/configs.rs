@@ -177,9 +177,9 @@ pub struct StressClientParameters {
     /// Relocation configuration. None means disabled, Some(config) enables continuous relocation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relocation: Option<RelocationConfig>,
-    /// Ratio of writes that overwrite existing keys (0.0 to 1.0, default 0.0)
-    #[serde(default = "defaults::default_overwrite_ratio")]
-    pub overwrite_ratio: f64,
+    /// Ratio of writes that are deletes (0.0 to 1.0, default 0.0)
+    #[serde(default = "defaults::default_delete_ratio")]
+    pub delete_ratio: f64,
     /// Cooldown duration in seconds after mixed phase to let relocation/GC complete
     #[serde(default = "defaults::default_cooldown_secs")]
     pub cooldown_secs: u64,
@@ -208,7 +208,7 @@ impl Default for StressClientParameters {
             read_percentage: defaults::default_read_percentage(),
             zipf_exponent: defaults::default_zipf_exponent(),
             relocation: None,
-            overwrite_ratio: defaults::default_overwrite_ratio(),
+            delete_ratio: defaults::default_delete_ratio(),
             cooldown_secs: defaults::default_cooldown_secs(),
         }
     }
@@ -286,7 +286,7 @@ pub mod defaults {
         0.0
     }
 
-    pub fn default_overwrite_ratio() -> f64 {
+    pub fn default_delete_ratio() -> f64 {
         0.0
     }
 
@@ -396,11 +396,8 @@ pub struct StressArgs {
         help = "Relocation strategy (wal or index). Enables continuous relocation"
     )]
     relocation: Option<String>,
-    #[arg(
-        long,
-        help = "Ratio of writes that overwrite existing keys (0.0 to 1.0)"
-    )]
-    overwrite_ratio: Option<f64>,
+    #[arg(long, help = "Ratio of writes that are deletes (0.0 to 1.0)")]
+    delete_ratio: Option<f64>,
     #[arg(
         long,
         help = "Cooldown duration in seconds after mixed phase (default 600)"
@@ -490,12 +487,12 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
             }
         }
     }
-    if let Some(overwrite_ratio) = args.overwrite_ratio {
-        if !(0.0..=1.0).contains(&overwrite_ratio) {
-            eprintln!("Error: overwrite_ratio must be between 0.0 and 1.0");
+    if let Some(delete_ratio) = args.delete_ratio {
+        if !(0.0..=1.0).contains(&delete_ratio) {
+            eprintln!("Error: delete_ratio must be between 0.0 and 1.0");
             std::process::exit(1);
         }
-        config.stress_client_parameters.overwrite_ratio = overwrite_ratio;
+        config.stress_client_parameters.delete_ratio = delete_ratio;
     }
     if let Some(cooldown_secs) = args.cooldown_secs {
         config.stress_client_parameters.cooldown_secs = cooldown_secs;

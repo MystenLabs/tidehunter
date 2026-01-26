@@ -155,6 +155,10 @@ impl Storage for Arc<RocksStorage> {
         self.db.get(k).unwrap().is_some()
     }
 
+    fn delete(&self, k: Bytes) {
+        self.db.delete(&k).unwrap()
+    }
+
     fn name(&self) -> &'static str {
         match self.mode {
             RocksMode::Plain => "rocksdb",

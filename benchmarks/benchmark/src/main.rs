@@ -615,35 +615,48 @@ impl StressThread {
                     self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
-                // Perform a write operation
-                let should_overwrite = thread_rng.r#gen::<f64>() < self.parameters.overwrite_ratio
+                // Perform a write operation (insert or delete)
+                let should_delete = thread_rng.r#gen::<f64>() < self.parameters.delete_ratio
                     && local_write_pos_counter > 0;
 
-                let pos = if should_overwrite {
-                    // Select existing key to overwrite using same logic as reads
+                if should_delete {
+                    // Select existing key to delete using same logic as reads
                     let highest_local_pos = local_write_pos_counter.saturating_sub(1);
-                    self.select_existing_key(&mut thread_rng, highest_local_pos)
+                    let pos = self.select_existing_key(&mut thread_rng, highest_local_pos);
+                    let key = self.key(pos);
+                    let timer = Instant::now();
+                    self.db.delete(key.into());
+                    // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
+                    let latency = timer
+                        .elapsed()
+                        .as_micros()
+                        .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
+                    self.benchmark_metrics
+                        .bench_deletes
+                        .with_label_values(&[self.db.name()])
+                        .observe(latency as f64);
+                    if self.latency.increment(latency as u64).is_err() {
+                        self.latency_errors.fetch_add(1, Ordering::Relaxed);
+                    }
                 } else {
-                    // Create new key (current behavior)
+                    // Create new key and insert
                     let pos = self.global_pos(local_write_pos_counter);
                     local_write_pos_counter += 1;
-                    pos
-                };
-
-                let (key, value) = self.key_value(pos);
-                let timer = Instant::now();
-                self.db.insert(key.into(), value.into());
-                // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
-                let latency = timer
-                    .elapsed()
-                    .as_micros()
-                    .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
-                self.benchmark_metrics
-                    .bench_writes
-                    .with_label_values(&[self.db.name()])
-                    .observe(latency as f64);
-                if self.latency.increment(latency as u64).is_err() {
-                    self.latency_errors.fetch_add(1, Ordering::Relaxed);
+                    let (key, value) = self.key_value(pos);
+                    let timer = Instant::now();
+                    self.db.insert(key.into(), value.into());
+                    // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
+                    let latency = timer
+                        .elapsed()
+                        .as_micros()
+                        .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
+                    self.benchmark_metrics
+                        .bench_writes
+                        .with_label_values(&[self.db.name()])
+                        .observe(latency as f64);
+                    if self.latency.increment(latency as u64).is_err() {
+                        self.latency_errors.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -652,7 +665,6 @@ impl StressThread {
         }
     }
 
-    #[allow(dead_code)]
     fn key(&self, pos: u64) -> Vec<u8> {
         let (key, _) = self.key_and_rng(pos);
         key

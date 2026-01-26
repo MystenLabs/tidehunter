@@ -12,5 +12,7 @@ pub trait Storage: Sync + Send + 'static {
 
     fn exists(&self, k: &[u8]) -> bool;
 
+    fn delete(&self, k: Bytes);
+
     fn name(&self) -> &'static str;
 }
