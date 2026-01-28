@@ -186,9 +186,12 @@ impl RelocationDriver {
             return Ok(());
         }
 
-        let gc_watermark = std::cmp::min(
-            watermarks.gc_watermark(),
-            db.control_region_store.lock().last_position(),
+        let wm_gc = watermarks.gc_watermark();
+        let cr_pos = db.control_region_store.lock().last_position();
+        let gc_watermark = std::cmp::min(wm_gc, cr_pos);
+        eprintln!(
+            "[relocation] GC watermark components: watermarks_gc={}, control_region={}, result={}",
+            wm_gc, cr_pos, gc_watermark
         );
 
         db.wal_writer.gc(gc_watermark)?;
@@ -225,6 +228,15 @@ impl RelocationDriver {
         // Restart from beginning if target_position changed or if previous run completed
         let should_restart = watermarks.data.next_to_process.is_none()
             || watermarks.data.target_position != target_position;
+
+        eprintln!(
+            "[relocation] Starting index-based relocation: upper_limit={}, effective_limit={}, target_position={:?}, should_restart={}, min_wal_position={}",
+            upper_limit,
+            effective_limit,
+            target_position,
+            should_restart,
+            db.wal.min_wal_position()
+        );
 
         // Get starting cell reference from saved progress or restart
         let mut current_cell_ref = if should_restart {
@@ -295,6 +307,10 @@ impl RelocationDriver {
         }
 
         // Save final progress with upper_limit and highest WAL position
+        eprintln!(
+            "[relocation] Completed index-based relocation: cells_processed={}, highest_wal_position={}, upper_limit={}, effective_limit={}",
+            cells_processed, highest_wal_position, upper_limit, effective_limit
+        );
         watermarks.set(
             current_cell_ref.clone(),
             highest_wal_position,

@@ -651,6 +651,9 @@ impl LargeTable {
     > {
         let mut replay_from: Option<u64> = None;
         let mut max_wal_position: Option<WalPosition> = None;
+        let mut replay_from_bottleneck_cell: Option<CellId> = None;
+        let mut replay_from_bottleneck_dirty: bool = false;
+        let mut replay_from_bottleneck_pending: bool = false;
         let mut ks_data = Vec::with_capacity(ks_table.rows.mutexes().len());
         for mutex in ks_table.rows.mutexes() {
             let mut row = mutex.lock();
@@ -672,13 +675,26 @@ impl LargeTable {
                 }
                 // Do not use last_processed from empty entries
                 if !entry.state.is_empty() {
-                    replay_from = Some(cmp::min(
-                        replay_from.unwrap_or(u64::MAX),
-                        entry.last_processed.as_u64(),
-                    ));
+                    let lp = entry.last_processed.as_u64();
+                    if lp < replay_from.unwrap_or(u64::MAX) {
+                        replay_from_bottleneck_cell = Some(entry.cell.clone());
+                        replay_from_bottleneck_dirty = entry.state.is_dirty();
+                        replay_from_bottleneck_pending = entry.pending_last_processed.is_some();
+                    }
+                    replay_from = Some(cmp::min(replay_from.unwrap_or(u64::MAX), lp));
                 }
             }
             ks_data.push(row_data);
+        }
+        if let Some(rf) = replay_from {
+            eprintln!(
+                "[snapshot] ks={} replay_from={} bottleneck_cell={:?} dirty={} pending_flush={}",
+                ks_table.context.name(),
+                rf,
+                replay_from_bottleneck_cell,
+                replay_from_bottleneck_dirty,
+                replay_from_bottleneck_pending
+            );
         }
         let metric = self
             .metrics
