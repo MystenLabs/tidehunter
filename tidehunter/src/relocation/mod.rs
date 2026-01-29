@@ -237,6 +237,7 @@ impl RelocationDriver {
             should_restart,
             db.wal.min_wal_position()
         );
+        let iteration_start = std::time::Instant::now();
 
         // Get starting cell reference from saved progress or restart
         let mut current_cell_ref = if should_restart {
@@ -263,8 +264,8 @@ impl RelocationDriver {
                         upper_limit,
                         target_position,
                     );
-                    self.save_progress(&db, &watermarks, true)?;
-                    // Save watermark only
+                    self.save_progress(&db, &watermarks, false)?;
+                    // Save progress and run gc()
                 }
             }
 
@@ -308,8 +309,12 @@ impl RelocationDriver {
 
         // Save final progress with upper_limit and highest WAL position
         eprintln!(
-            "[relocation] Completed index-based relocation: cells_processed={}, highest_wal_position={}, upper_limit={}, effective_limit={}",
-            cells_processed, highest_wal_position, upper_limit, effective_limit
+            "[relocation] Completed index-based relocation: cells_processed={}, highest_wal_position={}, upper_limit={}, effective_limit={}, elapsed_secs={}",
+            cells_processed,
+            highest_wal_position,
+            upper_limit,
+            effective_limit,
+            iteration_start.elapsed().as_secs()
         );
         watermarks.set(
             current_cell_ref.clone(),
