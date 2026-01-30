@@ -1345,12 +1345,10 @@ impl LargeTableEntry {
         } else {
             // Some entries remain, keep state as DirtyUnloaded
             self.state = LargeTableEntryState::DirtyUnloaded(position);
-            // Update min_position: all remaining entries have offset >= last_processed (O(1))
-            let lp_offset = last_processed.as_u64();
-            self.min_position = match self.min_position {
-                Some(current) if current.offset() >= lp_offset => Some(current),
-                _ => Some(WalPosition::new(lp_offset, 0)),
-            };
+            // Set min_position to None because the on-disk index may contain entries
+            // older than last_processed that were merged in via MergeUnloaded flush.
+            // This forces relocation to process this cell rather than skip it.
+            self.min_position = None;
             self.context
                 .metrics
                 .flush_update
