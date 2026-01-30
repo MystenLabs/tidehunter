@@ -268,18 +268,26 @@ pub fn main() {
         ops_sec,
         byte_div(total_bytes / msecs * 1000),
     );
-    // Cooldown phase - wait for relocation to finish
+    // Cooldown phase - wait for background work to finish
     if let Some(handle) = relocation_handle {
+        // Relocation enabled: wait for relocation thread to finish
         report!(report, "Waiting for current relocation to complete...");
         relocation_shutdown.store(true, Ordering::Relaxed);
         handle.join().expect("Relocation thread panicked");
         report!(report, "Relocation thread finished");
+    } else if let Some(ref db) = tidehunter_db {
+        // Relocation disabled: wait for all pending flushes to complete
+        report!(report, "Waiting for pending flushes to complete...");
+        db.flush_barrier();
+        report!(report, "All flushes complete");
+    }
 
-        // Measure storage after relocation completes
+    // Measure final storage (for tidehunter backend)
+    if tidehunter_db.is_some() {
         let storage_len = fs_extra::dir::get_size(&path).unwrap();
         report!(
             report,
-            "Storage used after relocation complete: {:.1} Gb",
+            "Storage used after cooldown: {:.1} Gb",
             storage_len as f64 / 1024. / 1024. / 1024.
         );
     }
