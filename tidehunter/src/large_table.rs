@@ -50,6 +50,11 @@ pub struct LargeTableEntry {
     /// - `None`: No flush is pending
     /// - `Some(pos)`: Async flush is in progress, will update `last_processed` to `pos` when complete
     pending_last_processed: Option<LastProcessed>,
+    /// Tracks the minimum WAL position across all entries in this cell.
+    /// Used to skip cells during relocation when all entries are above the effective limit.
+    /// - `None`: Unknown (cell is empty or unloaded without tracking)
+    /// - `Some(pos)`: The minimum WAL position of any entry in this cell
+    min_position: Option<WalPosition>,
 }
 
 enum LargeTableEntryState {
@@ -92,6 +97,10 @@ pub(crate) type RowContainer<T> = BTreeMap<CellId, T>;
 pub struct SnapshotEntryData {
     pub position: WalPosition,
     pub last_processed: LastProcessed,
+    /// Minimum WAL position across all entries in this cell.
+    /// Used to skip cells during relocation when all entries are above the effective limit.
+    #[serde(default)] // Backwards compatibility with old snapshots
+    pub min_position: Option<WalPosition>,
 }
 
 impl SnapshotEntryData {
@@ -100,6 +109,7 @@ impl SnapshotEntryData {
         Self {
             position: WalPosition::INVALID,
             last_processed: LastProcessed::none(),
+            min_position: None,
         }
     }
 }
@@ -527,6 +537,21 @@ impl LargeTable {
         Ok(Some(entry.data.clone_shared()))
     }
 
+    /// Get the minimum WAL position for a specific cell without loading the index.
+    /// Returns None if the cell doesn't exist or if min_position is not tracked.
+    /// This is used for relocation optimization to skip cells without disk I/O.
+    pub fn get_min_position_for_cell(
+        &self,
+        context: &KsContext,
+        cell_id: &CellId,
+    ) -> Option<WalPosition> {
+        let mutex_index = context.ks_config.mutex_for_cell(cell_id);
+        let mut row = self.row_by_mutex(context, mutex_index);
+
+        let entry = row.try_entry_mut(cell_id)?;
+        entry.min_position()
+    }
+
     pub fn sync_flush_for_relocation<L: Loader>(
         &self,
         context: &KsContext,
@@ -664,6 +689,7 @@ impl LargeTable {
                 let snapshot_data = SnapshotEntryData {
                     position,
                     last_processed: entry.last_processed,
+                    min_position: entry.min_position,
                 };
                 row_data.insert(entry.cell.clone(), snapshot_data);
                 if let Some(valid_position) = position.valid() {
@@ -1058,6 +1084,7 @@ impl LargeTableEntry {
             unload_jitter,
             pending_last_processed: None,
             last_processed: LastProcessed::none(),
+            min_position: None,
         }
     }
 
@@ -1080,6 +1107,7 @@ impl LargeTableEntry {
             )
         };
         entry.last_processed = entry_data.last_processed;
+        entry.min_position = entry_data.min_position;
         entry
     }
 
@@ -1092,6 +1120,11 @@ impl LargeTableEntry {
                 .stale_index_bytes
                 .inc_by(old_position.frame_len_u32() as u64);
         }
+        // Track minimum position for relocation optimization
+        self.min_position = Some(match self.min_position {
+            Some(current) => cmp::min(current, v),
+            None => v,
+        });
         self.report_loaded_keys_count();
     }
 
@@ -1103,6 +1136,11 @@ impl LargeTableEntry {
                 .stale_index_bytes
                 .inc_by(old_position.frame_len_u32() as u64);
         }
+        // Track minimum position for relocation optimization (tombstones have positions too)
+        self.min_position = Some(match self.min_position {
+            Some(current) => cmp::min(current, v),
+            None => v,
+        });
         self.report_loaded_keys_count();
     }
 
@@ -1163,6 +1201,14 @@ impl LargeTableEntry {
                 assert!(self.data.is_empty());
                 false
             }
+        };
+        // Compute min_position from loaded data
+        let loaded_min = data.min_position();
+        self.min_position = match (self.min_position, loaded_min) {
+            (Some(a), Some(b)) => Some(cmp::min(a, b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
         };
         self.data = ArcCow::new_owned(data);
         self.report_loaded_keys_count();
@@ -1290,6 +1336,7 @@ impl LargeTableEntry {
         // If all entries were removed, update state to Unloaded
         if self.data.is_empty() {
             self.state = LargeTableEntryState::Unloaded(position);
+            self.min_position = None;
             self.context
                 .metrics
                 .flush_update
@@ -1298,6 +1345,12 @@ impl LargeTableEntry {
         } else {
             // Some entries remain, keep state as DirtyUnloaded
             self.state = LargeTableEntryState::DirtyUnloaded(position);
+            // Update min_position: all remaining entries have offset >= last_processed (O(1))
+            let lp_offset = last_processed.as_u64();
+            self.min_position = match self.min_position {
+                Some(current) if current.offset() >= lp_offset => Some(current),
+                _ => Some(WalPosition::new(lp_offset, 0)),
+            };
             self.context
                 .metrics
                 .flush_update
@@ -1357,6 +1410,12 @@ impl LargeTableEntry {
         matches!(self.state, LargeTableEntryState::Empty)
     }
 
+    /// Returns the minimum WAL position of entries in this cell.
+    /// Used for relocation optimization to skip cells without loading.
+    pub fn min_position(&self) -> Option<WalPosition> {
+        self.min_position
+    }
+
     /// Clears this entry, setting its state to Empty and dropping all data.
     pub(crate) fn clear(&mut self) {
         self.state = LargeTableEntryState::Empty;
@@ -1365,6 +1424,7 @@ impl LargeTableEntry {
             bloom.clear();
         }
         self.last_processed = LastProcessed::none();
+        self.min_position = None;
     }
 
     pub fn flush_kind(&mut self) -> Option<FlushKind> {
@@ -2051,6 +2111,7 @@ mod tests {
                 SnapshotEntryData {
                     position: WalPosition::test_value(position_value as u64),
                     last_processed: LastProcessed::new_test(position_value as u64),
+                    min_position: None,
                 },
             );
         }
@@ -2103,6 +2164,7 @@ mod tests {
                 SnapshotEntryData {
                     position: WalPosition::INVALID,
                     last_processed: LastProcessed::none(),
+                    min_position: None,
                 },
             )]
             .into_iter()

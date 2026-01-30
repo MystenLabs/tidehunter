@@ -184,6 +184,15 @@ impl IndexTable {
         self.data.keys()
     }
 
+    /// Returns the minimum WAL position across all valid entries in this index.
+    /// Used for relocation optimization to skip cells without loading.
+    pub fn min_position(&self) -> Option<WalPosition> {
+        self.data
+            .values()
+            .filter_map(|v| v.into_wal_position().valid())
+            .min()
+    }
+
     /// Writes key-value pairs from IndexTable to a BytesMut buffer.
     /// Returns the populated buffer.
     pub fn serialize_index_entries(&self, ks: &KeySpaceDesc, out: &mut BytesMut) {
