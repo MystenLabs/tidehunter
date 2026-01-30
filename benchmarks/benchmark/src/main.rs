@@ -102,6 +102,8 @@ pub fn main() {
         &registry,
     );
     let mut tidehunter_db: Option<Arc<tidehunter::db::Db>> = None;
+    let mut relocation_handle: Option<JoinHandle<()>> = None;
+    let relocation_shutdown = Arc::new(AtomicBool::new(false));
     let storage: Arc<dyn Storage> = match config.stress_client_parameters.backend {
         Backend::Tidehunter => {
             if config.db_parameters.direct_io {
@@ -143,8 +145,14 @@ pub fn main() {
                 );
                 let db_clone = storage.db.clone();
                 let relocation_config = relocation_config.clone();
-                thread::spawn(move || {
+                let shutdown_clone = relocation_shutdown.clone();
+                relocation_handle = Some(thread::spawn(move || {
                     loop {
+                        // Check shutdown flag before starting new relocation
+                        if shutdown_clone.load(Ordering::Relaxed) {
+                            break;
+                        }
+
                         // Convert RelocationConfig to RelocationStrategy for this iteration
                         let strategy = match &relocation_config {
                             RelocationConfig::Wal => RelocationStrategy::WalBased,
@@ -162,10 +170,15 @@ pub fn main() {
                         // Start relocation and let it run to completion
                         db_clone.start_blocking_relocation_with_strategy(strategy);
 
-                        // Take a 30 second break between relocations
-                        thread::sleep(Duration::from_secs(30));
+                        // Take a 30 second break between relocations (check shutdown every second)
+                        for _ in 0..30 {
+                            if shutdown_clone.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            thread::sleep(Duration::from_secs(1));
+                        }
                     }
-                });
+                }));
             }
 
             tidehunter_db = Some(storage.db.clone());
@@ -255,21 +268,18 @@ pub fn main() {
         ops_sec,
         byte_div(total_bytes / msecs * 1000),
     );
-    // Cooldown phase - let relocation/GC complete
-    if stress.parameters.cooldown_secs > 0 {
-        report!(
-            report,
-            "Starting cooldown phase for {} seconds to let relocation/GC complete",
-            stress.parameters.cooldown_secs
-        );
-        thread::sleep(Duration::from_secs(stress.parameters.cooldown_secs));
-        report!(report, "Cooldown phase complete");
+    // Cooldown phase - wait for relocation to finish
+    if let Some(handle) = relocation_handle {
+        report!(report, "Waiting for current relocation to complete...");
+        relocation_shutdown.store(true, Ordering::Relaxed);
+        handle.join().expect("Relocation thread panicked");
+        report!(report, "Relocation thread finished");
 
-        // Measure storage after cooldown
+        // Measure storage after relocation completes
         let storage_len = fs_extra::dir::get_size(&path).unwrap();
         report!(
             report,
-            "Storage used after cooldown {:.1} Gb",
+            "Storage used after relocation complete: {:.1} Gb",
             storage_len as f64 / 1024. / 1024. / 1024.
         );
     }

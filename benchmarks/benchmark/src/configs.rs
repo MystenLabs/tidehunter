@@ -180,9 +180,6 @@ pub struct StressClientParameters {
     /// Ratio of writes that are deletes (0.0 to 1.0, default 0.0)
     #[serde(default = "defaults::default_delete_ratio")]
     pub delete_ratio: f64,
-    /// Cooldown duration in seconds after mixed phase to let relocation/GC complete
-    #[serde(default = "defaults::default_cooldown_secs")]
-    pub cooldown_secs: u64,
 }
 
 impl Default for StressClientParameters {
@@ -209,7 +206,6 @@ impl Default for StressClientParameters {
             zipf_exponent: defaults::default_zipf_exponent(),
             relocation: None,
             delete_ratio: defaults::default_delete_ratio(),
-            cooldown_secs: defaults::default_cooldown_secs(),
         }
     }
 }
@@ -288,10 +284,6 @@ pub mod defaults {
 
     pub fn default_delete_ratio() -> f64 {
         0.0
-    }
-
-    pub fn default_cooldown_secs() -> u64 {
-        600 // 10 minutes
     }
 }
 
@@ -398,11 +390,6 @@ pub struct StressArgs {
     relocation: Option<String>,
     #[arg(long, help = "Ratio of writes that are deletes (0.0 to 1.0)")]
     delete_ratio: Option<f64>,
-    #[arg(
-        long,
-        help = "Cooldown duration in seconds after mixed phase (default 600)"
-    )]
-    cooldown_secs: Option<u64>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -493,9 +480,6 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
             std::process::exit(1);
         }
         config.stress_client_parameters.delete_ratio = delete_ratio;
-    }
-    if let Some(cooldown_secs) = args.cooldown_secs {
-        config.stress_client_parameters.cooldown_secs = cooldown_secs;
     }
 
     config

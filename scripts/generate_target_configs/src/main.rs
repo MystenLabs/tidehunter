@@ -1,17 +1,20 @@
 use anyhow::Result;
-use benchmark::configs::{Backend, ReadMode, StressTestConfigs};
+use benchmark::configs::{ReadMode, RelocationConfig, StressTestConfigs};
 use std::fs;
 use std::path::PathBuf;
+
+const ONE_TB: usize = 1024 * 1024 * 1024 * 1024; // 1 TB
 
 fn main() -> Result<()> {
     // Base config from Tidehunter defaults + benchmark defaults
     let mut base_item = StressTestConfigs::default();
 
+    // default stress parameters
     base_item.stress_client_parameters.mixed_threads = 36;
     base_item.stress_client_parameters.write_threads = 36;
-    base_item.stress_client_parameters.write_size = 512;
+    base_item.stress_client_parameters.write_size = 64;
     base_item.stress_client_parameters.key_len = 32;
-    base_item.stress_client_parameters.writes = 83_000_000;
+    base_item.stress_client_parameters.writes = 50_000_000;
     base_item.stress_client_parameters.mixed_duration_secs = 600;
     base_item.stress_client_parameters.background_writes = 0;
     base_item.stress_client_parameters.no_snapshot = false;
@@ -22,20 +25,39 @@ fn main() -> Result<()> {
     base_item.stress_client_parameters.zipf_exponent = 0.0;
     base_item.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
 
-    // Place all parameters we want to set/vary below, either as single values or in nested for loops
-    base_item.stress_client_parameters.read_percentage = 100;
+    // default db parameters
+    base_item.db_parameters.num_flusher_threads = 12;
+    base_item.db_parameters.max_dirty_keys = 1024;
+    base_item.db_parameters.max_maps = 128;
+    base_item.db_parameters.metrics_enabled = false;
     base_item.db_parameters.direct_io = false;
+    base_item.db_parameters.relocation_max_reclaim_pct = 20; // increased from 5% for more aggressive GC
+
+    // Place all parameters we want to set/vary below, either as single values or in nested for loops
+    base_item.stress_client_parameters.relocation =
+        Some(RelocationConfig::Index { ratio: Some(0.2) });
+    base_item.stress_client_parameters.read_mode = ReadMode::Get;
+    base_item.stress_client_parameters.write_size = 1024;
+    base_item.db_parameters.metrics_enabled = true;
+
     let mut items: Vec<StressTestConfigs> = Vec::new();
-    for backend in [Backend::Tidehunter, Backend::Rocksdb] {
-        for read_mode in [ReadMode::Get, ReadMode::Exists, ReadMode::Lt(1)] {
-            for zipf_exponent in [0.0, 2.0] {
-                let mut item = base_item.clone();
-                item.stress_client_parameters.backend = backend.clone();
-                item.stress_client_parameters.read_mode = read_mode.clone();
-                item.stress_client_parameters.zipf_exponent = zipf_exponent;
-                let yaml = serde_yaml::to_string(&item)?;
-                println!("{yaml}");
-                items.push(item);
+    for relocation in [None, Some(RelocationConfig::Index { ratio: Some(1.0) })] {
+        for delete_ratio in [1.0] {
+            for read_percentage in [0] {
+                for zipf_exponent in [0.0, 2.0] {
+                    let mut item = base_item.clone();
+                    item.stress_client_parameters.relocation = relocation.clone();
+                    item.stress_client_parameters.delete_ratio = delete_ratio;
+                    item.stress_client_parameters.read_percentage = read_percentage;
+                    item.stress_client_parameters.zipf_exponent = zipf_exponent;
+                    item.stress_client_parameters.writes = ONE_TB
+                        / (item.stress_client_parameters.write_threads
+                            * (item.stress_client_parameters.key_len
+                                + item.stress_client_parameters.write_size));
+                    let yaml = serde_yaml::to_string(&item)?;
+                    println!("{yaml}");
+                    items.push(item);
+                }
             }
         }
     }
