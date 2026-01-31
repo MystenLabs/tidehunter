@@ -199,7 +199,6 @@ pub struct Metrics {
 
     // Index-based relocation metrics
     pub relocation_cells_processed: MetricIntCounterVec,
-    pub relocation_cells_skipped: MetricIntCounterVec,
     pub relocation_current_keyspace: MetricIntGauge,
 
     pub memory_estimate: MetricIntGaugeVec,
@@ -414,12 +413,6 @@ impl Metrics {
             // Index-based relocation metrics
             relocation_cells_processed: counter_vec!(
                 "relocation_cells_processed",
-                &["ks"],
-                registry,
-                enabled
-            ),
-            relocation_cells_skipped: counter_vec!(
-                "relocation_cells_skipped",
                 &["ks"],
                 registry,
                 enabled

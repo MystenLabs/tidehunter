@@ -446,39 +446,18 @@ impl RelocationDriver {
         let mut context = CellProcessingContext::new(batch);
         let mut removed_count = 0;
 
-        let ks_context = db.ks_context(cell_ref.keyspace);
-        let ks_name = ks_context.ks_config.name();
-
-        // Skip optimization: check if all entries in this cell are above effective_limit
-        // This avoids loading the index from disk for cells that don't need processing
-        if let Some(min_pos) = db
-            .large_table
-            .get_min_position_for_cell(ks_context, &cell_ref.cell_id)
-            && min_pos.offset() >= effective_limit
-        {
-            // Even though we skip processing, account for this cell's minimum position
-            // in the GC watermark calculation to prevent deleting WAL files that
-            // contain entries from this cell.
-            context.highest_wal_position = min_pos;
-            self.metrics
-                .relocation_cells_skipped
-                .with_label_values(&[ks_name])
-                .inc();
-            return Ok(context);
-        }
-
         // Phase A: Get shared reference to cell index
-        let index =
-            match db
-                .large_table
-                .get_index_for_cell(ks_context, &cell_ref.cell_id, db.as_ref())?
-            {
-                Some(index) => index,
-                None => {
-                    // Cell doesn't exist or is empty
-                    return Ok(context);
-                }
-            };
+        let index = match db.large_table.get_index_for_cell(
+            db.ks_context(cell_ref.keyspace),
+            &cell_ref.cell_id,
+            db.as_ref(),
+        )? {
+            Some(index) => index,
+            None => {
+                // Cell doesn't exist or is empty
+                return Ok(context);
+            }
+        };
 
         // Phase B: Read values from WAL and make decisions (no lock held, efficient iteration)
         // TODO(#74): Optimization needed - add support for making relocation decisions without loading values
@@ -494,7 +473,7 @@ impl RelocationDriver {
         // - Optional key-only decision callback in RelocationFilter trait
         // - Skip WAL value reads when key-only decisions are possible
         // - Fall back to current value-based approach when needed
-        let keyspace_desc = &ks_context.ks_config;
+        let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
         for (key, position) in index.iter() {
             if position.offset() >= effective_limit {
                 continue;
