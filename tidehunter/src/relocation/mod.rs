@@ -456,6 +456,10 @@ impl RelocationDriver {
             .get_min_position_for_cell(ks_context, &cell_ref.cell_id)
             && min_pos.offset() >= effective_limit
         {
+            // Even though we skip processing, account for this cell's minimum position
+            // in the GC watermark calculation to prevent deleting WAL files that
+            // contain entries from this cell.
+            context.highest_wal_position = min_pos;
             self.metrics
                 .relocation_cells_skipped
                 .with_label_values(&[ks_name])

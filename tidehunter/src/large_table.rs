@@ -1382,6 +1382,10 @@ impl LargeTableEntry {
                 .unmerge_flushed(&original_index, pending_last_processed);
             self.report_loaded_keys_count();
             self.state = LargeTableEntryState::DirtyUnloaded(position);
+            // Set min_position to None because the on-disk index may contain entries
+            // older than last_processed that were merged in. This forces relocation
+            // to process this cell rather than skip it.
+            self.min_position = None;
             self.context
                 .metrics
                 .flush_update
