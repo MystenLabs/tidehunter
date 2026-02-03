@@ -52,6 +52,7 @@ pub struct LargeTableEntry {
     /// - `None`: No flush is pending
     /// - `Some(pos)`: Async flush is in progress, will update `last_processed` to `pos` when complete
     pending_last_processed: Option<LastProcessed>,
+    value_lru: Option<LruCache<Bytes, Bytes>>,
 }
 
 enum LargeTableEntryState {
@@ -76,7 +77,6 @@ struct KsTable {
 }
 
 struct Row {
-    value_lru: Option<LruCache<Bytes, Bytes>>,
     context: KsContext,
     entries: Entries,
 }
@@ -178,11 +178,9 @@ impl LargeTable {
                                 .collect(),
                         ),
                     };
-                    let value_lru = ks.value_cache_size().map(LruCache::new);
                     Row {
                         entries,
                         context: context.clone(),
-                        value_lru,
                     }
                 });
 
@@ -250,7 +248,7 @@ impl LargeTable {
             drop(guard);
             entry.unload_if_ks_enabled(&self.flusher, loader)?;
         }
-        if let Some(value_lru) = &mut row.value_lru {
+        if let Some(value_lru) = &mut entry.value_lru {
             let delta: i64 = (k.len() + value.len()) as i64;
             let previous = value_lru.push(k, value.clone());
             self.update_lru_metric(context, previous, delta);
@@ -291,7 +289,7 @@ impl LargeTable {
         if !entry.remove(k.clone(), v) {
             return Ok(());
         }
-        if let Some(value_lru) = &mut row.value_lru {
+        if let Some(value_lru) = &mut entry.value_lru {
             let previous = value_lru.pop(&k);
             self.update_lru_metric(context, previous.map(|v| (k, v)), 0);
         }
@@ -314,8 +312,9 @@ impl LargeTable {
         if context.ks_config.value_cache_size().is_none() {
             return;
         }
-        let (mut row, _cell) = self.row(context, &key);
-        let Some(value_lru) = &mut row.value_lru else {
+        let (mut row, cell) = self.row(context, &key);
+        let entry = self.entry_mut(&mut row, &cell);
+        let Some(value_lru) = &mut entry.value_lru else {
             unreachable!()
         };
         let delta: i64 = (key.len() + value.len()) as i64;
@@ -346,16 +345,16 @@ impl LargeTable {
     ) -> Result<GetResult, L::Error> {
         let ks = &context.ks_config;
         let (mut row, cell) = self.row(context, k);
-        if let Some(value_lru) = &mut row.value_lru
+        let entry = row.try_entry_mut(&cell);
+        let Some(entry) = entry else {
+            return Ok(context.report_lookup_result(None, LookupSource::Prefix));
+        };
+        if let Some(value_lru) = &mut entry.value_lru
             && let Some(value) = value_lru.get(k)
         {
             context.inc_lookup_result(LookupResult::Found, LookupSource::Lru);
             return Ok(GetResult::Value(value.clone()));
         }
-        let entry = row.try_entry_mut(&cell);
-        let Some(entry) = entry else {
-            return Ok(context.report_lookup_result(None, LookupSource::Prefix));
-        };
 
         // todo correctness - LRU cache removal does not apply correctly
         entry.promote_pending(); // todo promote one key
@@ -1034,6 +1033,7 @@ impl LargeTableEntry {
         unload_jitter: usize,
         bloom_filter: Option<BloomFilter>,
     ) -> Self {
+        let value_lru = context.ks_config.value_cache_size().map(LruCache::new);
         Self {
             context,
             cell,
@@ -1044,6 +1044,7 @@ impl LargeTableEntry {
             unload_jitter,
             pending_last_processed: None,
             last_processed: LastProcessed::none(),
+            value_lru,
         }
     }
 
@@ -1856,7 +1857,6 @@ mod tests {
         {
             // Create a row with an Empty entry
             let mut row = Row {
-                value_lru: None,
                 context: context.clone(),
                 entries: Entries::Array(
                     1,
@@ -1882,7 +1882,6 @@ mod tests {
             entry.state = LargeTableEntryState::Loaded(WalPosition::test_value(42));
 
             let mut row = Row {
-                value_lru: None,
                 context: context.clone(),
                 entries: Entries::Array(1, Box::new([entry])),
             };
@@ -1929,7 +1928,6 @@ mod tests {
             );
 
             let mut row = Row {
-                value_lru: None,
                 context: context.clone(),
                 entries: Entries::Array(1, Box::new([entry])),
             };
@@ -1979,7 +1977,6 @@ mod tests {
             entry.state = LargeTableEntryState::DirtyLoaded(WalPosition::test_value(42));
 
             let mut row = Row {
-                value_lru: None,
                 context: context.clone(),
                 entries: Entries::Array(1, Box::new([entry])),
             };
@@ -2038,7 +2035,6 @@ mod tests {
             entry.state = LargeTableEntryState::DirtyUnloaded(WalPosition::test_value(42));
 
             let mut row = Row {
-                value_lru: None,
                 context: context.clone(),
                 entries: Entries::Array(1, Box::new([entry])),
             };
