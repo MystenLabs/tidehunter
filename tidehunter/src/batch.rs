@@ -45,14 +45,17 @@ impl WriteBatch {
 
     pub fn write(&mut self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) {
         let k = k.into();
+        let v = v.into();
         let context = self.db.ks_context(ks);
         context.ks_config.check_key(&k);
         let reduced_key = context.ks_config.reduced_key_bytes(k.clone());
+        // Pass value for LRU cache if enabled
+        let lru_update = context.ks_config.value_cache_size().map(|_| v.clone());
         self.db
             .large_table
-            .insert_pending(context, reduced_key, &mut self.transaction);
+            .insert_pending(context, reduced_key, lru_update, &mut self.transaction);
         // todo transaction state is corrupted on panic
-        self.prepare_write(WalEntry::Record(ks, k, v.into(), false));
+        self.prepare_write(WalEntry::Record(ks, k, v, false));
     }
 
     pub fn delete(&mut self, ks: KeySpace, k: impl Into<Bytes>) {

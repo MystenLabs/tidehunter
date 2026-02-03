@@ -145,6 +145,71 @@ fn test_batch() {
 }
 
 #[test]
+fn test_batch_lru() {
+    let dir = tempdir::TempDir::new("test-batch-lru").unwrap();
+    let config = Arc::new(Config::small());
+    let metrics = Metrics::new();
+
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new().with_value_cache_size(100);
+    let ks = ksb.add_key_space_config("ks", 4, 16, KeyType::uniform(16), ksc);
+    let key_shape = ksb.build();
+
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+
+    // Test batch writes populate LRU cache during promote_pending
+    let mut batch = db.write_batch();
+    batch.write(ks, vec![1, 2, 3, 4], vec![10]);
+    batch.write(ks, vec![2, 3, 4, 5], vec![20]);
+    batch.commit().unwrap();
+
+    // First access: promote_pending is called which populates LRU, then LRU is checked
+    assert_eq!(Some(vec![10].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+    assert_eq!(Some(vec![20].into()), db.get(ks, &[2, 3, 4, 5]).unwrap());
+
+    // Second access: promote_pending does nothing (already promoted), then LRU is checked and hits
+    assert_eq!(Some(vec![10].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+    assert_eq!(Some(vec![20].into()), db.get(ks, &[2, 3, 4, 5]).unwrap());
+
+    // Check that LRU cache was hit on all four get() calls
+    // (promote_pending populates LRU, then subsequent gets hit the cache)
+    let lru_hits = metrics
+        .lookup_result
+        .with_label_values(&["ks", "found", "lru"])
+        .get();
+    assert_eq!(
+        lru_hits, 4,
+        "All four get() calls should have been served from LRU cache"
+    );
+
+    // Test overwrite in batch updates LRU cache
+    let mut batch = db.write_batch();
+    batch.write(ks, vec![1, 2, 3, 4], vec![30]); // Overwrite with new value
+    batch.commit().unwrap();
+
+    // Access the overwritten key - should get the new value from LRU
+    assert_eq!(Some(vec![30].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+
+    // Verify LRU was hit (not read from disk/index)
+    let lru_hits_after_overwrite = metrics
+        .lookup_result
+        .with_label_values(&["ks", "found", "lru"])
+        .get();
+    assert_eq!(
+        lru_hits_after_overwrite, 5,
+        "Overwritten value should be served from updated LRU cache"
+    );
+
+    // Test delete in batch removes from LRU cache
+    let mut batch = db.write_batch();
+    batch.delete(ks, vec![1, 2, 3, 4]);
+    batch.commit().unwrap();
+
+    // Key should be deleted and not in LRU cache
+    assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
+}
+
+#[test]
 fn test_batch_replay() {
     let dir = tempdir::TempDir::new("test_batch_replay").unwrap();
     let config = Arc::new(Config::small());

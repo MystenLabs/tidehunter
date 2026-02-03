@@ -238,7 +238,7 @@ impl LargeTable {
 
         entry.promote_pending(); // todo promote one key
 
-        if !entry.insert(k.clone(), v) {
+        if !entry.insert(k.clone(), v, Some(value)) {
             return Ok(());
         }
 
@@ -247,11 +247,6 @@ impl LargeTable {
             // Drop the guard before flushing to ensure last_processed is updated
             drop(guard);
             entry.unload_if_ks_enabled(&self.flusher, loader)?;
-        }
-        if let Some(value_lru) = &mut entry.value_lru {
-            let delta: i64 = (k.len() + value.len()) as i64;
-            let previous = value_lru.push(k, value.clone());
-            self.update_lru_metric(context, previous, delta);
         }
         self.metrics
             .max_index_size
@@ -289,17 +284,19 @@ impl LargeTable {
         if !entry.remove(k.clone(), v) {
             return Ok(());
         }
-        if let Some(value_lru) = &mut entry.value_lru {
-            let previous = value_lru.pop(&k);
-            self.update_lru_metric(context, previous.map(|v| (k, v)), 0);
-        }
         Ok(())
     }
 
-    pub fn insert_pending(&self, context: &KsContext, k: Bytes, transaction: &mut Transaction) {
+    pub fn insert_pending(
+        &self,
+        context: &KsContext,
+        k: Bytes,
+        lru_update: Option<Bytes>,
+        transaction: &mut Transaction,
+    ) {
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
-        entry.pending_data.insert(k, transaction);
+        entry.pending_data.insert(k, lru_update, transaction);
     }
 
     pub fn remove_pending(&self, context: &KsContext, k: Bytes, transaction: &mut Transaction) {
@@ -319,22 +316,7 @@ impl LargeTable {
         };
         let delta: i64 = (key.len() + value.len()) as i64;
         let previous = value_lru.push(key, value);
-        self.update_lru_metric(context, previous, delta);
-    }
-
-    fn update_lru_metric(
-        &self,
-        context: &KsContext,
-        previous: Option<(Bytes, Bytes)>,
-        mut delta: i64,
-    ) {
-        if let Some((p_key, p_value)) = previous {
-            delta -= (p_key.len() + p_value.len()) as i64;
-        }
-        self.metrics
-            .value_cache_size
-            .with_label_values(&[context.name()])
-            .add(delta);
+        LargeTableEntry::update_lru_metric(context, previous, delta);
     }
 
     pub fn get<L: Loader>(
@@ -349,15 +331,17 @@ impl LargeTable {
         let Some(entry) = entry else {
             return Ok(context.report_lookup_result(None, LookupSource::Prefix));
         };
+
+        // Important: promote_pending must be called before checking LRU cache
+        // to ensure pending deletes are processed and LRU is updated correctly
+        entry.promote_pending(); // todo promote one key
+
         if let Some(value_lru) = &mut entry.value_lru
             && let Some(value) = value_lru.get(k)
         {
             context.inc_lookup_result(LookupResult::Found, LookupSource::Lru);
             return Ok(GetResult::Value(value.clone()));
         }
-
-        // todo correctness - LRU cache removal does not apply correctly
-        entry.promote_pending(); // todo promote one key
 
         if entry.bloom_filter_not_found(k) {
             return Ok(context.report_lookup_result(None, LookupSource::Bloom));
@@ -1090,15 +1074,23 @@ impl LargeTableEntry {
         skip
     }
 
-    /// Returns true if successful, false if update was skipped
-    pub fn insert(&mut self, k: Bytes, v: WalPosition) -> bool {
+    /// Returns true if successful, false if update was skipped.
+    /// The lru_value must be provided if LRU is configured.
+    pub fn insert(&mut self, k: Bytes, v: WalPosition, lru_value: Option<&Bytes>) -> bool {
         if self.skip_stale_update(&k, &v, "insert") {
             return false;
         }
         self.state.mark_dirty();
         self.insert_bloom_filter(&k);
-        self.data.make_mut().insert(k, v);
+        self.data.make_mut().insert(k.clone(), v);
         self.report_loaded_keys_count();
+
+        if let Some(value_lru) = &mut self.value_lru {
+            let lru_value = lru_value.expect("lru_value must be provided if LRU is configured");
+            let delta: i64 = (k.len() + lru_value.len()) as i64;
+            let previous = value_lru.push(k, lru_value.clone());
+            Self::update_lru_metric(&self.context, previous, delta);
+        }
         true
     }
 
@@ -1108,6 +1100,13 @@ impl LargeTableEntry {
             return false;
         }
         self.state.mark_dirty();
+
+        // Remove from LRU cache if enabled
+        if let Some(value_lru) = &mut self.value_lru {
+            let previous = value_lru.pop(&k);
+            Self::update_lru_metric(&self.context, previous.map(|v| (k.clone(), v)), 0);
+        }
+
         self.data.make_mut().remove(k, v);
         self.report_loaded_keys_count();
         true
@@ -1122,9 +1121,12 @@ impl LargeTableEntry {
             // changes from the committed batch goes over
             // the same skip_stale_update logic as regular updates
             if committed_change.is_modified {
-                // todo perf - LRU cache is not updated here
                 // todo perf - report_loaded_keys_count and make_mut calls can be done once
-                self.insert(committed_change.key, committed_change.value);
+                self.insert(
+                    committed_change.key,
+                    committed_change.value,
+                    committed_change.lru_update.as_ref(),
+                );
             } else {
                 self.remove(committed_change.key, committed_change.value);
             }
@@ -1153,6 +1155,17 @@ impl LargeTableEntry {
         } else {
             false
         }
+    }
+
+    fn update_lru_metric(context: &KsContext, previous: Option<(Bytes, Bytes)>, mut delta: i64) {
+        if let Some((p_key, p_value)) = previous {
+            delta -= (p_key.len() + p_value.len()) as i64;
+        }
+        context
+            .metrics
+            .value_cache_size
+            .with_label_values(&[context.name()])
+            .add(delta);
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {

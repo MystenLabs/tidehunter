@@ -28,21 +28,24 @@ pub struct PendingTable {
 #[derive(Default)]
 pub struct Transaction {
     status: TransactionStatus,
-    updates: Vec<PendingUpdateInner>,
+    updates: Vec<(PendingUpdateInner, Option<Bytes>)>,
     committed: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CommittedChange {
     pub key: Bytes,
-    // True if change was modification, false if change was deletion
+    /// True if change was modification, false if change was deletion
     pub is_modified: bool,
     pub value: WalPosition,
+    /// Value bytes for LRU cache updates. None for deletions or if LRU is not configured.
+    pub lru_update: Option<Bytes>,
 }
 
 #[derive(Default, Clone)]
 struct PendingUpdateInner {
     update: Arc<ArcSwapOption<WalPosition>>,
+    lru_update: Arc<ArcSwapOption<Bytes>>,
 }
 
 #[derive(Default, Clone)]
@@ -62,18 +65,24 @@ struct PendingUpdate {
 }
 
 impl PendingTable {
-    pub fn insert(&mut self, key: Bytes, transaction: &mut Transaction) {
-        self.insert_pending(key, true, transaction);
+    pub fn insert(&mut self, key: Bytes, lru_update: Option<Bytes>, transaction: &mut Transaction) {
+        self.insert_pending(key, true, lru_update, transaction);
     }
 
     pub fn remove(&mut self, key: Bytes, transaction: &mut Transaction) {
-        self.insert_pending(key, false, transaction);
+        self.insert_pending(key, false, None, transaction);
     }
 
-    fn insert_pending(&mut self, key: Bytes, is_modified: bool, transaction: &mut Transaction) {
+    fn insert_pending(
+        &mut self,
+        key: Bytes,
+        is_modified: bool,
+        lru_update: Option<Bytes>,
+        transaction: &mut Transaction,
+    ) {
         self.len += 1;
         let update = PendingUpdate::new(transaction.status.clone(), is_modified);
-        transaction.updates.push(update.inner.clone());
+        transaction.updates.push((update.inner.clone(), lru_update));
         self.data.entry(key).or_default().push(update);
     }
 
@@ -121,10 +130,17 @@ impl PendingTable {
                     status, TRANSACTION_STATUS_COMMITTED,
                     "Expected committed transaction"
                 );
+                let lru_update = update
+                    .inner
+                    .lru_update
+                    .load()
+                    .as_ref()
+                    .map(|b| (**b).clone());
                 let committed_change = CommittedChange {
                     key: key.clone(),
                     is_modified: update.is_modified,
                     value: *value.as_ref(),
+                    lru_update,
                 };
                 committed.push(committed_change);
             } else {
@@ -147,8 +163,11 @@ impl PendingTable {
 
 impl Transaction {
     pub fn commit(mut self, values: impl Iterator<Item = WalPosition>) {
-        for (update, value) in self.updates.drain(..).zip(values) {
+        for ((update, lru_update), value) in self.updates.drain(..).zip(values) {
             update.update.store(Some(Arc::new(value)));
+            if let Some(lru_bytes) = lru_update {
+                update.lru_update.store(Some(Arc::new(lru_bytes)));
+            }
         }
         self.status
             .status
@@ -194,9 +213,9 @@ mod tests {
         let mut tx1 = Transaction::default();
         let mut tx2 = Transaction::default();
 
-        table.insert(b(1), &mut tx1);
-        table.insert(b(1), &mut tx2);
-        table.insert(b(2), &mut tx2);
+        table.insert(b(1), None, &mut tx1);
+        table.insert(b(1), None, &mut tx2);
+        table.insert(b(2), None, &mut tx2);
         assert_eq!(table.take_committed().len(), 0);
         assert_eq!(table.len(), 3);
         drop(tx1); // drop tx1 without committing it
@@ -217,6 +236,7 @@ mod tests {
                 key: b(1),
                 is_modified: true,
                 value: WalPosition::test_value(1),
+                lru_update: None,
             }
         );
 
@@ -226,13 +246,14 @@ mod tests {
                 key: b(2),
                 is_modified: true,
                 value: WalPosition::test_value(2),
+                lru_update: None,
             }
         );
 
         // test take_committed_for
         let mut tx3 = Transaction::default();
-        table.insert(b(3), &mut tx3);
-        table.insert(b(4), &mut tx3);
+        table.insert(b(3), None, &mut tx3);
+        table.insert(b(4), None, &mut tx3);
         tx3.commit([WalPosition::test_value(3), WalPosition::test_value(4)].into_iter());
         let committed = table.take_committed_for(&b(3));
         assert_eq!(committed.len(), 1);
@@ -244,6 +265,7 @@ mod tests {
                 key: b(3),
                 is_modified: true,
                 value: WalPosition::test_value(3),
+                lru_update: None,
             }
         );
         let committed = table.take_committed();
@@ -256,6 +278,7 @@ mod tests {
                 key: b(4),
                 is_modified: true,
                 value: WalPosition::test_value(4),
+                lru_update: None,
             }
         );
     }
@@ -325,7 +348,7 @@ mod tests {
                     let table = tables.get(num as usize % tables.len()).unwrap();
                     table
                         .lock()
-                        .insert(Bytes::from(num.to_be_bytes()), transaction);
+                        .insert(Bytes::from(num.to_be_bytes()), None, transaction);
 
                     let transaction_to_commit = rng.gen_range(0..(transactions.len() * 4));
                     if transaction_to_commit >= transactions.len() {
