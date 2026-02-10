@@ -43,15 +43,15 @@ jobs:
       BENCH_DATA_DIR: "/opt/sui/db/tidehunter-benchmarks"
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
         with:
           fetch-depth: 0 # Fetch all history for proper benchmarking
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
 
       - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
       - name: Prepare results directory
         run: |
@@ -152,7 +152,7 @@ jobs:
           echo '```' >> ./results/summary.md
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmark-results-${{ env.TIMESTAMP }}
           path: results/
@@ -160,7 +160,7 @@ jobs:
 
       - name: Comment PR with benchmark results
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v6
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
         with:
           script: |
             const fs = require('fs');
@@ -205,7 +205,7 @@ jobs:
 
       - name: Send to Slack
         if: github.event_name == 'schedule' || github.event.inputs.post_to_slack == 'true'
-        uses: slackapi/slack-github-action@v1.25.0
+        uses: slackapi/slack-github-action@6c661ce58804a1a20f6dc5fbee7f0381b469e001 # v1.25.0
         with:
           channel-id: "tidehunter" # Replace with your channel ID
           payload: |
