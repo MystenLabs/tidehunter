@@ -486,6 +486,7 @@ impl LargeTable {
         let mutex = context.ks_config.mutex_for_cell(cell);
         let ks_table = self.ks_rows(&context.ks_config);
 
+        let mut wait_iterations = 0u32;
         loop {
             let mut row = ks_table.lock(mutex, &context.large_table_contention);
 
@@ -493,6 +494,19 @@ impl LargeTable {
                 && entry.pending_last_processed.is_some()
             {
                 // Async flush is in progress, wait for it to complete
+                wait_iterations += 1;
+                if wait_iterations == 20 {
+                    // Log after 1 second of waiting (20 * 50ms)
+                    eprintln!(
+                        "[relocation] lock_cell_waiting_for_flush: waited 1s for cell flush to complete"
+                    );
+                } else if wait_iterations.is_multiple_of(200) {
+                    // Log every 10 seconds thereafter
+                    eprintln!(
+                        "[relocation] lock_cell_waiting_for_flush: waited {}s for cell flush to complete",
+                        wait_iterations as u64 * 50 / 1000
+                    );
+                }
                 drop(row);
                 thread::sleep(Duration::from_millis(50));
                 continue;

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Weak, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 mod cell_reference;
 mod watermark;
@@ -100,6 +101,9 @@ struct CellProcessingContext {
     highest_wal_position: WalPosition,
     entries_removed: u64,
     entries_kept: u64,
+    entries_skipped: u64,
+    index_load_time: Duration,
+    entry_read_time: Duration,
 }
 
 impl CellProcessingContext {
@@ -109,6 +113,9 @@ impl CellProcessingContext {
             highest_wal_position: WalPosition::new(0, 0),
             entries_removed: 0,
             entries_kept: 0,
+            entries_skipped: 0,
+            index_load_time: Duration::ZERO,
+            entry_read_time: Duration::ZERO,
         }
     }
 
@@ -246,18 +253,49 @@ impl RelocationDriver {
             watermarks.data.next_to_process.clone()
         };
 
-        let mut cells_processed = 0;
+        let mut cells_processed = 0u64;
         let mut highest_wal_position = 0u64;
         let mut current_ks_id = None;
 
+        // Phase timing accumulators for periodic progress logging
+        let mut phase_a_total = Duration::ZERO; // index loading
+        let mut phase_b_total = Duration::ZERO; // entry iteration + WAL reads
+        let mut phase_c_total = Duration::ZERO; // write_relocated_batch (WAL write + flush)
+        let mut total_entries_kept = 0u64;
+        let mut total_entries_removed = 0u64;
+        let mut total_entries_skipped = 0u64;
+        let mut batch_log_start = Instant::now();
+
         while let Some(cell_ref) = current_cell_ref.take() {
             // Check for cancellation periodically
-            if cells_processed % Self::NUM_ITERATIONS_IN_BATCH == 0 {
+            if cells_processed.is_multiple_of(Self::NUM_ITERATIONS_IN_BATCH as u64) {
                 if self.should_cancel_relocation() {
                     break;
                 }
+                // Log progress every NUM_ITERATIONS_IN_BATCH cells
+                if cells_processed > 0 {
+                    let batch_elapsed = batch_log_start.elapsed();
+                    eprintln!(
+                        "[relocation] Progress: cells={}, entries_kept={}, entries_removed={}, entries_skipped={}, \
+                         phase_a(index_load)={:.1}s, phase_b(entry_read)={:.1}s, phase_c(write+flush)={:.1}s, \
+                         batch_wall={:.1}s, total_elapsed={:.0}s",
+                        cells_processed,
+                        total_entries_kept,
+                        total_entries_removed,
+                        total_entries_skipped,
+                        phase_a_total.as_secs_f64(),
+                        phase_b_total.as_secs_f64(),
+                        phase_c_total.as_secs_f64(),
+                        batch_elapsed.as_secs_f64(),
+                        iteration_start.elapsed().as_secs_f64(),
+                    );
+                    batch_log_start = Instant::now();
+                }
+
                 // Save progress periodically
-                if cells_processed % Self::NUM_ITERATIONS_TILL_SAVE == 0 {
+                if cells_processed.is_multiple_of(Self::NUM_ITERATIONS_TILL_SAVE as u64)
+                    && cells_processed > 0
+                {
                     watermarks.set(
                         Some(cell_ref.clone()),
                         highest_wal_position,
@@ -279,6 +317,13 @@ impl RelocationDriver {
             // Process each cell
             let context = self.process_single_cell(&cell_ref, &db, effective_limit)?;
 
+            // Accumulate per-cell timing
+            phase_a_total += context.index_load_time;
+            phase_b_total += context.entry_read_time;
+            total_entries_kept += context.entries_kept;
+            total_entries_removed += context.entries_removed;
+            total_entries_skipped += context.entries_skipped;
+
             // Track the highest WAL position seen
             if context.highest_wal_position.offset() > highest_wal_position {
                 highest_wal_position = context.highest_wal_position.offset();
@@ -287,7 +332,9 @@ impl RelocationDriver {
             // Relocate entries if any were marked for keeping
             let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
             if !context.batch.is_empty() {
+                let phase_c_start = Instant::now();
                 let successful = self.relocate_entries(context.batch, &db)?;
+                phase_c_total += phase_c_start.elapsed();
                 // Track successful relocations with existing metrics (same as WAL-based)
                 self.metrics
                     .relocation_kept
@@ -308,13 +355,23 @@ impl RelocationDriver {
         }
 
         // Save final progress with upper_limit and highest WAL position
+        let total_elapsed = iteration_start.elapsed();
         eprintln!(
-            "[relocation] Completed index-based relocation: cells_processed={}, highest_wal_position={}, upper_limit={}, effective_limit={}, elapsed_secs={}",
+            "[relocation] Completed index-based relocation: cells_processed={}, highest_wal_position={}, \
+             upper_limit={}, effective_limit={}, elapsed_secs={}, \
+             phase_a(index_load)={:.1}s, phase_b(entry_read)={:.1}s, phase_c(write+flush)={:.1}s, \
+             entries_kept={}, entries_removed={}, entries_skipped={}",
             cells_processed,
             highest_wal_position,
             upper_limit,
             effective_limit,
-            iteration_start.elapsed().as_secs()
+            total_elapsed.as_secs(),
+            phase_a_total.as_secs_f64(),
+            phase_b_total.as_secs_f64(),
+            phase_c_total.as_secs_f64(),
+            total_entries_kept,
+            total_entries_removed,
+            total_entries_skipped,
         );
         watermarks.set(
             current_cell_ref.clone(),
@@ -447,6 +504,7 @@ impl RelocationDriver {
         let mut removed_count = 0;
 
         // Phase A: Get shared reference to cell index
+        let phase_a_start = Instant::now();
         let index = match db.large_table.get_index_for_cell(
             db.ks_context(cell_ref.keyspace),
             &cell_ref.cell_id,
@@ -454,10 +512,12 @@ impl RelocationDriver {
         )? {
             Some(index) => index,
             None => {
+                context.index_load_time = phase_a_start.elapsed();
                 // Cell doesn't exist or is empty
                 return Ok(context);
             }
         };
+        context.index_load_time = phase_a_start.elapsed();
 
         // Phase B: Read values from WAL and make decisions (no lock held, efficient iteration)
         // TODO(#74): Optimization needed - add support for making relocation decisions without loading values
@@ -473,9 +533,11 @@ impl RelocationDriver {
         // - Optional key-only decision callback in RelocationFilter trait
         // - Skip WAL value reads when key-only decisions are possible
         // - Fall back to current value-based approach when needed
+        let phase_b_start = Instant::now();
         let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
         for (key, position) in index.iter() {
             if position.offset() >= effective_limit {
+                context.entries_skipped += 1;
                 continue;
             }
 
@@ -509,6 +571,7 @@ impl RelocationDriver {
                 }
             }
         }
+        context.entry_read_time = phase_b_start.elapsed();
 
         // Track removed entries with existing metrics (same as WAL-based)
         if removed_count > 0 {
