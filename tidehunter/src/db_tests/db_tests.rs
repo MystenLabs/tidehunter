@@ -135,13 +135,42 @@ fn test_batch() {
     let dir = tempdir::TempDir::new("test-batch").unwrap();
     let config = Arc::new(Config::small());
     let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
-    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
     let mut batch = db.write_batch();
     batch.write(ks, vec![5, 6, 7, 8], vec![15]);
     batch.write(ks, vec![6, 7, 8, 9], vec![17]);
+
+    // Check pending_table_len after writes but before commit
+    let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
+    assert_eq!(pending_len, 2, "Should have 2 pending entries after writes");
+
     batch.commit().unwrap();
+
+    // Check pending_table_len after commit but before promote_pending
+    let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
+    assert_eq!(
+        pending_len, 2,
+        "Should still have 2 pending entries after commit"
+    );
+
     assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
+
+    // Check pending_table_len after first get (promote_pending is called for that cell)
+    let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
+    // Could be 0, 1, or 2 depending on whether keys are in same cell
+    // If keys are in different cells, only one cell's pending_table is cleared
+    let pending_after_first_get = pending_len;
+
     assert_eq!(Some(vec![17].into()), db.get(ks, &[6, 7, 8, 9]).unwrap());
+
+    // After both gets, all pending entries should be promoted
+    let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
+    assert_eq!(
+        pending_len, 0,
+        "Should have 0 pending entries after both gets (was {} after first get)",
+        pending_after_first_get
+    );
 }
 
 #[test]
