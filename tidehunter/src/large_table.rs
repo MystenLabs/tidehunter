@@ -297,12 +297,14 @@ impl LargeTable {
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
         entry.pending_data.insert(k, lru_update, transaction);
+        context.pending_table_len.add(1);
     }
 
     pub fn remove_pending(&self, context: &KsContext, k: Bytes, transaction: &mut Transaction) {
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
         entry.pending_data.remove(k, transaction);
+        context.pending_table_len.add(1);
     }
 
     pub fn update_lru(&self, context: &KsContext, key: Bytes, value: Bytes) {
@@ -1113,7 +1115,10 @@ impl LargeTableEntry {
     }
 
     fn promote_pending(&mut self) {
-        let committed = self.pending_data.take_committed();
+        let (committed, removed) = self.pending_data.take_committed();
+        if removed > 0 {
+            self.context.pending_table_len.add(-(removed as i64));
+        }
         if committed.is_empty() {
             return;
         }

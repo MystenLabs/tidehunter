@@ -86,9 +86,9 @@ impl PendingTable {
         self.data.entry(key).or_default().push(update);
     }
 
-    pub fn take_committed_for(&mut self, key: &Bytes) -> Vec<CommittedChange> {
+    pub fn take_committed_for(&mut self, key: &Bytes) -> (Vec<CommittedChange>, usize) {
         let Some(updates) = self.data.get_mut(key) else {
-            return vec![];
+            return (vec![], 0);
         };
         let mut committed = Vec::with_capacity(updates.len());
         let removed = Self::do_take_committed(key, updates, &mut committed);
@@ -96,17 +96,19 @@ impl PendingTable {
         if updates.is_empty() {
             self.data.remove(key);
         }
-        committed
+        (committed, removed)
     }
 
-    pub fn take_committed(&mut self) -> Vec<CommittedChange> {
+    pub fn take_committed(&mut self) -> (Vec<CommittedChange>, usize) {
         let mut committed = Vec::with_capacity(self.len);
+        let mut total_removed = 0;
         self.data.retain(|key, updates| {
             let removed = Self::do_take_committed(key, updates, &mut committed);
             self.len = self.len.checked_sub(removed).expect("len overflow");
+            total_removed += removed;
             !updates.is_empty()
         });
-        committed
+        (committed, total_removed)
     }
 
     /// Take committed updates for a given key, add them to given vector
@@ -216,18 +218,23 @@ mod tests {
         table.insert(b(1), None, &mut tx1);
         table.insert(b(1), None, &mut tx2);
         table.insert(b(2), None, &mut tx2);
-        assert_eq!(table.take_committed().len(), 0);
+        let (committed, removed) = table.take_committed();
+        assert_eq!(committed.len(), 0);
+        assert_eq!(removed, 0);
         assert_eq!(table.len(), 3);
         drop(tx1); // drop tx1 without committing it
         // Nothing is committed but table len is reduced by 1 since tx1 update is discarded now
-        assert_eq!(table.take_committed().len(), 0);
+        let (committed, removed) = table.take_committed();
+        assert_eq!(committed.len(), 0);
+        assert_eq!(removed, 1);
         assert_eq!(table.len(), 2);
 
         tx2.commit([WalPosition::test_value(1), WalPosition::test_value(2)].into_iter()); // Commit tx2
 
-        let mut committed = table.take_committed();
+        let (mut committed, removed) = table.take_committed();
         // 2 values are committed and table is now empty(no more pending update).
         assert_eq!(committed.len(), 2);
+        assert_eq!(removed, 2);
         committed.sort_by_key(|c| c.key.clone());
         assert_eq!(table.len(), 0);
         assert_eq!(
@@ -255,8 +262,9 @@ mod tests {
         table.insert(b(3), None, &mut tx3);
         table.insert(b(4), None, &mut tx3);
         tx3.commit([WalPosition::test_value(3), WalPosition::test_value(4)].into_iter());
-        let committed = table.take_committed_for(&b(3));
+        let (committed, removed) = table.take_committed_for(&b(3));
         assert_eq!(committed.len(), 1);
+        assert_eq!(removed, 1);
         assert_eq!(table.data.len(), 1);
         assert_eq!(table.len(), 1);
         assert_eq!(
@@ -268,8 +276,9 @@ mod tests {
                 lru_update: None,
             }
         );
-        let committed = table.take_committed();
+        let (committed, removed) = table.take_committed();
         assert_eq!(committed.len(), 1);
+        assert_eq!(removed, 1);
         assert_eq!(table.data.len(), 0);
         assert_eq!(table.len(), 0);
         assert_eq!(
@@ -302,7 +311,8 @@ mod tests {
                 thread::spawn(move || {
                     let mut committed = HashSet::new();
                     while let Ok(expected_to_commit) = receiver.recv() {
-                        for c in table.lock().take_committed() {
+                        let (changes, _removed) = table.lock().take_committed();
+                        for c in changes {
                             println!("[{id}] committed {}", c.value.offset());
                             committed.insert(c.value.offset());
                         }

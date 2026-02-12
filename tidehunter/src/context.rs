@@ -23,6 +23,7 @@ pub struct KsContextInner {
     pub metrics: Arc<Metrics>,
     pub loaded_key_bytes: MetricIntGauge,
     pub large_table_contention: MetricHistogram,
+    pub pending_table_len: MetricIntGauge,
     // Operation metrics indexed by DbOpKind
     db_op_metrics: [MetricHistogram; DbOpKind::COUNT],
     // WAL written bytes metrics indexed by WalEntryKind
@@ -91,6 +92,7 @@ impl KsContext {
         let ks_name = ks_config.name();
         let loaded_key_bytes = metrics.loaded_key_bytes.with_label_values(&[ks_name]);
         let large_table_contention = metrics.large_table_contention.with_label_values(&[ks_name]);
+        let pending_table_len = metrics.pending_table_len.with_label_values(&[ks_name]);
 
         let db_op_metrics = array::from_fn(|i| {
             let op = DbOpKind::from_repr(i).expect("Invalid DbOpKind index");
@@ -151,6 +153,7 @@ impl KsContext {
             metrics,
             loaded_key_bytes,
             large_table_contention,
+            pending_table_len,
             db_op_metrics,
             wal_written_metrics,
             lookup_result_metrics,
