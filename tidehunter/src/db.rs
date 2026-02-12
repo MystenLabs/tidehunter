@@ -24,10 +24,11 @@ use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
-use std::{io, thread};
 
 pub struct Db {
     pub(crate) large_table: LargeTable,
@@ -105,8 +106,15 @@ impl Db {
         let _handles = IndexFlusher::start_threads(flusher_receivers, weak_db, metrics.clone());
 
         // Start the relocator with the weak reference
-        let _handle =
-            RelocationDriver::start(Arc::downgrade(&this), path, relocator_receiver, metrics);
+        let _handle = RelocationDriver::start(
+            Arc::downgrade(&this),
+            path,
+            relocator_receiver,
+            metrics.clone(),
+        );
+
+        // Start the pending promotion background job
+        let _promotion_handle = Self::start_pending_promotion_job(Arc::downgrade(&this));
 
         // todo: store handles and wait for them on Db drop
 
@@ -815,6 +823,28 @@ impl Db {
             .memory_estimate
             .with_label_values(&["_", "maps"])
             .set(maps_estimate as i64);
+    }
+
+    /// Starts a background job that periodically promotes pending entries and checks for flush.
+    fn start_pending_promotion_job(db: Weak<Db>) -> thread::JoinHandle<()> {
+        thread::Builder::new()
+            .name("pending-promotion".to_string())
+            .spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(10));
+
+                    let Some(db) = db.upgrade() else {
+                        // Db has been dropped, exit the thread
+                        break;
+                    };
+
+                    // Run the promotion job with the WAL as the loader
+                    if let Err(e) = db.large_table.promote_pending_job(db.wal.as_ref()) {
+                        eprintln!("Error in pending promotion job: {:?}", e);
+                    }
+                }
+            })
+            .unwrap()
     }
 
     /// Create a snapshot of the current db state

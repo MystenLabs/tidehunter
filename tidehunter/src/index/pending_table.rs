@@ -157,8 +157,7 @@ impl PendingTable {
         removed
     }
 
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len
     }
 }

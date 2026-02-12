@@ -200,6 +200,7 @@ pub struct Metrics {
     pub memory_estimate: MetricIntGaugeVec,
     pub value_cache_size: MetricIntGaugeVec,
     pub pending_table_len: MetricIntGaugeVec,
+    pub pending_promotion_job_remaining: MetricIntGaugeVec,
 }
 
 macro_rules! gauge (
@@ -415,6 +416,12 @@ impl Metrics {
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry, enabled),
             value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry, enabled),
             pending_table_len: gauge_vec!("pending_table_len", &["ks"], registry, enabled),
+            pending_promotion_job_remaining: gauge_vec!(
+                "pending_promotion_job_remaining",
+                &["ks"],
+                registry,
+                enabled
+            ),
         };
         Arc::new(this)
     }

@@ -414,6 +414,27 @@ impl LargeTable {
             .all(|m| m.rows.mutexes().iter().all(|m| m.lock().entries.is_empty()))
     }
 
+    /// Promotes pending entries for all cells in all keyspaces and checks for flush.
+    /// Reports remaining pending entries per keyspace to metrics.
+    pub(crate) fn promote_pending_job<L: Loader>(&self, loader: &L) -> Result<(), L::Error> {
+        for ks_table in &self.table {
+            let mut total_remaining = 0;
+            for mutex in ks_table.rows.mutexes() {
+                let mut row = mutex.lock();
+                for entry in row.entries.iter_mut() {
+                    let remaining =
+                        entry.promote_pending_and_check_flush(loader, &self.flusher)?;
+                    total_remaining += remaining;
+                }
+            }
+            self.metrics
+                .pending_promotion_job_remaining
+                .with_label_values(&[ks_table.context.name()])
+                .set(total_remaining as i64);
+        }
+        Ok(())
+    }
+
     fn too_many_dirty(&self, entry: &mut LargeTableEntry) -> bool {
         if entry.state.is_dirty() {
             // todo - we no longer have a counter for number of dirty keys for DirtyLoaded state.
@@ -1136,6 +1157,31 @@ impl LargeTableEntry {
                 self.remove(committed_change.key, committed_change.value);
             }
         }
+    }
+
+    /// Promotes pending entries and checks if flush is needed due to too many dirty keys.
+    /// Returns the number of remaining pending entries.
+    pub(crate) fn promote_pending_and_check_flush<L: Loader>(
+        &mut self,
+        loader: &L,
+        flusher: &IndexFlusher,
+    ) -> Result<usize, L::Error> {
+        self.promote_pending();
+        let remaining_pending = self.pending_data.len();
+
+        let should_flush = if loader.flush_supported() && self.state.is_dirty() {
+            let dirty_count = self.data.len();
+            self.context
+                .excess_dirty_keys(dirty_count.saturating_sub(self.unload_jitter))
+        } else {
+            false
+        };
+
+        if should_flush {
+            self.unload_if_ks_enabled(flusher, loader)?;
+        }
+
+        Ok(remaining_pending)
     }
 
     fn report_loaded_keys_count(&self) {
