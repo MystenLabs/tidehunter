@@ -872,6 +872,25 @@ impl Db {
         receiver.recv().unwrap();
     }
 
+    /// Wait for all pending flush operations to complete.
+    /// This is useful for ensuring all data is persisted before measuring storage.
+    pub fn flush_barrier(&self) {
+        use std::thread;
+        use std::time::Duration;
+
+        // Poll until flush_pending_count reaches 0
+        loop {
+            let pending = self
+                .metrics
+                .flush_pending_count
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if pending == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Wait for all background threads to finish by polling until no strong references remain.
     /// This ensures clean shutdown before database restart in tests.
     #[cfg(any(test, feature = "test-utils"))]

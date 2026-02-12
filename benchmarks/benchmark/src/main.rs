@@ -101,6 +101,9 @@ pub fn main() {
         format!("0.0.0.0:{METRICS_PORT}").parse().unwrap(),
         &registry,
     );
+    let mut tidehunter_db: Option<Arc<tidehunter::db::Db>> = None;
+    let mut relocation_handle: Option<JoinHandle<()>> = None;
+    let relocation_shutdown = Arc::new(AtomicBool::new(false));
     let storage: Arc<dyn Storage> = match config.stress_client_parameters.backend {
         Backend::Tidehunter => {
             if config.db_parameters.direct_io {
@@ -142,8 +145,14 @@ pub fn main() {
                 );
                 let db_clone = storage.db.clone();
                 let relocation_config = relocation_config.clone();
-                thread::spawn(move || {
+                let shutdown_clone = relocation_shutdown.clone();
+                relocation_handle = Some(thread::spawn(move || {
                     loop {
+                        // Check shutdown flag before starting new relocation
+                        if shutdown_clone.load(Ordering::Relaxed) {
+                            break;
+                        }
+
                         // Convert RelocationConfig to RelocationStrategy for this iteration
                         let strategy = match &relocation_config {
                             RelocationConfig::Wal => RelocationStrategy::WalBased,
@@ -161,12 +170,18 @@ pub fn main() {
                         // Start relocation and let it run to completion
                         db_clone.start_blocking_relocation_with_strategy(strategy);
 
-                        // Take a 30 second break between relocations
-                        thread::sleep(Duration::from_secs(30));
+                        // Take a 30 second break between relocations (check shutdown every second)
+                        for _ in 0..30 {
+                            if shutdown_clone.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            thread::sleep(Duration::from_secs(1));
+                        }
                     }
-                });
+                }));
             }
 
+            tidehunter_db = Some(storage.db.clone());
             Arc::new(storage)
         }
         Backend::Rocksdb => {
@@ -253,6 +268,29 @@ pub fn main() {
         ops_sec,
         byte_div(total_bytes / msecs * 1000),
     );
+    // Cooldown phase - wait for background work to finish
+    if let Some(handle) = relocation_handle {
+        // Relocation enabled: wait for relocation thread to finish
+        report!(report, "Waiting for current relocation to complete...");
+        relocation_shutdown.store(true, Ordering::Relaxed);
+        handle.join().expect("Relocation thread panicked");
+        report!(report, "Relocation thread finished");
+    } else if let Some(ref db) = tidehunter_db {
+        // Relocation disabled: wait for all pending flushes to complete
+        report!(report, "Waiting for pending flushes to complete...");
+        db.flush_barrier();
+        report!(report, "All flushes complete");
+    }
+
+    // Measure final storage (for tidehunter backend)
+    if tidehunter_db.is_some() {
+        let storage_len = fs_extra::dir::get_size(&path).unwrap();
+        report!(
+            report,
+            "Storage used after cooldown: {:.1} Gb",
+            storage_len as f64 / 1024. / 1024. / 1024.
+        );
+    }
     if print_report {
         report!(report, "Writing report file");
         fs::write("report.txt", &report.lines).unwrap();
@@ -279,6 +317,11 @@ pub fn main() {
         )
         .unwrap();
     }
+    // Dump relocation metrics at the end of benchmark
+    if let Some(db) = &tidehunter_db {
+        dump_relocation_metrics(db, &mut report);
+    }
+
     report!(report, "BENCHMARK_END");
 
     if stress.parameters.preserve {
@@ -590,35 +633,48 @@ impl StressThread {
                     self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
-                // Perform a write operation
-                let should_overwrite = thread_rng.r#gen::<f64>() < self.parameters.overwrite_ratio
+                // Perform a write operation (insert or delete)
+                let should_delete = thread_rng.r#gen::<f64>() < self.parameters.delete_ratio
                     && local_write_pos_counter > 0;
 
-                let pos = if should_overwrite {
-                    // Select existing key to overwrite using same logic as reads
+                if should_delete {
+                    // Select existing key to delete using same logic as reads
                     let highest_local_pos = local_write_pos_counter.saturating_sub(1);
-                    self.select_existing_key(&mut thread_rng, highest_local_pos)
+                    let pos = self.select_existing_key(&mut thread_rng, highest_local_pos);
+                    let key = self.key(pos);
+                    let timer = Instant::now();
+                    self.db.delete(key.into());
+                    // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
+                    let latency = timer
+                        .elapsed()
+                        .as_micros()
+                        .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
+                    self.benchmark_metrics
+                        .bench_deletes
+                        .with_label_values(&[self.db.name()])
+                        .observe(latency as f64);
+                    if self.latency.increment(latency as u64).is_err() {
+                        self.latency_errors.fetch_add(1, Ordering::Relaxed);
+                    }
                 } else {
-                    // Create new key (current behavior)
+                    // Create new key and insert
                     let pos = self.global_pos(local_write_pos_counter);
                     local_write_pos_counter += 1;
-                    pos
-                };
-
-                let (key, value) = self.key_value(pos);
-                let timer = Instant::now();
-                self.db.insert(key.into(), value.into());
-                // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
-                let latency = timer
-                    .elapsed()
-                    .as_micros()
-                    .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
-                self.benchmark_metrics
-                    .bench_writes
-                    .with_label_values(&[self.db.name()])
-                    .observe(latency as f64);
-                if self.latency.increment(latency as u64).is_err() {
-                    self.latency_errors.fetch_add(1, Ordering::Relaxed);
+                    let (key, value) = self.key_value(pos);
+                    let timer = Instant::now();
+                    self.db.insert(key.into(), value.into());
+                    // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
+                    let latency = timer
+                        .elapsed()
+                        .as_micros()
+                        .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
+                    self.benchmark_metrics
+                        .bench_writes
+                        .with_label_values(&[self.db.name()])
+                        .observe(latency as f64);
+                    if self.latency.increment(latency as u64).is_err() {
+                        self.latency_errors.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -627,7 +683,6 @@ impl StressThread {
         }
     }
 
-    #[allow(dead_code)]
     fn key(&self, pos: u64) -> Vec<u8> {
         let (key, _) = self.key_and_rng(pos);
         key
@@ -673,4 +728,66 @@ impl StressThread {
         writer.put_u64(pos);
         StdRng::from_seed(seed)
     }
+}
+
+fn dump_relocation_metrics(db: &tidehunter::db::Db, report: &mut Report) {
+    let metrics = db.test_get_metrics();
+
+    report!(report, "=== Relocation Metrics ===");
+    report!(
+        report,
+        "relocation_target_position: {}",
+        metrics.relocation_target_position.get()
+    );
+    report!(
+        report,
+        "relocation_terminal_position: {}",
+        metrics.relocation_terminal_position.get()
+    );
+    report!(
+        report,
+        "gc_position[wal]: {}",
+        metrics.gc_position.with_label_values(&["wal"]).get()
+    );
+    report!(
+        report,
+        "gc_position[index]: {}",
+        metrics.gc_position.with_label_values(&["index"]).get()
+    );
+    report!(
+        report,
+        "wal_deleted_bytes: {}",
+        metrics.wal_deleted_bytes.get()
+    );
+    report!(
+        report,
+        "stale_index_bytes: {}",
+        metrics.stale_index_bytes.get()
+    );
+    report!(
+        report,
+        "relocation_kept[root]: {}",
+        metrics.relocation_kept.with_label_values(&["root"]).get()
+    );
+    report!(
+        report,
+        "relocation_removed[root]: {}",
+        metrics
+            .relocation_removed
+            .with_label_values(&["root"])
+            .get()
+    );
+    report!(
+        report,
+        "relocation_cells_processed[root]: {}",
+        metrics
+            .relocation_cells_processed
+            .with_label_values(&["root"])
+            .get()
+    );
+    report!(
+        report,
+        "relocation_current_keyspace: {}",
+        metrics.relocation_current_keyspace.get()
+    );
 }
