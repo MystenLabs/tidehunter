@@ -519,56 +519,63 @@ impl RelocationDriver {
         };
         context.index_load_time = phase_a_start.elapsed();
 
-        // Phase B: Read values from WAL and make decisions (no lock held, efficient iteration)
-        // TODO(#74): Optimization needed - add support for making relocation decisions without loading values
-        // This would be beneficial in two scenarios:
-        // 1. Applications without pruner callbacks - relocation just moves non-deleted entries
-        // 2. Applications that can make decisions based on key only, without needing the value
-        //
-        // This strategy is most useful for applications that don't need values for decision making.
-        // For applications like Sui that require values (similar to current behavior),
-        // WAL-based relocation remains the better choice.
-        //
-        // Implementation could involve:
-        // - Optional key-only decision callback in RelocationFilter trait
-        // - Skip WAL value reads when key-only decisions are possible
-        // - Fall back to current value-based approach when needed
+        // Phase B: Collect entries, sort by WAL position for sequential I/O, then read values.
+        // Sorting by position turns random mmap reads into sequential access, enabling OS readahead.
+        // TODO(#74): Further optimization possible - add key-only decision callback to
+        // RelocationFilter trait to skip WAL reads for entries decidable by key alone.
         let phase_b_start = Instant::now();
         let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
+
+        // Step 1: Collect eligible (key, position) pairs from the index
+        let mut entries: Vec<(Bytes, WalPosition)> = Vec::new();
         for (key, position) in index.iter() {
             if position.offset() >= effective_limit {
                 context.entries_skipped += 1;
                 continue;
             }
+            entries.push((key.clone(), position));
+        }
 
-            // Read the actual value from WAL
-            let value = match db.read_record(position)? {
-                Some((_, val)) => val,
-                None => {
-                    // Entry might have been deleted or corrupted, skip it
-                    context.mark_entry_removed(position);
-                    removed_count += 1;
-                    continue;
-                }
-            };
+        // Step 2: Sort by WAL position offset for sequential I/O
+        entries.sort_unstable_by_key(|(_key, pos)| pos.offset());
 
-            // Simplified decision logic for index-based relocation. Since we're iterating through
-            // current index entries, we only need to check the relocation filter
-            let decision = keyspace_desc
-                .relocation_filter()
-                .map_or(Decision::Keep, |filter| filter(key, &value));
+        // Step 3: Read in position order, with or without filter
+        if let Some(filter) = keyspace_desc.relocation_filter() {
+            for (key, position) in &entries {
+                let value = match db.read_record(*position)? {
+                    Some((_, val)) => val,
+                    None => {
+                        context.mark_entry_removed(*position);
+                        removed_count += 1;
+                        continue;
+                    }
+                };
 
-            match decision {
-                Decision::Keep => {
-                    context.add_entry_to_relocate(key.clone(), value, position);
+                match filter(key, &value) {
+                    Decision::Keep => {
+                        context.add_entry_to_relocate(key.clone(), value, *position);
+                    }
+                    Decision::Remove => {
+                        context.mark_entry_removed(*position);
+                        removed_count += 1;
+                    }
+                    Decision::StopRelocation => {
+                        break;
+                    }
                 }
-                Decision::Remove => {
-                    context.mark_entry_removed(position);
-                    removed_count += 1;
-                }
-                Decision::StopRelocation => {
-                    break;
-                }
+            }
+        } else {
+            // No filter: all entries are unconditionally kept
+            for (key, position) in &entries {
+                let value = match db.read_record(*position)? {
+                    Some((_, val)) => val,
+                    None => {
+                        context.mark_entry_removed(*position);
+                        removed_count += 1;
+                        continue;
+                    }
+                };
+                context.add_entry_to_relocate(key.clone(), value, *position);
             }
         }
         context.entry_read_time = phase_b_start.elapsed();
