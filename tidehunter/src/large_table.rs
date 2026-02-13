@@ -236,7 +236,7 @@ impl LargeTable {
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
 
-        entry.promote_pending(); // todo promote one key
+        entry.promote_pending_for(&k);
 
         if !entry.insert(k.clone(), v, Some(value)) {
             return Ok(());
@@ -279,7 +279,7 @@ impl LargeTable {
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
 
-        entry.promote_pending(); // todo promote one key
+        entry.promote_pending_for(&k);
 
         if !entry.remove(k.clone(), v) {
             return Ok(());
@@ -336,7 +336,7 @@ impl LargeTable {
 
         // Important: promote_pending must be called before checking LRU cache
         // to ensure pending deletes are processed and LRU is updated correctly
-        entry.promote_pending(); // todo promote one key
+        entry.promote_pending();
 
         if let Some(value_lru) = &mut entry.value_lru
             && let Some(value) = value_lru.get(k)
@@ -422,8 +422,7 @@ impl LargeTable {
             for mutex in ks_table.rows.mutexes() {
                 let mut row = mutex.lock();
                 for entry in row.entries.iter_mut() {
-                    let remaining =
-                        entry.promote_pending_and_check_flush(loader, &self.flusher)?;
+                    let remaining = entry.promote_pending_and_check_flush(loader, &self.flusher)?;
                     total_remaining += remaining;
                 }
             }
@@ -1148,6 +1147,25 @@ impl LargeTableEntry {
             // the same skip_stale_update logic as regular updates
             if committed_change.is_modified {
                 // todo perf - report_loaded_keys_count and make_mut calls can be done once
+                self.insert(
+                    committed_change.key,
+                    committed_change.value,
+                    committed_change.lru_update.as_ref(),
+                );
+            } else {
+                self.remove(committed_change.key, committed_change.value);
+            }
+        }
+    }
+
+    /// Promotes pending entries for a single key.
+    fn promote_pending_for(&mut self, key: &Bytes) {
+        let (committed, removed) = self.pending_data.take_committed_for(key);
+        if removed > 0 {
+            self.context.pending_table_len.add(-(removed as i64));
+        }
+        for committed_change in committed {
+            if committed_change.is_modified {
                 self.insert(
                     committed_change.key,
                     committed_change.value,
