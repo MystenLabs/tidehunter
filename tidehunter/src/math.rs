@@ -31,6 +31,17 @@ pub fn starting_u32(slice: &[u8]) -> u32 {
     u32::from_be_bytes(p)
 }
 
+/// Extract ending u32 value from last bytes of a slice.
+/// If slice is less than four bytes long, assumes slice is padded with zeroes at the start.
+/// See test_ending_u32 for examples.
+pub fn ending_u32(slice: &[u8]) -> u32 {
+    let copy = cmp::min(slice.len(), 4);
+    let mut p = [0u8; 4];
+    // Copy the last 'copy' bytes to the end of the buffer
+    p[4 - copy..].copy_from_slice(&slice[slice.len() - copy..]);
+    u32::from_be_bytes(p)
+}
+
 pub fn starting_u64(slice: &[u8]) -> u64 {
     let copy = cmp::min(slice.len(), 8);
     let mut p = [0u8; 8];
@@ -79,4 +90,15 @@ fn test_starting_u32() {
     assert_eq!(0x1500, starting_u32(&[0, 0, 0x15]));
     assert_eq!(0x15, starting_u32(&[0, 0, 0, 0x15]));
     assert_eq!(0x01030507, starting_u32(&[0x01, 0x03, 0x05, 0x07]));
+}
+
+#[test]
+fn test_ending_u32() {
+    assert_eq!(0, ending_u32(&[]));
+    assert_eq!(0x15, ending_u32(&[0x15]));
+    assert_eq!(0x1500, ending_u32(&[0x15, 0]));
+    assert_eq!(0x150000, ending_u32(&[0x15, 0, 0]));
+    assert_eq!(0x15000000, ending_u32(&[0x15, 0, 0, 0]));
+    assert_eq!(0x01030507, ending_u32(&[0x01, 0x03, 0x05, 0x07]));
+    assert_eq!(0x03050709, ending_u32(&[0x01, 0x03, 0x05, 0x07, 0x09]));
 }

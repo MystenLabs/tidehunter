@@ -1,5 +1,5 @@
 use crate::crc::IntoBytesFixed;
-use crate::math::starting_u32;
+use crate::math::ending_u32;
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -20,7 +20,7 @@ impl CellId {
     pub fn mutex_seed(&self) -> usize {
         match self {
             CellId::Integer(p) => *p,
-            CellId::Bytes(bytes) => starting_u32(bytes) as usize,
+            CellId::Bytes(bytes) => ending_u32(bytes) as usize,
         }
     }
 
