@@ -812,6 +812,8 @@ fn test_index_based_relocation_with_target_position() {
         db.insert(ks, key, value).unwrap();
     }
 
+    // Ensure wal tracker has processed all guard drops from entries 0-499
+    db.wal_writer.wal_tracker_barrier();
     // Capture WAL position at entry 500
     let mid_position = db.wal_writer.last_processed().as_u64();
 
@@ -883,6 +885,7 @@ fn test_compute_target_position_from_ratio() {
         db.insert(ks, key, value).unwrap();
     }
     db.large_table.flusher.barrier();
+    db.wal_writer.wal_tracker_barrier();
 
     let min_pos = db.wal.min_wal_position();
     let last_pos = db.wal_writer.last_processed().as_u64();
