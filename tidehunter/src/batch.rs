@@ -11,12 +11,30 @@ pub struct WriteBatch {
     db: Arc<Db>,
     pub(crate) writes: Vec<WriteBatchWrite>,
     pub(crate) tag: String,
+    /// Operations to be applied to pending table on commit
+    pub(crate) pending_ops: Vec<PendingOp>,
 }
 
 pub(crate) struct WriteBatchWrite {
     pub prepared_write: PreparedWalWrite,
     pub is_modified: bool,
     pub ks: KeySpace,
+}
+
+pub(crate) enum PendingOp {
+    Insert {
+        ks: KeySpace,
+        #[allow(dead_code)] // Kept for debugging
+        key: Bytes,
+        reduced_key: Bytes,
+        lru_update: Option<Bytes>,
+    },
+    Remove {
+        ks: KeySpace,
+        #[allow(dead_code)] // Kept for debugging
+        key: Bytes,
+        reduced_key: Bytes,
+    },
 }
 
 pub(crate) struct RelocatedWriteBatch {
@@ -36,6 +54,7 @@ impl WriteBatch {
             transaction: Default::default(),
             writes: Default::default(),
             tag: Default::default(),
+            pending_ops: Default::default(),
         }
     }
 
@@ -43,7 +62,53 @@ impl WriteBatch {
         self.tag = tag;
     }
 
+    /// Write a key-value pair to the batch.
     pub fn write(&mut self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) {
+        let k = k.into();
+        let v = v.into();
+        let context = self.db.ks_context(ks);
+        context.ks_config.check_key(&k);
+        let reduced_key = context.ks_config.reduced_key_bytes(k.clone());
+        // Pass value for LRU cache if enabled
+        let lru_update = context.ks_config.value_cache_size().map(|_| v.clone());
+
+        // Store operation to be applied on commit
+        self.pending_ops.push(PendingOp::Insert {
+            ks,
+            key: k.clone(),
+            reduced_key,
+            lru_update,
+        });
+
+        // todo transaction state is corrupted on panic
+        self.prepare_write(WalEntry::Record(ks, k, v, false));
+    }
+
+    /// Delete a key from the batch.
+    pub fn delete(&mut self, ks: KeySpace, k: impl Into<Bytes>) {
+        let k = k.into();
+        let context = self.db.ks_context(ks);
+        context.ks_config.check_key(&k);
+        let reduced_key = context.ks_config.reduced_key_bytes(k.clone());
+
+        // Store operation to be applied on commit
+        self.pending_ops.push(PendingOp::Remove {
+            ks,
+            key: k.clone(),
+            reduced_key,
+        });
+
+        // todo transaction state is corrupted on panic
+        self.prepare_write(WalEntry::Remove(ks, k));
+    }
+
+    /// Write a key-value pair and immediately add to pending table.
+    ///
+    /// This method can make batch commit faster by spreading pending table updates
+    /// across multiple write calls instead of doing them all at commit time.
+    /// However, it requires that batches are short-lived, as long-lived batches
+    /// increase pending table size which makes other operations slower.
+    pub fn write_immediate(&mut self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) {
         let k = k.into();
         let v = v.into();
         let context = self.db.ks_context(ks);
@@ -58,7 +123,13 @@ impl WriteBatch {
         self.prepare_write(WalEntry::Record(ks, k, v, false));
     }
 
-    pub fn delete(&mut self, ks: KeySpace, k: impl Into<Bytes>) {
+    /// Delete a key and immediately add to pending table.
+    ///
+    /// This method can make batch commit faster by spreading pending table updates
+    /// across multiple delete calls instead of doing them all at commit time.
+    /// However, it requires that batches are short-lived, as holding pending table
+    /// locks for extended periods can impact concurrent operations.
+    pub fn delete_immediate(&mut self, ks: KeySpace, k: impl Into<Bytes>) {
         let k = k.into();
         let context = self.db.ks_context(ks);
         context.ks_config.check_key(&k);

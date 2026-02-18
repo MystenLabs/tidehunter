@@ -142,8 +142,12 @@ fn test_batch() {
     batch.write(ks, vec![6, 7, 8, 9], vec![17]);
 
     // Check pending_table_len after writes but before commit
+    // With deferred pending table updates, pending entries are only added on commit
     let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
-    assert_eq!(pending_len, 2, "Should have 2 pending entries after writes");
+    assert_eq!(
+        pending_len, 0,
+        "Should have 0 pending entries before commit (deferred behavior)"
+    );
 
     batch.commit().unwrap();
 

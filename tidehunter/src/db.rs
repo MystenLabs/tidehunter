@@ -371,9 +371,10 @@ impl Db {
 
     pub(crate) fn do_write_batch(&self, batch: WriteBatch) -> DbResult<()> {
         let WriteBatch {
-            transaction,
+            mut transaction,
             writes,
             tag,
+            pending_ops,
             ..
         } = batch;
         if writes.is_empty() {
@@ -389,6 +390,33 @@ impl Db {
             .write_batch_times
             .with_label_values(&[&tag, "write"])
             .mcs_timer();
+
+        // Apply all pending operations to the large table before writing to WAL
+        for op in pending_ops {
+            match op {
+                crate::batch::PendingOp::Insert {
+                    ks,
+                    reduced_key,
+                    lru_update,
+                    ..
+                } => {
+                    let context = self.ks_context(ks);
+                    self.large_table.insert_pending(
+                        context,
+                        reduced_key,
+                        lru_update,
+                        &mut transaction,
+                    );
+                }
+                crate::batch::PendingOp::Remove {
+                    ks, reduced_key, ..
+                } => {
+                    let context = self.ks_context(ks);
+                    self.large_table
+                        .remove_pending(context, reduced_key, &mut transaction);
+                }
+            }
+        }
 
         let guards = self.write_batch_into_wal(&writes)?;
 
