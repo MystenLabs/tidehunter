@@ -414,10 +414,7 @@ impl Db {
                         &mut transaction,
                     );
                 }
-                crate::batch::PendingOp::Remove {
-                    ks,
-                    reduced_key,
-                } => {
+                crate::batch::PendingOp::Remove { ks, reduced_key } => {
                     let context = self.ks_context(*ks);
                     self.large_table.remove_pending(
                         context,
