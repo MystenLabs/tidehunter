@@ -1,5 +1,4 @@
 use crate::WalPosition;
-use arc_swap::ArcSwapOption;
 use minibytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +27,6 @@ pub struct PendingTable {
 #[derive(Default)]
 pub struct Transaction {
     status: TransactionStatus,
-    updates: Vec<(PendingUpdateInner, Option<Bytes>)>,
     committed: bool,
 }
 
@@ -42,10 +40,10 @@ pub struct CommittedChange {
     pub lru_update: Option<Bytes>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct PendingUpdateInner {
-    update: Arc<ArcSwapOption<WalPosition>>,
-    lru_update: Arc<ArcSwapOption<Bytes>>,
+    update: WalPosition,
+    lru_update: Option<Bytes>,
 }
 
 #[derive(Default, Clone)]
@@ -65,24 +63,35 @@ struct PendingUpdate {
 }
 
 impl PendingTable {
-    pub fn insert(&mut self, key: Bytes, lru_update: Option<Bytes>, transaction: &mut Transaction) {
-        self.insert_pending(key, true, lru_update, transaction);
+    pub fn insert(
+        &mut self,
+        key: Bytes,
+        position: WalPosition,
+        lru_update: Option<Bytes>,
+        transaction: &mut Transaction,
+    ) {
+        self.insert_pending(key, true, position, lru_update, transaction);
     }
 
-    pub fn remove(&mut self, key: Bytes, transaction: &mut Transaction) {
-        self.insert_pending(key, false, None, transaction);
+    pub fn remove(&mut self, key: Bytes, position: WalPosition, transaction: &mut Transaction) {
+        self.insert_pending(key, false, position, None, transaction);
     }
 
     fn insert_pending(
         &mut self,
         key: Bytes,
         is_modified: bool,
+        position: WalPosition,
         lru_update: Option<Bytes>,
         transaction: &mut Transaction,
     ) {
         self.len += 1;
-        let update = PendingUpdate::new(transaction.status.clone(), is_modified);
-        transaction.updates.push((update.inner.clone(), lru_update));
+        let update = PendingUpdate::new(
+            transaction.status.clone(),
+            is_modified,
+            position,
+            lru_update,
+        );
         self.data.entry(key).or_default().push(update);
     }
 
@@ -126,23 +135,12 @@ impl PendingTable {
             if status == TRANSACTION_STATUS_PENDING {
                 return true;
             }
-            let inner = update.inner.update.load();
-            if let Some(value) = inner.as_ref() {
-                assert_eq!(
-                    status, TRANSACTION_STATUS_COMMITTED,
-                    "Expected committed transaction"
-                );
-                let lru_update = update
-                    .inner
-                    .lru_update
-                    .load()
-                    .as_ref()
-                    .map(|b| (**b).clone());
+            if status == TRANSACTION_STATUS_COMMITTED {
                 let committed_change = CommittedChange {
                     key: key.clone(),
                     is_modified: update.is_modified,
-                    value: *value.as_ref(),
-                    lru_update,
+                    value: update.inner.update,
+                    lru_update: update.inner.lru_update.clone(),
                 };
                 committed.push(committed_change);
             } else {
@@ -163,13 +161,7 @@ impl PendingTable {
 }
 
 impl Transaction {
-    pub fn commit(mut self, values: impl Iterator<Item = WalPosition>) {
-        for ((update, lru_update), value) in self.updates.drain(..).zip(values) {
-            update.update.store(Some(Arc::new(value)));
-            if let Some(lru_bytes) = lru_update {
-                update.lru_update.store(Some(Arc::new(lru_bytes)));
-            }
-        }
+    pub fn commit(mut self) {
         self.status
             .status
             .store(TRANSACTION_STATUS_COMMITTED, Ordering::SeqCst);
@@ -188,8 +180,16 @@ impl Drop for Transaction {
 }
 
 impl PendingUpdate {
-    fn new(transaction_status: TransactionStatus, is_modified: bool) -> Self {
-        let inner = Default::default();
+    fn new(
+        transaction_status: TransactionStatus,
+        is_modified: bool,
+        position: WalPosition,
+        lru_update: Option<Bytes>,
+    ) -> Self {
+        let inner = PendingUpdateInner {
+            update: position,
+            lru_update,
+        };
         Self {
             transaction_status,
             is_modified,
@@ -214,9 +214,9 @@ mod tests {
         let mut tx1 = Transaction::default();
         let mut tx2 = Transaction::default();
 
-        table.insert(b(1), None, &mut tx1);
-        table.insert(b(1), None, &mut tx2);
-        table.insert(b(2), None, &mut tx2);
+        table.insert(b(1), WalPosition::test_value(0), None, &mut tx1);
+        table.insert(b(1), WalPosition::test_value(1), None, &mut tx2);
+        table.insert(b(2), WalPosition::test_value(2), None, &mut tx2);
         let (committed, removed) = table.take_committed();
         assert_eq!(committed.len(), 0);
         assert_eq!(removed, 0);
@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(table.len(), 2);
 
-        tx2.commit([WalPosition::test_value(1), WalPosition::test_value(2)].into_iter()); // Commit tx2
+        tx2.commit(); // Commit tx2
 
         let (mut committed, removed) = table.take_committed();
         // 2 values are committed and table is now empty(no more pending update).
@@ -258,9 +258,9 @@ mod tests {
 
         // test take_committed_for
         let mut tx3 = Transaction::default();
-        table.insert(b(3), None, &mut tx3);
-        table.insert(b(4), None, &mut tx3);
-        tx3.commit([WalPosition::test_value(3), WalPosition::test_value(4)].into_iter());
+        table.insert(b(3), WalPosition::test_value(3), None, &mut tx3);
+        table.insert(b(4), WalPosition::test_value(4), None, &mut tx3);
+        tx3.commit();
         let (committed, removed) = table.take_committed_for(&b(3));
         assert_eq!(committed.len(), 1);
         assert_eq!(removed, 1);
@@ -355,9 +355,12 @@ mod tests {
                     let num: u64 = rng.r#gen();
                     transaction_changes.push(num);
                     let table = tables.get(num as usize % tables.len()).unwrap();
-                    table
-                        .lock()
-                        .insert(Bytes::from(num.to_be_bytes()), None, transaction);
+                    table.lock().insert(
+                        Bytes::from(num.to_be_bytes()),
+                        WalPosition::test_value(num),
+                        None,
+                        transaction,
+                    );
 
                     let transaction_to_commit = rng.gen_range(0..(transactions.len() * 4));
                     if transaction_to_commit >= transactions.len() {
@@ -374,11 +377,7 @@ mod tests {
                             .push(*num_to_commit);
                     }
                     println!("Committing");
-                    transaction_to_commit.commit(
-                        nums_to_commit
-                            .iter()
-                            .map(|num| WalPosition::test_value(*num)),
-                    );
+                    transaction_to_commit.commit();
                     for (table_id, message) in tables_to_commit {
                         println!("Sending to {table_id}: {message:?}");
                         senders[table_id].send(message).unwrap();

@@ -291,19 +291,28 @@ impl LargeTable {
         &self,
         context: &KsContext,
         k: Bytes,
+        position: WalPosition,
         lru_update: Option<Bytes>,
         transaction: &mut Transaction,
     ) {
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
-        entry.pending_data.insert(k, lru_update, transaction);
+        entry
+            .pending_data
+            .insert(k, position, lru_update, transaction);
         context.pending_table_len.add(1);
     }
 
-    pub fn remove_pending(&self, context: &KsContext, k: Bytes, transaction: &mut Transaction) {
+    pub fn remove_pending(
+        &self,
+        context: &KsContext,
+        k: Bytes,
+        position: WalPosition,
+        transaction: &mut Transaction,
+    ) {
         let (mut row, cell) = self.row(context, &k);
         let entry = self.entry_mut(&mut row, &cell);
-        entry.pending_data.remove(k, transaction);
+        entry.pending_data.remove(k, position, transaction);
         context.pending_table_len.add(1);
     }
 

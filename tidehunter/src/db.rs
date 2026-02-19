@@ -391,8 +391,14 @@ impl Db {
             .with_label_values(&[&tag, "write"])
             .mcs_timer();
 
-        // Apply all pending operations to the large table before writing to WAL
-        for op in pending_ops {
+        // Write to WAL first to get positions
+        let guards = self.write_batch_into_wal(&writes)?;
+
+        // Extract WAL positions (skip the first guard which is batch start)
+        let positions: Vec<_> = guards[1..].iter().map(|g| *g.wal_position()).collect();
+
+        // Apply all pending operations to the large table with known WAL positions
+        for (op, position) in pending_ops.iter().zip(positions.iter()) {
             match op {
                 crate::batch::PendingOp::Insert {
                     ks,
@@ -400,25 +406,28 @@ impl Db {
                     lru_update,
                     ..
                 } => {
-                    let context = self.ks_context(ks);
+                    let context = self.ks_context(*ks);
                     self.large_table.insert_pending(
                         context,
-                        reduced_key,
-                        lru_update,
+                        reduced_key.clone(),
+                        *position,
+                        lru_update.clone(),
                         &mut transaction,
                     );
                 }
                 crate::batch::PendingOp::Remove {
                     ks, reduced_key, ..
                 } => {
-                    let context = self.ks_context(ks);
-                    self.large_table
-                        .remove_pending(context, reduced_key, &mut transaction);
+                    let context = self.ks_context(*ks);
+                    self.large_table.remove_pending(
+                        context,
+                        reduced_key.clone(),
+                        *position,
+                        &mut transaction,
+                    );
                 }
             }
         }
-
-        let guards = self.write_batch_into_wal(&writes)?;
 
         let mut num_inserts = 0;
         let mut num_deletes = 0;
@@ -452,9 +461,7 @@ impl Db {
             .mcs_timer();
 
         // keep all guards active until transaction is committed
-        // positions for transaction commit starts with 1 (skip batch start wal entry)
-        let iter = &guards[1..];
-        transaction.commit(iter.iter().map(|g| *g.wal_position()));
+        transaction.commit();
 
         self.metrics.wal_written_bytes.set(
             guards

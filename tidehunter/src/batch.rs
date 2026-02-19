@@ -102,45 +102,6 @@ impl WriteBatch {
         self.prepare_write(WalEntry::Remove(ks, k));
     }
 
-    /// Write a key-value pair and immediately add to pending table.
-    ///
-    /// This method can make batch commit faster by spreading pending table updates
-    /// across multiple write calls instead of doing them all at commit time.
-    /// However, it requires that batches are short-lived, as long-lived batches
-    /// increase pending table size which makes other operations slower.
-    pub fn write_immediate(&mut self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) {
-        let k = k.into();
-        let v = v.into();
-        let context = self.db.ks_context(ks);
-        context.ks_config.check_key(&k);
-        let reduced_key = context.ks_config.reduced_key_bytes(k.clone());
-        // Pass value for LRU cache if enabled
-        let lru_update = context.ks_config.value_cache_size().map(|_| v.clone());
-        self.db
-            .large_table
-            .insert_pending(context, reduced_key, lru_update, &mut self.transaction);
-        // todo transaction state is corrupted on panic
-        self.prepare_write(WalEntry::Record(ks, k, v, false));
-    }
-
-    /// Delete a key and immediately add to pending table.
-    ///
-    /// This method can make batch commit faster by spreading pending table updates
-    /// across multiple delete calls instead of doing them all at commit time.
-    /// However, it requires that batches are short-lived, as holding pending table
-    /// locks for extended periods can impact concurrent operations.
-    pub fn delete_immediate(&mut self, ks: KeySpace, k: impl Into<Bytes>) {
-        let k = k.into();
-        let context = self.db.ks_context(ks);
-        context.ks_config.check_key(&k);
-        let reduced_key = context.ks_config.reduced_key_bytes(k.clone());
-        self.db
-            .large_table
-            .remove_pending(context, reduced_key, &mut self.transaction);
-        // todo transaction state is corrupted on panic
-        self.prepare_write(WalEntry::Remove(ks, k));
-    }
-
     fn prepare_write(&mut self, wal_entry: WalEntry) {
         let (prepared_write, ks, is_modified) = match &wal_entry {
             WalEntry::Record(ks, _key, _value, _relocated) => {
