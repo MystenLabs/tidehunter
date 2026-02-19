@@ -404,7 +404,6 @@ impl Db {
                     ks,
                     reduced_key,
                     lru_update,
-                    ..
                 } => {
                     let context = self.ks_context(*ks);
                     self.large_table.insert_pending(
@@ -416,7 +415,8 @@ impl Db {
                     );
                 }
                 crate::batch::PendingOp::Remove {
-                    ks, reduced_key, ..
+                    ks,
+                    reduced_key,
                 } => {
                     let context = self.ks_context(*ks);
                     self.large_table.remove_pending(

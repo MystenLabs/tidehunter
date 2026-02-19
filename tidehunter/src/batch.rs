@@ -24,15 +24,11 @@ pub(crate) struct WriteBatchWrite {
 pub(crate) enum PendingOp {
     Insert {
         ks: KeySpace,
-        #[allow(dead_code)] // Kept for debugging
-        key: Bytes,
         reduced_key: Bytes,
         lru_update: Option<Bytes>,
     },
     Remove {
         ks: KeySpace,
-        #[allow(dead_code)] // Kept for debugging
-        key: Bytes,
         reduced_key: Bytes,
     },
 }
@@ -75,7 +71,6 @@ impl WriteBatch {
         // Store operation to be applied on commit
         self.pending_ops.push(PendingOp::Insert {
             ks,
-            key: k.clone(),
             reduced_key,
             lru_update,
         });
@@ -94,7 +89,6 @@ impl WriteBatch {
         // Store operation to be applied on commit
         self.pending_ops.push(PendingOp::Remove {
             ks,
-            key: k.clone(),
             reduced_key,
         });
 
