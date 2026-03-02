@@ -7,9 +7,9 @@ use crate::large_table::Loader;
 use crate::metrics::Metrics;
 use crate::relocation::updates::RelocationUpdates;
 use crate::wal::position::WalPosition;
-use std::sync::Arc;
-use std::sync::Weak;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
+use std::sync::{Arc, Weak};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -79,7 +79,12 @@ impl IndexFlusher {
     pub fn request_flush(&self, ks: KeySpace, cell: CellId, flush_kind: FlushKind) {
         let thread_index = self.get_thread_for_cell(&cell);
         let command = FlusherCommand::new(ks, cell, flush_kind);
-        self.metrics.flush_pending.add(1);
+        let count = self
+            .metrics
+            .flush_pending_count
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        self.metrics.flush_pending.set(count as i64);
         self.senders[thread_index]
             .send(command)
             .expect("Flusher has stopped unexpectedly")
@@ -109,7 +114,12 @@ impl IndexFlusher {
                 CellId::Integer(thread_id), // Use thread_id to ensure it goes to the right thread
                 FlushKind::Barrier(SendGuard(lock)),
             );
-            self.metrics.flush_pending.add(1);
+            let count = self
+                .metrics
+                .flush_pending_count
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            self.metrics.flush_pending.set(count as i64);
             sender.send(command).unwrap();
         }
 
@@ -135,7 +145,12 @@ impl IndexFlusherThread {
 
     pub fn run(self) {
         while let Ok(command) = self.receiver.recv() {
-            self.metrics.flush_pending.add(-1);
+            let count = self
+                .metrics
+                .flush_pending_count
+                .fetch_sub(1, Ordering::Relaxed)
+                - 1;
+            self.metrics.flush_pending.set(count as i64);
             let now = Instant::now();
             let Some(db) = self.db.upgrade() else {
                 return;
