@@ -958,8 +958,7 @@ impl Db {
     }
 
     /// Wait for all background threads to finish by polling until no strong references remain.
-    /// This ensures clean shutdown before database restart in tests.
-    #[cfg(any(test, feature = "test-utils"))]
+    /// This ensures clean database shutdown
     pub fn wait_for_background_threads_to_finish(self: Arc<Self>) {
         use std::thread;
         use std::time::Duration;
