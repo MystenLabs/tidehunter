@@ -839,11 +839,7 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        assert!(
-            wal_files.len() >= 5,
-            "Expected at least 5 WAL files, got {}",
-            wal_files.len()
-        );
+        assert_eq!(wal_files.len(), 5);
 
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let mut wal_iterator = wal.wal_iterator(0).unwrap();
