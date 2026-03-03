@@ -123,16 +123,25 @@ impl WalWriter {
     fn get_writeable_map(&self, position: u64) -> (Map, usize) {
         let (map, offset) = self.wal.layout.locate(position);
         const MAX_ATTEMPTS: usize = 10 * 1000;
-        for _ in 0..MAX_ATTEMPTS {
+        for attempt in 0..MAX_ATTEMPTS {
             let Some(map) = self.wal.get_map(map) else {
                 self.wal.metrics.wal_write_wait.inc();
+                if attempt > 0 && attempt % 1000 == 0 {
+                    eprintln!(
+                        "[wal-writer] waiting for map {:?} (waited ~{}ms so far)",
+                        map, attempt
+                    );
+                }
                 thread::sleep(Duration::from_millis(1));
                 continue;
             };
+            if attempt > 1000 {
+                eprintln!("[wal-writer] got map {:?} after ~{}ms", map.id, attempt);
+            }
             assert!(map.writeable, "Map is not writable");
             return (map, offset as usize);
         }
-        panic!("Could not receive writable map {map:?}")
+        panic!("Could not receive writable map {map:?} after {MAX_ATTEMPTS}ms")
     }
 
     /// Current un-initialized position,
@@ -353,10 +362,15 @@ impl Wal {
         self.layout.wal_file_size
     }
 
-    /// Returns the file descriptor of the wal file
+    /// Returns the file descriptor of the wal file containing the given position,
+    /// along with the offset within that file.
     #[cfg(test)]
-    pub(crate) fn file(&self) -> File {
-        self.files.load().current_file().try_clone().unwrap()
+    pub(crate) fn file_at_position(&self, position: u64) -> (File, u64) {
+        let file_id = self.layout.locate_file(position);
+        let offset = self.layout.offset_in_wal_file(position);
+        let files = self.files.load();
+        let file = files.get(file_id).try_clone().unwrap();
+        (file, offset)
     }
 }
 
@@ -586,7 +600,7 @@ mod tests {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let layout = WalLayout {
             frag_size: 1024,
-            max_maps: 3,
+            max_maps: 16,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -648,7 +662,7 @@ mod tests {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let layout = WalLayout {
             frag_size: 512,
-            max_maps: 4,
+            max_maps: 16,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -764,7 +778,7 @@ mod tests {
         let frag_size = 512;
         let layout = WalLayout {
             frag_size,
-            max_maps: 3,
+            max_maps: 16,
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
@@ -799,7 +813,7 @@ mod tests {
         let dir = tempdir::TempDir::new("test-multi-file-wal").unwrap();
         let layout = WalLayout {
             frag_size: 1024,
-            max_maps: 3,
+            max_maps: 16,
             direct_io: false,
             wal_file_size: 8192,
             kind: WalKind::Replay,
