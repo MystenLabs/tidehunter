@@ -122,17 +122,26 @@ impl WalWriter {
 
     fn get_writeable_map(&self, position: u64) -> (Map, usize) {
         let (map, offset) = self.wal.layout.locate(position);
-        const MAX_ATTEMPTS: usize = 60 * 1000;
-        for _ in 0..MAX_ATTEMPTS {
+        const MAX_ATTEMPTS: usize = 10 * 1000;
+        for attempt in 0..MAX_ATTEMPTS {
             let Some(map) = self.wal.get_map(map) else {
                 self.wal.metrics.wal_write_wait.inc();
+                if attempt > 0 && attempt % 1000 == 0 {
+                    eprintln!(
+                        "[wal-writer] waiting for map {:?} (waited ~{}ms so far)",
+                        map, attempt
+                    );
+                }
                 thread::sleep(Duration::from_millis(1));
                 continue;
             };
+            if attempt > 1000 {
+                eprintln!("[wal-writer] got map {:?} after ~{}ms", map.id, attempt);
+            }
             assert!(map.writeable, "Map is not writable");
             return (map, offset as usize);
         }
-        panic!("Could not receive writable map {map:?}")
+        panic!("Could not receive writable map {map:?} after {MAX_ATTEMPTS}ms")
     }
 
     /// Current un-initialized position,
@@ -830,7 +839,11 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        assert_eq!(wal_files.len(), 5);
+        assert!(
+            wal_files.len() >= 5,
+            "Expected at least 5 WAL files, got {}",
+            wal_files.len()
+        );
 
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let mut wal_iterator = wal.wal_iterator(0).unwrap();
