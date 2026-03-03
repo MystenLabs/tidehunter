@@ -73,10 +73,20 @@ impl WalCleanupWorker {
         while let Ok(msg) = self.receiver.recv() {
             match msg {
                 WalCleanupMessage::DeleteFile(path) => {
+                    let t = Instant::now();
                     std::fs::remove_file(&path).expect("Failed to remove wal file");
+                    let elapsed_ms = t.elapsed().as_millis();
+                    if elapsed_ms > 100 {
+                        eprintln!("[wal-cleanup] delete_file took {}ms", elapsed_ms);
+                    }
                 }
                 WalCleanupMessage::DropMaps(maps) => {
+                    let t = Instant::now();
                     drop(maps); // Explicit drop; munmap happens here in background
+                    let elapsed_ms = t.elapsed().as_millis();
+                    if elapsed_ms > 100 {
+                        eprintln!("[wal-cleanup] drop_maps (munmap) took {}ms", elapsed_ms);
+                    }
                 }
             }
         }
@@ -217,9 +227,25 @@ impl WalMapperThread {
                     );
                     map_id = map_id.next_map();
                     self.make_map(map_id);
+                    let elapsed_ms = timer.elapsed().as_millis();
+                    if elapsed_ms > 100 {
+                        eprintln!(
+                            "[wal-mapper] MapFinalized({:?}) took {}ms (maps_count={})",
+                            map_to_sync_id,
+                            elapsed_ms,
+                            self.maps.maps.len()
+                        );
+                    }
                 }
                 WalMapperMessage::MinWalPositionUpdated(watermark) => {
                     self.min_wal_position_updated(watermark);
+                    let elapsed_ms = timer.elapsed().as_millis();
+                    if elapsed_ms > 100 {
+                        eprintln!(
+                            "[wal-mapper] MinWalPositionUpdated(watermark={}) took {}ms",
+                            watermark, elapsed_ms
+                        );
+                    }
                 }
             }
             self.metrics
@@ -230,6 +256,7 @@ impl WalMapperThread {
 
     /// Delete files up to the watermark
     fn min_wal_position_updated(&mut self, watermark: u64) {
+        let start = Instant::now();
         let wal_files = self.files.load();
         let mut num_files_deleted = 0;
         for idx in 0..wal_files.files.len() {
@@ -249,24 +276,40 @@ impl WalMapperThread {
             let new_min_file_id = new_files.min_file_id;
             self.files.store(Arc::new(new_files));
 
+            let t = Instant::now();
             // Remove all maps that belonged to deleted files
             self.maps
                 .maps
                 .retain(|&map_id, _| self.layout.file_for_map(map_id) >= new_min_file_id);
+            let retain_ms = t.elapsed().as_millis();
 
+            let t = Instant::now();
             self.publish_maps();
+            let publish_ms = t.elapsed().as_millis();
+
+            let total_ms = start.elapsed().as_millis();
+            if total_ms > 100 {
+                eprintln!(
+                    "[wal-mapper] min_wal_position_updated(watermark={}): deleted={} files, retain={}ms, publish={}ms, total={}ms",
+                    watermark, num_files_deleted, retain_ms, publish_ms, total_ms
+                );
+            }
         }
     }
 
     fn make_map(&mut self, map_id: MapId) {
+        let total_start = Instant::now();
         let file_id = self.layout.file_for_map(map_id);
         let mut files = self.files.load();
+        let mut open_file_ms = 0u128;
         if file_id > files.current_file_id() {
             assert_eq!(file_id, WalFileId(files.current_file_id().0 + 1));
             let mut new_files = files.files.clone();
             let new_file_path = self.layout.wal_file_name(&files.base_path, file_id);
+            let t = Instant::now();
             let new_file = Wal::open_file(&new_file_path, &self.layout)
                 .expect("Failed to create new wal file");
+            open_file_ms = t.elapsed().as_millis();
             new_files.push(Arc::new(new_file));
 
             let new_wal_files = WalFiles {
@@ -277,10 +320,22 @@ impl WalMapperThread {
             self.files.store(Arc::new(new_wal_files));
             files = self.files.load();
         }
+        let t = Instant::now();
         Wal::extend_to_map_id(&self.layout, &files, map_id).expect("Failed to extend wal file");
+        let extend_ms = t.elapsed().as_millis();
+        let t = Instant::now();
         self.maps.map(files.get(file_id), &self.layout, map_id);
-
+        let mmap_ms = t.elapsed().as_millis();
+        let t = Instant::now();
         self.publish_maps();
+        let publish_ms = t.elapsed().as_millis();
+        let total_ms = total_start.elapsed().as_millis();
+        if total_ms > 100 {
+            eprintln!(
+                "[wal-mapper] make_map({:?}): open_file={}ms, extend={}ms, mmap={}ms, publish={}ms, total={}ms",
+                map_id, open_file_ms, extend_ms, mmap_ms, publish_ms, total_ms
+            );
+        }
     }
 
     fn publish_maps(&self) {
@@ -315,7 +370,16 @@ impl WalMaps {
         };
         assert!(self.maps.insert(map_id, map).is_none());
         if self.maps.len() > layout.max_maps {
-            self.maps.pop_first();
+            let t = Instant::now();
+            let evicted = self.maps.pop_first();
+            let elapsed_ms = t.elapsed().as_millis();
+            if elapsed_ms > 10 {
+                let evicted_id = evicted.map(|(id, _)| id);
+                eprintln!(
+                    "[wal-mapper] pop_first (evict map {:?}) took {}ms",
+                    evicted_id, elapsed_ms
+                );
+            }
         }
         self.maps.get(&map_id).unwrap()
     }
