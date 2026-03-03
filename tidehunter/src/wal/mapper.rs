@@ -108,7 +108,7 @@ struct WalMapperThread {
     metrics: Arc<Metrics>,
     cleanup_thread: WalCleanupThread,
 }
-const INITIAL_MAPS_BUFFER: usize = 10;
+const INITIAL_MAPS_BUFFER: usize = 2;
 
 #[derive(Clone, Default)]
 pub struct WalMaps {
@@ -358,7 +358,6 @@ impl WalMaps {
                 .offset(layout.offset_in_wal_file(range.start))
                 .len(layout.frag_size as usize);
             options
-                .populate()
                 .map_mut(file)
                 .expect("Failed to mmap on wal file")
                 .into()
