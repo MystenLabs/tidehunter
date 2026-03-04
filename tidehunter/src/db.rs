@@ -12,6 +12,7 @@ use crate::iterators::IteratorResult;
 use crate::iterators::db_iterator::DbIterator;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader};
+use crate::lock::DbLock;
 use crate::metrics::{Metrics, TimerExt};
 use crate::relocation::updates::RelocationUpdates;
 use crate::relocation::{RelocationCommand, RelocationDriver, RelocationStrategy, Relocator};
@@ -43,6 +44,7 @@ pub struct Db {
     pub(crate) key_shape: KeyShape,
     relocator: Relocator,
     commit_pool: Option<rayon::ThreadPool>,
+    _lock: DbLock,
 }
 
 pub type DbResult<T> = Result<T, DbError>;
@@ -58,6 +60,7 @@ impl Db {
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
         let path = path.canonicalize()?;
+        let lock = DbLock::acquire(&path)?;
         Self::maybe_create_shape_file(&path, &key_shape)?;
         Self::maybe_create_config_file(&path, &config)?;
         let (control_region_store, control_region) =
@@ -113,6 +116,7 @@ impl Db {
             key_shape,
             relocator,
             commit_pool,
+            _lock: lock,
         };
         this.report_memory_estimates();
         let this = Arc::new(this);

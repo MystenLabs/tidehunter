@@ -16,6 +16,7 @@ pub mod iterators;
 pub mod key_shape;
 #[doc(hidden)] // Used by tools/wal_inspector for control region inspection
 pub mod large_table;
+mod lock;
 pub mod lookup;
 mod math;
 pub mod metrics;

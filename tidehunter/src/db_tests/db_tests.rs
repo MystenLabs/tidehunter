@@ -94,6 +94,52 @@ pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
 }
 
 #[test]
+fn test_db_lock() {
+    use std::env;
+    use std::process::Command;
+
+    // Helper subprocess mode
+    if let Ok(mode) = env::var("TEST_DB_LOCK_HELPER") {
+        let db_path_str = env::var("TEST_DB_PATH").unwrap();
+        let db_path = Path::new(&db_path_str);
+        let config = Arc::new(Config::small());
+        let (key_shape, _) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+
+        let result = Db::open(db_path, key_shape, config, Metrics::new());
+        std::process::exit(match (mode.as_str(), result) {
+            ("locked", Err(DbError::Io(e))) if e.kind() == std::io::ErrorKind::AlreadyExists => 1,
+            ("unlocked", Ok(_)) => 0,
+            _ => 2,
+        });
+    }
+
+    let dir = tempdir::TempDir::new("test-lock").unwrap();
+    let config = Arc::new(Config::small());
+    let (key_shape, _) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+
+    let run_subprocess = |mode: &str| {
+        Command::new(env::current_exe().unwrap())
+            .args(&["db::tests::db_tests::test_db_lock", "--exact"])
+            .env("TEST_DB_LOCK_HELPER", mode)
+            .env("TEST_DB_PATH", dir.path().to_str().unwrap())
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+
+    // Test with lock held
+    {
+        let db = Db::open(dir.path(), key_shape.clone(), config, Metrics::new()).unwrap();
+        assert_eq!(run_subprocess("locked"), Some(1), "Should be locked");
+        db.wait_for_background_threads_to_finish();
+    }
+
+    // Test after lock released
+    assert_eq!(run_subprocess("unlocked"), Some(0), "Should be unlocked");
+}
+
+#[test]
 fn test_multi_thread_write() {
     let dir = tempdir::TempDir::new("test-batch").unwrap();
     let config = Config::small();
