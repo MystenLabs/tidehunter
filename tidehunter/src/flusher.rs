@@ -212,7 +212,7 @@ impl IndexFlusherThread {
     fn run_compactor(ctx: &KsContext, index: &mut IndexTable) {
         if let Some(compactor) = ctx.ks_config.compactor() {
             let pre_compact_len = index.len();
-            index.compact_with(|iter| (compactor)(iter), ctx.ks_config.index_key_size());
+            index.compact_with(|iter| (compactor)(iter));
             let compacted = pre_compact_len.saturating_sub(index.len());
             ctx.metrics
                 .compacted_keys

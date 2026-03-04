@@ -1302,7 +1302,7 @@ impl LargeTableEntry {
         let remaining_pending = self.pending_data.len();
 
         // Move clean entries from the BTreeMap into the compact flat array.
-        self.data.make_mut().promote_to_flat(self.context.ks_config.index_key_size());
+        self.data.make_mut().promote_to_flat();
 
         let should_flush = if loader.flush_supported() && self.state.is_dirty() {
             let dirty_count = self.data.count_dirty();
