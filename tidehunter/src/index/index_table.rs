@@ -1,13 +1,15 @@
 use crate::key_shape::KeySpaceDesc;
 use crate::primitives::cursor::SliceCursor;
-use crate::primitives::range_from_excluding::RangeFromExcluding;
 use crate::primitives::slice_buf::SliceBuf;
 use crate::primitives::var_int::{MAX_U16_VARINT, deserialize_u16_varint, serialize_u16_varint};
 use crate::wal::position::{HasOffset, LastProcessed, WalPosition};
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
-use std::collections::btree_map::{Entry, Keys};
-use std::collections::{BTreeMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::collections::btree_map::Entry;
+use std::ops::Bound;
 
 #[derive(Default, Clone, Debug)]
 #[doc(hidden)]
@@ -15,6 +17,15 @@ pub struct IndexTable {
     data: BTreeMap<Bytes, IndexWalPosition>,
     /// Sum of all key lengths currently in `data`. Maintained incrementally.
     key_bytes: usize,
+    /// Sorted clean entries in compact binary format.
+    ///
+    /// Format: `[count: u32][entry_offsets: u32 * count][entries]`
+    /// where each entry is `[key_len: u16][key][wal_offset: u64][wal_len: u32]`.
+    /// All entries are considered clean (they were promoted from the BTreeMap).
+    /// Entries in `data` take priority over entries in `flat` for the same key.
+    flat: Bytes,
+    /// Sum of all key lengths currently in `flat`. Maintained incrementally.
+    flat_key_bytes: usize,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -33,6 +44,124 @@ enum IndexEntryKind {
 
 // Compile time check to ensure IndexWalPosition consumes the same amount of memory as WalPosition
 const _: [u8; size_of::<WalPosition>()] = [0u8; size_of::<IndexWalPosition>()];
+
+// ---------------------------------------------------------------------------
+// Flat array helper functions
+// ---------------------------------------------------------------------------
+
+fn flat_entry_count(flat: &[u8]) -> usize {
+    if flat.len() < 4 {
+        return 0;
+    }
+    u32::from_be_bytes(flat[0..4].try_into().unwrap()) as usize
+}
+
+fn flat_entries_section_start(count: usize) -> usize {
+    4 + 4 * count
+}
+
+fn flat_read_entry_offset(flat: &[u8], idx: usize) -> usize {
+    let pos = 4 + 4 * idx;
+    u32::from_be_bytes(flat[pos..pos + 4].try_into().unwrap()) as usize
+}
+
+/// Parse a `(key_slice, WalPosition)` from the entries section at `byte_offset`.
+fn flat_parse_entry(entries_section: &[u8], byte_offset: usize) -> (&[u8], WalPosition) {
+    let key_len = u16::from_be_bytes(
+        entries_section[byte_offset..byte_offset + 2]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let key = &entries_section[byte_offset + 2..byte_offset + 2 + key_len];
+    let wal_start = byte_offset + 2 + key_len;
+    let wal_offset = u64::from_be_bytes(
+        entries_section[wal_start..wal_start + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let wal_len = u32::from_be_bytes(
+        entries_section[wal_start + 8..wal_start + 12]
+            .try_into()
+            .unwrap(),
+    );
+    (key, WalPosition::new(wal_offset, wal_len))
+}
+
+fn build_flat_bytes(entries: Vec<(Bytes, WalPosition)>) -> Bytes {
+    let n = entries.len();
+    if n == 0 {
+        return Bytes::default();
+    }
+    // First pass: build entries section and collect byte offsets.
+    let mut data_section: Vec<u8> = Vec::new();
+    let mut offsets: Vec<u32> = Vec::with_capacity(n);
+
+    for (key, pos) in &entries {
+        offsets.push(data_section.len() as u32);
+        let key_len = key.len() as u16;
+        data_section.extend_from_slice(&key_len.to_be_bytes());
+        data_section.extend_from_slice(key);
+        pos.write_to_buf(&mut data_section);
+    }
+
+    // Build final buffer: [count: u32][offsets: u32 * n][data_section]
+    let header_size = 4 + 4 * n;
+    let mut result = Vec::with_capacity(header_size + data_section.len());
+    result.extend_from_slice(&(n as u32).to_be_bytes());
+    for off in offsets {
+        result.extend_from_slice(&off.to_be_bytes());
+    }
+    result.extend_from_slice(&data_section);
+
+    Bytes::from(result)
+}
+
+// ---------------------------------------------------------------------------
+// Sequential flat iterator
+// ---------------------------------------------------------------------------
+
+struct FlatIter<'a> {
+    flat: &'a [u8],
+    entries_section: &'a [u8],
+    count: usize,
+    index: usize,
+}
+
+impl<'a> FlatIter<'a> {
+    fn new(flat: &'a [u8]) -> Self {
+        let count = flat_entry_count(flat);
+        let section_start = flat_entries_section_start(count);
+        let entries_section = if count > 0 {
+            &flat[section_start..]
+        } else {
+            &[]
+        };
+        Self {
+            flat,
+            entries_section,
+            count,
+            index: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for FlatIter<'a> {
+    type Item = (&'a [u8], WalPosition);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.count {
+            return None;
+        }
+        let byte_offset = flat_read_entry_offset(self.flat, self.index);
+        let (key, pos) = flat_parse_entry(self.entries_section, byte_offset);
+        self.index += 1;
+        Some((key, pos))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IndexTable implementation
+// ---------------------------------------------------------------------------
 
 impl IndexTable {
     pub fn insert(&mut self, k: Bytes, v: WalPosition) -> Option<WalPosition> {
@@ -81,8 +210,15 @@ impl IndexTable {
                 panic!("found.offset {} > v.offset {}", found.offset, v.offset);
             }
             if v.is_removed() {
-                if self.data.remove(k).is_some() {
-                    self.key_bytes -= k.len();
+                if self.flat.is_empty() {
+                    if self.data.remove(k).is_some() {
+                        self.key_bytes -= k.len();
+                    }
+                } else {
+                    // Keep tombstone in BTreeMap to shadow any existing flat entry for this key.
+                    if self.data.insert(k.clone(), *v).is_none() {
+                        self.key_bytes += k.len();
+                    }
                 }
             } else if self.data.insert(k.clone(), v.as_clean_modified()).is_none() {
                 self.key_bytes += k.len();
@@ -146,18 +282,30 @@ impl IndexTable {
         self.key_bytes -= removed_bytes;
     }
 
-    /// Change loaded dirty IndexTable into unloaded dirty by retaining dirty keys and tombstones
+    /// Change loaded dirty IndexTable into unloaded dirty by retaining dirty keys and tombstones.
+    /// Also clears the flat array since it contains clean data that is already on disk.
     pub fn retain_dirty(&mut self) {
         self.retain(|_, pos| !pos.is_clean());
+        self.flat = Bytes::default();
+        self.flat_key_bytes = 0;
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
-        self.data.get(k).map(|p| p.into_wal_position())
+        // BTreeMap takes priority: may have a more-recent Modified or Removed entry.
+        if let Some(p) = self.data.get(k) {
+            return Some(p.into_wal_position());
+        }
+        // Fall through to the flat array.
+        self.flat_binary_search(k)
     }
 
     /// similar to `get`, but returns the position of the modification operation for both deletes and inserts
     pub fn get_update_position(&self, k: &[u8]) -> Option<WalPosition> {
-        self.data.get(k).map(|p| p.into_update_position())
+        if let Some(p) = self.data.get(k) {
+            return Some(p.into_update_position());
+        }
+        // For flat entries all positions are clean, so update position == value position.
+        self.flat_binary_search(k)
     }
 
     /// If prev is None returns first entry.
@@ -168,45 +316,130 @@ impl IndexTable {
     ///
     /// This works even if prev is set to Some(k), but the value at k does not exist (for ex. was deleted).
     pub fn next_entry(&self, prev: Option<Bytes>, reverse: bool) -> Option<(Bytes, WalPosition)> {
-        fn next<'a>(
-            mut it: impl Iterator<Item = (&'a Bytes, &'a IndexWalPosition)> + 'a,
-        ) -> Option<(Bytes, WalPosition)> {
-            it.next()
-                .map(|(key, value)| (key.clone(), value.into_wal_position()))
-        }
-        if let Some(prev) = prev {
-            if reverse {
-                next(self.data.range(..prev).rev())
-            } else {
-                let range = RangeFromExcluding { from: &prev };
-                next(self.data.range(range))
-            }
+        if reverse {
+            self.next_entry_reverse(prev.as_deref())
         } else {
-            let iterator = self.data.iter();
-            if reverse {
-                next(iterator.rev())
+            self.next_entry_forward(prev.as_deref())
+        }
+    }
+
+    fn next_entry_forward(&self, prev: Option<&[u8]>) -> Option<(Bytes, WalPosition)> {
+        // Find first BTreeMap entry strictly after prev.
+        // We include Removed entries so callers can see the tombstone (INVALID position)
+        // and correctly shadow any matching on-disk entry (used by DirtyUnloaded iteration).
+        let btree_cand: Option<(&Bytes, &IndexWalPosition)> = if let Some(prev) = prev {
+            self.data
+                .range::<[u8], _>((Bound::Excluded(prev), Bound::<&[u8]>::Unbounded))
+                .next()
+        } else {
+            self.data.iter().next()
+        };
+
+        // Find the first flat entry strictly after prev, skipping entries that are
+        // shadowed by a Removed tombstone in BTreeMap.
+        let mut flat_cand = self.flat_next_forward(prev);
+        while let Some((ref fk, _)) = flat_cand {
+            if self
+                .data
+                .get(fk.as_ref())
+                .map(|v| v.is_removed())
+                .unwrap_or(false)
+            {
+                let fk_clone = fk.clone();
+                flat_cand = self.flat_next_forward(Some(fk_clone.as_ref()));
             } else {
-                next(iterator)
+                break;
             }
+        }
+
+        // Take the candidate with the smaller key; BTreeMap wins on ties.
+        match (btree_cand, flat_cand) {
+            (None, None) => None,
+            (Some((bk, bv)), None) => Some((bk.clone(), bv.into_wal_position())),
+            (None, Some((fk, fv))) => Some((fk, fv)),
+            (Some((bk, bv)), Some((fk, fv))) => match bk.as_ref().cmp(fk.as_ref()) {
+                Ordering::Less | Ordering::Equal => Some((bk.clone(), bv.into_wal_position())),
+                Ordering::Greater => Some((fk, fv)),
+            },
+        }
+    }
+
+    fn next_entry_reverse(&self, prev: Option<&[u8]>) -> Option<(Bytes, WalPosition)> {
+        // Find last BTreeMap entry strictly before prev.
+        // We include Removed entries so callers can see the tombstone (INVALID position)
+        // and correctly shadow any matching on-disk entry (used by DirtyUnloaded iteration).
+        let btree_cand: Option<(&Bytes, &IndexWalPosition)> = if let Some(prev) = prev {
+            self.data
+                .range::<[u8], _>((Bound::Unbounded, Bound::Excluded(prev)))
+                .next_back()
+        } else {
+            self.data.iter().next_back()
+        };
+
+        // Find the last flat entry strictly before prev, skipping deleted entries.
+        let mut flat_cand = self.flat_next_reverse(prev);
+        while let Some((ref fk, _)) = flat_cand {
+            if self
+                .data
+                .get(fk.as_ref())
+                .map(|v| v.is_removed())
+                .unwrap_or(false)
+            {
+                let fk_clone = fk.clone();
+                flat_cand = self.flat_next_reverse(Some(fk_clone.as_ref()));
+            } else {
+                break;
+            }
+        }
+
+        // Take the candidate with the larger key; BTreeMap wins on ties.
+        match (btree_cand, flat_cand) {
+            (None, None) => None,
+            (Some((bk, bv)), None) => Some((bk.clone(), bv.into_wal_position())),
+            (None, Some((fk, fv))) => Some((fk, fv)),
+            (Some((bk, bv)), Some((fk, fv))) => match bk.as_ref().cmp(fk.as_ref()) {
+                Ordering::Greater | Ordering::Equal => Some((bk.clone(), bv.into_wal_position())),
+                Ordering::Less => Some((fk, fv)),
+            },
         }
     }
 
     pub fn len(&self) -> usize {
-        self.data.len()
+        // Note: may slightly overcount when BTreeMap has entries that also exist in flat,
+        // but the error window is small (only during period between promote_to_flat calls).
+        self.flat_len() + self.data.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.data.is_empty() && self.flat.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Bytes, WalPosition)> + '_ {
-        self.data
+    pub fn iter(&self) -> impl Iterator<Item = (Bytes, WalPosition)> + '_ {
+        // Flat entries not overridden by BTreeMap, followed by valid BTreeMap entries.
+        // Collect and sort to guarantee sorted output.
+        let flat_entries = FlatIter::new(&self.flat)
+            .filter(|(k, _)| !self.data.contains_key(*k))
+            .map(|(k, pos)| (Bytes::from(k.to_vec()), pos));
+        let btree_entries = self
+            .data
             .iter()
-            .filter_map(|(k, v)| v.into_wal_position().valid().map(|pos| (k, pos)))
+            .filter_map(|(k, v)| v.into_wal_position().valid().map(|pos| (k.clone(), pos)));
+
+        let mut all: Vec<(Bytes, WalPosition)> = flat_entries.chain(btree_entries).collect();
+        all.sort_by(|(a, _), (b, _)| a.as_ref().cmp(b.as_ref()));
+        all.into_iter()
     }
 
-    pub fn keys(&self) -> Keys<'_, Bytes, IndexWalPosition> {
-        self.data.keys()
+    pub fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
+        // Flat keys not in BTreeMap, plus all BTreeMap keys.
+        let flat_keys = FlatIter::new(&self.flat)
+            .filter(|(k, _)| !self.data.contains_key(*k))
+            .map(|(k, _)| Bytes::from(k.to_vec()));
+        let btree_keys = self.data.keys().cloned();
+
+        let mut all: Vec<Bytes> = flat_keys.chain(btree_keys).collect();
+        all.sort();
+        all.into_iter()
     }
 
     /// Writes key-value pairs from IndexTable to a BytesMut buffer.
@@ -223,32 +456,106 @@ impl IndexTable {
         out: &mut BytesMut,
         visitor: &mut impl IndexSerializationVisitor,
     ) {
-        // Write each key-value pair
-        for (key, value) in self.data.iter() {
-            visitor.add_key(key, out.len());
-            if let Some(expected_size) = ks.index_key_size() {
-                if key.len() != expected_size {
-                    panic!(
-                        "Index in ks {} contains key length {} (configured {})",
-                        ks.name(),
-                        key.len(),
-                        expected_size
-                    );
+        if self.flat.is_empty() {
+            // Fast path: only BTreeMap entries.
+            for (key, value) in self.data.iter() {
+                if value.is_removed() {
+                    continue;
                 }
-            } else {
-                if key.len() > MAX_U16_VARINT as usize {
-                    panic!(
-                        "Trying to insert {key:?} into ks {}, key length is {}, maximum allowed {}",
-                        ks.name(),
-                        key.len(),
-                        MAX_U16_VARINT
-                    );
-                }
-                serialize_u16_varint(key.len() as u16, out);
+                self.write_key_val(ks, out, visitor, key, value.ensure_clean_wal_position());
             }
-            out.put_slice(key);
-            value.ensure_clean_wal_position().write_to_buf(out);
+            return;
         }
+
+        // Merge-sort flat and BTreeMap entries; BTreeMap overrides flat for the same key.
+        let flat = &self.flat[..];
+
+        // Use owned Vec<u8> for flat keys to avoid borrow conflicts.
+        let mut cur_flat: Option<(Vec<u8>, WalPosition)> =
+            FlatIter::new(flat).next().map(|(k, p)| (k.to_vec(), p));
+        let mut btree_it = self.data.iter();
+        let mut cur_btree: Option<(&Bytes, &IndexWalPosition)> = btree_it.next();
+
+        loop {
+            let cmp = match (&cur_flat, cur_btree) {
+                (None, None) => break,
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some((fk, _)), Some((bk, _))) => fk.as_slice().cmp(bk.as_ref()),
+            };
+
+            match cmp {
+                Ordering::Less => {
+                    // Flat key is smaller (or btree is empty): output flat entry.
+                    let (fk, fp) = cur_flat.take().unwrap();
+                    self.write_key_val(ks, out, visitor, fk.as_slice(), fp);
+                    cur_flat = {
+                        // Advance flat iterator: we need to find the entry after the one we just wrote.
+                        // Re-scan from the beginning using the key we just wrote, since FlatIter doesn't have position.
+                        // More efficient: track position manually.
+                        // For now, use a fresh FlatIter and skip until > fk.
+                        FlatIter::new(flat)
+                            .find(|(k, _)| *k > fk.as_slice())
+                            .map(|(k, p)| (k.to_vec(), p))
+                    };
+                }
+                Ordering::Equal => {
+                    // Same key: BTreeMap overrides flat.
+                    cur_flat = {
+                        let fk = cur_flat.take().unwrap().0;
+                        FlatIter::new(flat)
+                            .find(|(k, _)| *k > fk.as_slice())
+                            .map(|(k, p)| (k.to_vec(), p))
+                    };
+                    let (bk, bv) = cur_btree.take().unwrap();
+                    cur_btree = btree_it.next();
+                    if !bv.is_removed() {
+                        self.write_key_val(ks, out, visitor, bk, bv.ensure_clean_wal_position());
+                    }
+                }
+                Ordering::Greater => {
+                    // BTreeMap key is smaller (or flat is empty): output btree entry.
+                    let (bk, bv) = cur_btree.take().unwrap();
+                    cur_btree = btree_it.next();
+                    if !bv.is_removed() {
+                        self.write_key_val(ks, out, visitor, bk, bv.ensure_clean_wal_position());
+                    }
+                }
+            }
+        }
+    }
+
+    fn write_key_val(
+        &self,
+        ks: &KeySpaceDesc,
+        out: &mut BytesMut,
+        visitor: &mut impl IndexSerializationVisitor,
+        key: &[u8],
+        pos: WalPosition,
+    ) {
+        visitor.add_key(key, out.len());
+        if let Some(expected_size) = ks.index_key_size() {
+            if key.len() != expected_size {
+                panic!(
+                    "Index in ks {} contains key length {} (configured {})",
+                    ks.name(),
+                    key.len(),
+                    expected_size
+                );
+            }
+        } else {
+            if key.len() > MAX_U16_VARINT as usize {
+                panic!(
+                    "Trying to insert {key:?} into ks {}, key length is {}, maximum allowed {}",
+                    ks.name(),
+                    key.len(),
+                    MAX_U16_VARINT
+                );
+            }
+            serialize_u16_varint(key.len() as u16, out);
+        }
+        out.put_slice(key);
+        pos.write_to_buf(out);
     }
 
     /// Deserializes IndexTable from bytes
@@ -276,18 +583,30 @@ impl IndexTable {
                 panic!("Duplicate keys detected in index");
             }
         }
-        IndexTable { data, key_bytes }
+        IndexTable {
+            data,
+            key_bytes,
+            flat: Bytes::default(),
+            flat_key_bytes: 0,
+        }
     }
 
-    /// Marks all elements in this index as clean and remove tombstones
+    /// Marks all elements in this index as clean and remove tombstones.
+    /// When flat is non-empty, Removed tombstones are kept in BTreeMap so they continue
+    /// to shadow flat entries until the next flush/unload.
     pub fn clean_self(&mut self) {
+        let has_flat = !self.flat.is_empty();
         self.retain(|_, v| match v.kind {
             IndexEntryKind::Clean => true,
             IndexEntryKind::Modified => {
                 *v = v.as_clean_modified();
                 true
             }
-            IndexEntryKind::Removed => false,
+            IndexEntryKind::Removed => {
+                // Keep tombstone if flat might contain this key; it prevents the flat
+                // entry from appearing alive after the BTreeMap tombstone is removed.
+                has_flat
+            }
         });
     }
 
@@ -315,9 +634,35 @@ impl IndexTable {
     where
         F: FnOnce(&mut dyn DoubleEndedIterator<Item = &Bytes>) -> HashSet<Bytes>,
     {
-        let mut iter = self.data.keys();
-        let to_retain = compactor(&mut iter);
+        // Collect all valid unique keys from both flat and BTreeMap in sorted order.
+        let all_keys: Vec<Bytes> = {
+            let flat_only = FlatIter::new(&self.flat)
+                .filter(|(k, _)| !self.data.contains_key(*k))
+                .map(|(k, _)| Bytes::from(k.to_vec()));
+            let btree_valid = self
+                .data
+                .iter()
+                .filter(|(_, v)| !v.is_removed())
+                .map(|(k, _)| k.clone());
+            let mut v: Vec<Bytes> = flat_only.chain(btree_valid).collect();
+            v.sort();
+            v
+        };
+
+        let mut iter = all_keys.iter();
+        drop(iter);
+        drop(all_keys);
+
         self.retain(|k, _| to_retain.contains(k));
+
+        if !self.flat.is_empty() {
+            let retained: Vec<(Bytes, WalPosition)> = FlatIter::new(&self.flat)
+                .filter(|(k, _)| to_retain.contains(&Bytes::from(k.to_vec())))
+                .map(|(k, p)| (Bytes::from(k.to_vec()), p))
+                .collect();
+            self.flat_key_bytes = retained.iter().map(|(k, _)| k.len()).sum();
+            self.flat = build_flat_bytes(retained);
+        }
     }
 
     /// Apply given update function to a value with a given key.
@@ -329,9 +674,222 @@ impl IndexTable {
         }
     }
 
-    /// Total bytes occupied by keys in this table. Always O(1).
+    /// Total bytes occupied by keys in this table (data + flat). Always O(1).
     pub fn total_key_bytes(&self) -> usize {
-        self.key_bytes
+        self.key_bytes + self.flat_key_bytes
+    }
+
+    /// Move all clean entries from the BTreeMap into the flat array, then remove them
+    /// from BTreeMap. Entries from both old flat and clean BTreeMap entries are merged
+    /// into a new sorted flat. Removed (tombstone) entries in BTreeMap remain to shadow
+    /// corresponding flat entries on future reads.
+    pub fn promote_to_flat(&mut self) {
+        let has_clean = self.data.values().any(|v| v.is_clean());
+        if !has_clean && self.flat.is_empty() {
+            return;
+        }
+
+        // Take ownership of the old flat to avoid borrow conflicts during the merge.
+        let old_flat = std::mem::take(&mut self.flat);
+        let flat_slice = &old_flat[..];
+        let flat_count = flat_entry_count(flat_slice);
+        let entries_start = flat_entries_section_start(flat_count);
+        let entries_section: &[u8] = if flat_count > 0 {
+            &flat_slice[entries_start..]
+        } else {
+            &[]
+        };
+
+        // Collect clean BTreeMap entries sorted by key (BTreeMap is already sorted).
+        let btree_clean: Vec<(&Bytes, WalPosition)> = self
+            .data
+            .iter()
+            .filter(|(_, v)| v.is_clean())
+            .map(|(k, v)| (k, v.into_wal_position()))
+            .collect();
+
+        // Merge sorted flat + sorted clean BTreeMap into a new flat.
+        let mut result: Vec<(Bytes, WalPosition)> = Vec::new();
+        let mut fi = 0usize; // index into flat entries
+        let mut bi = 0usize; // index into btree_clean
+
+        while fi < flat_count || bi < btree_clean.len() {
+            let flat_info: Option<(&[u8], usize)> = if fi < flat_count {
+                let off = flat_read_entry_offset(flat_slice, fi);
+                let (k, _) = flat_parse_entry(entries_section, off);
+                Some((k, off))
+            } else {
+                None
+            };
+
+            match (flat_info, btree_clean.get(bi)) {
+                (None, None) => break,
+                (Some((fk, off)), None) => {
+                    // Only in flat: include unless there is a Removed tombstone in BTreeMap.
+                    if !self.data.get(fk).map(|v| v.is_removed()).unwrap_or(false) {
+                        let (_, pos) = flat_parse_entry(entries_section, off);
+                        let key_abs = entries_start + off + 2;
+                        let key_bytes = old_flat.slice(key_abs..key_abs + fk.len());
+                        result.push((key_bytes, pos));
+                    }
+                    fi += 1;
+                }
+                (None, Some((bk, bv))) => {
+                    result.push(((*bk).clone(), *bv));
+                    bi += 1;
+                }
+                (Some((fk, off)), Some((bk, bv))) => {
+                    match fk.cmp(bk.as_ref()) {
+                        Ordering::Less => {
+                            // Flat key is smaller.
+                            if !self.data.get(fk).map(|v| v.is_removed()).unwrap_or(false) {
+                                let (_, pos) = flat_parse_entry(entries_section, off);
+                                let key_abs = entries_start + off + 2;
+                                let key_bytes = old_flat.slice(key_abs..key_abs + fk.len());
+                                result.push((key_bytes, pos));
+                            }
+                            fi += 1;
+                        }
+                        Ordering::Equal => {
+                            // BTreeMap clean entry overrides flat entry for the same key.
+                            result.push(((*bk).clone(), *bv));
+                            fi += 1;
+                            bi += 1;
+                        }
+                        Ordering::Greater => {
+                            // BTreeMap key is smaller.
+                            result.push(((*bk).clone(), *bv));
+                            bi += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update key_bytes: subtract clean entries leaving data.
+        let clean_key_bytes: usize = self.data.iter()
+            .filter(|(_, v)| v.is_clean())
+            .map(|(k, _)| k.len())
+            .sum();
+        self.key_bytes -= clean_key_bytes;
+
+        self.flat_key_bytes = result.iter().map(|(k, _)| k.len()).sum();
+        self.flat = build_flat_bytes(result);
+        // Remove clean entries from BTreeMap; they are now stored in flat.
+        self.data.retain(|_, v| !v.is_clean());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Private flat-array helpers
+    // ---------------------------------------------------------------------------
+
+    fn flat_len(&self) -> usize {
+        flat_entry_count(&self.flat)
+    }
+
+    /// Binary search the flat array for an exact key match.
+    fn flat_binary_search(&self, key: &[u8]) -> Option<WalPosition> {
+        let flat = &self.flat[..];
+        let count = flat_entry_count(flat);
+        if count == 0 {
+            return None;
+        }
+        let entries_start = flat_entries_section_start(count);
+        let entries = &flat[entries_start..];
+
+        let mut lo = 0usize;
+        let mut hi = count;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let off = flat_read_entry_offset(flat, mid);
+            let (mid_key, mid_pos) = flat_parse_entry(entries, off);
+            match mid_key.cmp(key) {
+                Ordering::Equal => return Some(mid_pos),
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+            }
+        }
+        None
+    }
+
+    /// Return the first flat entry with key strictly greater than `prev`
+    /// (or the first entry at all when `prev` is `None`).
+    fn flat_next_forward(&self, prev: Option<&[u8]>) -> Option<(Bytes, WalPosition)> {
+        let flat = &self.flat[..];
+        let count = flat_entry_count(flat);
+        if count == 0 {
+            return None;
+        }
+        let entries_start = flat_entries_section_start(count);
+        let entries = &flat[entries_start..];
+
+        let start_idx = if let Some(prev) = prev {
+            // Binary search: find the first index where key > prev.
+            let mut lo = 0usize;
+            let mut hi = count;
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let off = flat_read_entry_offset(flat, mid);
+                let (mid_key, _) = flat_parse_entry(entries, off);
+                if mid_key <= prev {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        } else {
+            0
+        };
+
+        if start_idx >= count {
+            return None;
+        }
+        let off = flat_read_entry_offset(flat, start_idx);
+        let (key, pos) = flat_parse_entry(entries, off);
+        let key_abs_start = entries_start + off + 2;
+        let key_bytes = self.flat.slice(key_abs_start..key_abs_start + key.len());
+        Some((key_bytes, pos))
+    }
+
+    /// Return the last flat entry with key strictly less than `prev`
+    /// (or the last entry at all when `prev` is `None`).
+    fn flat_next_reverse(&self, prev: Option<&[u8]>) -> Option<(Bytes, WalPosition)> {
+        let flat = &self.flat[..];
+        let count = flat_entry_count(flat);
+        if count == 0 {
+            return None;
+        }
+        let entries_start = flat_entries_section_start(count);
+        let entries = &flat[entries_start..];
+
+        let end_idx = if let Some(prev) = prev {
+            // Binary search: find the first index where key >= prev, then subtract 1.
+            let mut lo = 0usize;
+            let mut hi = count;
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let off = flat_read_entry_offset(flat, mid);
+                let (mid_key, _) = flat_parse_entry(entries, off);
+                if mid_key < prev {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            if lo == 0 {
+                return None;
+            }
+            lo - 1
+        } else {
+            count - 1
+        };
+
+        let off = flat_read_entry_offset(flat, end_idx);
+        let (key, pos) = flat_parse_entry(entries, off);
+        let key_abs_start = entries_start + off + 2;
+        let key_bytes = self.flat.slice(key_abs_start..key_abs_start + key.len());
+        Some((key_bytes, pos))
     }
 
     #[cfg(test)]
@@ -477,7 +1035,12 @@ mod tests {
             (vec![].into(), iwp(25)),
         ]);
         let key_bytes: usize = data.keys().map(|k: &Bytes| k.len()).sum();
-        let index = IndexTable { data, key_bytes };
+        let index = IndexTable {
+            data,
+            key_bytes,
+            flat: Default::default(),
+            flat_key_bytes: 0,
+        };
         let (shape, ks) = KeyShape::new_single_config_indexing(
             KeyIndexing::variable_length(),
             1,
@@ -647,5 +1210,103 @@ mod tests {
         let next = next.unwrap();
         assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 6]));
         assert_eq!(next.1, WalPosition::test_value(3));
+    }
+
+    #[test]
+    fn test_promote_to_flat_basic() {
+        let mut table = IndexTable::default();
+        table.insert(vec![1].into(), WalPosition::test_value(1));
+        table.insert(vec![2].into(), WalPosition::test_value(2));
+        table.insert(vec![3].into(), WalPosition::test_value(3));
+        // Clean entries (simulate loaded state).
+        table
+            .data
+            .values_mut()
+            .for_each(|v| *v = v.as_clean_modified());
+
+        table.promote_to_flat();
+
+        // BTreeMap should be empty after promotion.
+        assert!(table.data.is_empty());
+        assert_eq!(table.flat_len(), 3);
+
+        // Lookups should still work.
+        assert_eq!(table.get(&[1]), Some(WalPosition::test_value(1)));
+        assert_eq!(table.get(&[2]), Some(WalPosition::test_value(2)));
+        assert_eq!(table.get(&[3]), Some(WalPosition::test_value(3)));
+        assert_eq!(table.get(&[4]), None);
+    }
+
+    #[test]
+    fn test_promote_to_flat_with_remove() {
+        let mut table = IndexTable::default();
+        table.insert(vec![1].into(), WalPosition::test_value(1));
+        table.insert(vec![2].into(), WalPosition::test_value(2));
+        table
+            .data
+            .values_mut()
+            .for_each(|v| *v = v.as_clean_modified());
+        // First promotion: flat gets [1, 2].
+        table.promote_to_flat();
+
+        // Now remove key [1] (goes to BTreeMap as Removed).
+        table.remove(vec![1].into(), WalPosition::test_value(10));
+        assert_eq!(table.get(&[1]), Some(WalPosition::INVALID)); // deleted
+
+        // Add a new key.
+        table.insert(vec![3].into(), WalPosition::test_value(5));
+        table.data.values_mut().for_each(|v| {
+            if v.is_modified() {
+                *v = v.as_clean_modified();
+            }
+        });
+
+        // Second promotion: flat should have [2, 3], key [1] not in flat.
+        // The Removed tombstone for key [1] stays in BTreeMap for dirty tracking,
+        // so get() returns INVALID (not None).
+        table.promote_to_flat();
+        assert_eq!(table.flat_len(), 2);
+        assert_eq!(table.get(&[1]), Some(WalPosition::INVALID)); // deleted
+        assert_eq!(table.get(&[2]), Some(WalPosition::test_value(2)));
+        assert_eq!(table.get(&[3]), Some(WalPosition::test_value(5)));
+    }
+
+    #[test]
+    fn test_next_entry_after_promote() {
+        let mut table = IndexTable::default();
+        table.insert(vec![1, 2, 3, 4].into(), WalPosition::test_value(1));
+        table.insert(vec![1, 2, 3, 7].into(), WalPosition::test_value(2));
+        table.insert(vec![1, 2, 4, 5].into(), WalPosition::test_value(3));
+        table
+            .data
+            .values_mut()
+            .for_each(|v| *v = v.as_clean_modified());
+        table.promote_to_flat();
+
+        // Forward traversal after promotion.
+        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), false);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 4, 5]));
+
+        // Reverse traversal.
+        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), true);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 4]));
+
+        // First entry (no prev).
+        let next = table.next_entry(None, false);
+        assert_eq!(next.unwrap().0, Bytes::from(vec![1, 2, 3, 4]));
+
+        // Last entry (no prev, reverse).
+        let next = table.next_entry(None, true);
+        assert_eq!(next.unwrap().0, Bytes::from(vec![1, 2, 4, 5]));
+    }
+}
+
+// Helper for tests only.
+#[cfg(test)]
+impl IndexWalPosition {
+    fn is_modified(&self) -> bool {
+        self.kind == IndexEntryKind::Modified
     }
 }

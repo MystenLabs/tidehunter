@@ -169,7 +169,7 @@ impl LargeTable {
                                         "Failed to load an index entry to reconstruct bloom filter",
                                     );
                                     for key in data.keys() {
-                                        filter.insert(key);
+                                        filter.insert(&key);
                                     }
                                 }
                                 filter
@@ -477,11 +477,7 @@ impl LargeTable {
 
     fn too_many_dirty(&self, entry: &mut LargeTableEntry) -> bool {
         if entry.state.is_dirty() {
-            // todo - we no longer have a counter for number of dirty keys for DirtyLoaded state.
-            // This means in DirtyLoaded state inserting single dirty key can trigger flush,
-            // if many clean keys are present.
-            // Ideally instead we should just unload DirtyLoaded->DirtyUnloaded instead.
-            let dirty_count = entry.data.len();
+            let dirty_count = entry.data.count_dirty();
             entry
                 .context
                 .excess_dirty_keys(dirty_count.saturating_sub(entry.unload_jitter))
@@ -1305,8 +1301,11 @@ impl LargeTableEntry {
         self.promote_pending();
         let remaining_pending = self.pending_data.len();
 
+        // Move clean entries from the BTreeMap into the compact flat array.
+        self.data.make_mut().promote_to_flat();
+
         let should_flush = if loader.flush_supported() && self.state.is_dirty() {
-            let dirty_count = self.data.len();
+            let dirty_count = self.data.count_dirty();
             self.context
                 .excess_dirty_keys(dirty_count.saturating_sub(self.unload_jitter))
         } else {

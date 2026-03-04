@@ -473,7 +473,7 @@ impl RelocationDriver {
             // current index entries, we only need to check the relocation filter
             let decision = keyspace_desc
                 .relocation_filter()
-                .map_or(Decision::Keep, |filter| filter(key, &value));
+                .map_or(Decision::Keep, |filter| filter(&key, &value));
 
             match decision {
                 Decision::Keep => {
