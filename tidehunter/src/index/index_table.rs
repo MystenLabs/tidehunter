@@ -19,9 +19,11 @@ pub struct IndexTable {
     key_bytes: usize,
     /// Sorted clean entries in compact binary format.
     ///
-    /// Format: `[count: u32][entry_offsets: u32 * count][entries]`
-    /// where each entry is `[key_len: u16][key][wal_offset: u64][wal_len: u32]`.
-    /// All entries are considered clean (they were promoted from the BTreeMap).
+    /// Two formats depending on whether the key space uses fixed-length keys:
+    /// - Variable-length (`FLAT_TAG_VAR`): `[0x00][count: u32][offsets: u32 * count][key_len: u16][key][pos (12)]*`
+    /// - Fixed-length (`FLAT_TAG_FIXED`): `[0x01][key_size: u8][key (key_size)][pos (12)]*`
+    ///
+    /// All entries are considered clean (promoted from the BTreeMap).
     /// Entries in `data` take priority over entries in `flat` for the same key.
     flat: Bytes,
     /// Sum of all key lengths currently in `flat`. Maintained incrementally.
@@ -46,27 +48,45 @@ enum IndexEntryKind {
 const _: [u8; size_of::<WalPosition>()] = [0u8; size_of::<IndexWalPosition>()];
 
 // ---------------------------------------------------------------------------
-// Flat array helper functions
+// Flat format tags and helper functions
+//
+// Two in-memory formats are supported, chosen by `key_size` at build time:
+//
+//   FLAT_TAG_VAR   — variable-length keys:
+//     [FLAT_TAG_VAR: u8][count: u32][offsets: u32 * count]
+//     [key_len: u16][key][pos (12)]* (one entry per offset)
+//     Offsets enable O(log n) binary search without scanning entries.
+//
+//   FLAT_TAG_FIXED — fixed-length keys (key_size known):
+//     [FLAT_TAG_FIXED: u8][key_size: u8][key (key_size)][pos (12)]*
+//     No per-entry overhead; count = (flat.len() - 2) / (key_size + 12).
+//
+// The flat buffer is purely in-memory and never persisted.
 // ---------------------------------------------------------------------------
 
-fn flat_entry_count(flat: &[u8]) -> usize {
-    if flat.len() < 4 {
+const FLAT_TAG_VAR: u8 = 0;
+const FLAT_TAG_FIXED: u8 = 1;
+
+// ---- Variable-length helpers (operate on var_flat = &flat[1..]) -----------
+
+fn var_flat_entry_count(var_flat: &[u8]) -> usize {
+    if var_flat.len() < 4 {
         return 0;
     }
-    u32::from_be_bytes(flat[0..4].try_into().unwrap()) as usize
+    u32::from_be_bytes(var_flat[0..4].try_into().unwrap()) as usize
 }
 
-fn flat_entries_section_start(count: usize) -> usize {
+fn var_flat_entries_section_start(count: usize) -> usize {
     4 + 4 * count
 }
 
-fn flat_read_entry_offset(flat: &[u8], idx: usize) -> usize {
+fn var_flat_read_entry_offset(var_flat: &[u8], idx: usize) -> usize {
     let pos = 4 + 4 * idx;
-    u32::from_be_bytes(flat[pos..pos + 4].try_into().unwrap()) as usize
+    u32::from_be_bytes(var_flat[pos..pos + 4].try_into().unwrap()) as usize
 }
 
-/// Parse a `(key_slice, WalPosition)` from the entries section at `byte_offset`.
-fn flat_parse_entry(entries_section: &[u8], byte_offset: usize) -> (&[u8], WalPosition) {
+/// Parse a `(key_slice, WalPosition)` from the var-len entries section at `byte_offset`.
+fn var_flat_parse_entry(entries_section: &[u8], byte_offset: usize) -> (&[u8], WalPosition) {
     let key_len = u16::from_be_bytes(
         entries_section[byte_offset..byte_offset + 2]
             .try_into()
@@ -87,60 +107,91 @@ fn flat_parse_entry(entries_section: &[u8], byte_offset: usize) -> (&[u8], WalPo
     (key, WalPosition::new(wal_offset, wal_len))
 }
 
-fn build_flat_bytes(entries: Vec<(Bytes, WalPosition)>) -> Bytes {
+/// Build a flat buffer from a sorted list of `(key, position)` pairs.
+///
+/// Pass `key_size = Some(n)` for fixed-length key spaces; `None` for variable-length.
+fn build_flat_bytes(entries: Vec<(Bytes, WalPosition)>, key_size: Option<usize>) -> Bytes {
     let n = entries.len();
     if n == 0 {
         return Bytes::default();
     }
-    // First pass: build entries section and collect byte offsets.
-    let mut data_section: Vec<u8> = Vec::new();
-    let mut offsets: Vec<u32> = Vec::with_capacity(n);
 
-    for (key, pos) in &entries {
-        offsets.push(data_section.len() as u32);
-        let key_len = key.len() as u16;
-        data_section.extend_from_slice(&key_len.to_be_bytes());
-        data_section.extend_from_slice(key);
-        pos.write_to_buf(&mut data_section);
+    if let Some(key_size) = key_size {
+        // Fixed-length format: [FLAT_TAG_FIXED][key_size: u8][key...pos...]*
+        let elem_size = key_size + WalPosition::LENGTH;
+        let mut result = Vec::with_capacity(2 + n * elem_size);
+        result.push(FLAT_TAG_FIXED);
+        result.push(key_size as u8);
+        for (key, pos) in &entries {
+            debug_assert_eq!(key.len(), key_size, "key length mismatch in fixed flat");
+            result.extend_from_slice(key);
+            pos.write_to_buf(&mut result);
+        }
+        Bytes::from(result)
+    } else {
+        // Variable-length format: [FLAT_TAG_VAR][count: u32][offsets: u32*n][key_len: u16][key][pos]*
+        let mut data_section: Vec<u8> = Vec::new();
+        let mut offsets: Vec<u32> = Vec::with_capacity(n);
+        for (key, pos) in &entries {
+            offsets.push(data_section.len() as u32);
+            let key_len = key.len() as u16;
+            data_section.extend_from_slice(&key_len.to_be_bytes());
+            data_section.extend_from_slice(key);
+            pos.write_to_buf(&mut data_section);
+        }
+        let header_size = 1 + 4 + 4 * n; // tag + count + offsets
+        let mut result = Vec::with_capacity(header_size + data_section.len());
+        result.push(FLAT_TAG_VAR);
+        result.extend_from_slice(&(n as u32).to_be_bytes());
+        for off in offsets {
+            result.extend_from_slice(&off.to_be_bytes());
+        }
+        result.extend_from_slice(&data_section);
+        Bytes::from(result)
     }
-
-    // Build final buffer: [count: u32][offsets: u32 * n][data_section]
-    let header_size = 4 + 4 * n;
-    let mut result = Vec::with_capacity(header_size + data_section.len());
-    result.extend_from_slice(&(n as u32).to_be_bytes());
-    for off in offsets {
-        result.extend_from_slice(&off.to_be_bytes());
-    }
-    result.extend_from_slice(&data_section);
-
-    Bytes::from(result)
 }
 
 // ---------------------------------------------------------------------------
 // Sequential flat iterator
 // ---------------------------------------------------------------------------
 
-struct FlatIter<'a> {
-    flat: &'a [u8],
-    entries_section: &'a [u8],
-    count: usize,
-    index: usize,
+enum FlatIter<'a> {
+    Empty,
+    VarLen {
+        var_flat: &'a [u8],        // &flat[1..]: starts with count field
+        entries_section: &'a [u8],
+        count: usize,
+        index: usize,
+    },
+    Fixed {
+        entries: &'a [u8], // &flat[2..]: packed key+pos elements
+        key_size: usize,
+        count: usize,
+        index: usize,
+    },
 }
 
 impl<'a> FlatIter<'a> {
     fn new(flat: &'a [u8]) -> Self {
-        let count = flat_entry_count(flat);
-        let section_start = flat_entries_section_start(count);
-        let entries_section = if count > 0 {
-            &flat[section_start..]
-        } else {
-            &[]
-        };
-        Self {
-            flat,
-            entries_section,
-            count,
-            index: 0,
+        if flat.is_empty() {
+            return Self::Empty;
+        }
+        match flat[0] {
+            FLAT_TAG_VAR => {
+                let var_flat = &flat[1..];
+                let count = var_flat_entry_count(var_flat);
+                let section_start = var_flat_entries_section_start(count);
+                let entries_section = if count > 0 { &var_flat[section_start..] } else { &[] };
+                Self::VarLen { var_flat, entries_section, count, index: 0 }
+            }
+            FLAT_TAG_FIXED => {
+                let key_size = flat[1] as usize;
+                let entries = &flat[2..];
+                let elem_size = key_size + WalPosition::LENGTH;
+                let count = if elem_size > 0 { entries.len() / elem_size } else { 0 };
+                Self::Fixed { entries, key_size, count, index: 0 }
+            }
+            tag => panic!("Unknown flat format tag: {tag}"),
         }
     }
 }
@@ -149,13 +200,30 @@ impl<'a> Iterator for FlatIter<'a> {
     type Item = (&'a [u8], WalPosition);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.count {
-            return None;
+        match self {
+            Self::Empty => None,
+            Self::VarLen { var_flat, entries_section, count, index } => {
+                if *index >= *count {
+                    return None;
+                }
+                let byte_offset = var_flat_read_entry_offset(var_flat, *index);
+                let (key, pos) = var_flat_parse_entry(entries_section, byte_offset);
+                *index += 1;
+                Some((key, pos))
+            }
+            Self::Fixed { entries, key_size, count, index } => {
+                if *index >= *count {
+                    return None;
+                }
+                let elem_size = *key_size + WalPosition::LENGTH;
+                let start = *index * elem_size;
+                let key = &entries[start..start + *key_size];
+                let pos =
+                    WalPosition::from_slice(&entries[start + *key_size..start + elem_size]);
+                *index += 1;
+                Some((key, pos))
+            }
         }
-        let byte_offset = flat_read_entry_offset(self.flat, self.index);
-        let (key, pos) = flat_parse_entry(self.entries_section, byte_offset);
-        self.index += 1;
-        Some((key, pos))
     }
 }
 
@@ -630,7 +698,7 @@ impl IndexTable {
 
     /// Compact index by retaining keys identified by the compactor.
     /// The compactor receives a double-ended iterator over all keys and returns keys to retain.
-    pub fn compact_with<F>(&mut self, compactor: F)
+    pub fn compact_with<F>(&mut self, compactor: F, key_size: Option<usize>)
     where
         F: FnOnce(&mut dyn DoubleEndedIterator<Item = &Bytes>) -> HashSet<Bytes>,
     {
@@ -650,6 +718,7 @@ impl IndexTable {
         };
 
         let mut iter = all_keys.iter();
+        let to_retain = compactor(&mut iter);
         drop(iter);
         drop(all_keys);
 
@@ -661,7 +730,7 @@ impl IndexTable {
                 .map(|(k, p)| (Bytes::from(k.to_vec()), p))
                 .collect();
             self.flat_key_bytes = retained.iter().map(|(k, _)| k.len()).sum();
-            self.flat = build_flat_bytes(retained);
+            self.flat = build_flat_bytes(retained, key_size);
         }
     }
 
@@ -683,22 +752,20 @@ impl IndexTable {
     /// from BTreeMap. Entries from both old flat and clean BTreeMap entries are merged
     /// into a new sorted flat. Removed (tombstone) entries in BTreeMap remain to shadow
     /// corresponding flat entries on future reads.
-    pub fn promote_to_flat(&mut self) {
+    ///
+    /// `key_size` must match the key space: `Some(n)` for fixed-length keys, `None` for
+    /// variable-length keys.
+    pub fn promote_to_flat(&mut self, key_size: Option<usize>) {
         let has_clean = self.data.values().any(|v| v.is_clean());
         if !has_clean && self.flat.is_empty() {
             return;
         }
 
-        // Take ownership of the old flat to avoid borrow conflicts during the merge.
+        // Collect old flat entries. FlatIter handles both format variants.
         let old_flat = std::mem::take(&mut self.flat);
-        let flat_slice = &old_flat[..];
-        let flat_count = flat_entry_count(flat_slice);
-        let entries_start = flat_entries_section_start(flat_count);
-        let entries_section: &[u8] = if flat_count > 0 {
-            &flat_slice[entries_start..]
-        } else {
-            &[]
-        };
+        let flat_entries: Vec<(Bytes, WalPosition)> = FlatIter::new(&old_flat)
+            .map(|(k, p)| (Bytes::from(k.to_vec()), p))
+            .collect();
 
         // Collect clean BTreeMap entries sorted by key (BTreeMap is already sorted).
         let btree_clean: Vec<(&Bytes, WalPosition)> = self
@@ -708,29 +775,19 @@ impl IndexTable {
             .map(|(k, v)| (k, v.into_wal_position()))
             .collect();
 
-        // Merge sorted flat + sorted clean BTreeMap into a new flat.
+        // Merge sorted flat entries + sorted clean BTreeMap entries.
         let mut result: Vec<(Bytes, WalPosition)> = Vec::new();
-        let mut fi = 0usize; // index into flat entries
-        let mut bi = 0usize; // index into btree_clean
+        let mut fi = 0usize;
+        let mut bi = 0usize;
+        let flat_count = flat_entries.len();
 
         while fi < flat_count || bi < btree_clean.len() {
-            let flat_info: Option<(&[u8], usize)> = if fi < flat_count {
-                let off = flat_read_entry_offset(flat_slice, fi);
-                let (k, _) = flat_parse_entry(entries_section, off);
-                Some((k, off))
-            } else {
-                None
-            };
-
-            match (flat_info, btree_clean.get(bi)) {
+            match (flat_entries.get(fi), btree_clean.get(bi)) {
                 (None, None) => break,
-                (Some((fk, off)), None) => {
+                (Some((fk, fv)), None) => {
                     // Only in flat: include unless there is a Removed tombstone in BTreeMap.
-                    if !self.data.get(fk).map(|v| v.is_removed()).unwrap_or(false) {
-                        let (_, pos) = flat_parse_entry(entries_section, off);
-                        let key_abs = entries_start + off + 2;
-                        let key_bytes = old_flat.slice(key_abs..key_abs + fk.len());
-                        result.push((key_bytes, pos));
+                    if !self.data.get(fk.as_ref()).map(|v| v.is_removed()).unwrap_or(false) {
+                        result.push((fk.clone(), *fv));
                     }
                     fi += 1;
                 }
@@ -738,31 +795,24 @@ impl IndexTable {
                     result.push(((*bk).clone(), *bv));
                     bi += 1;
                 }
-                (Some((fk, off)), Some((bk, bv))) => {
-                    match fk.cmp(bk.as_ref()) {
-                        Ordering::Less => {
-                            // Flat key is smaller.
-                            if !self.data.get(fk).map(|v| v.is_removed()).unwrap_or(false) {
-                                let (_, pos) = flat_parse_entry(entries_section, off);
-                                let key_abs = entries_start + off + 2;
-                                let key_bytes = old_flat.slice(key_abs..key_abs + fk.len());
-                                result.push((key_bytes, pos));
-                            }
-                            fi += 1;
+                (Some((fk, fv)), Some((bk, bv))) => match fk.as_ref().cmp(bk.as_ref()) {
+                    Ordering::Less => {
+                        if !self.data.get(fk.as_ref()).map(|v| v.is_removed()).unwrap_or(false) {
+                            result.push((fk.clone(), *fv));
                         }
-                        Ordering::Equal => {
-                            // BTreeMap clean entry overrides flat entry for the same key.
-                            result.push(((*bk).clone(), *bv));
-                            fi += 1;
-                            bi += 1;
-                        }
-                        Ordering::Greater => {
-                            // BTreeMap key is smaller.
-                            result.push(((*bk).clone(), *bv));
-                            bi += 1;
-                        }
+                        fi += 1;
                     }
-                }
+                    Ordering::Equal => {
+                        // BTreeMap clean entry overrides flat entry for the same key.
+                        result.push(((*bk).clone(), *bv));
+                        fi += 1;
+                        bi += 1;
+                    }
+                    Ordering::Greater => {
+                        result.push(((*bk).clone(), *bv));
+                        bi += 1;
+                    }
+                },
             }
         }
 
@@ -774,7 +824,7 @@ impl IndexTable {
         self.key_bytes -= clean_key_bytes;
 
         self.flat_key_bytes = result.iter().map(|(k, _)| k.len()).sum();
-        self.flat = build_flat_bytes(result);
+        self.flat = build_flat_bytes(result, key_size);
         // Remove clean entries from BTreeMap; they are now stored in flat.
         self.data.retain(|_, v| !v.is_clean());
     }
@@ -784,112 +834,222 @@ impl IndexTable {
     // ---------------------------------------------------------------------------
 
     fn flat_len(&self) -> usize {
-        flat_entry_count(&self.flat)
+        let flat = &self.flat[..];
+        if flat.is_empty() {
+            return 0;
+        }
+        match flat[0] {
+            FLAT_TAG_VAR => var_flat_entry_count(&flat[1..]),
+            FLAT_TAG_FIXED => {
+                let key_size = flat[1] as usize;
+                let elem_size = key_size + WalPosition::LENGTH;
+                (flat.len() - 2) / elem_size
+            }
+            tag => panic!("Unknown flat format tag: {tag}"),
+        }
     }
 
     /// Binary search the flat array for an exact key match.
     fn flat_binary_search(&self, key: &[u8]) -> Option<WalPosition> {
         let flat = &self.flat[..];
-        let count = flat_entry_count(flat);
-        if count == 0 {
+        if flat.is_empty() {
             return None;
         }
-        let entries_start = flat_entries_section_start(count);
-        let entries = &flat[entries_start..];
-
-        let mut lo = 0usize;
-        let mut hi = count;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            let off = flat_read_entry_offset(flat, mid);
-            let (mid_key, mid_pos) = flat_parse_entry(entries, off);
-            match mid_key.cmp(key) {
-                Ordering::Equal => return Some(mid_pos),
-                Ordering::Less => lo = mid + 1,
-                Ordering::Greater => hi = mid,
+        match flat[0] {
+            FLAT_TAG_VAR => {
+                let var_flat = &flat[1..];
+                let count = var_flat_entry_count(var_flat);
+                if count == 0 {
+                    return None;
+                }
+                let entries_start = var_flat_entries_section_start(count);
+                let entries = &var_flat[entries_start..];
+                let mut lo = 0usize;
+                let mut hi = count;
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    let off = var_flat_read_entry_offset(var_flat, mid);
+                    let (mid_key, mid_pos) = var_flat_parse_entry(entries, off);
+                    match mid_key.cmp(key) {
+                        Ordering::Equal => return Some(mid_pos),
+                        Ordering::Less => lo = mid + 1,
+                        Ordering::Greater => hi = mid,
+                    }
+                }
+                None
             }
+            FLAT_TAG_FIXED => {
+                let key_size = flat[1] as usize;
+                let entries = &flat[2..];
+                let elem_size = key_size + WalPosition::LENGTH;
+                let count = entries.len() / elem_size;
+                if count == 0 {
+                    return None;
+                }
+                let mut lo = 0usize;
+                let mut hi = count;
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    let start = mid * elem_size;
+                    let mid_key = &entries[start..start + key_size];
+                    match mid_key.cmp(key) {
+                        Ordering::Equal => {
+                            return Some(WalPosition::from_slice(
+                                &entries[start + key_size..start + elem_size],
+                            ));
+                        }
+                        Ordering::Less => lo = mid + 1,
+                        Ordering::Greater => hi = mid,
+                    }
+                }
+                None
+            }
+            tag => panic!("Unknown flat format tag: {tag}"),
         }
-        None
     }
 
     /// Return the first flat entry with key strictly greater than `prev`
     /// (or the first entry at all when `prev` is `None`).
     fn flat_next_forward(&self, prev: Option<&[u8]>) -> Option<(Bytes, WalPosition)> {
         let flat = &self.flat[..];
-        let count = flat_entry_count(flat);
-        if count == 0 {
+        if flat.is_empty() {
             return None;
         }
-        let entries_start = flat_entries_section_start(count);
-        let entries = &flat[entries_start..];
-
-        let start_idx = if let Some(prev) = prev {
-            // Binary search: find the first index where key > prev.
-            let mut lo = 0usize;
-            let mut hi = count;
-            while lo < hi {
-                let mid = (lo + hi) / 2;
-                let off = flat_read_entry_offset(flat, mid);
-                let (mid_key, _) = flat_parse_entry(entries, off);
-                if mid_key <= prev {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
+        match flat[0] {
+            FLAT_TAG_VAR => {
+                let var_flat = &flat[1..];
+                let count = var_flat_entry_count(var_flat);
+                if count == 0 {
+                    return None;
                 }
+                let entries_start = var_flat_entries_section_start(count);
+                let entries = &var_flat[entries_start..];
+                let start_idx = if let Some(prev) = prev {
+                    let mut lo = 0usize;
+                    let mut hi = count;
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        let off = var_flat_read_entry_offset(var_flat, mid);
+                        let (mid_key, _) = var_flat_parse_entry(entries, off);
+                        if mid_key <= prev { lo = mid + 1; } else { hi = mid; }
+                    }
+                    lo
+                } else {
+                    0
+                };
+                if start_idx >= count {
+                    return None;
+                }
+                let off = var_flat_read_entry_offset(var_flat, start_idx);
+                let (key, pos) = var_flat_parse_entry(entries, off);
+                // Absolute position in self.flat: 1 (tag) + entries_start + off + 2 (key_len u16)
+                let key_abs_start = 1 + entries_start + off + 2;
+                let key_bytes = self.flat.slice(key_abs_start..key_abs_start + key.len());
+                Some((key_bytes, pos))
             }
-            lo
-        } else {
-            0
-        };
-
-        if start_idx >= count {
-            return None;
+            FLAT_TAG_FIXED => {
+                let key_size = flat[1] as usize;
+                let entries = &flat[2..];
+                let elem_size = key_size + WalPosition::LENGTH;
+                let count = entries.len() / elem_size;
+                if count == 0 {
+                    return None;
+                }
+                let start_idx = if let Some(prev) = prev {
+                    let mut lo = 0usize;
+                    let mut hi = count;
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        let mid_key = &entries[mid * elem_size..mid * elem_size + key_size];
+                        if mid_key <= prev { lo = mid + 1; } else { hi = mid; }
+                    }
+                    lo
+                } else {
+                    0
+                };
+                if start_idx >= count {
+                    return None;
+                }
+                // Absolute position in self.flat: 2 (tag + key_size byte) + idx * elem_size
+                let key_abs_start = 2 + start_idx * elem_size;
+                let key_bytes = self.flat.slice(key_abs_start..key_abs_start + key_size);
+                let pos =
+                    WalPosition::from_slice(&flat[key_abs_start + key_size..key_abs_start + elem_size]);
+                Some((key_bytes, pos))
+            }
+            tag => panic!("Unknown flat format tag: {tag}"),
         }
-        let off = flat_read_entry_offset(flat, start_idx);
-        let (key, pos) = flat_parse_entry(entries, off);
-        let key_abs_start = entries_start + off + 2;
-        let key_bytes = self.flat.slice(key_abs_start..key_abs_start + key.len());
-        Some((key_bytes, pos))
     }
 
     /// Return the last flat entry with key strictly less than `prev`
     /// (or the last entry at all when `prev` is `None`).
     fn flat_next_reverse(&self, prev: Option<&[u8]>) -> Option<(Bytes, WalPosition)> {
         let flat = &self.flat[..];
-        let count = flat_entry_count(flat);
-        if count == 0 {
+        if flat.is_empty() {
             return None;
         }
-        let entries_start = flat_entries_section_start(count);
-        let entries = &flat[entries_start..];
-
-        let end_idx = if let Some(prev) = prev {
-            // Binary search: find the first index where key >= prev, then subtract 1.
-            let mut lo = 0usize;
-            let mut hi = count;
-            while lo < hi {
-                let mid = (lo + hi) / 2;
-                let off = flat_read_entry_offset(flat, mid);
-                let (mid_key, _) = flat_parse_entry(entries, off);
-                if mid_key < prev {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
+        match flat[0] {
+            FLAT_TAG_VAR => {
+                let var_flat = &flat[1..];
+                let count = var_flat_entry_count(var_flat);
+                if count == 0 {
+                    return None;
                 }
+                let entries_start = var_flat_entries_section_start(count);
+                let entries = &var_flat[entries_start..];
+                let end_idx = if let Some(prev) = prev {
+                    let mut lo = 0usize;
+                    let mut hi = count;
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        let off = var_flat_read_entry_offset(var_flat, mid);
+                        let (mid_key, _) = var_flat_parse_entry(entries, off);
+                        if mid_key < prev { lo = mid + 1; } else { hi = mid; }
+                    }
+                    if lo == 0 {
+                        return None;
+                    }
+                    lo - 1
+                } else {
+                    count - 1
+                };
+                let off = var_flat_read_entry_offset(var_flat, end_idx);
+                let (key, pos) = var_flat_parse_entry(entries, off);
+                let key_abs_start = 1 + entries_start + off + 2;
+                let key_bytes = self.flat.slice(key_abs_start..key_abs_start + key.len());
+                Some((key_bytes, pos))
             }
-            if lo == 0 {
-                return None;
+            FLAT_TAG_FIXED => {
+                let key_size = flat[1] as usize;
+                let entries = &flat[2..];
+                let elem_size = key_size + WalPosition::LENGTH;
+                let count = entries.len() / elem_size;
+                if count == 0 {
+                    return None;
+                }
+                let end_idx = if let Some(prev) = prev {
+                    let mut lo = 0usize;
+                    let mut hi = count;
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        let mid_key = &entries[mid * elem_size..mid * elem_size + key_size];
+                        if mid_key < prev { lo = mid + 1; } else { hi = mid; }
+                    }
+                    if lo == 0 {
+                        return None;
+                    }
+                    lo - 1
+                } else {
+                    count - 1
+                };
+                let key_abs_start = 2 + end_idx * elem_size;
+                let key_bytes = self.flat.slice(key_abs_start..key_abs_start + key_size);
+                let pos =
+                    WalPosition::from_slice(&flat[key_abs_start + key_size..key_abs_start + elem_size]);
+                Some((key_bytes, pos))
             }
-            lo - 1
-        } else {
-            count - 1
-        };
-
-        let off = flat_read_entry_offset(flat, end_idx);
-        let (key, pos) = flat_parse_entry(entries, off);
-        let key_abs_start = entries_start + off + 2;
-        let key_bytes = self.flat.slice(key_abs_start..key_abs_start + key.len());
-        Some((key_bytes, pos))
+            tag => panic!("Unknown flat format tag: {tag}"),
+        }
     }
 
     #[cfg(test)]
@@ -1224,7 +1384,7 @@ mod tests {
             .values_mut()
             .for_each(|v| *v = v.as_clean_modified());
 
-        table.promote_to_flat();
+        table.promote_to_flat(None);
 
         // BTreeMap should be empty after promotion.
         assert!(table.data.is_empty());
@@ -1247,7 +1407,7 @@ mod tests {
             .values_mut()
             .for_each(|v| *v = v.as_clean_modified());
         // First promotion: flat gets [1, 2].
-        table.promote_to_flat();
+        table.promote_to_flat(None);
 
         // Now remove key [1] (goes to BTreeMap as Removed).
         table.remove(vec![1].into(), WalPosition::test_value(10));
@@ -1264,7 +1424,7 @@ mod tests {
         // Second promotion: flat should have [2, 3], key [1] not in flat.
         // The Removed tombstone for key [1] stays in BTreeMap for dirty tracking,
         // so get() returns INVALID (not None).
-        table.promote_to_flat();
+        table.promote_to_flat(None);
         assert_eq!(table.flat_len(), 2);
         assert_eq!(table.get(&[1]), Some(WalPosition::INVALID)); // deleted
         assert_eq!(table.get(&[2]), Some(WalPosition::test_value(2)));
@@ -1281,7 +1441,7 @@ mod tests {
             .data
             .values_mut()
             .for_each(|v| *v = v.as_clean_modified());
-        table.promote_to_flat();
+        table.promote_to_flat(None);
 
         // Forward traversal after promotion.
         let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), false);
@@ -1300,6 +1460,98 @@ mod tests {
         // Last entry (no prev, reverse).
         let next = table.next_entry(None, true);
         assert_eq!(next.unwrap().0, Bytes::from(vec![1, 2, 4, 5]));
+    }
+
+    fn k4(v: u32) -> Bytes {
+        Bytes::from(v.to_be_bytes().to_vec())
+    }
+
+    #[test]
+    fn test_promote_to_flat_fixed_len_basic() {
+        let mut table = IndexTable::default();
+        table.insert(k4(10), WalPosition::test_value(1));
+        table.insert(k4(20), WalPosition::test_value(2));
+        table.insert(k4(30), WalPosition::test_value(3));
+        table.data.values_mut().for_each(|v| *v = v.as_clean_modified());
+
+        table.promote_to_flat(Some(4));
+
+        assert!(table.data.is_empty());
+        assert_eq!(table.flat_len(), 3);
+        // Fixed-length format: tag(1) + key_size(1) + 3*(4+12) = 50 bytes
+        assert_eq!(table.flat.len(), 2 + 3 * (4 + WalPosition::LENGTH));
+
+        assert_eq!(table.get(&k4(10)), Some(WalPosition::test_value(1)));
+        assert_eq!(table.get(&k4(20)), Some(WalPosition::test_value(2)));
+        assert_eq!(table.get(&k4(30)), Some(WalPosition::test_value(3)));
+        assert_eq!(table.get(&k4(15)), None);
+    }
+
+    #[test]
+    fn test_promote_to_flat_fixed_len_next_entry() {
+        let mut table = IndexTable::default();
+        table.insert(k4(10), WalPosition::test_value(1));
+        table.insert(k4(20), WalPosition::test_value(2));
+        table.insert(k4(30), WalPosition::test_value(3));
+        table.data.values_mut().for_each(|v| *v = v.as_clean_modified());
+        table.promote_to_flat(Some(4));
+
+        // Forward from k4(10) → k4(20)
+        let next = table.next_entry(Some(k4(10)), false).unwrap();
+        assert_eq!(next.0, k4(20));
+        assert_eq!(next.1, WalPosition::test_value(2));
+
+        // Reverse from k4(30) → k4(20)
+        let next = table.next_entry(Some(k4(30)), true).unwrap();
+        assert_eq!(next.0, k4(20));
+        assert_eq!(next.1, WalPosition::test_value(2));
+
+        // First (no prev, forward)
+        assert_eq!(table.next_entry(None, false).unwrap().0, k4(10));
+        // Last (no prev, reverse)
+        assert_eq!(table.next_entry(None, true).unwrap().0, k4(30));
+
+        // Past end → None
+        assert!(table.next_entry(Some(k4(30)), false).is_none());
+        // Before start → None
+        assert!(table.next_entry(Some(k4(10)), true).is_none());
+    }
+
+    #[test]
+    fn test_promote_to_flat_fixed_len_with_remove() {
+        let mut table = IndexTable::default();
+        table.insert(k4(10), WalPosition::test_value(1));
+        table.insert(k4(20), WalPosition::test_value(2));
+        table.data.values_mut().for_each(|v| *v = v.as_clean_modified());
+        table.promote_to_flat(Some(4));
+        assert_eq!(table.flat_len(), 2);
+
+        // Remove k4(10); tombstone stays in BTreeMap.
+        table.remove(k4(10), WalPosition::test_value(5));
+        assert_eq!(table.get(&k4(10)), Some(WalPosition::INVALID));
+
+        // Add k4(30) and promote again.
+        table.insert(k4(30), WalPosition::test_value(6));
+        table.data.values_mut().for_each(|v| {
+            if v.is_modified() {
+                *v = v.as_clean_modified();
+            }
+        });
+        table.promote_to_flat(Some(4));
+
+        // flat: [20, 30]; k4(10) shadowed by Removed tombstone.
+        assert_eq!(table.flat_len(), 2);
+        assert_eq!(table.get(&k4(10)), Some(WalPosition::INVALID));
+        assert_eq!(table.get(&k4(20)), Some(WalPosition::test_value(2)));
+        assert_eq!(table.get(&k4(30)), Some(WalPosition::test_value(6)));
+
+        // next_entry returns the Removed tombstone for k4(10) (INVALID pos) so callers
+        // can shadow the corresponding on-disk entry (DirtyUnloaded merge).
+        let (key, pos) = table.next_entry(None, false).unwrap();
+        assert_eq!(key, k4(10));
+        assert_eq!(pos, WalPosition::INVALID);
+        // Continuing past the tombstone yields k4(20).
+        assert_eq!(table.next_entry(Some(k4(10)), false).unwrap().0, k4(20));
     }
 }
 
