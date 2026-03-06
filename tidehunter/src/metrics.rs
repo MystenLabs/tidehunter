@@ -154,6 +154,7 @@ pub struct Metrics {
     pub read: MetricIntCounterVec,
     pub read_bytes: MetricIntCounterVec,
     pub loaded_key_bytes: MetricIntGaugeVec,
+    pub flat_index_bytes: MetricIntGaugeVec,
     pub index_distance_from_tail: MetricIntGaugeVec,
 
     pub lookup_mcs: MetricHistogramVec,
@@ -311,6 +312,7 @@ impl Metrics {
             read: counter_vec!("read", &["ks", "kind", "type"], registry, enabled),
             read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry, enabled),
             loaded_key_bytes: gauge_vec!("loaded_key_bytes", &["ks"], registry, enabled),
+            flat_index_bytes: gauge_vec!("flat_index_bytes", &["ks"], registry, enabled),
             index_distance_from_tail: gauge_vec!(
                 "index_distance_from_tail",
                 &["ks"],

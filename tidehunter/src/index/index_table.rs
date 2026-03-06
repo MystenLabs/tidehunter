@@ -26,8 +26,6 @@ pub struct IndexTable {
     /// All entries are considered clean (promoted from the BTreeMap).
     /// Entries in `data` take priority over entries in `flat` for the same key.
     flat: Bytes,
-    /// Sum of all key lengths currently in `flat`. Maintained incrementally.
-    flat_key_bytes: usize,
     /// Fixed key size for this key space, or `None` for variable-length keys.
     /// Determines which flat format is used.
     key_size: Option<usize>,
@@ -348,7 +346,6 @@ impl IndexTable {
     pub fn retain_dirty(&mut self) {
         self.retain(|_, pos| !pos.is_clean());
         self.flat = Bytes::default();
-        self.flat_key_bytes = 0;
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
@@ -648,7 +645,6 @@ impl IndexTable {
             data,
             key_bytes,
             flat: Bytes::default(),
-            flat_key_bytes: 0,
             key_size: ks.index_key_size(),
         }
     }
@@ -723,7 +719,6 @@ impl IndexTable {
                 .filter(|(k, _)| to_retain.contains(&Bytes::from(k.to_vec())))
                 .map(|(k, p)| (Bytes::from(k.to_vec()), p))
                 .collect();
-            self.flat_key_bytes = retained.iter().map(|(k, _)| k.len()).sum();
             self.flat = build_flat_bytes(retained, self.key_size);
         }
     }
@@ -737,9 +732,14 @@ impl IndexTable {
         }
     }
 
-    /// Total bytes occupied by keys in this table (data + flat). Always O(1).
+    /// Total bytes occupied by keys in this table (BTreeMap keys + full flat buffer). Always O(1).
     pub fn total_key_bytes(&self) -> usize {
-        self.key_bytes + self.flat_key_bytes
+        self.key_bytes + self.flat.len()
+    }
+
+    /// Bytes occupied by the flat buffer. Always O(1).
+    pub fn flat_key_bytes(&self) -> usize {
+        self.flat.len()
     }
 
     /// Move all clean entries from the BTreeMap into the flat array, then remove them
@@ -815,7 +815,6 @@ impl IndexTable {
             .sum();
         self.key_bytes -= clean_key_bytes;
 
-        self.flat_key_bytes = result.iter().map(|(k, _)| k.len()).sum();
         self.flat = build_flat_bytes(result, self.key_size);
         // Remove clean entries from BTreeMap; they are now stored in flat.
         self.data.retain(|_, v| !v.is_clean());
@@ -1174,7 +1173,6 @@ mod tests {
             data,
             key_bytes,
             flat: Default::default(),
-            flat_key_bytes: 0,
             key_size: None,
         };
         let (shape, ks) = KeyShape::new_single_config_indexing(

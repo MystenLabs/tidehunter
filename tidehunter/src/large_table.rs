@@ -58,6 +58,8 @@ pub struct LargeTableEntry {
     /// Used to compute the delta on the next report so multiple cells
     /// can safely share one gauge via `.add()` instead of `.set()`.
     last_reported_key_bytes: i64,
+    /// Last value added to the shared `flat_index_bytes` gauge.
+    last_reported_flat_bytes: i64,
 }
 
 enum LargeTableEntryState {
@@ -1149,6 +1151,7 @@ impl LargeTableEntry {
             last_processed: LastProcessed::none(),
             value_lru,
             last_reported_key_bytes: 0,
+            last_reported_flat_bytes: 0,
         }
     }
 
@@ -1303,6 +1306,7 @@ impl LargeTableEntry {
 
         // Move clean entries from the BTreeMap into the compact flat array.
         self.data.make_mut().promote_to_flat();
+        self.report_loaded_keys_count();
 
         let should_flush = if loader.flush_supported() && self.state.is_dirty() {
             let dirty_count = self.data.count_dirty();
@@ -1324,6 +1328,11 @@ impl LargeTableEntry {
         let delta = new_bytes - self.last_reported_key_bytes;
         self.last_reported_key_bytes = new_bytes;
         self.context.loaded_key_bytes.add(delta);
+
+        let new_flat_bytes = self.data.flat_key_bytes() as i64;
+        let flat_delta = new_flat_bytes - self.last_reported_flat_bytes;
+        self.last_reported_flat_bytes = new_flat_bytes;
+        self.context.flat_index_bytes.add(flat_delta);
     }
 
     fn insert_bloom_filter(&mut self, key: &[u8]) {
