@@ -1,5 +1,6 @@
+use crate::metrics::MetricIntGauge;
 use bytes::BytesMut;
-use minibytes::Bytes;
+use minibytes::{Bytes, BytesOwner};
 use std::alloc::Layout;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -7,14 +8,55 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 
+/// Wraps a `Vec<u8>` buffer and tracks total held bytes via a Prometheus gauge.
+/// Increments the gauge by `len` on creation and decrements it on drop.
+struct TrackingVec {
+    inner: Vec<u8>,
+    gauge: MetricIntGauge,
+}
+
+impl TrackingVec {
+    fn new(inner: Vec<u8>, gauge: MetricIntGauge) -> Self {
+        gauge.add(inner.len() as i64);
+        Self { inner, gauge }
+    }
+}
+
+impl Drop for TrackingVec {
+    fn drop(&mut self) {
+        self.gauge.add(-(self.inner.len() as i64));
+    }
+}
+
+impl AsRef<[u8]> for TrackingVec {
+    fn as_ref(&self) -> &[u8] {
+        self.inner.as_ref()
+    }
+}
+
+impl BytesOwner for TrackingVec {}
+
 pub struct FileReader {
     file: Arc<File>,
     direct_io: bool,
+    bytes_gauge: MetricIntGauge,
 }
 
 impl FileReader {
     pub fn new(file: Arc<File>, direct_io: bool) -> Self {
-        Self { file, direct_io }
+        Self {
+            file,
+            direct_io,
+            bytes_gauge: MetricIntGauge::disabled(),
+        }
+    }
+
+    pub fn new_tracked(file: Arc<File>, direct_io: bool, bytes_gauge: MetricIntGauge) -> Self {
+        Self {
+            file,
+            direct_io,
+            bytes_gauge,
+        }
     }
 
     /// Returns new un-initialized buffer of a given size
@@ -46,13 +88,16 @@ impl FileReader {
             let mut buffer =
                 Self::io_buffer((read_range.end - read_range.start) as usize, self.direct_io);
             self.file.read_exact_at(&mut buffer, read_range.start)?;
-            let buffer = Bytes::from(buffer);
+            let buffer = Bytes::from(TrackingVec::new(buffer, self.bytes_gauge.clone()));
             let buffer = buffer.slice(map_range);
             Ok(buffer)
         } else {
             let mut buffer = Self::io_buffer(len, self.direct_io);
             self.file.read_exact_at(&mut buffer, pos)?;
-            Ok(Bytes::from(buffer))
+            Ok(Bytes::from(TrackingVec::new(
+                buffer,
+                self.bytes_gauge.clone(),
+            )))
         }
     }
 }

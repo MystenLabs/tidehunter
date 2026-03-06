@@ -284,7 +284,11 @@ impl Wal {
             let header_end = offset + CrcFrame::CRC_HEADER_LENGTH as u64;
             let range = (header_end + inner_offset as u64)..(offset + pos.frame_len() as u64);
             Ok(WalRandomRead::File(FileRange::new(
-                FileReader::new(file.clone(), self.layout.direct_io),
+                FileReader::new_tracked(
+                    file.clone(),
+                    self.layout.direct_io,
+                    self.metrics.file_reader_bytes.clone(),
+                ),
                 range,
             )))
         }

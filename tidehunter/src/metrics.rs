@@ -107,6 +107,10 @@ pub struct MetricIntGauge {
 }
 
 impl MetricIntGauge {
+    pub fn disabled() -> Self {
+        Self { inner: None }
+    }
+
     pub fn set(&self, v: i64) {
         if let Some(inner) = &self.inner {
             inner.set(v);
@@ -198,6 +202,7 @@ pub struct Metrics {
     pub relocation_current_keyspace: MetricIntGauge,
 
     pub wal_mmap_bytes: MetricIntGauge,
+    pub file_reader_bytes: MetricIntGauge,
 
     pub memory_estimate: MetricIntGaugeVec,
     pub value_cache_size: MetricIntGaugeVec,
@@ -416,6 +421,7 @@ impl Metrics {
             relocation_current_keyspace: gauge!("relocation_current_keyspace", registry, enabled),
 
             wal_mmap_bytes: gauge!("wal_mmap_bytes", registry, enabled),
+            file_reader_bytes: gauge!("file_reader_bytes", registry, enabled),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry, enabled),
             value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry, enabled),
