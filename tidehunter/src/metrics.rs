@@ -204,6 +204,7 @@ pub struct Metrics {
     pub value_cache_size: MetricIntGaugeVec,
     pub pending_table_len: MetricIntGaugeVec,
     pub pending_promotion_job_remaining: MetricIntGaugeVec,
+    pub pending_promotion_job_time_mcs: MetricIntCounter,
 }
 
 macro_rules! gauge (
@@ -425,6 +426,11 @@ impl Metrics {
             pending_promotion_job_remaining: gauge_vec!(
                 "pending_promotion_job_remaining",
                 &["ks"],
+                registry,
+                enabled
+            ),
+            pending_promotion_job_time_mcs: counter!(
+                "pending_promotion_job_time_mcs",
                 registry,
                 enabled
             ),
