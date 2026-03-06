@@ -590,39 +590,72 @@ impl IndexTable {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Bytes, WalPosition)> + '_ {
-        // Flat entries not overridden by BTreeMap, skipping Removed.
-        // Collect and sort to guarantee sorted output.
-        let flat_entries = FlatIter::new(&self.flat, self.key_size)
+        // Both sources are sorted and disjoint (flat excludes keys present in data).
+        // Merge in O(N+M) rather than collecting and sorting.
+        let mut flat_it = FlatIter::new(&self.flat, self.key_size)
             .filter(|(k, _)| !self.data.contains_key(*k))
             .filter_map(|(k, iwp)| {
                 iwp.into_wal_position()
                     .valid()
                     .map(|pos| (Bytes::from(k.to_vec()), pos))
-            });
-        let btree_entries = self
+            })
+            .peekable();
+        let mut btree_it = self
             .data
             .iter()
-            .filter_map(|(k, v)| v.into_wal_position().valid().map(|pos| (k.clone(), pos)));
+            .filter_map(|(k, v)| v.into_wal_position().valid().map(|pos| (k.clone(), pos)))
+            .peekable();
 
-        let mut all: Vec<(Bytes, WalPosition)> = flat_entries.chain(btree_entries).collect();
-        all.sort_by(|(a, _), (b, _)| a.as_ref().cmp(b.as_ref()));
-        all.into_iter()
+        let mut result = Vec::with_capacity(self.flat_len() + self.data.len());
+        loop {
+            let cmp = match (flat_it.peek(), btree_it.peek()) {
+                (None, None) => break,
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some((fk, _)), Some((bk, _))) => fk.cmp(bk),
+            };
+            if cmp != Ordering::Greater {
+                result.push(flat_it.next().unwrap());
+            } else {
+                result.push(btree_it.next().unwrap());
+            }
+        }
+        result.extend(flat_it);
+        result.extend(btree_it);
+        result.into_iter()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
-        // Flat keys not in BTreeMap, skipping Removed, plus valid BTreeMap keys.
-        let flat_keys = FlatIter::new(&self.flat, self.key_size)
+        // Both sources are sorted and disjoint (flat excludes keys present in data).
+        // Merge in O(N+M) rather than collecting and sorting.
+        let mut flat_it = FlatIter::new(&self.flat, self.key_size)
             .filter(|(k, iwp)| !self.data.contains_key(*k) && !iwp.is_removed())
-            .map(|(k, _)| Bytes::from(k.to_vec()));
-        let btree_keys = self
+            .map(|(k, _)| Bytes::from(k.to_vec()))
+            .peekable();
+        let mut btree_it = self
             .data
             .iter()
             .filter(|(_, v)| !v.is_removed())
-            .map(|(k, _)| k.clone());
+            .map(|(k, _)| k.clone())
+            .peekable();
 
-        let mut all: Vec<Bytes> = flat_keys.chain(btree_keys).collect();
-        all.sort();
-        all.into_iter()
+        let mut result = Vec::with_capacity(self.flat_len() + self.data.len());
+        loop {
+            let cmp = match (flat_it.peek(), btree_it.peek()) {
+                (None, None) => break,
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(fk), Some(bk)) => fk.cmp(bk),
+            };
+            if cmp != Ordering::Greater {
+                result.push(flat_it.next().unwrap());
+            } else {
+                result.push(btree_it.next().unwrap());
+            }
+        }
+        result.extend(flat_it);
+        result.extend(btree_it);
+        result.into_iter()
     }
 
     /// Writes key-value pairs from IndexTable to a BytesMut buffer.
@@ -654,10 +687,10 @@ impl IndexTable {
         // Removed entries from either source are skipped (tombstones are not written on disk).
         let flat = &self.flat[..];
 
-        // Use owned Vec<u8> for flat keys to avoid borrow conflicts.
-        let mut cur_flat: Option<(Vec<u8>, IndexWalPosition)> = FlatIter::new(flat, self.key_size)
-            .next()
-            .map(|(k, iwp)| (k.to_vec(), iwp));
+        // Keep a single stateful FlatIter alive for O(N) sequential traversal.
+        let mut flat_iter = FlatIter::new(flat, self.key_size);
+        let mut cur_flat: Option<(Vec<u8>, IndexWalPosition)> =
+            flat_iter.next().map(|(k, iwp)| (k.to_vec(), iwp));
         let mut btree_it = self.data.iter();
         let mut cur_btree: Option<(&Bytes, &IndexWalPosition)> = btree_it.next();
 
@@ -682,16 +715,11 @@ impl IndexTable {
                             fiwp.into_update_position(),
                         );
                     }
-                    cur_flat = FlatIter::new(flat, self.key_size)
-                        .find(|(k, _)| *k > fk.as_slice())
-                        .map(|(k, iwp)| (k.to_vec(), iwp));
+                    cur_flat = flat_iter.next().map(|(k, iwp)| (k.to_vec(), iwp));
                 }
                 Ordering::Equal => {
-                    // Same key: BTreeMap overrides flat.
-                    let fk = cur_flat.take().unwrap().0;
-                    cur_flat = FlatIter::new(flat, self.key_size)
-                        .find(|(k, _)| *k > fk.as_slice())
-                        .map(|(k, iwp)| (k.to_vec(), iwp));
+                    // Same key: BTreeMap overrides flat; advance both.
+                    cur_flat = flat_iter.next().map(|(k, iwp)| (k.to_vec(), iwp));
                     let (bk, bv) = cur_btree.take().unwrap();
                     cur_btree = btree_it.next();
                     if !bv.is_removed() {
@@ -839,17 +867,35 @@ impl IndexTable {
         F: FnOnce(&mut dyn DoubleEndedIterator<Item = &Bytes>) -> HashSet<Bytes>,
     {
         // Collect all valid unique keys from both flat and BTreeMap in sorted order.
+        // Both sources are sorted and disjoint — merge in O(N+M).
         let all_keys: Vec<Bytes> = {
-            let flat_only = FlatIter::new(&self.flat, self.key_size)
+            let mut flat_it = FlatIter::new(&self.flat, self.key_size)
                 .filter(|(k, _)| !self.data.contains_key(*k))
-                .map(|(k, _)| Bytes::from(k.to_vec()));
-            let btree_valid = self
+                .filter(|(_, iwp)| !iwp.is_removed())
+                .map(|(k, _)| Bytes::from(k.to_vec()))
+                .peekable();
+            let mut btree_it = self
                 .data
                 .iter()
                 .filter(|(_, v)| !v.is_removed())
-                .map(|(k, _)| k.clone());
-            let mut v: Vec<Bytes> = flat_only.chain(btree_valid).collect();
-            v.sort();
+                .map(|(k, _)| k.clone())
+                .peekable();
+            let mut v: Vec<Bytes> = Vec::with_capacity(self.flat_len() + self.data.len());
+            loop {
+                let cmp = match (flat_it.peek(), btree_it.peek()) {
+                    (None, None) => break,
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (Some(fk), Some(bk)) => fk.cmp(bk),
+                };
+                if cmp != Ordering::Greater {
+                    v.push(flat_it.next().unwrap());
+                } else {
+                    v.push(btree_it.next().unwrap());
+                }
+            }
+            v.extend(flat_it);
+            v.extend(btree_it);
             v
         };
 
