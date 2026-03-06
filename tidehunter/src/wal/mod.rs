@@ -100,6 +100,12 @@ impl WalWriter {
         let mut guards = vec![];
         for w in writes {
             let frame_size = w.len();
+            // The in-memory flat index packs the entry kind into the top 2 bits of the
+            // 4-byte WAL frame-length field, so frame sizes must fit in 30 bits (< 1 GiB).
+            assert!(
+                frame_size < (1 << 30),
+                "WAL frame size {frame_size} exceeds 1 GiB limit"
+            );
             let aligned_frame_size = self.wal.layout.align(frame_size as u64);
             self.fp.fp_multi_write_before_write_buf();
             let buf = write_buf_at(&map.data, offset, frame_size);
