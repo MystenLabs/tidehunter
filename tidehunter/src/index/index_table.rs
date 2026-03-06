@@ -17,15 +17,17 @@ pub struct IndexTable {
     data: BTreeMap<Bytes, IndexWalPosition>,
     /// Sum of all key lengths currently in `data`. Maintained incrementally.
     key_bytes: usize,
-    /// Sorted clean entries in compact binary format.
+    /// Sorted entries in compact binary format (both clean and dirty).
     ///
     /// Two formats depending on whether the key space uses fixed-length keys:
     /// - Variable-length (`key_size == None`): `[count: u32][offsets: u32 * count][key_len: u16][key][pos (12)]*`
     /// - Fixed-length (`key_size == Some(n)`): `[key (n bytes)][pos (12 bytes)]*` — identical to on-disk body
     ///
-    /// All entries are considered clean (promoted from the BTreeMap).
     /// Entries in `data` take priority over entries in `flat` for the same key.
     flat: Bytes,
+    /// Number of dirty (Modified) entries currently stored in `flat`.
+    /// Incremented by `promote_to_flat`, reset to zero by `clean_self`.
+    flat_dirty_count: usize,
     /// Fixed key size for this key space, or `None` for variable-length keys.
     /// Determines which flat format is used.
     key_size: Option<usize>,
@@ -153,7 +155,7 @@ fn build_flat_bytes(entries: Vec<(Bytes, WalPosition)>, key_size: Option<usize>)
 enum FlatIter<'a> {
     Empty,
     VarLen {
-        flat: &'a [u8],            // full flat buffer, starts with count field
+        flat: &'a [u8], // full flat buffer, starts with count field
         entries_section: &'a [u8],
         count: usize,
         index: usize,
@@ -175,13 +177,31 @@ impl<'a> FlatIter<'a> {
             None => {
                 let count = var_flat_entry_count(flat);
                 let section_start = var_flat_entries_section_start(count);
-                let entries_section = if count > 0 { &flat[section_start..] } else { &[] };
-                Self::VarLen { flat, entries_section, count, index: 0 }
+                let entries_section = if count > 0 {
+                    &flat[section_start..]
+                } else {
+                    &[]
+                };
+                Self::VarLen {
+                    flat,
+                    entries_section,
+                    count,
+                    index: 0,
+                }
             }
             Some(key_size) => {
                 let elem_size = key_size + WalPosition::LENGTH;
-                let count = if elem_size > 0 { flat.len() / elem_size } else { 0 };
-                Self::Fixed { entries: flat, key_size, count, index: 0 }
+                let count = if elem_size > 0 {
+                    flat.len() / elem_size
+                } else {
+                    0
+                };
+                Self::Fixed {
+                    entries: flat,
+                    key_size,
+                    count,
+                    index: 0,
+                }
             }
         }
     }
@@ -193,7 +213,12 @@ impl<'a> Iterator for FlatIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Empty => None,
-            Self::VarLen { flat, entries_section, count, index } => {
+            Self::VarLen {
+                flat,
+                entries_section,
+                count,
+                index,
+            } => {
                 if *index >= *count {
                     return None;
                 }
@@ -202,15 +227,19 @@ impl<'a> Iterator for FlatIter<'a> {
                 *index += 1;
                 Some((key, pos))
             }
-            Self::Fixed { entries, key_size, count, index } => {
+            Self::Fixed {
+                entries,
+                key_size,
+                count,
+                index,
+            } => {
                 if *index >= *count {
                     return None;
                 }
                 let elem_size = *key_size + WalPosition::LENGTH;
                 let start = *index * elem_size;
                 let key = &entries[start..start + *key_size];
-                let pos =
-                    WalPosition::from_slice(&entries[start + *key_size..start + elem_size]);
+                let pos = WalPosition::from_slice(&entries[start + *key_size..start + elem_size]);
                 *index += 1;
                 Some((key, pos))
             }
@@ -322,7 +351,7 @@ impl IndexTable {
     /// Count the number of dirty(modified or removed) wal positions in this index.
     /// This information is not cached and causes iteration over the entire index table.
     pub fn count_dirty(&self) -> usize {
-        self.data.values().filter(|p| !p.is_clean()).count()
+        self.flat_dirty_count + self.data.values().filter(|p| !p.is_clean()).count()
     }
 
     fn retain<F>(&mut self, mut f: F)
@@ -529,8 +558,9 @@ impl IndexTable {
         let flat = &self.flat[..];
 
         // Use owned Vec<u8> for flat keys to avoid borrow conflicts.
-        let mut cur_flat: Option<(Vec<u8>, WalPosition)> =
-            FlatIter::new(flat, self.key_size).next().map(|(k, p)| (k.to_vec(), p));
+        let mut cur_flat: Option<(Vec<u8>, WalPosition)> = FlatIter::new(flat, self.key_size)
+            .next()
+            .map(|(k, p)| (k.to_vec(), p));
         let mut btree_it = self.data.iter();
         let mut cur_btree: Option<(&Bytes, &IndexWalPosition)> = btree_it.next();
 
@@ -645,6 +675,7 @@ impl IndexTable {
             data,
             key_bytes,
             flat: Bytes::default(),
+            flat_dirty_count: 0,
             key_size: ks.index_key_size(),
         }
     }
@@ -666,6 +697,8 @@ impl IndexTable {
                 has_flat
             }
         });
+        // All flat entries are now on disk; none are dirty.
+        self.flat_dirty_count = 0;
     }
 
     /// Retain only unprocessed entries
@@ -742,14 +775,14 @@ impl IndexTable {
         self.flat.len()
     }
 
-    /// Move all clean entries from the BTreeMap into the flat array, then remove them
-    /// from BTreeMap. Entries from both old flat and clean BTreeMap entries are merged
-    /// into a new sorted flat. Removed (tombstone) entries in BTreeMap remain to shadow
-    /// corresponding flat entries on future reads.
-    ///
+    /// Move all non-Removed entries (both Clean and Modified) from the BTreeMap into the
+    /// flat array, then remove them from BTreeMap. Entries from both old flat and promoted
+    /// BTreeMap entries are merged into a new sorted flat. Removed (tombstone) entries in
+    /// BTreeMap remain to shadow corresponding flat entries on future reads.
+    /// `flat_dirty_count` is incremented by the number of Modified entries promoted.
     pub fn promote_to_flat(&mut self) {
-        let has_clean = self.data.values().any(|v| v.is_clean());
-        if !has_clean && self.flat.is_empty() {
+        let has_promotable = self.data.values().any(|v| !v.is_removed());
+        if !has_promotable && self.flat.is_empty() {
             return;
         }
 
@@ -759,48 +792,69 @@ impl IndexTable {
             .map(|(k, p)| (Bytes::from(k.to_vec()), p))
             .collect();
 
-        // Collect clean BTreeMap entries sorted by key (BTreeMap is already sorted).
-        let btree_clean: Vec<(&Bytes, WalPosition)> = self
+        // Collect non-Removed BTreeMap entries sorted by key (BTreeMap is already sorted).
+        // Track which ones are Modified (dirty) so we can update flat_dirty_count.
+        let btree_promotable: Vec<(&Bytes, WalPosition, bool)> = self
             .data
             .iter()
-            .filter(|(_, v)| v.is_clean())
-            .map(|(k, v)| (k, v.into_wal_position()))
+            .filter(|(_, v)| !v.is_removed())
+            .map(|(k, v)| (k, v.into_wal_position(), !v.is_clean()))
             .collect();
 
-        // Merge sorted flat entries + sorted clean BTreeMap entries.
+        // Merge sorted flat entries + sorted non-Removed BTreeMap entries.
         let mut result: Vec<(Bytes, WalPosition)> = Vec::new();
+        let mut new_dirty: usize = 0;
         let mut fi = 0usize;
         let mut bi = 0usize;
         let flat_count = flat_entries.len();
 
-        while fi < flat_count || bi < btree_clean.len() {
-            match (flat_entries.get(fi), btree_clean.get(bi)) {
+        while fi < flat_count || bi < btree_promotable.len() {
+            match (flat_entries.get(fi), btree_promotable.get(bi)) {
                 (None, None) => break,
                 (Some((fk, fv)), None) => {
                     // Only in flat: include unless there is a Removed tombstone in BTreeMap.
-                    if !self.data.get(fk.as_ref()).map(|v| v.is_removed()).unwrap_or(false) {
+                    if !self
+                        .data
+                        .get(fk.as_ref())
+                        .map(|v| v.is_removed())
+                        .unwrap_or(false)
+                    {
                         result.push((fk.clone(), *fv));
                     }
                     fi += 1;
                 }
-                (None, Some((bk, bv))) => {
+                (None, Some((bk, bv, is_dirty))) => {
+                    if *is_dirty {
+                        new_dirty += 1;
+                    }
                     result.push(((*bk).clone(), *bv));
                     bi += 1;
                 }
-                (Some((fk, fv)), Some((bk, bv))) => match fk.as_ref().cmp(bk.as_ref()) {
+                (Some((fk, fv)), Some((bk, bv, is_dirty))) => match fk.as_ref().cmp(bk.as_ref()) {
                     Ordering::Less => {
-                        if !self.data.get(fk.as_ref()).map(|v| v.is_removed()).unwrap_or(false) {
+                        if !self
+                            .data
+                            .get(fk.as_ref())
+                            .map(|v| v.is_removed())
+                            .unwrap_or(false)
+                        {
                             result.push((fk.clone(), *fv));
                         }
                         fi += 1;
                     }
                     Ordering::Equal => {
-                        // BTreeMap clean entry overrides flat entry for the same key.
+                        // BTreeMap entry overrides flat entry for the same key.
+                        if *is_dirty {
+                            new_dirty += 1;
+                        }
                         result.push(((*bk).clone(), *bv));
                         fi += 1;
                         bi += 1;
                     }
                     Ordering::Greater => {
+                        if *is_dirty {
+                            new_dirty += 1;
+                        }
                         result.push(((*bk).clone(), *bv));
                         bi += 1;
                     }
@@ -808,16 +862,19 @@ impl IndexTable {
             }
         }
 
-        // Update key_bytes: subtract clean entries leaving data.
-        let clean_key_bytes: usize = self.data.iter()
-            .filter(|(_, v)| v.is_clean())
+        // Update key_bytes: subtract all promoted entries (Clean and Modified).
+        let promoted_key_bytes: usize = self
+            .data
+            .iter()
+            .filter(|(_, v)| !v.is_removed())
             .map(|(k, _)| k.len())
             .sum();
-        self.key_bytes -= clean_key_bytes;
+        self.key_bytes -= promoted_key_bytes;
 
         self.flat = build_flat_bytes(result, self.key_size);
-        // Remove clean entries from BTreeMap; they are now stored in flat.
-        self.data.retain(|_, v| !v.is_clean());
+        self.flat_dirty_count += new_dirty;
+        // Remove all non-Removed entries from BTreeMap; they are now stored in flat.
+        self.data.retain(|_, v| v.is_removed());
     }
 
     // ---------------------------------------------------------------------------
@@ -911,7 +968,11 @@ impl IndexTable {
                         let mid = (lo + hi) / 2;
                         let off = var_flat_read_entry_offset(flat, mid);
                         let (mid_key, _) = var_flat_parse_entry(entries, off);
-                        if mid_key <= prev { lo = mid + 1; } else { hi = mid; }
+                        if mid_key <= prev {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
                     }
                     lo
                 } else {
@@ -939,7 +1000,11 @@ impl IndexTable {
                     while lo < hi {
                         let mid = (lo + hi) / 2;
                         let mid_key = &flat[mid * elem_size..mid * elem_size + key_size];
-                        if mid_key <= prev { lo = mid + 1; } else { hi = mid; }
+                        if mid_key <= prev {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
                     }
                     lo
                 } else {
@@ -980,7 +1045,11 @@ impl IndexTable {
                         let mid = (lo + hi) / 2;
                         let off = var_flat_read_entry_offset(flat, mid);
                         let (mid_key, _) = var_flat_parse_entry(entries, off);
-                        if mid_key < prev { lo = mid + 1; } else { hi = mid; }
+                        if mid_key < prev {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
                     }
                     if lo == 0 {
                         return None;
@@ -1007,7 +1076,11 @@ impl IndexTable {
                     while lo < hi {
                         let mid = (lo + hi) / 2;
                         let mid_key = &flat[mid * elem_size..mid * elem_size + key_size];
-                        if mid_key < prev { lo = mid + 1; } else { hi = mid; }
+                        if mid_key < prev {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
                     }
                     if lo == 0 {
                         return None;
@@ -1173,6 +1246,7 @@ mod tests {
             data,
             key_bytes,
             flat: Default::default(),
+            flat_dirty_count: 0,
             key_size: None,
         };
         let (shape, ks) = KeyShape::new_single_config_indexing(
@@ -1446,7 +1520,10 @@ mod tests {
         table.insert(k4(10), WalPosition::test_value(1));
         table.insert(k4(20), WalPosition::test_value(2));
         table.insert(k4(30), WalPosition::test_value(3));
-        table.data.values_mut().for_each(|v| *v = v.as_clean_modified());
+        table
+            .data
+            .values_mut()
+            .for_each(|v| *v = v.as_clean_modified());
 
         table.key_size = Some(4);
         table.promote_to_flat();
@@ -1468,7 +1545,10 @@ mod tests {
         table.insert(k4(10), WalPosition::test_value(1));
         table.insert(k4(20), WalPosition::test_value(2));
         table.insert(k4(30), WalPosition::test_value(3));
-        table.data.values_mut().for_each(|v| *v = v.as_clean_modified());
+        table
+            .data
+            .values_mut()
+            .for_each(|v| *v = v.as_clean_modified());
         table.key_size = Some(4);
         table.promote_to_flat();
 
@@ -1498,7 +1578,10 @@ mod tests {
         let mut table = IndexTable::default();
         table.insert(k4(10), WalPosition::test_value(1));
         table.insert(k4(20), WalPosition::test_value(2));
-        table.data.values_mut().for_each(|v| *v = v.as_clean_modified());
+        table
+            .data
+            .values_mut()
+            .for_each(|v| *v = v.as_clean_modified());
         table.key_size = Some(4);
         table.promote_to_flat();
         assert_eq!(table.flat_len(), 2);
@@ -1530,6 +1613,97 @@ mod tests {
         assert_eq!(pos, WalPosition::INVALID);
         // Continuing past the tombstone yields k4(20).
         assert_eq!(table.next_entry(Some(k4(10)), false).unwrap().0, k4(20));
+    }
+
+    #[test]
+    fn test_promote_to_flat_modified_entries() {
+        // promote_to_flat should promote Modified (dirty) entries too, not just Clean.
+        let mut table = IndexTable::default();
+        table.insert(vec![1].into(), WalPosition::test_value(1));
+        table.insert(vec![2].into(), WalPosition::test_value(2));
+        table.insert(vec![3].into(), WalPosition::test_value(3));
+        // All entries are Modified (not yet flushed).
+        assert_eq!(table.count_dirty(), 3);
+
+        table.promote_to_flat();
+
+        // BTreeMap should be empty (only Removed entries stay).
+        assert!(table.data.is_empty());
+        assert_eq!(table.flat_len(), 3);
+        // Dirty count should include the flat dirty entries.
+        assert_eq!(table.count_dirty(), 3);
+        assert_eq!(table.flat_dirty_count, 3);
+
+        // Lookups still work.
+        assert_eq!(table.get(&[1]), Some(WalPosition::test_value(1)));
+        assert_eq!(table.get(&[2]), Some(WalPosition::test_value(2)));
+        assert_eq!(table.get(&[3]), Some(WalPosition::test_value(3)));
+        assert_eq!(table.get(&[4]), None);
+
+        // After clean_self, flat_dirty_count is reset to zero.
+        table.clean_self();
+        assert_eq!(table.flat_dirty_count, 0);
+        assert_eq!(table.count_dirty(), 0);
+        // Entries remain accessible.
+        assert_eq!(table.get(&[1]), Some(WalPosition::test_value(1)));
+    }
+
+    #[test]
+    fn test_promote_to_flat_mixed_clean_and_modified() {
+        // promote_to_flat should handle a mix of Clean and Modified entries.
+        let mut table = IndexTable::default();
+        table.insert(vec![1].into(), WalPosition::test_value(1));
+        table.insert(vec![2].into(), WalPosition::test_value(2));
+        table.insert(vec![3].into(), WalPosition::test_value(3));
+        // Make [1] and [3] clean; leave [2] modified.
+        table
+            .data
+            .entry(vec![1].into())
+            .and_modify(|v| *v = v.as_clean_modified());
+        table
+            .data
+            .entry(vec![3].into())
+            .and_modify(|v| *v = v.as_clean_modified());
+
+        table.promote_to_flat();
+
+        assert!(table.data.is_empty());
+        assert_eq!(table.flat_len(), 3);
+        // Only [2] is dirty in flat.
+        assert_eq!(table.flat_dirty_count, 1);
+        assert_eq!(table.count_dirty(), 1);
+
+        assert_eq!(table.get(&[1]), Some(WalPosition::test_value(1)));
+        assert_eq!(table.get(&[2]), Some(WalPosition::test_value(2)));
+        assert_eq!(table.get(&[3]), Some(WalPosition::test_value(3)));
+    }
+
+    #[test]
+    fn test_promote_to_flat_modified_with_remove() {
+        // Removed entries stay in BTreeMap to shadow flat; Modified entries go to flat.
+        let mut table = IndexTable::default();
+        table.insert(vec![1].into(), WalPosition::test_value(1));
+        table.insert(vec![2].into(), WalPosition::test_value(2));
+        // First promotion with Modified entries.
+        table.promote_to_flat();
+        assert_eq!(table.flat_len(), 2);
+        assert_eq!(table.flat_dirty_count, 2);
+        assert_eq!(table.count_dirty(), 2);
+
+        // Delete [1] (Removed tombstone in BTreeMap) and add [3].
+        table.remove(vec![1].into(), WalPosition::test_value(10));
+        table.insert(vec![3].into(), WalPosition::test_value(5));
+        // count_dirty: 2 (flat) + 1 (Removed) + 1 (new Modified) = 4
+        assert_eq!(table.count_dirty(), 4);
+
+        table.promote_to_flat();
+        // flat: [2, 3]; [1] removed from flat because of Removed tombstone.
+        assert_eq!(table.flat_len(), 2);
+        // [3] was Modified when promoted; flat_dirty_count = 2 (prev) + 1 (new) = 3.
+        assert_eq!(table.flat_dirty_count, 3);
+        assert_eq!(table.get(&[1]), Some(WalPosition::INVALID)); // Removed tombstone still shadows
+        assert_eq!(table.get(&[2]), Some(WalPosition::test_value(2)));
+        assert_eq!(table.get(&[3]), Some(WalPosition::test_value(5)));
     }
 }
 
