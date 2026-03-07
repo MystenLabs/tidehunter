@@ -920,7 +920,11 @@ impl Db {
                     };
 
                     // Run the promotion job with the WAL as the loader
-                    let _timer = db.metrics.pending_promotion_job_time_mcs.clone().mcs_timer();
+                    let _timer = db
+                        .metrics
+                        .pending_promotion_job_time_mcs
+                        .clone()
+                        .mcs_timer();
                     if let Err(e) = db.large_table.promote_pending_job(db.wal.as_ref()) {
                         eprintln!("Error in pending promotion job: {:?}", e);
                     }
