@@ -463,10 +463,51 @@ impl LargeTable {
         for ks_table in &self.table {
             let mut total_remaining = 0;
             for mutex in ks_table.rows.mutexes() {
-                let mut row = mutex.lock();
-                for entry in row.entries.iter_mut() {
-                    let remaining = entry.promote_pending_and_check_flush(loader, &self.flusher)?;
-                    total_remaining += remaining;
+                // Phase 1: under lock — promote pending entries and check flush threshold
+                // (promote_pending changes dirty count), then grab a shared snapshot so
+                // promote_to_flat can run outside the lock.
+                let snapshots: Vec<(CellId, usize, Arc<IndexTable>)> = {
+                    let mut row = mutex.lock();
+                    let mut snapshots = Vec::with_capacity(row.entries.iter().count());
+                    for entry in row.entries.iter_mut() {
+                        let remaining =
+                            entry.promote_pending_and_check_flush(loader, &self.flusher)?;
+                        let arc = entry.data.clone_shared();
+                        snapshots.push((entry.cell.clone(), remaining, arc));
+                    }
+                    snapshots
+                    // lock released here
+                };
+
+                // Phase 2: outside the lock — clone each snapshot and compact BTreeMap into flat.
+                // promote_to_flat does not change the dirty count, so the flush check above is
+                // sufficient. If a writer modifies an entry concurrently it will clone on make_mut
+                // (ArcCow semantics); the same_shared check below detects this and discards stale work.
+                let promoted: Vec<(CellId, usize, Arc<IndexTable>, IndexTable)> = snapshots
+                    .into_iter()
+                    .map(|(cell, remaining, arc)| {
+                        let mut table = (*arc).clone();
+                        table.promote_to_flat();
+                        (cell, remaining, arc, table)
+                    })
+                    .collect();
+
+                // Phase 3: re-acquire lock — write back promoted table only if the entry was
+                // not modified while we were outside the lock, then update metrics.
+                {
+                    let mut row = mutex.lock();
+                    for (cell, remaining, arc, promoted_table) in promoted {
+                        total_remaining += remaining;
+                        let Some(entry) = row.try_entry_mut(&cell) else {
+                            continue;
+                        };
+                        if entry.data.same_shared(&arc) {
+                            entry.data = ArcCow::new_owned(promoted_table);
+                        } else {
+                            self.metrics.promote_flat_arc_miss.inc();
+                        }
+                        entry.report_loaded_keys_count();
+                    }
                 }
             }
             self.metrics
@@ -1296,30 +1337,21 @@ impl LargeTableEntry {
 
     /// Promotes pending entries and checks if flush is needed due to too many dirty keys.
     /// Returns the number of remaining pending entries.
-    pub(crate) fn promote_pending_and_check_flush<L: Loader>(
+    fn promote_pending_and_check_flush<L: Loader>(
         &mut self,
         loader: &L,
         flusher: &IndexFlusher,
     ) -> Result<usize, L::Error> {
         self.promote_pending();
         let remaining_pending = self.pending_data.len();
-
-        // Move clean entries from the BTreeMap into the compact flat array.
-        self.data.make_mut().promote_to_flat();
-        self.report_loaded_keys_count();
-
-        let should_flush = if loader.flush_supported() && self.state.is_dirty() {
+        let should_flush = loader.flush_supported() && self.state.is_dirty() && {
             let dirty_count = self.data.count_dirty();
             self.context
                 .excess_dirty_keys(dirty_count.saturating_sub(self.unload_jitter))
-        } else {
-            false
         };
-
         if should_flush {
             self.unload_if_ks_enabled(flusher, loader)?;
         }
-
         Ok(remaining_pending)
     }
 
