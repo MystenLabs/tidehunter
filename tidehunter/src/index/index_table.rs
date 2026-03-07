@@ -394,17 +394,24 @@ impl IndexTable {
             if dirty.data.contains_key(k) {
                 continue;
             }
-            let key = Bytes::from(k.to_vec());
+            // Zero-copy: k is a subslice of dirty.flat, so slice_ref avoids a heap allocation.
+            let key = dirty.flat.slice_to_bytes(k);
             if v.is_removed() {
                 if self.flat.is_empty() {
                     if self.data.remove(&key).is_some() {
                         self.key_bytes -= key.len();
                     }
-                } else if self.data.insert(key.clone(), v).is_none() {
-                    self.key_bytes += key.len();
+                } else {
+                    let len = key.len();
+                    if self.data.insert(key, v).is_none() {
+                        self.key_bytes += len;
+                    }
                 }
-            } else if self.data.insert(key.clone(), v.as_clean_modified()).is_none() {
-                self.key_bytes += key.len();
+            } else {
+                let len = key.len();
+                if self.data.insert(key, v.as_clean_modified()).is_none() {
+                    self.key_bytes += len;
+                }
             }
         }
     }
@@ -423,9 +430,11 @@ impl IndexTable {
             if dirty.data.contains_key(k) {
                 continue;
             }
-            let key = Bytes::from(k.to_vec());
-            if self.data.insert(key.clone(), v).is_none() {
-                self.key_bytes += key.len();
+            // Zero-copy: k is a subslice of dirty.flat, so slice_ref avoids a heap allocation.
+            let key = dirty.flat.slice_to_bytes(k);
+            let len = key.len();
+            if self.data.insert(key, v).is_none() {
+                self.key_bytes += len;
             }
         }
     }
@@ -457,24 +466,26 @@ impl IndexTable {
         if !original.flat.is_empty() {
             let orig_flat_bytes = original.flat.clone();
             let self_flat_bytes = std::mem::take(&mut self.flat);
-            let orig_entries: Vec<(&[u8], IndexWalPosition)> =
-                FlatIter::new(&orig_flat_bytes, original.key_size).collect();
+            // Peekable iterator over original flat avoids a full Vec allocation.
+            let mut orig_it = FlatIter::new(&orig_flat_bytes, original.key_size).peekable();
             let mut kept: Vec<(Bytes, IndexWalPosition)> = Vec::new();
-            let mut oi = 0usize;
             for (sk, s_iwp) in FlatIter::new(&self_flat_bytes, self.key_size) {
-                while oi < orig_entries.len() && orig_entries[oi].0 < sk {
-                    oi += 1;
+                // Advance orig_it past entries with keys smaller than sk.
+                while orig_it.peek().map(|(ok, _)| *ok < sk).unwrap_or(false) {
+                    orig_it.next();
                 }
-                let should_remove = if oi < orig_entries.len() && orig_entries[oi].0 == sk {
-                    let (_, o_iwp) = orig_entries[oi];
-                    oi += 1;
-                    last_processed.is_processed(&o_iwp)
-                        && s_iwp.into_wal_position() == o_iwp.into_wal_position()
-                } else {
-                    false
-                };
+                // Check for an exact key match and consume the orig entry if found.
+                let should_remove =
+                    if orig_it.peek().map(|(ok, _)| *ok == sk).unwrap_or(false) {
+                        let (_, o_iwp) = orig_it.next().unwrap();
+                        last_processed.is_processed(&o_iwp)
+                            && s_iwp.into_wal_position() == o_iwp.into_wal_position()
+                    } else {
+                        false
+                    };
                 if !should_remove {
-                    kept.push((Bytes::from(sk.to_vec()), s_iwp));
+                    // Zero-copy: sk is a subslice of self_flat_bytes.
+                    kept.push((self_flat_bytes.slice_to_bytes(sk), s_iwp));
                 }
             }
             self.flat = build_flat_bytes(kept, self.key_size);
