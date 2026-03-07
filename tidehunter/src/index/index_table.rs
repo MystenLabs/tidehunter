@@ -388,6 +388,25 @@ impl IndexTable {
                 self.key_bytes += k.len();
             }
         }
+        // Also merge flat entries (present when promote_to_flat has been called on dirty).
+        // BTreeMap entries already processed above take priority; skip those keys.
+        for (k, v) in FlatIter::new(&dirty.flat, dirty.key_size) {
+            if dirty.data.contains_key(k) {
+                continue;
+            }
+            let key = Bytes::from(k.to_vec());
+            if v.is_removed() {
+                if self.flat.is_empty() {
+                    if self.data.remove(&key).is_some() {
+                        self.key_bytes -= key.len();
+                    }
+                } else if self.data.insert(key.clone(), v).is_none() {
+                    self.key_bytes += key.len();
+                }
+            } else if self.data.insert(key.clone(), v.as_clean_modified()).is_none() {
+                self.key_bytes += key.len();
+            }
+        }
     }
 
     /// Merges dirty IndexTable into a loaded IndexTable, preserving dirty states
@@ -396,6 +415,17 @@ impl IndexTable {
         for (k, v) in dirty.data.iter() {
             if self.data.insert(k.clone(), *v).is_none() {
                 self.key_bytes += k.len();
+            }
+        }
+        // Also merge flat entries (present when promote_to_flat has been called on dirty).
+        // BTreeMap entries already processed above take priority; skip those keys.
+        for (k, v) in FlatIter::new(&dirty.flat, dirty.key_size) {
+            if dirty.data.contains_key(k) {
+                continue;
+            }
+            let key = Bytes::from(k.to_vec());
+            if self.data.insert(key.clone(), v).is_none() {
+                self.key_bytes += key.len();
             }
         }
     }
@@ -421,6 +451,33 @@ impl IndexTable {
                     }
                 }
             }
+        }
+        // Also unmerge flat entries (present when promote_to_flat was called on original).
+        // Rebuild self.flat, dropping entries whose key+position matches a processed original entry.
+        if !original.flat.is_empty() {
+            let orig_flat_bytes = original.flat.clone();
+            let self_flat_bytes = std::mem::take(&mut self.flat);
+            let orig_entries: Vec<(&[u8], IndexWalPosition)> =
+                FlatIter::new(&orig_flat_bytes, original.key_size).collect();
+            let mut kept: Vec<(Bytes, IndexWalPosition)> = Vec::new();
+            let mut oi = 0usize;
+            for (sk, s_iwp) in FlatIter::new(&self_flat_bytes, self.key_size) {
+                while oi < orig_entries.len() && orig_entries[oi].0 < sk {
+                    oi += 1;
+                }
+                let should_remove = if oi < orig_entries.len() && orig_entries[oi].0 == sk {
+                    let (_, o_iwp) = orig_entries[oi];
+                    oi += 1;
+                    last_processed.is_processed(&o_iwp)
+                        && s_iwp.into_wal_position() == o_iwp.into_wal_position()
+                } else {
+                    false
+                };
+                if !should_remove {
+                    kept.push((Bytes::from(sk.to_vec()), s_iwp));
+                }
+            }
+            self.flat = build_flat_bytes(kept, self.key_size);
         }
     }
 
@@ -919,9 +976,17 @@ impl IndexTable {
     /// Apply given update function to a value with a given key.
     /// If the key does not exist, this function completes without calling the update function
     pub fn apply_update(&mut self, key: &[u8], update: impl FnOnce(&mut IndexWalPosition)) {
-        let value = self.data.get_mut(key);
-        if let Some(value) = value {
-            update(value)
+        if let Some(value) = self.data.get_mut(key) {
+            update(value);
+            return;
+        }
+        // Also check the flat buffer (present when promote_to_flat has been called).
+        // Insert the updated entry into the BTreeMap so it shadows the stale flat entry.
+        if let Some(mut iwp) = self.flat_binary_search(key) {
+            update(&mut iwp);
+            let key_bytes = Bytes::from(key.to_vec());
+            self.key_bytes += key_bytes.len();
+            self.data.insert(key_bytes, iwp);
         }
     }
 
