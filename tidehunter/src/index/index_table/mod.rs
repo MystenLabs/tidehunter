@@ -1,3 +1,8 @@
+mod flat;
+use flat::{
+    FlatIter, build_flat_bytes, flat_count, flat_entry_at, flat_lower_bound, flat_upper_bound,
+};
+
 use crate::key_shape::KeySpaceDesc;
 use crate::primitives::cursor::SliceCursor;
 use crate::primitives::slice_buf::SliceBuf;
@@ -40,20 +45,20 @@ pub struct IndexTable {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct IndexWalPosition {
-    offset: u64,
-    len: u32,
-    kind: IndexEntryKind,
+    pub(super) offset: u64,
+    pub(super) len: u32,
+    pub(super) kind: IndexEntryKind,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-enum IndexEntryKind {
+pub(super) enum IndexEntryKind {
     Clean,
     Modified,
     Removed,
 }
 
 impl IndexEntryKind {
-    fn to_u8(self) -> u8 {
+    pub(super) fn to_u8(self) -> u8 {
         match self {
             IndexEntryKind::Clean => 0,
             IndexEntryKind::Modified => 1,
@@ -61,7 +66,7 @@ impl IndexEntryKind {
         }
     }
 
-    fn from_u8(b: u8) -> Self {
+    pub(super) fn from_u8(b: u8) -> Self {
         match b {
             1 => IndexEntryKind::Modified,
             2 => IndexEntryKind::Removed,
@@ -72,340 +77,6 @@ impl IndexEntryKind {
 
 // Compile time check to ensure IndexWalPosition consumes the same amount of memory as WalPosition
 const _: [u8; size_of::<WalPosition>()] = [0u8; size_of::<IndexWalPosition>()];
-
-// ---------------------------------------------------------------------------
-// Flat array helper functions
-//
-// Two in-memory formats, selected by `IndexTable::key_size`:
-//
-//   Variable-length (key_size == None):
-//     [count: u32][offsets: u32 * count][key_len: u16][key][wal_offset: u64][encoded_len: u32]*
-//     Offsets enable O(log n) binary search without scanning entries.
-//
-//   Fixed-length (key_size == Some(n)):
-//     [key (n bytes)][wal_offset: u64][encoded_len: u32]*
-//     No per-entry overhead; count = flat.len() / (n + 12).
-//
-// `encoded_len` packs the entry kind into the top 2 bits of the 4-byte length
-// field.  WAL frame sizes are always < 1 GiB (2^30), so bits 30-31 are free:
-//   bits 31-30 = kind  (0 = Clean, 1 = Modified, 2 = Removed)
-//   bits 29-0  = actual WAL frame length
-//
-// The flat buffer is purely in-memory and never persisted.
-// ---------------------------------------------------------------------------
-
-// ---- Variable-length helpers (operate on the flat buffer directly) --------
-
-fn var_flat_entry_count(flat: &[u8]) -> usize {
-    if flat.len() < 4 {
-        return 0;
-    }
-    u32::from_be_bytes(flat[0..4].try_into().unwrap()) as usize
-}
-
-fn var_flat_entries_section_start(count: usize) -> usize {
-    4 + 4 * count
-}
-
-fn var_flat_read_entry_offset(flat: &[u8], idx: usize) -> usize {
-    let pos = 4 + 4 * idx;
-    u32::from_be_bytes(flat[pos..pos + 4].try_into().unwrap()) as usize
-}
-
-/// Encode `kind` into the top 2 bits of `len`. `len` must be < 2^30 (asserted in `Wal::multi_write`).
-#[inline]
-fn encode_kind_in_len(len: u32, kind: IndexEntryKind) -> u32 {
-    len | ((kind.to_u8() as u32) << 30)
-}
-
-/// Extract `kind` from the top 2 bits and the actual `len` from the bottom 30 bits.
-#[inline]
-fn decode_kind_from_len(encoded: u32) -> (u32, IndexEntryKind) {
-    (
-        encoded & 0x3FFF_FFFF,
-        IndexEntryKind::from_u8((encoded >> 30) as u8),
-    )
-}
-
-/// Parse a `(key_slice, IndexWalPosition)` from the var-len entries section at `byte_offset`.
-/// Layout: [key_len: u16][key][wal_offset: u64][encoded_len: u32]
-fn var_flat_parse_entry(entries_section: &[u8], byte_offset: usize) -> (&[u8], IndexWalPosition) {
-    let key_len = u16::from_be_bytes(
-        entries_section[byte_offset..byte_offset + 2]
-            .try_into()
-            .unwrap(),
-    ) as usize;
-    let key = &entries_section[byte_offset + 2..byte_offset + 2 + key_len];
-    let wal_start = byte_offset + 2 + key_len;
-    let wal_offset = u64::from_be_bytes(
-        entries_section[wal_start..wal_start + 8]
-            .try_into()
-            .unwrap(),
-    );
-    let encoded = u32::from_be_bytes(
-        entries_section[wal_start + 8..wal_start + 12]
-            .try_into()
-            .unwrap(),
-    );
-    let (wal_len, kind) = decode_kind_from_len(encoded);
-    (
-        key,
-        IndexWalPosition {
-            offset: wal_offset,
-            len: wal_len,
-            kind,
-        },
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Shared flat-buffer helpers (operate on raw `&[u8]`, format-agnostic)
-// ---------------------------------------------------------------------------
-
-/// Returns the number of entries encoded in `flat`.
-fn flat_count(flat: &[u8], key_size: Option<usize>) -> usize {
-    if flat.is_empty() {
-        return 0;
-    }
-    match key_size {
-        None => var_flat_entry_count(flat),
-        Some(ks) => flat.len() / (ks + WalPosition::LENGTH),
-    }
-}
-
-/// Returns the key slice and `IndexWalPosition` for the entry at position `idx`.
-/// The returned key slice borrows from `flat`.
-/// Panics if `idx >= flat_count(flat, key_size)`.
-fn flat_entry_at(flat: &[u8], key_size: Option<usize>, idx: usize) -> (&[u8], IndexWalPosition) {
-    match key_size {
-        None => {
-            let count = var_flat_entry_count(flat);
-            let entries_start = var_flat_entries_section_start(count);
-            let entries = &flat[entries_start..];
-            let off = var_flat_read_entry_offset(flat, idx);
-            var_flat_parse_entry(entries, off)
-        }
-        Some(ks) => {
-            let elem_size = ks + WalPosition::LENGTH;
-            let start = idx * elem_size;
-            let key = &flat[start..start + ks];
-            let wal_offset =
-                u64::from_be_bytes(flat[start + ks..start + ks + 8].try_into().unwrap());
-            let encoded =
-                u32::from_be_bytes(flat[start + ks + 8..start + elem_size].try_into().unwrap());
-            let (len, kind) = decode_kind_from_len(encoded);
-            (
-                key,
-                IndexWalPosition {
-                    offset: wal_offset,
-                    len,
-                    kind,
-                },
-            )
-        }
-    }
-}
-
-/// Lower bound: the smallest index `i` such that `flat[i].key >= target`.
-/// Returns `flat_count(flat, key_size)` when all keys are less than `target`.
-fn flat_lower_bound(flat: &[u8], key_size: Option<usize>, target: &[u8]) -> usize {
-    let count = flat_count(flat, key_size);
-    let mut lo = 0usize;
-    let mut hi = count;
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        let (mid_key, _) = flat_entry_at(flat, key_size, mid);
-        if mid_key < target {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
-/// Upper bound: the smallest index `i` such that `flat[i].key > target`.
-/// Returns `flat_count(flat, key_size)` when all keys are <= `target`.
-fn flat_upper_bound(flat: &[u8], key_size: Option<usize>, target: &[u8]) -> usize {
-    let count = flat_count(flat, key_size);
-    let mut lo = 0usize;
-    let mut hi = count;
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        let (mid_key, _) = flat_entry_at(flat, key_size, mid);
-        if mid_key <= target {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
-/// Build a flat buffer from a sorted list of `(key, IndexWalPosition)` pairs.
-///
-/// Pass `key_size = Some(n)` for fixed-length key spaces; `None` for variable-length.
-///
-/// Fixed format:    `[key (n)][wal_offset: u64][encoded_len: u32]*`
-/// Variable format: `[count: u32][offsets: u32*n][key_len: u16][key][wal_offset: u64][encoded_len: u32]*`
-///
-/// `encoded_len` packs the entry kind into the top 2 bits (see `encode_kind_in_len`).
-fn build_flat_bytes(entries: Vec<(Bytes, IndexWalPosition)>, key_size: Option<usize>) -> Bytes {
-    let n = entries.len();
-    if n == 0 {
-        return Bytes::default();
-    }
-
-    if let Some(key_size) = key_size {
-        // Fixed-length format: [key (key_size)][wal_offset (8)][encoded_len (4)]
-        let elem_size = key_size + WalPosition::LENGTH;
-        let mut result = Vec::with_capacity(n * elem_size);
-        for (key, iwp) in &entries {
-            debug_assert_eq!(key.len(), key_size, "key length mismatch in fixed flat");
-            result.extend_from_slice(key);
-            result.extend_from_slice(&iwp.offset.to_be_bytes());
-            result.extend_from_slice(&encode_kind_in_len(iwp.len, iwp.kind).to_be_bytes());
-        }
-        Bytes::from(result)
-    } else {
-        // Variable-length format: [count: u32][offsets: u32*n][key_len: u16][key][wal_offset (8)][encoded_len (4)]*
-        let mut data_section: Vec<u8> = Vec::new();
-        let mut offsets: Vec<u32> = Vec::with_capacity(n);
-        for (key, iwp) in &entries {
-            offsets.push(data_section.len() as u32);
-            let key_len = key.len() as u16;
-            data_section.extend_from_slice(&key_len.to_be_bytes());
-            data_section.extend_from_slice(key);
-            data_section.extend_from_slice(&iwp.offset.to_be_bytes());
-            data_section.extend_from_slice(&encode_kind_in_len(iwp.len, iwp.kind).to_be_bytes());
-        }
-        let header_size = 4 + 4 * n; // count + offsets
-        let mut result = Vec::with_capacity(header_size + data_section.len());
-        result.extend_from_slice(&(n as u32).to_be_bytes());
-        for off in offsets {
-            result.extend_from_slice(&off.to_be_bytes());
-        }
-        result.extend_from_slice(&data_section);
-        Bytes::from(result)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Sequential flat iterator
-// ---------------------------------------------------------------------------
-
-enum FlatIter<'a> {
-    Empty,
-    VarLen {
-        flat: &'a [u8], // full flat buffer, starts with count field
-        entries_section: &'a [u8],
-        count: usize,
-        index: usize,
-    },
-    Fixed {
-        entries: &'a [u8], // full flat buffer: packed key+pos elements
-        key_size: usize,
-        count: usize,
-        index: usize,
-    },
-}
-
-impl<'a> FlatIter<'a> {
-    fn new(flat: &'a [u8], key_size: Option<usize>) -> Self {
-        if flat.is_empty() {
-            return Self::Empty;
-        }
-        match key_size {
-            None => {
-                let count = var_flat_entry_count(flat);
-                let section_start = var_flat_entries_section_start(count);
-                let entries_section = if count > 0 {
-                    &flat[section_start..]
-                } else {
-                    &[]
-                };
-                Self::VarLen {
-                    flat,
-                    entries_section,
-                    count,
-                    index: 0,
-                }
-            }
-            Some(key_size) => {
-                let elem_size = key_size + WalPosition::LENGTH;
-                let count = if elem_size > 0 {
-                    flat.len() / elem_size
-                } else {
-                    0
-                };
-                Self::Fixed {
-                    entries: flat,
-                    key_size,
-                    count,
-                    index: 0,
-                }
-            }
-        }
-    }
-}
-
-impl<'a> Iterator for FlatIter<'a> {
-    type Item = (&'a [u8], IndexWalPosition);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Empty => None,
-            Self::VarLen {
-                flat,
-                entries_section,
-                count,
-                index,
-            } => {
-                if *index >= *count {
-                    return None;
-                }
-                let byte_offset = var_flat_read_entry_offset(flat, *index);
-                let (key, iwp) = var_flat_parse_entry(entries_section, byte_offset);
-                *index += 1;
-                Some((key, iwp))
-            }
-            Self::Fixed {
-                entries,
-                key_size,
-                count,
-                index,
-            } => {
-                if *index >= *count {
-                    return None;
-                }
-                // Fixed layout per entry: [key (key_size)][wal_offset (8)][encoded_len (4)]
-                let elem_size = *key_size + WalPosition::LENGTH;
-                let start = *index * elem_size;
-                let key = &entries[start..start + *key_size];
-                let wal_offset = u64::from_be_bytes(
-                    entries[start + *key_size..start + *key_size + 8]
-                        .try_into()
-                        .unwrap(),
-                );
-                let encoded = u32::from_be_bytes(
-                    entries[start + *key_size + 8..start + elem_size]
-                        .try_into()
-                        .unwrap(),
-                );
-                let (len, kind) = decode_kind_from_len(encoded);
-                *index += 1;
-                Some((
-                    key,
-                    IndexWalPosition {
-                        offset: wal_offset,
-                        len,
-                        kind,
-                    },
-                ))
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // IndexTable implementation
@@ -1370,6 +1041,7 @@ impl<'a> Iterator for VariableLenKeyIndexIterator<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::flat::{decode_kind_from_len, encode_kind_in_len};
     use super::*;
     use crate::key_shape::{KeyIndexing, KeyShape, KeyType};
 
