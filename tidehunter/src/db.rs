@@ -254,12 +254,12 @@ impl Db {
                     false
                 };
             if timed_snapshot || written > snapshot_written_bytes {
-                // todo taint storage instance on failure?
-                let snapshot_position = db
-                    .rebuild_control_region()
-                    .expect("Failed to rebuild control region");
-                // snapshot_position is now a u64 offset
-                position = snapshot_position;
+                // // todo taint storage instance on failure?
+                // let snapshot_position = db
+                //     .rebuild_control_region()
+                //     .expect("Failed to rebuild control region");
+                // // snapshot_position is now a u64 offset
+                // position = snapshot_position;
             }
         }
     }
