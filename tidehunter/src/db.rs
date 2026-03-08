@@ -224,7 +224,7 @@ impl Db {
     fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
         let start = Instant::now();
         let mut last_snapshot = Duration::ZERO;
-        const SNAPSHOT_EVERY_SECS: u64 = 3600;
+        const SNAPSHOT_EVERY_SECS: u64 = 3600 * 100;
         loop {
             // Check if database is still alive periodically (every second) to allow faster shutdown
             for _ in 0..60 {
