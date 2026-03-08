@@ -781,9 +781,15 @@ impl IndexTable {
     /// Move ALL entries from the BTreeMap (write buffer) into the flat array, merging
     /// with any existing flat content. BTreeMap is empty after this call.
     /// BTreeMap entries override flat entries for the same key.
-    pub fn promote_to_flat(&mut self) {
-        if self.data.is_empty() {
-            return;
+    #[cfg(not(test))]
+    const PROMOTE_THRESHOLD: usize = 128;
+    #[cfg(test)]
+    const PROMOTE_THRESHOLD: usize = 0;
+
+    /// Returns `true` if the flat buffer was updated, `false` if nothing changed.
+    pub fn promote_to_flat(&mut self) -> bool {
+        if self.data.len() <= Self::PROMOTE_THRESHOLD {
+            return false;
         }
 
         // Collect old flat entries.
@@ -836,6 +842,7 @@ impl IndexTable {
         self.key_bytes = 0;
         self.flat = build_flat_bytes(result, self.key_size);
         self.data.clear();
+        true
     }
 
     // ---------------------------------------------------------------------------

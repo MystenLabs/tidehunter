@@ -483,21 +483,25 @@ impl LargeTable {
                 // promote_to_flat does not change the dirty count, so the flush check above is
                 // sufficient. If a writer modifies an entry concurrently it will clone on make_mut
                 // (ArcCow semantics); the same_shared check below detects this and discards stale work.
-                let promoted: Vec<(CellId, usize, Arc<IndexTable>, IndexTable)> = snapshots
-                    .into_iter()
-                    .map(|(cell, remaining, arc)| {
-                        let mut table = (*arc).clone();
-                        table.promote_to_flat();
-                        (cell, remaining, arc, table)
+                let promoted: Vec<(CellId, Arc<IndexTable>, IndexTable)> = snapshots
+                    .iter()
+                    .filter_map(|(cell, _, arc)| {
+                        let mut table = (**arc).clone();
+                        table
+                            .promote_to_flat()
+                            .then_some((cell.clone(), arc.clone(), table))
                     })
                     .collect();
+                total_remaining += snapshots
+                    .iter()
+                    .map(|(_, remaining, _)| remaining)
+                    .sum::<usize>();
 
                 // Phase 3: re-acquire lock — write back promoted table only if the entry was
                 // not modified while we were outside the lock, then update metrics.
-                {
+                if !promoted.is_empty() {
                     let mut row = mutex.lock();
-                    for (cell, remaining, arc, promoted_table) in promoted {
-                        total_remaining += remaining;
+                    for (cell, arc, promoted_table) in promoted {
                         let Some(entry) = row.try_entry_mut(&cell) else {
                             continue;
                         };
