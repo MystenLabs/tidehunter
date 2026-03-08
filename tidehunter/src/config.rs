@@ -120,6 +120,11 @@ impl Config {
         self.snapshot_written_bytes
     }
 
+    pub fn gen_snapshot_written_bytes_jitter(&self, rng: &mut impl Rng) -> u64 {
+        let max_jitter = cmp::max(1, self.snapshot_written_bytes / 10);
+        self.snapshot_written_bytes + rng.gen_range(0..max_jitter)
+    }
+
     pub fn gen_dirty_keys_jitter(&self, rng: &mut impl Rng) -> usize {
         rng.gen_range(0..self.max_dirty_keys_jitter())
     }

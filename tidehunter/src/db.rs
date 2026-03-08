@@ -24,6 +24,7 @@ use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
+use rand::rngs::ThreadRng;
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -225,6 +226,11 @@ impl Db {
         let start = Instant::now();
         let mut last_snapshot = Duration::ZERO;
         const SNAPSHOT_EVERY_SECS: u64 = 3600 * 100;
+        let mut rng = ThreadRng::default();
+        let snapshot_written_bytes = weak
+            .upgrade()?
+            .config
+            .gen_snapshot_written_bytes_jitter(&mut rng);
         loop {
             // Check if database is still alive periodically (every second) to allow faster shutdown
             for _ in 0..60 {
@@ -247,7 +253,7 @@ impl Db {
                 } else {
                     false
                 };
-            if timed_snapshot || written > db.config.snapshot_written_bytes() {
+            if timed_snapshot || written > snapshot_written_bytes {
                 // todo taint storage instance on failure?
                 let snapshot_position = db
                     .rebuild_control_region()
