@@ -200,6 +200,8 @@ pub struct Metrics {
 
     pub wal_mmap_bytes: MetricIntGauge,
 
+    pub dirty_keys: MetricIntGaugeVec,
+
     pub memory_estimate: MetricIntGaugeVec,
     pub value_cache_size: MetricIntGaugeVec,
     pub pending_table_len: MetricIntGaugeVec,
@@ -420,6 +422,8 @@ impl Metrics {
             relocation_current_keyspace: gauge!("relocation_current_keyspace", registry, enabled),
 
             wal_mmap_bytes: gauge!("wal_mmap_bytes", registry, enabled),
+
+            dirty_keys: gauge_vec!("dirty_keys", &["ks"], registry, enabled),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry, enabled),
             value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry, enabled),

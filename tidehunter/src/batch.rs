@@ -110,7 +110,11 @@ impl WriteBatch {
         let cell_id = context.ks_config.cell_id(&reduced_key);
 
         // Store operation to be applied on commit
-        self.pending_ops.push(PendingOp::Remove { ks, reduced_key, cell_id });
+        self.pending_ops.push(PendingOp::Remove {
+            ks,
+            reduced_key,
+            cell_id,
+        });
 
         // todo transaction state is corrupted on panic
         self.prepare_write(WalEntry::Remove(ks, k));

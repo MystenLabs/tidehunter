@@ -24,6 +24,9 @@ pub struct IndexTable {
     data: BTreeMap<Bytes, IndexWalPosition>,
     /// Sum of all key lengths currently in `data`. Maintained incrementally.
     key_bytes: usize,
+    /// Count of dirty (Modified or Removed) entries across both `data` and `flat`.
+    /// Maintained incrementally for O(1) access via `dirty_count()`.
+    dirty_count: usize,
     /// Primary storage for all entries in compact binary format.
     ///
     /// Two formats depending on whether the key space uses fixed-length keys:
@@ -78,6 +81,16 @@ impl IndexEntryKind {
 // Compile time check to ensure IndexWalPosition consumes the same amount of memory as WalPosition
 const _: [u8; size_of::<WalPosition>()] = [0u8; size_of::<IndexWalPosition>()];
 
+/// Adjust `dirty_count` when an entry transitions between clean and dirty states.
+/// Takes a direct reference to the counter to avoid borrow conflicts when `self.data` is held.
+fn adjust_dirty_count(dirty_count: &mut usize, was_dirty: bool, is_dirty: bool) {
+    match (was_dirty, is_dirty) {
+        (true, false) => *dirty_count -= 1,
+        (false, true) => *dirty_count += 1,
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // IndexTable implementation
 // ---------------------------------------------------------------------------
@@ -113,6 +126,7 @@ impl IndexTable {
         match self.data.entry(k) {
             Entry::Vacant(va) => {
                 self.key_bytes += va.key().len();
+                adjust_dirty_count(&mut self.dirty_count, false, !v.is_clean());
                 va.insert(v);
                 None
             }
@@ -122,6 +136,7 @@ impl IndexTable {
                     previous.offset < v.offset,
                     "Index WAL position must be increasing"
                 );
+                adjust_dirty_count(&mut self.dirty_count, !previous.is_clean(), !v.is_clean());
                 oc.insert(v);
                 Some(previous.into_wal_position())
             }
@@ -182,6 +197,7 @@ impl IndexTable {
                 }
             }
         }
+        self.dirty_count = self.count_dirty_slow();
     }
 
     /// Merges dirty IndexTable into a loaded IndexTable, preserving dirty states
@@ -205,6 +221,7 @@ impl IndexTable {
                 self.key_bytes += len;
             }
         }
+        self.dirty_count = self.count_dirty_slow();
     }
 
     /// Remove flushed index entries that have offset <= last_processed
@@ -257,11 +274,17 @@ impl IndexTable {
             }
             self.flat = build_flat_bytes(kept, self.key_size);
         }
+        self.dirty_count = self.count_dirty_slow();
     }
 
-    /// Count the number of dirty (Modified or Removed) wal positions in this index.
-    /// This information is not cached and causes iteration over the entire index table.
-    pub fn count_dirty(&self) -> usize {
+    /// Count the number of dirty (Modified or Removed) entries. O(1) — uses cached count.
+    pub fn dirty_count(&self) -> usize {
+        self.dirty_count
+    }
+
+    /// Slow path: recount by iterating all entries. Used to recompute the cache after
+    /// bulk mutations that touch both `flat` and `data` in ways too complex to track inline.
+    fn count_dirty_slow(&self) -> usize {
         let flat_dirty = FlatIter::new(&self.flat, self.key_size)
             .filter(|(_, iwp)| !iwp.is_clean())
             .count();
@@ -273,15 +296,31 @@ impl IndexTable {
         F: FnMut(&Bytes, &mut IndexWalPosition) -> bool,
     {
         let mut removed_bytes = 0usize;
+        let mut dirty_delta: i64 = 0;
         self.data.retain(|k, v| {
+            let was_dirty = !v.is_clean();
             if f(k, v) {
+                let is_dirty = !v.is_clean();
+                match (was_dirty, is_dirty) {
+                    (true, false) => dirty_delta -= 1,
+                    (false, true) => dirty_delta += 1,
+                    _ => {}
+                }
                 true
             } else {
                 removed_bytes += k.len();
+                if was_dirty {
+                    dirty_delta -= 1;
+                }
                 false
             }
         });
         self.key_bytes -= removed_bytes;
+        if dirty_delta >= 0 {
+            self.dirty_count += dirty_delta as usize;
+        } else {
+            self.dirty_count = self.dirty_count.saturating_sub((-dirty_delta) as usize);
+        }
     }
 
     /// Reduces this index to its dirty overlay: keeps only Modified and Removed entries,
@@ -636,6 +675,7 @@ impl IndexTable {
             key_bytes,
             flat: Bytes::default(),
             key_size: ks.index_key_size(),
+            dirty_count: 0,
         }
     }
 
@@ -664,6 +704,11 @@ impl IndexTable {
             }
             IndexEntryKind::Removed => false,
         });
+        // The flat rebuild above removed flat dirty entries without updating dirty_count.
+        // retain correctly handled BTreeMap changes, but dirty_count is still off by the
+        // flat dirty entries that were dropped. Setting to 0 is correct since all remaining
+        // entries are Clean after this call.
+        self.dirty_count = 0;
     }
 
     /// Retain only unprocessed entries (those with WAL offset > last_processed).
@@ -672,6 +717,8 @@ impl IndexTable {
     pub fn retain_unprocessed(&mut self, last_processed: LastProcessed) {
         self.flat = Bytes::default();
         self.retain(|_, v| !last_processed.is_processed(v));
+        // flat was cleared unconditionally; recount since retain only tracked BTreeMap changes.
+        self.dirty_count = self.count_dirty_slow();
     }
 
     /// Returns true if this index table has any unprocessed entries.
@@ -693,6 +740,8 @@ impl IndexTable {
             .collect();
         self.flat = build_flat_bytes(kept, self.key_size);
         self.retain(|_, v| v.offset >= last_processed);
+        // flat was rebuilt; recount since retain only tracked BTreeMap changes.
+        self.dirty_count = self.count_dirty_slow();
     }
 
     /// Compact index by retaining keys identified by the compactor.
@@ -749,19 +798,25 @@ impl IndexTable {
                 .collect();
             self.flat = build_flat_bytes(retained, self.key_size);
         }
+        // flat was rebuilt; recount since retain only tracked BTreeMap changes.
+        self.dirty_count = self.count_dirty_slow();
     }
 
     /// Apply given update function to a value with a given key.
     /// If the key does not exist, this function completes without calling the update function
     pub fn apply_update(&mut self, key: &[u8], update: impl FnOnce(&mut IndexWalPosition)) {
         if let Some(value) = self.data.get_mut(key) {
+            let was_dirty = !value.is_clean();
             update(value);
+            adjust_dirty_count(&mut self.dirty_count, was_dirty, !value.is_clean());
             return;
         }
         // Also check the flat buffer (present when promote_to_flat has been called).
         // Insert the updated entry into the BTreeMap so it shadows the stale flat entry.
         if let Some(mut iwp) = self.flat_binary_search(key) {
+            let was_dirty = !iwp.is_clean();
             update(&mut iwp);
+            adjust_dirty_count(&mut self.dirty_count, was_dirty, !iwp.is_clean());
             let key_bytes = Bytes::from(key.to_vec());
             self.key_bytes += key_bytes.len();
             self.data.insert(key_bytes, iwp);
@@ -840,10 +895,16 @@ impl IndexTable {
 
         // All BTreeMap key bytes are now in flat; reset the BTreeMap.
         self.key_bytes = 0;
+        // Recount dirty from the merged result (cheaper than an extra pass over flat after build).
+        self.dirty_count = result.iter().filter(|(_, iwp)| !iwp.is_clean()).count();
         self.flat = build_flat_bytes(result, self.key_size);
         self.data.clear();
         true
     }
+
+    // ---------------------------------------------------------------------------
+    // Private helpers
+    // ---------------------------------------------------------------------------
 
     // ---------------------------------------------------------------------------
     // Private flat-array helpers
@@ -1081,6 +1142,7 @@ mod tests {
             key_bytes,
             flat: Default::default(),
             key_size: None,
+            dirty_count: 0,
         };
         let (shape, ks) = KeyShape::new_single_config_indexing(
             KeyIndexing::variable_length(),
@@ -1454,7 +1516,7 @@ mod tests {
         table.insert(vec![2].into(), WalPosition::test_value(2));
         table.insert(vec![3].into(), WalPosition::test_value(3));
         // All entries are Modified (not yet flushed).
-        assert_eq!(table.count_dirty(), 3);
+        assert_eq!(table.dirty_count(), 3);
 
         table.promote_to_flat();
 
@@ -1462,7 +1524,7 @@ mod tests {
         assert!(table.data.is_empty());
         assert_eq!(table.flat_len(), 3);
         // Dirty count should include the flat dirty entries.
-        assert_eq!(table.count_dirty(), 3);
+        assert_eq!(table.dirty_count(), 3);
 
         // Lookups still work.
         assert_eq!(table.get(&[1]), Some(WalPosition::test_value(1)));
@@ -1472,7 +1534,7 @@ mod tests {
 
         // After clean_self, all dirty entries are cleaned.
         table.clean_self();
-        assert_eq!(table.count_dirty(), 0);
+        assert_eq!(table.dirty_count(), 0);
         // Entries remain accessible.
         assert_eq!(table.get(&[1]), Some(WalPosition::test_value(1)));
     }
@@ -1499,7 +1561,7 @@ mod tests {
         assert!(table.data.is_empty());
         assert_eq!(table.flat_len(), 3);
         // Only [2] is dirty in flat.
-        assert_eq!(table.count_dirty(), 1);
+        assert_eq!(table.dirty_count(), 1);
 
         assert_eq!(table.get(&[1]), Some(WalPosition::test_value(1)));
         assert_eq!(table.get(&[2]), Some(WalPosition::test_value(2)));
@@ -1515,18 +1577,18 @@ mod tests {
         // First promotion with Modified entries.
         table.promote_to_flat();
         assert_eq!(table.flat_len(), 2);
-        assert_eq!(table.count_dirty(), 2);
+        assert_eq!(table.dirty_count(), 2);
 
         // Delete [1] (Removed goes to BTreeMap) and add [3].
         table.remove(vec![1].into(), WalPosition::test_value(10));
         table.insert(vec![3].into(), WalPosition::test_value(5));
-        // count_dirty: 2 (flat Modified) + 1 (Removed) + 1 (new Modified) = 4
-        assert_eq!(table.count_dirty(), 4);
+        // dirty_count: 2 (flat Modified) + 1 (Removed) + 1 (new Modified) = 4
+        assert_eq!(table.dirty_count(), 4);
 
         table.promote_to_flat();
         // flat: [1]=Removed, [2]=Modified, [3]=Modified — Removed entry stays in flat.
         assert_eq!(table.flat_len(), 3);
-        assert_eq!(table.count_dirty(), 3);
+        assert_eq!(table.dirty_count(), 3);
         assert_eq!(table.get(&[1]), Some(WalPosition::INVALID)); // Removed → INVALID
         assert_eq!(table.get(&[2]), Some(WalPosition::test_value(2)));
         assert_eq!(table.get(&[3]), Some(WalPosition::test_value(5)));
@@ -1681,7 +1743,7 @@ mod tests {
         assert_eq!(table.get(&[1]), Some(WalPosition::test_value(10)));
         assert!(table.get(&[2]).is_none()); // Clean removed
         assert_eq!(table.get(&[3]), Some(WalPosition::test_value(30)));
-        assert_eq!(table.count_dirty(), 2);
+        assert_eq!(table.dirty_count(), 2);
     }
 
     #[test]

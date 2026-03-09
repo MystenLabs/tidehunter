@@ -60,6 +60,8 @@ pub struct LargeTableEntry {
     last_reported_key_bytes: i64,
     /// Last value added to the shared `flat_index_bytes` gauge.
     last_reported_flat_bytes: i64,
+    /// Last value added to the shared `dirty_keys` gauge.
+    last_reported_dirty_count: i64,
 }
 
 enum LargeTableEntryState {
@@ -329,7 +331,10 @@ impl LargeTable {
         for (cell_id, op, position) in ops {
             let entry = self.entry_mut(&mut row, cell_id);
             match op {
-                PendingBatchOp::Insert { reduced_key, lru_update } => {
+                PendingBatchOp::Insert {
+                    reduced_key,
+                    lru_update,
+                } => {
                     entry.pending_data.insert(
                         reduced_key.clone(),
                         *position,
@@ -338,7 +343,9 @@ impl LargeTable {
                     );
                 }
                 PendingBatchOp::Remove { reduced_key } => {
-                    entry.pending_data.remove(reduced_key.clone(), *position, transaction);
+                    entry
+                        .pending_data
+                        .remove(reduced_key.clone(), *position, transaction);
                 }
             }
             context.pending_table_len.add(1);
@@ -535,7 +542,7 @@ impl LargeTable {
 
     fn too_many_dirty(&self, entry: &mut LargeTableEntry) -> bool {
         if entry.state.is_dirty() {
-            let dirty_count = entry.data.count_dirty();
+            let dirty_count = entry.data.dirty_count();
             entry
                 .context
                 .excess_dirty_keys(dirty_count.saturating_sub(entry.unload_jitter))
@@ -1208,6 +1215,7 @@ impl LargeTableEntry {
             value_lru,
             last_reported_key_bytes: 0,
             last_reported_flat_bytes: 0,
+            last_reported_dirty_count: 0,
         }
     }
 
@@ -1360,7 +1368,7 @@ impl LargeTableEntry {
         self.promote_pending();
         let remaining_pending = self.pending_data.len();
         let should_flush = loader.flush_supported() && self.state.is_dirty() && {
-            let dirty_count = self.data.count_dirty();
+            let dirty_count = self.data.dirty_count();
             self.context
                 .excess_dirty_keys(dirty_count.saturating_sub(self.unload_jitter))
         };
@@ -1380,6 +1388,11 @@ impl LargeTableEntry {
         let flat_delta = new_flat_bytes - self.last_reported_flat_bytes;
         self.last_reported_flat_bytes = new_flat_bytes;
         self.context.flat_index_bytes.add(flat_delta);
+
+        let new_dirty = self.data.dirty_count() as i64;
+        let dirty_delta = new_dirty - self.last_reported_dirty_count;
+        self.last_reported_dirty_count = new_dirty;
+        self.context.dirty_keys.add(dirty_delta);
     }
 
     fn insert_bloom_filter(&mut self, key: &[u8]) {
@@ -1599,6 +1612,7 @@ impl LargeTableEntry {
                 // positions, so leaving Removed entries would cause WalPosition::INVALID to be
                 // returned to callers and trigger a crash in Wal::read.
                 self.data.make_mut().clean_self();
+                self.report_loaded_keys_count();
                 self.state = LargeTableEntryState::Loaded(position);
             }
             return;

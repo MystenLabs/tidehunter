@@ -221,7 +221,7 @@ impl Db {
             .unwrap();
     }
 
-    fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
+    fn periodic_snapshot_thread(weak: Weak<Db>, position: u64) -> Option<()> {
         let start = Instant::now();
         let mut last_snapshot = Duration::ZERO;
         const SNAPSHOT_EVERY_SECS: u64 = 3600 * 100;
@@ -424,27 +424,36 @@ impl Db {
         let positions: Vec<_> = guards[1..].iter().map(|g| *g.wal_position()).collect();
 
         // Group pending_ops by (ks_id, mutex_idx) so each mutex is acquired only once.
-        let mut grouped: Vec<(usize /*ks_id*/, usize /*mutex_idx*/, CellId, PendingBatchOp, WalPosition)> =
-            pending_ops
-                .iter()
-                .zip(positions.iter())
-                .map(|(op, &pos)| {
-                    let ks = op.ks();
-                    let cell_id = op.cell_id().clone();
-                    let context = self.ks_context(ks);
-                    let mutex_idx = context.ks_config.mutex_for_cell(&cell_id);
-                    let batch_op = match op {
-                        PendingOp::Insert { reduced_key, lru_update, .. } => PendingBatchOp::Insert {
-                            reduced_key: reduced_key.clone(),
-                            lru_update: lru_update.clone(),
-                        },
-                        PendingOp::Remove { reduced_key, .. } => PendingBatchOp::Remove {
-                            reduced_key: reduced_key.clone(),
-                        },
-                    };
-                    (ks.as_usize(), mutex_idx, cell_id, batch_op, pos)
-                })
-                .collect();
+        let mut grouped: Vec<(
+            usize, /*ks_id*/
+            usize, /*mutex_idx*/
+            CellId,
+            PendingBatchOp,
+            WalPosition,
+        )> = pending_ops
+            .iter()
+            .zip(positions.iter())
+            .map(|(op, &pos)| {
+                let ks = op.ks();
+                let cell_id = op.cell_id().clone();
+                let context = self.ks_context(ks);
+                let mutex_idx = context.ks_config.mutex_for_cell(&cell_id);
+                let batch_op = match op {
+                    PendingOp::Insert {
+                        reduced_key,
+                        lru_update,
+                        ..
+                    } => PendingBatchOp::Insert {
+                        reduced_key: reduced_key.clone(),
+                        lru_update: lru_update.clone(),
+                    },
+                    PendingOp::Remove { reduced_key, .. } => PendingBatchOp::Remove {
+                        reduced_key: reduced_key.clone(),
+                    },
+                };
+                (ks.as_usize(), mutex_idx, cell_id, batch_op, pos)
+            })
+            .collect();
         // Stable sort preserves WAL-position order within the same mutex group.
         grouped.sort_by_key(|(ks_id, mutex_idx, _, _, _)| (*ks_id, *mutex_idx));
 
@@ -454,10 +463,9 @@ impl Db {
             let mut i = 0;
             while i < grouped.len() {
                 let (ks_id_0, mutex_idx_0, _, _, _) = grouped[i];
-                let j = i + grouped[i..]
-                    .partition_point(|(ks_id, mutex_idx, _, _, _)| {
-                        *ks_id == ks_id_0 && *mutex_idx == mutex_idx_0
-                    });
+                let j = i + grouped[i..].partition_point(|(ks_id, mutex_idx, _, _, _)| {
+                    *ks_id == ks_id_0 && *mutex_idx == mutex_idx_0
+                });
                 group_ranges.push((i, j));
                 i = j;
             }
@@ -474,15 +482,19 @@ impl Db {
                 .iter()
                 .map(|(_, _, cell, op, pos)| (cell.clone(), op, *pos))
                 .collect();
-            self.large_table.apply_pending_batch(context, mutex_idx, &ops, &transaction);
+            self.large_table
+                .apply_pending_batch(context, mutex_idx, &ops, &transaction);
         };
 
         if let Some(pool) = &self.commit_pool {
             use rayon::prelude::*;
             pool.install(|| {
-                group_ranges.par_iter().with_min_len(1).for_each(|&(start, end)| {
-                    apply_group(start, end);
-                });
+                group_ranges
+                    .par_iter()
+                    .with_min_len(1)
+                    .for_each(|&(start, end)| {
+                        apply_group(start, end);
+                    });
             });
         } else {
             for (start, end) in group_ranges {
