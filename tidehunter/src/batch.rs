@@ -25,13 +25,29 @@ pub(crate) enum PendingOp {
     Insert {
         ks: KeySpace,
         reduced_key: Bytes,
+        cell_id: CellId,
         /// `(full_key, value)` for LRU updates. None if LRU is not configured.
         lru_update: Option<(Bytes, Bytes)>,
     },
     Remove {
         ks: KeySpace,
         reduced_key: Bytes,
+        cell_id: CellId,
     },
+}
+
+impl PendingOp {
+    pub(crate) fn ks(&self) -> KeySpace {
+        match self {
+            PendingOp::Insert { ks, .. } | PendingOp::Remove { ks, .. } => *ks,
+        }
+    }
+
+    pub(crate) fn cell_id(&self) -> &CellId {
+        match self {
+            PendingOp::Insert { cell_id, .. } | PendingOp::Remove { cell_id, .. } => cell_id,
+        }
+    }
 }
 
 pub(crate) struct RelocatedWriteBatch {
@@ -66,6 +82,7 @@ impl WriteBatch {
         let context = self.db.ks_context(ks);
         context.ks_config.check_key(&k);
         let reduced_key = context.ks_config.reduced_key_bytes(k.clone());
+        let cell_id = context.ks_config.cell_id(&reduced_key);
         // Pass (full_key, value) for LRU cache if enabled
         let lru_update = context
             .ks_config
@@ -76,6 +93,7 @@ impl WriteBatch {
         self.pending_ops.push(PendingOp::Insert {
             ks,
             reduced_key,
+            cell_id,
             lru_update,
         });
 
@@ -89,9 +107,10 @@ impl WriteBatch {
         let context = self.db.ks_context(ks);
         context.ks_config.check_key(&k);
         let reduced_key = context.ks_config.reduced_key_bytes(k.clone());
+        let cell_id = context.ks_config.cell_id(&reduced_key);
 
         // Store operation to be applied on commit
-        self.pending_ops.push(PendingOp::Remove { ks, reduced_key });
+        self.pending_ops.push(PendingOp::Remove { ks, reduced_key, cell_id });
 
         // todo transaction state is corrupted on panic
         self.prepare_write(WalEntry::Remove(ks, k));

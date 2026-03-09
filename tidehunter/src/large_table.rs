@@ -126,6 +126,17 @@ pub(crate) struct LargeTableSnapshot {
     pub replay_from: u64,
 }
 
+/// A single pending operation to apply within a batch, used by [`LargeTable::apply_pending_batch`].
+pub(crate) enum PendingBatchOp {
+    Insert {
+        reduced_key: Bytes,
+        lru_update: Option<(Bytes, Bytes)>,
+    },
+    Remove {
+        reduced_key: Bytes,
+    },
+}
+
 impl LargeTable {
     pub(crate) fn from_unloaded<L: Loader + Sync>(
         key_shape: &KeyShape,
@@ -305,33 +316,33 @@ impl LargeTable {
         Ok(())
     }
 
-    pub fn insert_pending(
+    /// Apply a batch of pending operations that all share the same mutex shard,
+    /// acquiring the mutex only once.
+    pub(crate) fn apply_pending_batch(
         &self,
         context: &KsContext,
-        k: Bytes,
-        position: WalPosition,
-        lru_update: Option<(Bytes, Bytes)>,
+        mutex_idx: usize,
+        ops: &[(CellId, &PendingBatchOp, WalPosition)],
         transaction: &Transaction,
     ) {
-        let (mut row, cell) = self.row(context, &k);
-        let entry = self.entry_mut(&mut row, &cell);
-        entry
-            .pending_data
-            .insert(k, position, lru_update, transaction);
-        context.pending_table_len.add(1);
-    }
-
-    pub fn remove_pending(
-        &self,
-        context: &KsContext,
-        k: Bytes,
-        position: WalPosition,
-        transaction: &Transaction,
-    ) {
-        let (mut row, cell) = self.row(context, &k);
-        let entry = self.entry_mut(&mut row, &cell);
-        entry.pending_data.remove(k, position, transaction);
-        context.pending_table_len.add(1);
+        let mut row = self.row_by_mutex(context, mutex_idx);
+        for (cell_id, op, position) in ops {
+            let entry = self.entry_mut(&mut row, cell_id);
+            match op {
+                PendingBatchOp::Insert { reduced_key, lru_update } => {
+                    entry.pending_data.insert(
+                        reduced_key.clone(),
+                        *position,
+                        lru_update.clone(),
+                        transaction,
+                    );
+                }
+                PendingBatchOp::Remove { reduced_key } => {
+                    entry.pending_data.remove(reduced_key.clone(), *position, transaction);
+                }
+            }
+            context.pending_table_len.add(1);
+        }
     }
 
     pub fn update_lru(

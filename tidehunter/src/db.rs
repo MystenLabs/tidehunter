@@ -7,11 +7,10 @@ use crate::crc::IntoBytesFixed;
 use crate::flusher::IndexFlusher;
 use crate::index::index_format::{IndexFormat, IndexIterCache};
 use crate::index::index_table::IndexTable;
-use crate::index::pending_table::Transaction;
 use crate::iterators::IteratorResult;
 use crate::iterators::db_iterator::DbIterator;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
-use crate::large_table::{GetResult, LargeTable, Loader};
+use crate::large_table::{GetResult, LargeTable, Loader, PendingBatchOp};
 use crate::metrics::{Metrics, TimerExt};
 use crate::relocation::updates::RelocationUpdates;
 use crate::relocation::{RelocationCommand, RelocationDriver, RelocationStrategy, Relocator};
@@ -424,21 +423,70 @@ impl Db {
         // Extract WAL positions (skip the first guard which is batch start)
         let positions: Vec<_> = guards[1..].iter().map(|g| *g.wal_position()).collect();
 
-        // Apply all pending operations to the large table with known WAL positions
+        // Group pending_ops by (ks_id, mutex_idx) so each mutex is acquired only once.
+        let mut grouped: Vec<(usize /*ks_id*/, usize /*mutex_idx*/, CellId, PendingBatchOp, WalPosition)> =
+            pending_ops
+                .iter()
+                .zip(positions.iter())
+                .map(|(op, &pos)| {
+                    let ks = op.ks();
+                    let cell_id = op.cell_id().clone();
+                    let context = self.ks_context(ks);
+                    let mutex_idx = context.ks_config.mutex_for_cell(&cell_id);
+                    let batch_op = match op {
+                        PendingOp::Insert { reduced_key, lru_update, .. } => PendingBatchOp::Insert {
+                            reduced_key: reduced_key.clone(),
+                            lru_update: lru_update.clone(),
+                        },
+                        PendingOp::Remove { reduced_key, .. } => PendingBatchOp::Remove {
+                            reduced_key: reduced_key.clone(),
+                        },
+                    };
+                    (ks.as_usize(), mutex_idx, cell_id, batch_op, pos)
+                })
+                .collect();
+        // Stable sort preserves WAL-position order within the same mutex group.
+        grouped.sort_by_key(|(ks_id, mutex_idx, _, _, _)| (*ks_id, *mutex_idx));
+
+        // Compute group boundaries: contiguous ranges with the same (ks_id, mutex_idx).
+        let mut group_ranges: Vec<(usize, usize)> = Vec::new();
+        {
+            let mut i = 0;
+            while i < grouped.len() {
+                let (ks_id_0, mutex_idx_0, _, _, _) = grouped[i];
+                let j = i + grouped[i..]
+                    .partition_point(|(ks_id, mutex_idx, _, _, _)| {
+                        *ks_id == ks_id_0 && *mutex_idx == mutex_idx_0
+                    });
+                group_ranges.push((i, j));
+                i = j;
+            }
+        }
+
+        // Apply all pending operations to the large table with known WAL positions.
+        // Each group shares one mutex shard and is processed under a single lock.
+        let apply_group = |start: usize, end: usize| {
+            let group = &grouped[start..end];
+            let ks = KeySpace(group[0].0 as u8);
+            let mutex_idx = group[0].1;
+            let context = self.ks_context(ks);
+            let ops: Vec<(CellId, &PendingBatchOp, WalPosition)> = group
+                .iter()
+                .map(|(_, _, cell, op, pos)| (cell.clone(), op, *pos))
+                .collect();
+            self.large_table.apply_pending_batch(context, mutex_idx, &ops, &transaction);
+        };
+
         if let Some(pool) = &self.commit_pool {
             use rayon::prelude::*;
             pool.install(|| {
-                pending_ops
-                    .par_iter()
-                    .zip(positions.par_iter())
-                    .with_min_len(32)
-                    .for_each(|(op, position)| {
-                        self.apply_batch_op(op, *position, &transaction);
-                    });
+                group_ranges.par_iter().with_min_len(1).for_each(|&(start, end)| {
+                    apply_group(start, end);
+                });
             });
         } else {
-            for (op, position) in pending_ops.iter().zip(positions.iter()) {
-                self.apply_batch_op(op, *position, &transaction);
+            for (start, end) in group_ranges {
+                apply_group(start, end);
             }
         }
 
@@ -485,34 +533,6 @@ impl Db {
         );
 
         Ok(())
-    }
-
-    fn apply_batch_op(&self, op: &PendingOp, position: WalPosition, transaction: &Transaction) {
-        match op {
-            PendingOp::Insert {
-                ks,
-                reduced_key,
-                lru_update,
-            } => {
-                let context = self.ks_context(*ks);
-                self.large_table.insert_pending(
-                    context,
-                    reduced_key.clone(),
-                    position,
-                    lru_update.clone(),
-                    transaction,
-                );
-            }
-            PendingOp::Remove { ks, reduced_key } => {
-                let context = self.ks_context(*ks);
-                self.large_table.remove_pending(
-                    context,
-                    reduced_key.clone(),
-                    position,
-                    transaction,
-                );
-            }
-        }
     }
 
     pub(crate) fn write_relocated_batch(&self, batch: RelocatedWriteBatch) -> DbResult<()> {
