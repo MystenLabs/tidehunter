@@ -44,6 +44,12 @@ pub struct Config {
     /// Using this feature does not change batch atomicity and isolation guarantees.
     #[serde(default)]
     pub commit_pool_size: usize,
+    /// Entries whose most recent write WAL offset is within `unload_lag` bytes of the
+    /// current processed WAL position are kept in memory after a flush.
+    /// This prevents recently written entries from being evicted only to be reloaded moments later.
+    /// Default: 0 (all eligible entries are unloaded normally).
+    #[serde(default)]
+    pub unload_lag: u64,
 }
 
 fn default_metrics_enabled() -> bool {
@@ -72,6 +78,7 @@ impl Default for Config {
             relocation_max_reclaim_pct: default_relocation_max_reclaim_pct(),
             metrics_enabled: true,
             commit_pool_size: 0,
+            unload_lag: 0,
         }
     }
 }
@@ -94,6 +101,7 @@ impl Config {
             metrics_enabled: true,
             relocation_max_reclaim_pct: 100,
             commit_pool_size: 0,
+            unload_lag: 0,
         }
     }
 

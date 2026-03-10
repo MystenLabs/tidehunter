@@ -136,6 +136,10 @@ impl LastProcessed {
         self.0
     }
 
+    pub(crate) fn saturating_sub(self, rhs: u64) -> Self {
+        Self(self.0.saturating_sub(rhs))
+    }
+
     /// Returns whether the position is processed(included in the index).
     pub(crate) fn is_processed<T: HasOffset>(self, pos: &T) -> bool {
         // Offset is processed if it is below (but not equal) to last_processed position

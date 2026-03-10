@@ -1617,8 +1617,12 @@ impl LargeTableEntry {
             }
             return;
         }
-        // Unloading enabled: retain only entries with offset >= last_processed
-        self.data.make_mut().retain_unprocessed(last_processed);
+        // Unloading enabled: retain only entries with offset >= (last_processed - unload_lag).
+        // When unload_lag is set, entries written within lag bytes of last_processed are kept
+        // in memory to avoid immediately reloading recently written data.
+        let retain_threshold = last_processed
+            .saturating_sub(self.context.config.unload_lag);
+        self.data.make_mut().retain_unprocessed(retain_threshold);
         self.report_loaded_keys_count();
 
         // If all entries were removed, update state to Unloaded
