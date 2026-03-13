@@ -358,7 +358,6 @@ impl WalMaps {
                 .offset(layout.offset_in_wal_file(range.start))
                 .len(layout.frag_size as usize);
             options
-                .populate()
                 .map_mut(file)
                 .expect("Failed to mmap on wal file")
                 .into()
