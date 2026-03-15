@@ -28,6 +28,10 @@ pub struct Config {
     pub num_flusher_threads: usize,
     /// Whether to perform flushing synchronously instead of async (default: false)
     pub sync_flush: bool,
+    /// Maximum pending flush count before backpressure is applied
+    pub max_flush_pending: u64,
+    /// Sleep duration in microseconds when backpressure is triggered
+    pub flush_pending_backpressure_sleep_us: u64,
     /// Maximum size of a single WAL file
     pub wal_file_size: u64,
     /// Strategy to use for relocation (WalBased or IndexBased)
@@ -67,6 +71,8 @@ impl Default for Config {
             direct_io: false,
             num_flusher_threads: 1,
             sync_flush: false,
+            max_flush_pending: 128,
+            flush_pending_backpressure_sleep_us: 36,
             wal_file_size: 10 * (1 << 30), // 10Gb
             relocation_strategy: RelocationStrategy::default(),
             relocation_max_reclaim_pct: default_relocation_max_reclaim_pct(),
@@ -89,6 +95,8 @@ impl Config {
             direct_io: false,
             num_flusher_threads: 1,
             sync_flush: false,
+            max_flush_pending: 128,
+            flush_pending_backpressure_sleep_us: 36,
             wal_file_size: 4 * 1024 * 1024,
             relocation_strategy: RelocationStrategy::default(),
             metrics_enabled: true,
