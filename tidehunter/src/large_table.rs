@@ -352,6 +352,24 @@ impl LargeTable {
         }
     }
 
+    /// Promotes committed pending entries for specific cells in a mutex shard.
+    /// Called after a write batch commits to eagerly apply changes to the index.
+    /// `cell_ids` may contain duplicates; each cell's `promote_pending` is safe to call
+    /// multiple times (idempotent when no new committed entries remain).
+    pub(crate) fn promote_pending_cells(
+        &self,
+        context: &KsContext,
+        mutex_idx: usize,
+        cell_ids: &[CellId],
+    ) {
+        let mut row = self.row_by_mutex(context, mutex_idx);
+        for cell_id in cell_ids {
+            if let Some(entry) = row.try_entry_mut(cell_id) {
+                entry.promote_pending();
+            }
+        }
+    }
+
     pub fn update_lru(
         &self,
         context: &KsContext,

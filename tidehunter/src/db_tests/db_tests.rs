@@ -208,30 +208,18 @@ fn test_batch_impl(config: Config) {
 
     batch.commit().unwrap();
 
-    // Check pending_table_len after commit but before promote_pending
-    let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
-    assert_eq!(
-        pending_len, 2,
-        "Should still have 2 pending entries after commit"
-    );
-
-    assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
-
-    // Check pending_table_len after first get (promote_pending is called for that cell)
-    let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
-    // Could be 0, 1, or 2 depending on whether keys are in same cell
-    // If keys are in different cells, only one cell's pending_table is cleared
-    let pending_after_first_get = pending_len;
-
-    assert_eq!(Some(vec![17].into()), db.get(ks, &[6, 7, 8, 9]).unwrap());
-
-    // After both gets, all pending entries should be promoted
+    // After commit, pending entries are eagerly promoted to the main index.
     let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
     assert_eq!(
         pending_len, 0,
-        "Should have 0 pending entries after both gets (was {} after first get)",
-        pending_after_first_get
+        "Should have 0 pending entries after commit (eager promotion)"
     );
+
+    assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
+    assert_eq!(Some(vec![17].into()), db.get(ks, &[6, 7, 8, 9]).unwrap());
+
+    let pending_len = metrics.pending_table_len.with_label_values(&["root"]).get();
+    assert_eq!(pending_len, 0, "Should have 0 pending entries after gets");
 }
 
 #[test]

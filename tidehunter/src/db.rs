@@ -495,7 +495,7 @@ impl Db {
                     });
             });
         } else {
-            for (start, end) in group_ranges {
+            for &(start, end) in &group_ranges {
                 apply_group(start, end);
             }
         }
@@ -533,6 +533,46 @@ impl Db {
 
         // keep all guards active until transaction is committed
         transaction.commit();
+
+        drop(_commit_timer);
+        let _promote_timer = self
+            .metrics
+            .write_batch_times
+            .with_label_values(&[&tag, "promote"])
+            .mcs_timer();
+
+        // Promote committed pending entries to the main index for all affected cells.
+        let promote_group = |start: usize, end: usize| {
+            let group = &grouped[start..end];
+            let ks = KeySpace(group[0].0 as u8);
+            let mutex_idx = group[0].1;
+            let context = self.ks_context(ks);
+            // Collect unique cell_ids; groups are small so O(n²) dedup is fine.
+            let mut cell_ids: Vec<CellId> = Vec::new();
+            for (_, _, cell_id, _, _) in group {
+                if !cell_ids.contains(cell_id) {
+                    cell_ids.push(cell_id.clone());
+                }
+            }
+            self.large_table
+                .promote_pending_cells(context, mutex_idx, &cell_ids);
+        };
+
+        if let Some(pool) = &self.commit_pool {
+            use rayon::prelude::*;
+            pool.install(|| {
+                group_ranges
+                    .par_iter()
+                    .with_min_len(1)
+                    .for_each(|&(start, end)| {
+                        promote_group(start, end);
+                    });
+            });
+        } else {
+            for &(start, end) in &group_ranges {
+                promote_group(start, end);
+            }
+        }
 
         self.metrics.wal_written_bytes.set(
             guards
