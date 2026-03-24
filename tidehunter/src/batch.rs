@@ -101,6 +101,57 @@ impl WriteBatch {
         self.prepare_write(WalEntry::Record(ks, k, v, false));
     }
 
+    /// Write many key-value pairs to the batch.
+    ///
+    /// Uses rayon to parallelize `PreparedWalWrite::new` (CRC computation and key reduction)
+    /// across all items. Order of updates within this call is not preserved.
+    pub fn write_many(
+        &mut self,
+        items: impl rayon::iter::IndexedParallelIterator<Item = (KeySpace, Bytes, Bytes)>,
+    ) {
+        use rayon::iter::ParallelIterator;
+
+        let db = &self.db;
+
+        let prepared: Vec<(WriteBatchWrite, PendingOp)> = items
+            .with_min_len(16)
+            .map(|(ks, k, v)| {
+                let context = db.ks_context(ks);
+                context.ks_config.check_key(&k);
+                let reduced_key = context.ks_config.reduced_key_bytes(k.clone());
+                let cell_id = context.ks_config.cell_id(&reduced_key);
+                let lru_update = context
+                    .ks_config
+                    .value_cache_size()
+                    .map(|_| (k.clone(), v.clone()));
+                let wal_entry = WalEntry::Record(ks, k.clone(), v.clone(), false);
+                let prepared_write = PreparedWalWrite::new(&wal_entry);
+                (
+                    WriteBatchWrite {
+                        prepared_write,
+                        is_modified: true,
+                        ks,
+                    },
+                    PendingOp::Insert {
+                        ks,
+                        reduced_key,
+                        cell_id,
+                        lru_update,
+                    },
+                )
+            })
+            .collect();
+
+        for (write, op) in prepared {
+            self.writes.push(write);
+            self.pending_ops.push(op);
+            assert!(
+                self.writes.len() < MAX_BATCH_LEN,
+                "Batch exceeds max length {MAX_BATCH_LEN}"
+            );
+        }
+    }
+
     /// Delete a key from the batch.
     pub fn delete(&mut self, ks: KeySpace, k: impl Into<Bytes>) {
         let k = k.into();
