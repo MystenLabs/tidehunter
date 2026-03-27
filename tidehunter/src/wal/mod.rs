@@ -434,7 +434,9 @@ impl WalIterator {
         let Some(file) = files.get_checked(layout.file_for_map(map_id)) else {
             return Ok(None);
         };
-        Ok(Some(maps.map(file, layout, map_id).clone()))
+        Ok(Some(
+            maps.map(file, layout, map_id, layout.kind.name()).clone(),
+        ))
     }
 
     pub fn into_writer(self, position_override: Option<u64>) -> WalWriter {
