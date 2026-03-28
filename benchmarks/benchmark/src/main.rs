@@ -177,6 +177,57 @@ pub fn main() {
             let storage = RocksStorage::open(&path, true, config.db_parameters.metrics_enabled);
             Arc::new(storage)
         }
+        Backend::Lmdb => {
+            use crate::storage::lmdb::LmdbStorage;
+            let storage = LmdbStorage::open(&path);
+            storage as Arc<dyn Storage>
+        }
+        Backend::Faster => {
+            #[cfg(all(target_os = "linux", feature = "enable-faster"))]
+            {
+                use crate::storage::faster::FasterStorage;
+                let storage = FasterStorage::open(&path);
+
+                // Start background checkpoint thread (matches C++ FASTER benchmark pattern)
+                report!(
+                    report,
+                    "Starting background FASTER checkpointing (every 30s)"
+                );
+                let storage_clone = storage.clone();
+                thread::spawn(move || {
+                    let mut checkpoint_count = 0;
+                    loop {
+                        thread::sleep(Duration::from_secs(30));
+
+                        let start = Instant::now();
+                        match storage_clone.checkpoint() {
+                            Ok(_) => {
+                                checkpoint_count += 1;
+                                let duration = start.elapsed();
+                                println!(
+                                    "FASTER checkpoint {} done: {:.2} seconds",
+                                    checkpoint_count,
+                                    duration.as_secs_f64()
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("FASTER checkpoint failed: {}", e);
+                            }
+                        }
+                    }
+                });
+
+                storage as Arc<dyn Storage>
+            }
+            #[cfg(not(all(target_os = "linux", feature = "enable-faster")))]
+            {
+                eprintln!("ERROR: FASTER backend requires Linux and the 'enable-faster' feature.");
+                eprintln!(
+                    "Please choose a different backend or build with the feature enabled on Linux."
+                );
+                std::process::exit(1);
+            }
+        }
     };
     let stress = Stress {
         storage,
