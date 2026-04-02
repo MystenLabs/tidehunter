@@ -11,6 +11,7 @@ use crate::relocation::updates::RelocationUpdates;
 use crate::wal::position::WalPosition;
 use std::sync::Arc;
 use std::sync::Weak;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
 use std::thread::JoinHandle;
@@ -85,7 +86,12 @@ impl IndexFlusher {
     pub fn request_flush(&self, ks: KeySpace, cell: CellId, flush_kind: FlushKind) {
         let thread_index = self.get_thread_for_cell(&cell);
         let command = IndexFlushCommand::new(ks, cell, flush_kind);
-        self.metrics.flush_pending.add(1);
+        let count = self
+            .metrics
+            .flush_pending_count
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        self.metrics.flush_pending.set(count as i64);
         self.senders[thread_index]
             .send(FlusherCommand::Command(command))
             .expect("Flusher has stopped unexpectedly")
@@ -106,7 +112,12 @@ impl IndexFlusher {
         let mutex = Arc::new(parking_lot::Mutex::new(()));
         let guard = Arc::new(SendGuard(mutex.lock_arc()));
         for sender in &self.senders {
-            self.metrics.flush_pending.add(1);
+            let count = self
+                .metrics
+                .flush_pending_count
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            self.metrics.flush_pending.set(count as i64);
             sender
                 .send(FlusherCommand::Barrier(Arc::clone(&guard)))
                 .expect("Flusher has stopped unexpectedly");
@@ -135,11 +146,21 @@ impl IndexFlusherThread {
         while let Ok(command) = self.receiver.recv() {
             match command {
                 FlusherCommand::Barrier(_guard) => {
-                    self.metrics.flush_pending.add(-1);
+                    let count = self
+                        .metrics
+                        .flush_pending_count
+                        .fetch_sub(1, Ordering::Relaxed)
+                        - 1;
+                    self.metrics.flush_pending.set(count as i64);
                     // Dropping _guard releases the mutex, allowing the barrier() caller to proceed
                 }
                 FlusherCommand::Command(command) => {
-                    self.metrics.flush_pending.add(-1);
+                    let count = self
+                        .metrics
+                        .flush_pending_count
+                        .fetch_sub(1, Ordering::Relaxed)
+                        - 1;
+                    self.metrics.flush_pending.set(count as i64);
                     let now = Instant::now();
                     let Some(db) = self.db.upgrade() else {
                         return;
