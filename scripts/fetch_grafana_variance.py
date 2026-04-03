@@ -22,7 +22,7 @@ from urllib.parse import urlencode
 import math
 
 # ---- Fill these in ----
-GRAFANA_CLOUD_TOKEN = "PLACEHOLDER"
+GRAFANA_CLOUD_TOKEN = ""
 GRAFANA_URL = "https://metrics.sui.io"
 GRAFANA_DATASOURCE_NAME = "mysten-metrics-internal"
 
@@ -77,7 +77,7 @@ def resolve_datasource_id(grafana_url, datasource_name, token):
     return str(data["id"])
 
 
-def query_prometheus(grafana_url, datasource_id, token, query, start, end, step=15):
+def query_prometheus(grafana_url, datasource_id, token, query, start, end, step=60):
     """Query Grafana Cloud's Prometheus-compatible API."""
     params = urlencode({
         "query": query,
@@ -116,18 +116,29 @@ def extract_values(result):
 
 
 def compute_stats(values):
-    """Compute mean, stddev, and coefficient of variation from (timestamp, value) pairs."""
+    """Compute mean, median, stddev, CV, and percentiles from (timestamp, value) pairs."""
     if not values:
-        return {"mean": None, "stddev": None, "cv": None, "n_samples": 0}
-    vals = [v for _, v in values]
+        return {"mean": None, "median": None, "stddev": None, "cv": None,
+                "p99": None, "p999": None, "min": None, "max": None, "n_samples": 0}
+    vals = sorted([v for _, v in values])
     n = len(vals)
     mean = sum(vals) / n
+    median = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+
     if n < 2:
-        return {"mean": mean, "stddev": 0, "cv": 0, "n_samples": n}
+        return {"mean": mean, "median": median, "stddev": 0, "cv": 0,
+                "p99": vals[-1], "p999": vals[-1], "min": vals[0], "max": vals[-1],
+                "n_samples": n}
+
     variance = sum((v - mean) ** 2 for v in vals) / (n - 1)
     stddev = math.sqrt(variance)
     cv = stddev / mean if mean != 0 else float("inf")
-    return {"mean": mean, "stddev": stddev, "cv": cv, "n_samples": n}
+    p99 = vals[min(int(n * 0.99), n - 1)]
+    p999 = vals[min(int(n * 0.999), n - 1)]
+
+    return {"mean": mean, "median": median, "stddev": stddev, "cv": cv,
+            "p99": p99, "p999": p999, "min": vals[0], "max": vals[-1],
+            "n_samples": n}
 
 
 def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, host):
@@ -153,8 +164,8 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
     for metric in ["bench_writes", "bench_reads"]:
         result = query_prometheus(
             grafana_url, datasource_id, token,
-            f"rate({metric}_count{host_filter}[30s])",
-            start, end, step=15
+            f"rate({metric}_count{host_filter}[1m])",
+            start, end, step=60
         )
         values = extract_values(result)
         if values:
@@ -176,8 +187,8 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
         for pct, label in zip(percentiles, labels):
             result = query_prometheus(
                 grafana_url, datasource_id, token,
-                f'histogram_quantile({pct}, rate({metric}_bucket{host_filter}[30s]))',
-                start, end, step=15
+                f'histogram_quantile({pct}, rate({metric}_bucket{host_filter}[1m]))',
+                start, end, step=60
             )
             values = extract_values(result)
             if values:
@@ -198,8 +209,8 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
     for metric in ["bench_writes", "bench_reads"]:
         result = query_prometheus(
             grafana_url, datasource_id, token,
-            f"rate({metric}_sum{host_filter}[30s]) / rate({metric}_count{host_filter}[30s])",
-            start, end, step=15
+            f"rate({metric}_sum{host_filter}[1m]) / rate({metric}_count{host_filter}[1m])",
+            start, end, step=60
         )
         values = extract_values(result)
         if values:
@@ -210,6 +221,47 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
                   f"n={stats['n_samples']} samples")
         else:
             print(f"  {metric}: no data")
+
+    # --- Contention metrics ---
+    print(f"\n--- Contention ---")
+    contention_metrics = [
+        ("large_table_contention", "Large table lock contention"),
+        ("snapshot_lock_time_mcs", "Snapshot lock hold time"),
+    ]
+    for metric, description in contention_metrics:
+        # Per-interval mean contention
+        result = query_prometheus(
+            grafana_url, datasource_id, token,
+            f"rate({metric}_sum{host_filter}[1m]) / rate({metric}_count{host_filter}[1m])",
+            start, end, step=60
+        )
+        values = extract_values(result)
+        if not values:
+            print(f"  {description} ({metric}): no data")
+            continue
+
+        stats = compute_stats(values)
+        print(f"  {description} ({metric}):")
+        print(f"    Mean: {stats['mean']:.1f}us, Median: {stats['median']:.1f}us, "
+              f"Stddev: {stats['stddev']:.1f}us, CV: {stats['cv']:.4f}")
+        print(f"    Min: {stats['min']:.1f}us, Max: {stats['max']:.1f}us, "
+              f"P99: {stats['p99']:.1f}us, P99.9: {stats['p999']:.1f}us")
+        print(f"    Samples: {stats['n_samples']}")
+
+        # Also get histogram percentiles for the raw contention distribution
+        pct_parts = []
+        for pct, label in [(0.5, "p50"), (0.9, "p90"), (0.99, "p99"), (0.999, "p99.9")]:
+            result = query_prometheus(
+                grafana_url, datasource_id, token,
+                f"histogram_quantile({pct}, rate({metric}_bucket{host_filter}[1m]))",
+                start, end, step=60
+            )
+            pct_values = extract_values(result)
+            if pct_values:
+                pct_stats = compute_stats(pct_values)
+                pct_parts.append(f"{label}={pct_stats['mean']:.1f}")
+        if pct_parts:
+            print(f"    Histogram percentiles (avg over time): {', '.join(pct_parts)}")
 
 
 def main():
