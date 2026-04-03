@@ -101,7 +101,7 @@ impl RocksStorage {
         opt.set_max_total_wal_size(DEFAULT_DB_WAL_SIZE as u64 * 1024 * 1024);
 
         // Num threads for compactions and memtable flushes.
-        opt.increase_parallelism(8);
+        opt.increase_parallelism(12);
 
         opt.set_enable_pipelined_write(true);
 
