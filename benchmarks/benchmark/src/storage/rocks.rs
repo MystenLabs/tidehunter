@@ -105,9 +105,13 @@ impl RocksStorage {
 
         opt.set_enable_pipelined_write(true);
 
+        // Use direct reads to bypass OS page cache, so block cache is the sole cache.
+        opt.set_use_direct_reads(true);
+
         // Increase block size to 16KiB.
         // https://github.com/EighteenZi/rocksdb_wiki/blob/master/Memory-usage-in-RocksDB.md#indexes-and-filter-blocks
-        opt.set_block_based_table_factory(&get_block_options(128, 16 << 10));
+        // 128GB block cache to match Tidehunter's 128GB mmap budget.
+        opt.set_block_based_table_factory(&get_block_options(128 * 1024, 16 << 10));
 
         // Set memtable bloomfilter.
         opt.set_memtable_prefix_bloom_ratio(0.02);
