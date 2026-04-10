@@ -58,7 +58,8 @@ pub struct KeySpaceConfig {
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
     index_format: IndexFormatType,
-    unloaded_iterator: bool,
+    /// When `None`, resolved at runtime: `true` for fixed-length keys, `false` for variable-length.
+    unloaded_iterator: Option<bool>,
     #[serde(skip)]
     relocation_filter: Option<Arc<Box<dyn RelocationFilter>>>,
 }
@@ -211,7 +212,7 @@ impl KeyShapeBuilder {
             if matches!(ks.key_indexing, KeyIndexing::VariableLength) {
                 // todo this can be supported
                 assert!(
-                    !ks.config.unloaded_iterator,
+                    !matches!(ks.config.unloaded_iterator, Some(true)),
                     "Unloaded iterator currently not supported for variable length key indexing"
                 );
             }
@@ -422,7 +423,10 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn unloaded_iterator_enabled(&self) -> bool {
-        self.config.unloaded_iterator
+        self.config.unloaded_iterator.unwrap_or_else(|| {
+            // Default: true for fixed-length keys, false for variable-length
+            !matches!(self.key_indexing, KeyIndexing::VariableLength)
+        })
     }
 
     #[doc(hidden)] // Used by tools/tideconsole to display keyspace names
@@ -571,7 +575,7 @@ impl KeySpaceConfig {
     }
 
     pub fn with_unloaded_iterator(mut self, enabled: bool) -> Self {
-        self.unloaded_iterator = enabled;
+        self.unloaded_iterator = Some(enabled);
         self
     }
 }
