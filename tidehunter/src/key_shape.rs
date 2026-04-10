@@ -49,7 +49,7 @@ pub struct KeySpaceDescInner {
     config: KeySpaceConfig,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct KeySpaceConfig {
     #[serde(skip)]
     compactor: Option<Arc<Compactor>>,
@@ -58,25 +58,10 @@ pub struct KeySpaceConfig {
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
     index_format: IndexFormatType,
-    #[serde(default = "KeySpaceConfig::default_unloaded_iterator")]
-    unloaded_iterator: bool,
+    /// When `None`, resolved at runtime: `true` for fixed-length keys, `false` for variable-length.
+    unloaded_iterator: Option<bool>,
     #[serde(skip)]
     relocation_filter: Option<Arc<Box<dyn RelocationFilter>>>,
-}
-
-impl Default for KeySpaceConfig {
-    fn default() -> Self {
-        Self {
-            compactor: None,
-            disable_unload: false,
-            max_dirty_keys: None,
-            bloom_filter: None,
-            value_cache_size: 0,
-            index_format: IndexFormatType::default(),
-            unloaded_iterator: true,
-            relocation_filter: None,
-        }
-    }
 }
 
 /// This enum allows customizing the key used in the index.
@@ -224,6 +209,12 @@ impl KeyShapeBuilder {
                 );
             }
             ks.key_type.verify_key_size(ks.index_key_size());
+            if matches!(ks.key_indexing, KeyIndexing::VariableLength) {
+                assert!(
+                    !matches!(ks.config.unloaded_iterator, Some(true)),
+                    "Unloaded iterator currently not supported for variable length key indexing"
+                );
+            }
         }
     }
 }
@@ -431,7 +422,10 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn unloaded_iterator_enabled(&self) -> bool {
-        self.config.unloaded_iterator
+        self.config.unloaded_iterator.unwrap_or_else(|| {
+            // Default: true for fixed-length keys, false for variable-length
+            !matches!(self.key_indexing, KeyIndexing::VariableLength)
+        })
     }
 
     #[doc(hidden)] // Used by tools/tideconsole to display keyspace names
@@ -580,12 +574,8 @@ impl KeySpaceConfig {
     }
 
     pub fn with_unloaded_iterator(mut self, enabled: bool) -> Self {
-        self.unloaded_iterator = enabled;
+        self.unloaded_iterator = Some(enabled);
         self
-    }
-
-    fn default_unloaded_iterator() -> bool {
-        true
     }
 }
 
