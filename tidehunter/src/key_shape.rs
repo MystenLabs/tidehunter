@@ -209,12 +209,6 @@ impl KeyShapeBuilder {
                 );
             }
             ks.key_type.verify_key_size(ks.index_key_size());
-            if matches!(ks.key_indexing, KeyIndexing::VariableLength) {
-                assert!(
-                    !matches!(ks.config.unloaded_iterator, Some(true)),
-                    "Unloaded iterator currently not supported for variable length key indexing"
-                );
-            }
         }
     }
 }
@@ -422,10 +416,7 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn unloaded_iterator_enabled(&self) -> bool {
-        self.config.unloaded_iterator.unwrap_or_else(|| {
-            // Default: true for fixed-length keys, false for variable-length
-            !matches!(self.key_indexing, KeyIndexing::VariableLength)
-        })
+        self.config.unloaded_iterator.unwrap_or(true)
     }
 
     #[doc(hidden)] // Used by tools/tideconsole to display keyspace names
