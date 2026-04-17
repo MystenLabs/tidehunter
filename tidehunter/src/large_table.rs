@@ -609,6 +609,15 @@ impl LargeTable {
                         let Some(entry) = row.try_entry_mut(&cell) else {
                             continue;
                         };
+                        // Was a flush dispatched since we captured arc in phase 1? A writer's
+                        // prepare_async_flush on a clean pending_data doesn't call make_mut, so
+                        // same_shared below will still be true — but the flusher holds arc, and
+                        // installing a BTree-empty promoted table would break unmerge_flushed on
+                        // completion.
+                        if entry.pending_last_processed.is_some() {
+                            self.metrics.promote_flat_arc_miss.inc();
+                            continue;
+                        }
                         if entry.data.same_shared(&arc) {
                             entry.data = ArcCow::new_owned(promoted_table);
                         } else {
