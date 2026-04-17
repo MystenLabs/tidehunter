@@ -572,6 +572,15 @@ impl LargeTable {
                         if let Some(kind) = flush_kind {
                             flush_decisions.push((entry.cell.clone(), kind));
                         }
+                        // Skip promote_to_flat for entries with a flush in flight. The flusher
+                        // holds a pre-promote `Arc<IndexTable>` snapshot and will call
+                        // `unmerge_flushed` against it on completion; if we reshape the BTree/flat
+                        // split now (promote_to_flat moves every BTreeMap entry into `flat`), that
+                        // unmerge would look up original.data keys in an empty self.data BTreeMap.
+                        // A later pass will promote this entry once the flush completes.
+                        if entry.pending_last_processed.is_some() {
+                            continue;
+                        }
                         let arc = entry.data.clone_shared();
                         snapshots.push((entry.cell.clone(), arc));
                     }
