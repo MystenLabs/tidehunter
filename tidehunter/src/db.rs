@@ -76,7 +76,7 @@ impl Db {
             .unzip();
         let (relocator_sender, relocator_receiver) = mpsc::channel();
 
-        let flusher = IndexFlusher::new(flusher_senders, metrics.clone());
+        let flusher = IndexFlusher::new(flusher_senders, metrics.clone(), config.clone());
         let relocator = Relocator(relocator_sender);
         let large_table = LargeTable::from_unloaded(
             &key_shape,

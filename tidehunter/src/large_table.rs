@@ -271,33 +271,37 @@ impl LargeTable {
     ) -> Result<(), L::Error> {
         self.fp.fp_insert_before_lock();
         let v = *guard.wal_position();
-        let (mut row, cell) = self.row(context, &reduced_key);
-        let entry = self.entry_mut(&mut row, &cell);
 
-        entry.promote_pending_for(&reduced_key);
+        // Under the row lock: apply the in-memory update and prepare any flush. We do NOT
+        // dispatch the flush here — see below.
+        let (index_size, flush_decision) = {
+            let (mut row, cell) = self.row(context, &reduced_key);
+            let entry = self.entry_mut(&mut row, &cell);
 
-        if !entry.insert(reduced_key.clone(), v, full_key, Some(value)) {
-            return Ok(());
-        }
+            entry.promote_pending_for(&reduced_key);
 
-        // Apply backpressure if too many async flushes are pending
-        if !context.config.sync_flush && context.config.max_flush_pending > 0 {
-            while self.metrics.flush_pending_count.load(Ordering::Relaxed)
-                > context.config.max_flush_pending
-            {
-                self.metrics.flush_backpressure_count.inc();
-                std::thread::sleep(std::time::Duration::from_micros(
-                    context.config.flush_pending_backpressure_sleep_us,
-                ));
+            if !entry.insert(reduced_key.clone(), v, full_key, Some(value)) {
+                return Ok(());
             }
+
+            let index_size = entry.data.len();
+            let flush_kind = if loader.flush_supported() && self.too_many_dirty(entry) {
+                // Drop the WAL guard before preparing the flush so last_processed is current.
+                drop(guard);
+                entry.prepare_async_flush(loader)?
+            } else {
+                None
+            };
+            (index_size, flush_kind.map(|k| (cell.clone(), k)))
+        };
+        // Row lock released here — so the backpressure wait below cannot block the flushers
+        // that need the same row mutex to complete `update_flushed_index`.
+
+        if let Some((cell_id, flush_kind)) = flush_decision {
+            self.flusher
+                .request_flush_with_backpressure(context.id(), cell_id, flush_kind);
         }
 
-        let index_size = entry.data.len();
-        if loader.flush_supported() && self.too_many_dirty(entry) {
-            // Drop the guard before flushing to ensure last_processed is updated
-            drop(guard);
-            entry.unload_if_ks_enabled(&self.flusher, loader)?;
-        }
         self.metrics
             .max_index_size
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
@@ -508,14 +512,36 @@ impl LargeTable {
         num_shards: usize,
     ) -> Result<(), L::Error> {
         for ks_table in &self.table {
+            let ks = ks_table.context.id();
             for (mutex_idx, flag) in ks_table.pending_dirty.iter().enumerate() {
-                if mutex_idx % num_shards == shard_idx && flag.swap(false, Ordering::Acquire) {
+                if mutex_idx % num_shards != shard_idx {
+                    continue;
+                }
+                if !flag.swap(false, Ordering::Acquire) {
+                    continue;
+                }
+
+                // Phase 1: under lock — promote pending entries and collect flush decisions.
+                let decisions: Vec<(CellId, FlushKind)> = {
                     let mut row = ks_table
                         .rows
                         .lock(mutex_idx, &ks_table.context.large_table_contention);
+                    let mut decisions = Vec::new();
                     for entry in row.entries.iter_mut() {
-                        entry.promote_pending_and_check_flush(loader, &self.flusher)?;
+                        let (_remaining, flush_kind) =
+                            entry.promote_pending_and_prepare_flush(loader)?;
+                        if let Some(kind) = flush_kind {
+                            decisions.push((entry.cell.clone(), kind));
+                        }
                     }
+                    decisions
+                    // lock released here
+                };
+
+                // Phase 2: outside lock — dispatch flushes with back-pressure. The wait in
+                // request_flush_with_backpressure must not overlap any row lock we hold.
+                for (cell, kind) in decisions {
+                    self.flusher.request_flush_with_backpressure(ks, cell, kind);
                 }
             }
         }
@@ -527,23 +553,29 @@ impl LargeTable {
     /// Runs on a 10-second polling cadence, independently of the pending-promotion thread.
     pub(crate) fn promote_flat_job<L: Loader>(&self, loader: &L) -> Result<(), L::Error> {
         for ks_table in &self.table {
+            let ks = ks_table.context.id();
             let mut total_remaining = 0;
             for mutex in ks_table.rows.mutexes() {
-                // Phase 1: under lock — promote any remaining pending entries and check flush.
-                // promote_pending must run before flush to ensure pending entries are applied
-                // before the flusher snapshots the index. The event-driven thread handles
-                // the common case; this is a 1-second catch-all for anything it missed.
-                let snapshots: Vec<(CellId, Arc<IndexTable>)> = {
+                // Phase 1: under lock — promote any remaining pending entries, collect flush
+                // decisions, and snapshot for promote_to_flat. promote_pending must run before
+                // flush preparation to ensure pending entries are applied before the flusher
+                // snapshots the index. The event-driven thread handles the common case; this
+                // is a 10-second catch-all for anything it missed.
+                let (snapshots, flush_decisions) = {
                     let mut row = mutex.lock();
                     let mut snapshots = Vec::with_capacity(row.entries.iter().count());
+                    let mut flush_decisions = Vec::new();
                     for entry in row.entries.iter_mut() {
-                        let remaining =
-                            entry.promote_pending_and_check_flush(loader, &self.flusher)?;
+                        let (remaining, flush_kind) =
+                            entry.promote_pending_and_prepare_flush(loader)?;
                         total_remaining += remaining;
+                        if let Some(kind) = flush_kind {
+                            flush_decisions.push((entry.cell.clone(), kind));
+                        }
                         let arc = entry.data.clone_shared();
                         snapshots.push((entry.cell.clone(), arc));
                     }
-                    snapshots
+                    (snapshots, flush_decisions)
                     // lock released here
                 };
 
@@ -575,6 +607,13 @@ impl LargeTable {
                         }
                         entry.report_loaded_keys_count();
                     }
+                }
+
+                // Phase 4: outside lock — dispatch flushes with back-pressure. Deferred until
+                // after phase 3 so the BP wait never overlaps any row lock we hold, and so local
+                // promote_to_flat work isn't delayed by waiting on the flusher queue to drain.
+                for (cell, kind) in flush_decisions {
+                    self.flusher.request_flush_with_backpressure(ks, cell, kind);
                 }
             }
             self.metrics
@@ -1073,21 +1112,36 @@ impl LargeTable {
         threshold_position: u64,
     ) {
         for ks_table in self.table.iter() {
+            let ks = ks_table.context.id();
             for mutex in ks_table.rows.mutexes() {
-                let mut row = mutex.lock();
-                for entry in row.entries.iter_mut() {
-                    // Important - read last_processed_wal_position before promote_pending.
-                    // See also comments in unload_if_ks_enabled.
-                    let loader_last_processed = loader.last_processed_wal_position();
-                    entry.promote_pending();
-                    entry.request_async_snapshot_flush(
-                        &self.flusher,
-                        loader_last_processed,
-                        force_relocate_below,
-                        threshold_position,
-                    );
+                // Phase 1: under lock — prepare flush decisions. No IO, no blocking.
+                let decisions: Vec<(CellId, FlushKind)> = {
+                    let mut row = mutex.lock();
+                    let mut decisions = Vec::new();
+                    for entry in row.entries.iter_mut() {
+                        // Important - read last_processed_wal_position before promote_pending.
+                        // See also comments in prepare_async_flush.
+                        let loader_last_processed = loader.last_processed_wal_position();
+                        entry.promote_pending();
+                        if let Some(kind) = entry.prepare_async_snapshot_flush(
+                            loader_last_processed,
+                            force_relocate_below,
+                            threshold_position,
+                        ) {
+                            decisions.push((entry.cell.clone(), kind));
+                        }
+                    }
+                    decisions
+                    // row lock released here
+                };
+
+                // Phase 2: outside lock — dispatch flushes with back-pressure. The subsequent
+                // `flusher.barrier()` (called by the snapshot path in Db) still observes all
+                // of these in `flush_pending_count` because each dispatch increments before
+                // returning.
+                for (cell, kind) in decisions {
+                    self.flusher.request_flush_with_backpressure(ks, cell, kind);
                 }
-                // row lock released immediately — no IO under lock
             }
         }
     }
@@ -1371,13 +1425,14 @@ impl LargeTableEntry {
         }
     }
 
-    /// Promotes pending entries and checks if flush is needed due to too many dirty keys.
-    /// Returns the number of remaining pending entries.
-    fn promote_pending_and_check_flush<L: Loader>(
+    /// Promotes pending entries, then if the dirty threshold is exceeded, prepares an async
+    /// flush under the row lock. Returns the number of remaining pending entries and an
+    /// optional FlushKind to be dispatched OUTSIDE the row lock via
+    /// `IndexFlusher::request_flush_with_backpressure`.
+    fn promote_pending_and_prepare_flush<L: Loader>(
         &mut self,
         loader: &L,
-        flusher: &IndexFlusher,
-    ) -> Result<usize, L::Error> {
+    ) -> Result<(usize, Option<FlushKind>), L::Error> {
         self.promote_pending();
         let remaining_pending = self.pending_data.len();
         let should_flush = loader.flush_supported() && self.state.is_dirty() && {
@@ -1385,10 +1440,12 @@ impl LargeTableEntry {
             self.context
                 .excess_dirty_keys(dirty_count.saturating_sub(self.unload_jitter))
         };
-        if should_flush {
-            self.unload_if_ks_enabled(flusher, loader)?;
-        }
-        Ok(remaining_pending)
+        let flush_kind = if should_flush {
+            self.prepare_async_flush(loader)?
+        } else {
+            None
+        };
+        Ok((remaining_pending, flush_kind))
     }
 
     fn report_loaded_keys_count(&mut self) {
@@ -1480,19 +1537,20 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    /// Queues an async flush for this entry if it needs flushing for a snapshot.
+    /// Prepares an async flush for this entry if needed for a snapshot, returning a FlushKind
+    /// to be dispatched OUTSIDE the row lock via `IndexFlusher::request_flush_with_backpressure`.
     /// Called during pass 1 of the two-pass snapshot flush mechanism.
-    /// No IO is performed — flushes are dispatched asynchronously.
-    pub fn request_async_snapshot_flush(
+    /// No IO is performed here; the row lock is only held long enough to mutate
+    /// `pending_last_processed` and compute the FlushKind.
+    pub fn prepare_async_snapshot_flush(
         &mut self,
-        flusher: &IndexFlusher,
         loader_last_processed: LastProcessed,
         force_relocate_below: Option<WalPosition>,
         threshold_position: u64,
-    ) {
-        // Skip if already has a pending flush in flight
+    ) -> Option<FlushKind> {
+        // Skip if a flush is already in flight for this entry.
         if self.pending_last_processed.is_some() {
-            return;
+            return None;
         }
         let forced_relocation = if let (Some(index_wal_position), Some(force_relocate_below)) =
             (self.state.wal_position().valid(), force_relocate_below)
@@ -1509,45 +1567,36 @@ impl LargeTableEntry {
                 .inc();
         }
         if !forced_relocation && !self.state.is_dirty() {
-            return;
+            return None;
         }
         if !forced_relocation {
             // Only flush dirty entries at or below threshold
             let should_flush = self.last_processed.as_u64() <= threshold_position;
             if !should_flush {
-                return;
+                return None;
             }
         }
 
         self.pending_last_processed = Some(loader_last_processed);
+        self.context
+            .metrics
+            .snapshot_force_unload
+            .with_label_values(&[self.context.name()])
+            .inc();
 
         if forced_relocation {
-            self.context
-                .metrics
-                .snapshot_force_unload
-                .with_label_values(&[self.context.name()])
-                .inc();
             // For forced relocation: use ForceRelocate — flusher loads from disk at old position
             let old_position = self
                 .state
                 .wal_position()
                 .valid()
                 .expect("forced relocation entry must have valid wal position");
-            flusher.request_flush(
-                self.context.id(),
-                self.cell.clone(),
-                FlushKind::ForceRelocate(old_position),
-            );
+            Some(FlushKind::ForceRelocate(old_position))
         } else {
-            self.context
-                .metrics
-                .snapshot_force_unload
-                .with_label_values(&[self.context.name()])
-                .inc();
             let flush_kind = self
                 .flush_kind()
                 .expect("entry must be dirty for non-relocation async snapshot flush");
-            flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
+            Some(flush_kind)
         }
     }
 
@@ -1631,32 +1680,37 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    fn unload_if_ks_enabled<L: Loader>(
+    /// Prepares an async flush under the row lock and returns a FlushKind to be dispatched
+    /// OUTSIDE the lock via `IndexFlusher::request_flush_with_backpressure`. Returns None when:
+    /// unloading is disabled for the keyspace, a flush is already in flight for this entry,
+    /// or the sync_flush path was taken (which completes under the lock and does not enqueue).
+    ///
+    /// Splitting the state mutation from the enqueue avoids holding the row mutex across the
+    /// backpressure wait in `request_flush_with_backpressure`.
+    fn prepare_async_flush<L: Loader>(
         &mut self,
-        flusher: &IndexFlusher,
         loader: &L,
-    ) -> Result<(), L::Error> {
+    ) -> Result<Option<FlushKind>, L::Error> {
         if self.context.ks_config.unloading_disabled() {
-            return Ok(());
+            return Ok(None);
         }
-        if self.pending_last_processed.is_none() {
-            if self.context.config.sync_flush {
-                self.sync_flush(loader, false, None, None)?;
-            } else {
-                // Perform async flush - store the captured value for later
-                self.pending_last_processed = Some(loader.last_processed_wal_position());
-                // Important - it is required to call promote_pending once
-                // more after acquiring Loader::last_processed_wal_position.
-                // This ensures that all batch writes committed
-                // before last_processed_wal_position are propagated to the index.
-                self.promote_pending();
-                let flush_kind = self
-                    .flush_kind()
-                    .expect("unload_if_ks_enabled is called in clean state");
-                flusher.request_flush(self.context.id(), self.cell.clone(), flush_kind);
-            }
+        if self.pending_last_processed.is_some() {
+            return Ok(None);
         }
-        Ok(())
+        if self.context.config.sync_flush {
+            self.sync_flush(loader, false, None, None)?;
+            return Ok(None);
+        }
+        // Capture the WAL position before promote_pending so the recovery invariant holds.
+        self.pending_last_processed = Some(loader.last_processed_wal_position());
+        // Important - it is required to call promote_pending once more after acquiring
+        // Loader::last_processed_wal_position. This ensures that all batch writes committed
+        // before last_processed_wal_position are propagated to the index.
+        self.promote_pending();
+        let flush_kind = self
+            .flush_kind()
+            .expect("prepare_async_flush is called in clean state");
+        Ok(Some(flush_kind))
     }
 
     fn clear_after_flush(

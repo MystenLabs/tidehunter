@@ -1,6 +1,7 @@
 // See docs/snapshot_mechanism.md for an overview of how the flusher integrates
 // with the two-pass snapshot mechanism.
 use crate::cell::CellId;
+use crate::config::Config;
 use crate::context::KsContext;
 use crate::db::Db;
 use crate::index::index_table::IndexTable;
@@ -20,6 +21,7 @@ use std::time::Instant;
 pub struct IndexFlusher {
     senders: Vec<mpsc::Sender<FlusherCommand>>,
     metrics: Arc<Metrics>,
+    config: Arc<Config>,
 }
 
 pub(crate) struct IndexFlusherThread {
@@ -57,9 +59,17 @@ pub enum FlushKind {
 }
 
 impl IndexFlusher {
-    pub fn new(senders: Vec<mpsc::Sender<FlusherCommand>>, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        senders: Vec<mpsc::Sender<FlusherCommand>>,
+        metrics: Arc<Metrics>,
+        config: Arc<Config>,
+    ) -> Self {
         assert!(!senders.is_empty(), "Must have at least one flusher thread");
-        Self { senders, metrics }
+        Self {
+            senders,
+            metrics,
+            config,
+        }
     }
 
     /// Start flusher threads with the given receivers and database reference
@@ -83,6 +93,8 @@ impl IndexFlusher {
             .collect()
     }
 
+    /// Unchecked enqueue. Do NOT call this while holding a row lock when the queue
+    /// may be near `max_flush_pending`; use `request_flush_with_backpressure` instead.
     pub fn request_flush(&self, ks: KeySpace, cell: CellId, flush_kind: FlushKind) {
         let thread_index = self.get_thread_for_cell(&cell);
         let command = IndexFlushCommand::new(ks, cell, flush_kind);
@@ -97,6 +109,27 @@ impl IndexFlusher {
             .expect("Flusher has stopped unexpectedly")
     }
 
+    /// Gated enqueue: blocks until `flush_pending_count <= max_flush_pending`, then
+    /// performs the enqueue. Safe to call only when the caller holds NO row locks.
+    pub fn request_flush_with_backpressure(
+        &self,
+        ks: KeySpace,
+        cell: CellId,
+        flush_kind: FlushKind,
+    ) {
+        if !self.config.sync_flush && self.config.max_flush_pending > 0 {
+            while self.metrics.flush_pending_count.load(Ordering::Relaxed)
+                > self.config.max_flush_pending
+            {
+                self.metrics.flush_backpressure_count.inc();
+                std::thread::sleep(std::time::Duration::from_micros(
+                    self.config.flush_pending_backpressure_sleep_us,
+                ));
+            }
+        }
+        self.request_flush(ks, cell, flush_kind);
+    }
+
     fn get_thread_for_cell(&self, cell: &CellId) -> usize {
         cell.mutex_seed() % self.senders.len()
     }
@@ -104,7 +137,7 @@ impl IndexFlusher {
     #[cfg(test)]
     pub fn new_unstarted_for_test() -> Self {
         let (sender, _receiver) = mpsc::channel();
-        Self::new(vec![sender], Metrics::new())
+        Self::new(vec![sender], Metrics::new(), Arc::new(Config::default()))
     }
 
     /// Wait until all messages that are currently queued for all flusher threads are processed.
