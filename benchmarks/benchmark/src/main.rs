@@ -108,20 +108,21 @@ pub fn main() {
             }
             use crate::storage::tidehunter::TidehunterStorage;
             let mutexes = 4096 * 32;
+            let key_len = config.stress_client_parameters.key_len;
             let (key_shape, ks) = match config.stress_client_parameters.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
-                    32,
+                    key_len,
                     mutexes,
                     KeyType::uniform(1),
                     key_space_config(),
                 ),
                 KeyLayout::SequenceChoice => {
                     let key_type = KeyType::prefix_uniform(8, 2);
-                    KeyShape::new_single_config(32, mutexes, key_type, key_space_config())
+                    KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config())
                 }
                 KeyLayout::ChoiceSequence => {
                     let key_type = KeyType::prefix_uniform(15, 5);
-                    KeyShape::new_single_config(32, mutexes, key_type, key_space_config())
+                    KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config())
                 }
             };
             let storage =
