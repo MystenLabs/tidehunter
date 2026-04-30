@@ -109,20 +109,36 @@ pub fn main() {
             use crate::storage::tidehunter::TidehunterStorage;
             let mutexes = 4096 * 32;
             let key_len = config.stress_client_parameters.key_len;
+            let bloom = match (
+                config.stress_client_parameters.bloom_filter_rate,
+                config.stress_client_parameters.bloom_filter_count,
+            ) {
+                (Some(rate), Some(count)) => {
+                    report!(
+                        report,
+                        "Bloom filter **enabled** (rate={rate}, count={count})"
+                    );
+                    Some((rate, count))
+                }
+                (None, None) => None,
+                _ => panic!(
+                    "bloom_filter_rate and bloom_filter_count must both be set or both be unset"
+                ),
+            };
             let (key_shape, ks) = match config.stress_client_parameters.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     key_len,
                     mutexes,
                     KeyType::uniform(1),
-                    key_space_config(),
+                    key_space_config(bloom),
                 ),
                 KeyLayout::SequenceChoice => {
                     let key_type = KeyType::prefix_uniform(8, 2);
-                    KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config())
+                    KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config(bloom))
                 }
                 KeyLayout::ChoiceSequence => {
                     let key_type = KeyType::prefix_uniform(15, 5);
-                    KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config())
+                    KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config(bloom))
                 }
             };
             let storage =
@@ -287,14 +303,18 @@ pub fn main() {
     }
 }
 
-fn key_space_config() -> KeySpaceConfig {
+fn key_space_config(bloom: Option<(f32, u32)>) -> KeySpaceConfig {
     use tidehunter::index::index_format::IndexFormatType;
     use tidehunter::index::uniform_lookup::UniformLookupIndex;
-    KeySpaceConfig::new()
+    let mut cfg = KeySpaceConfig::new()
         .with_index_format(IndexFormatType::Uniform(
             UniformLookupIndex::new_with_window_size(744),
         ))
-        .with_unloaded_iterator(true)
+        .with_unloaded_iterator(true);
+    if let Some((rate, count)) = bloom {
+        cfg = cfg.with_bloom_filter(rate, count);
+    }
+    cfg
 }
 
 struct Stress {

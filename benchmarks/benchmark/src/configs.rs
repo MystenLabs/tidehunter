@@ -180,6 +180,18 @@ pub struct StressClientParameters {
     /// Ratio of writes that overwrite existing keys (0.0 to 1.0, default 0.0)
     #[serde(default = "defaults::default_overwrite_ratio")]
     pub overwrite_ratio: f64,
+    /// Bloom filter false-positive rate for Tidehunter key spaces (e.g. 0.01 for 1%).
+    /// When set together with `bloom_filter_count`, enables a bloom filter sized to
+    /// approximate that FPR for the configured number of expected items per cell.
+    /// Set to None to disable bloom filters (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloom_filter_rate: Option<f32>,
+    /// Expected number of items per cell for bloom filter sizing. Should roughly
+    /// equal total_keys / num_cells. With `bloom_filter_rate=0.01` and `count`
+    /// matching the actual fill, this yields ~10 bits per key (matching RocksDB's
+    /// `set_bloom_filter(10.0, false)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloom_filter_count: Option<u32>,
 }
 
 impl Default for StressClientParameters {
@@ -206,6 +218,8 @@ impl Default for StressClientParameters {
             zipf_exponent: defaults::default_zipf_exponent(),
             relocation: None,
             overwrite_ratio: defaults::default_overwrite_ratio(),
+            bloom_filter_rate: None,
+            bloom_filter_count: None,
         }
     }
 }
@@ -393,6 +407,16 @@ pub struct StressArgs {
         help = "Ratio of writes that overwrite existing keys (0.0 to 1.0)"
     )]
     overwrite_ratio: Option<f64>,
+    #[arg(
+        long,
+        help = "Bloom filter false-positive rate (e.g. 0.01 for 1%). Requires --bloom-filter-count to take effect"
+    )]
+    bloom_filter_rate: Option<f32>,
+    #[arg(
+        long,
+        help = "Expected items per bloom filter cell (≈ total_keys / num_cells). Requires --bloom-filter-rate to take effect"
+    )]
+    bloom_filter_count: Option<u32>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -483,6 +507,12 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
             std::process::exit(1);
         }
         config.stress_client_parameters.overwrite_ratio = overwrite_ratio;
+    }
+    if let Some(bloom_filter_rate) = args.bloom_filter_rate {
+        config.stress_client_parameters.bloom_filter_rate = Some(bloom_filter_rate);
+    }
+    if let Some(bloom_filter_count) = args.bloom_filter_count {
+        config.stress_client_parameters.bloom_filter_count = Some(bloom_filter_count);
     }
 
     config
