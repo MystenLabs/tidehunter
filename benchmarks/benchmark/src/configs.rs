@@ -192,6 +192,14 @@ pub struct StressClientParameters {
     /// `set_bloom_filter(10.0, false)`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bloom_filter_count: Option<u32>,
+    /// Number of Large Table cells per mutex. Total cells = num_mutexes * cells_per_mutex.
+    /// Must be a power of two. Only applied with `key_layout: Uniform`. None = default of 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cells_per_mutex: Option<usize>,
+    /// Number of Large Table mutexes (row locks). Total cells = num_mutexes * cells_per_mutex.
+    /// Must be a power of two. None = default of 4096 * 32 = 131072.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_mutexes: Option<usize>,
 }
 
 impl Default for StressClientParameters {
@@ -220,6 +228,8 @@ impl Default for StressClientParameters {
             overwrite_ratio: defaults::default_overwrite_ratio(),
             bloom_filter_rate: None,
             bloom_filter_count: None,
+            cells_per_mutex: None,
+            num_mutexes: None,
         }
     }
 }
@@ -417,6 +427,16 @@ pub struct StressArgs {
         help = "Expected items per bloom filter cell (≈ total_keys / num_cells). Requires --bloom-filter-rate to take effect"
     )]
     bloom_filter_count: Option<u32>,
+    #[arg(
+        long,
+        help = "Cells per mutex for Uniform key layout (must be a power of two). Total cells = num_mutexes * cells_per_mutex"
+    )]
+    cells_per_mutex: Option<usize>,
+    #[arg(
+        long,
+        help = "Number of Large Table mutexes (must be a power of two). Total cells = num_mutexes * cells_per_mutex"
+    )]
+    num_mutexes: Option<usize>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -513,6 +533,12 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     }
     if let Some(bloom_filter_count) = args.bloom_filter_count {
         config.stress_client_parameters.bloom_filter_count = Some(bloom_filter_count);
+    }
+    if let Some(cells_per_mutex) = args.cells_per_mutex {
+        config.stress_client_parameters.cells_per_mutex = Some(cells_per_mutex);
+    }
+    if let Some(num_mutexes) = args.num_mutexes {
+        config.stress_client_parameters.num_mutexes = Some(num_mutexes);
     }
 
     config

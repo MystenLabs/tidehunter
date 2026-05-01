@@ -107,7 +107,11 @@ pub fn main() {
                 report!(report, "Using **direct IO**");
             }
             use crate::storage::tidehunter::TidehunterStorage;
-            let mutexes = 4096 * 32;
+            let mutexes = config
+                .stress_client_parameters
+                .num_mutexes
+                .unwrap_or(4096 * 32);
+            report!(report, "Num mutexes: **{mutexes}**");
             let key_len = config.stress_client_parameters.key_len;
             let bloom = match (
                 config.stress_client_parameters.bloom_filter_rate,
@@ -125,11 +129,21 @@ pub fn main() {
                     "bloom_filter_rate and bloom_filter_count must both be set or both be unset"
                 ),
             };
+            let cells_per_mutex = config.stress_client_parameters.cells_per_mutex.unwrap_or(1);
+            if config.stress_client_parameters.cells_per_mutex.is_some()
+                && !matches!(
+                    config.stress_client_parameters.key_layout,
+                    KeyLayout::Uniform
+                )
+            {
+                panic!("cells_per_mutex only applies to key_layout: Uniform");
+            }
+            report!(report, "Cells per mutex: **{cells_per_mutex}**");
             let (key_shape, ks) = match config.stress_client_parameters.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     key_len,
                     mutexes,
-                    KeyType::uniform(1),
+                    KeyType::uniform(cells_per_mutex),
                     key_space_config(bloom),
                 ),
                 KeyLayout::SequenceChoice => {
