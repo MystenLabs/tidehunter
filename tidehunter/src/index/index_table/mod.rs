@@ -943,13 +943,31 @@ impl IndexTable {
         self.dirty_count = 0;
     }
 
-    /// Retain only unprocessed entries (those with WAL offset > last_processed).
-    /// Flat is cleared entirely: promote_to_flat always runs before last_processed is
-    /// captured, so all flat entries are guaranteed to be processed.
+    /// Retain only unprocessed entries (those with WAL offset >= last_processed).
+    /// Walks both the BTreeMap write buffer and the flat buffer; processed entries
+    /// are dropped from either side.
+    ///
+    /// We cannot clear `self.flat` unconditionally: `promote_flat_job` can move
+    /// still-pending writes from the BTreeMap into flat between the flush
+    /// snapshot capture and this callback. Those entries' WAL offsets exceed
+    /// `last_processed` and must survive — the new on-disk blob written by the
+    /// flusher does not contain them (it was built from the snapshot, which
+    /// observed them in the BTreeMap, but `clean_self` / compactor passes can
+    /// drop them on the way to disk if the keys appear deleted at snapshot
+    /// time). Dropping them here as well would leave a window where neither
+    /// the on-disk index nor the in-memory overlay holds the durable WAL
+    /// entry — observed in production as a dirty-overlay loss after a clean
+    /// flush completion.
     pub fn retain_unprocessed(&mut self, last_processed: LastProcessed) {
-        self.flat = Bytes::default();
+        self.retain_flat(|_, iwp| {
+            if last_processed.is_processed(&iwp) {
+                None
+            } else {
+                Some(iwp)
+            }
+        });
         self.retain(|_, v| !last_processed.is_processed(v));
-        // flat was cleared unconditionally; recount since retain only tracked BTreeMap changes.
+        // retain_flat doesn't track dirty_count; recompute.
         self.dirty_count = self.count_dirty_slow();
     }
 
@@ -1439,6 +1457,30 @@ mod tests {
                 (vec![6].into(), WalPosition::test_value(4)) // This one wasn't unmerged because offset > 3
             ]
         );
+    }
+
+    #[test]
+    fn test_retain_unprocessed_preserves_flat_unprocessed() {
+        // Regression: `promote_flat_job` can move a still-pending write from
+        // BTreeMap into flat between flush snapshot and `update_flushed_index`.
+        // `retain_unprocessed` must walk flat (not clear it unconditionally),
+        // otherwise the unprocessed entry is lost from in-memory state.
+        let mut index = IndexTable::default();
+        index.insert(vec![1].into(), WalPosition::test_value(100));
+        index.insert(vec![2].into(), WalPosition::test_value(200));
+        index.insert(vec![3].into(), WalPosition::test_value(500));
+
+        // Simulate `promote_flat_job` moving BTreeMap → flat.
+        index.promote_to_flat_force();
+        assert!(index.data_btree_is_empty());
+        assert_eq!(index.len(), 3);
+
+        // last_processed = 300: positions 100, 200 are processed; 500 is not.
+        index.retain_unprocessed(LastProcessed::new(300));
+
+        assert!(index.get(&[1]).is_none());
+        assert!(index.get(&[2]).is_none());
+        assert_eq!(index.get(&[3]), Some(WalPosition::test_value(500)));
     }
 
     #[test]
