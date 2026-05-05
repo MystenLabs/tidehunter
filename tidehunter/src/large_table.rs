@@ -394,7 +394,22 @@ impl LargeTable {
     ) {
         let mut row = self.row_by_mutex(context, mutex_idx);
         for (cell_id, op, position) in ops {
+            // Diagnostic invariants: the per-op cell must hash to this group's
+            // mutex_idx, and `entry_mut` must return the entry actually owning
+            // that cell. A violation would silently route writes into the wrong
+            // cell's pending_data, producing a "WAL has the entry, dirty overlay
+            // does not" inconsistency at read time.
+            assert_eq!(
+                context.ks_config.mutex_for_cell(cell_id),
+                mutex_idx,
+                "apply_pending_batch: cell {cell_id:?} mutex_for_cell != group mutex_idx {mutex_idx}",
+            );
             let entry = self.entry_mut(&mut row, cell_id);
+            assert_eq!(
+                &entry.cell, cell_id,
+                "apply_pending_batch: entry_mut returned wrong cell (expected {cell_id:?}, got {:?})",
+                entry.cell,
+            );
             match op {
                 PendingBatchOp::Insert {
                     reduced_key,

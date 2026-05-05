@@ -172,6 +172,31 @@ impl Transaction {
 impl Drop for Transaction {
     fn drop(&mut self) {
         if !self.committed {
+            // Diagnostic: a Transaction dropped without commit silently discards
+            // every PendingUpdate it touched (take_committed sees REVERTED and
+            // drops them), which surfaces as a "WAL has the entry, dirty overlay
+            // does not" inconsistency. We do not expect this to occur in
+            // production. Log a backtrace so the cause is visible if it ever
+            // does.
+            //
+            // The Arc-strong-count check filters out the common no-op case
+            // where do_write_batch early-returns on an empty batch — no
+            // PendingUpdates were ever created, so strong_count == 1 (just
+            // this Transaction's own reference). Any committed-against
+            // PendingTable would have cloned the Arc into PendingUpdate.
+            // Suppressed under #[cfg(test)] because pending_table's own unit
+            // tests deliberately drop uncommitted transactions.
+            #[cfg(not(test))]
+            if Arc::strong_count(&self.status.status) > 1 {
+                eprintln!(
+                    "tidehunter: Transaction dropped without commit (REVERTED) \
+                     while still referenced by pending updates (strong_count={}). \
+                     Those updates will be silently discarded by take_committed. \
+                     Backtrace:\n{}",
+                    Arc::strong_count(&self.status.status),
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
             self.status
                 .status
                 .store(TRANSACTION_STATUS_REVERTED, Ordering::SeqCst);
