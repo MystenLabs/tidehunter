@@ -315,8 +315,11 @@ fn main() {
                 thread_pb.inc(1);
                 overall.inc(1);
 
+                let restarts_enabled = std::env::var("DISABLE_RESTART").is_err();
+                let relocation_enabled = std::env::var("DISABLE_RELOCATION").is_err();
+
                 // 1% chance: restart db (whole-process unload window).
-                if rng.gen_range(0..100) < 1 {
+                if restarts_enabled && rng.gen_range(0..100) < 1 {
                     let mut w = db.write();
                     if let Some(old) = w.take() {
                         old.wait_for_background_threads_to_finish();
@@ -332,7 +335,7 @@ fn main() {
                 }
 
                 // 1% chance: explicit relocation pass.
-                if rng.gen_range(0..100) < 1 {
+                if relocation_enabled && rng.gen_range(0..100) < 1 {
                     let r = db.read();
                     let _: Result<(), _> = r.as_ref().unwrap().start_relocation();
                 }
