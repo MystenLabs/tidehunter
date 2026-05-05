@@ -8,6 +8,7 @@ members = [
     "benchmarks/wal_benchmark",
     "scripts/generate_target_configs",
     "tests/concurrent_test",
+    "tests/objects_iter_test",
     "tools/tideconsole",
 ]
 resolver = "2"

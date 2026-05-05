@@ -1420,6 +1420,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objects_iter_test"
+version = "0.1.0"
+dependencies = [
+ "indicatif",
+ "parking_lot",
+ "rand 0.8.5",
+ "tempdir",
+ "tidehunter",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
