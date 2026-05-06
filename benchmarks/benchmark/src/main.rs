@@ -67,6 +67,11 @@ pub fn main() {
         &config.stress_client_parameters
     );
 
+    if config.stress_client_parameters.reuse.is_some()
+        && config.stress_client_parameters.db_path.is_some()
+    {
+        panic!("--reuse and --db-path are mutually exclusive");
+    }
     let temp_dir = if let Some(path) = &config.stress_client_parameters.path {
         tempdir::TempDir::new_in(path, "stress").unwrap()
     } else {
@@ -75,6 +80,10 @@ pub fn main() {
 
     let path = if let Some(reuse) = &config.stress_client_parameters.reuse {
         reuse.parse().unwrap()
+    } else if let Some(db_path) = &config.stress_client_parameters.db_path {
+        let p: std::path::PathBuf = db_path.parse().unwrap();
+        fs::create_dir_all(&p).expect("failed to create db_path");
+        p
     } else {
         temp_dir.path().to_path_buf()
     };
@@ -95,6 +104,29 @@ pub fn main() {
         config.stress_client_parameters.read_mode
     );
     let print_report = config.stress_client_parameters.report;
+    let measure_open = config.stress_client_parameters.measure_open;
+    if measure_open && !matches!(config.stress_client_parameters.backend, Backend::Tidehunter) {
+        panic!("--measure-open is only supported for the Tidehunter backend");
+    }
+    if measure_open && config.stress_client_parameters.crash_after_secs.is_some() {
+        panic!("--measure-open and --crash-after-secs are mutually exclusive");
+    }
+    if let Some(secs) = config.stress_client_parameters.crash_after_secs {
+        report!(
+            report,
+            "CRASH: scheduled simulated crash via process::exit(137) at +{secs}s"
+        );
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(secs));
+            // process::exit bypasses Drop and stack unwinding (running only
+            // atexit hooks + stdio flush), simulating SIGKILL for recovery
+            // tests. The Db is never drop()-ped, so no in-flight WAL fsync
+            // or relocation cleanup runs.
+            eprintln!("[crash-after-{secs}s] exiting via process::exit(137)");
+            std::process::exit(137);
+        });
+    }
+    let mut recovery_timings: Option<tidehunter::db::RecoveryTimings> = None;
     let registry = Registry::new();
     let benchmark_metrics = BenchmarkMetrics::new_in(&registry, &config);
     prometheus::start_prometheus_server(
@@ -155,47 +187,54 @@ pub fn main() {
                     KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config(bloom))
                 }
             };
-            let storage =
-                TidehunterStorage::open(&registry, config.db_parameters, &path, (key_shape, ks));
-            if !config.stress_client_parameters.no_snapshot {
-                report!(report, "Periodic snapshot **enabled**");
-                storage.db.start_periodic_snapshot();
-            } else {
-                report!(report, "Periodic snapshot **disabled**");
-            }
+            let (storage, timings) = TidehunterStorage::open_with_timings(
+                &registry,
+                config.db_parameters,
+                &path,
+                (key_shape, ks),
+            );
+            recovery_timings = Some(timings);
+            if !measure_open {
+                if !config.stress_client_parameters.no_snapshot {
+                    report!(report, "Periodic snapshot **enabled**");
+                    storage.db.start_periodic_snapshot();
+                } else {
+                    report!(report, "Periodic snapshot **disabled**");
+                }
 
-            // Start continuous relocation if enabled
-            if let Some(ref relocation_config) = config.stress_client_parameters.relocation {
-                report!(
-                    report,
-                    "Starting continuous {:?} relocation",
-                    relocation_config
-                );
-                let db_clone = storage.db.clone();
-                let relocation_config = relocation_config.clone();
-                thread::spawn(move || {
-                    loop {
-                        // Convert RelocationConfig to RelocationStrategy for this iteration
-                        let strategy = match &relocation_config {
-                            RelocationConfig::Wal => RelocationStrategy::WalBased,
-                            RelocationConfig::Index { ratio: None } => {
-                                RelocationStrategy::IndexBased(None)
-                            }
-                            RelocationConfig::Index { ratio: Some(r) } => {
-                                // Compute fresh target position from ratio each iteration
-                                let target_position =
-                                    compute_target_position_from_ratio(&db_clone, *r);
-                                RelocationStrategy::IndexBased(target_position)
-                            }
-                        };
+                // Start continuous relocation if enabled
+                if let Some(ref relocation_config) = config.stress_client_parameters.relocation {
+                    report!(
+                        report,
+                        "Starting continuous {:?} relocation",
+                        relocation_config
+                    );
+                    let db_clone = storage.db.clone();
+                    let relocation_config = relocation_config.clone();
+                    thread::spawn(move || {
+                        loop {
+                            // Convert RelocationConfig to RelocationStrategy for this iteration
+                            let strategy = match &relocation_config {
+                                RelocationConfig::Wal => RelocationStrategy::WalBased,
+                                RelocationConfig::Index { ratio: None } => {
+                                    RelocationStrategy::IndexBased(None)
+                                }
+                                RelocationConfig::Index { ratio: Some(r) } => {
+                                    // Compute fresh target position from ratio each iteration
+                                    let target_position =
+                                        compute_target_position_from_ratio(&db_clone, *r);
+                                    RelocationStrategy::IndexBased(target_position)
+                                }
+                            };
 
-                        // Start relocation and let it run to completion
-                        db_clone.start_blocking_relocation_with_strategy(strategy);
+                            // Start relocation and let it run to completion
+                            db_clone.start_blocking_relocation_with_strategy(strategy);
 
-                        // Take a 30 second break between relocations
-                        thread::sleep(Duration::from_secs(30));
-                    }
-                });
+                            // Take a 30 second break between relocations
+                            thread::sleep(Duration::from_secs(30));
+                        }
+                    });
+                }
             }
 
             Arc::new(storage)
@@ -209,6 +248,36 @@ pub fn main() {
             Arc::new(storage)
         }
     };
+    if measure_open {
+        run_measure_open(
+            &storage,
+            recovery_timings.expect("Tidehunter open should have produced timings"),
+            &config.stress_client_parameters,
+            &mut report,
+        );
+        let clean_path = if config.stress_client_parameters.clean_after_measure {
+            config.stress_client_parameters.reuse.clone()
+        } else {
+            None
+        };
+        // Drop the storage (and the underlying Db) so the lock is released and
+        // mmaps unmapped before we delete files.
+        drop(storage);
+        if let Some(p) = clean_path {
+            report!(report, "CLEAN: removing {p}");
+            if let Err(e) = fs::remove_dir_all(&p) {
+                eprintln!("clean_after_measure: failed to remove {p}: {e}");
+            }
+        }
+        if print_report {
+            report!(report, "Writing report file");
+            fs::write("report.txt", &report.lines).unwrap();
+        }
+        if config.stress_client_parameters.preserve {
+            temp_dir.into_path();
+        }
+        return;
+    }
     let stress = Stress {
         storage,
         parameters: Arc::new(config.stress_client_parameters),
@@ -314,6 +383,119 @@ pub fn main() {
 
     if stress.parameters.preserve {
         temp_dir.into_path();
+    }
+}
+
+fn pos_to_key_value(
+    pos: u64,
+    key_len: usize,
+    value_len: usize,
+    layout: &KeyLayout,
+) -> (Vec<u8>, Vec<u8>) {
+    // Mirror StressThread::key_value exactly: a single pos-seeded RNG fills
+    // the key bytes first, then the value bytes. The key prefix is rewritten
+    // by the layout *after* RNG consumption, so the value bytes are
+    // determined by the RNG state after `key_len` bytes have been drawn.
+    let mut seed = <StdRng as SeedableRng>::Seed::default();
+    {
+        let mut writer = &mut seed[..];
+        writer.put_u64(pos);
+    }
+    let mut rng = StdRng::from_seed(seed);
+    let mut key = vec![0u8; key_len];
+    rng.fill_bytes(&mut key);
+    match layout {
+        KeyLayout::Uniform => {}
+        KeyLayout::SequenceChoice => {
+            key[..8].copy_from_slice(&u64::to_be_bytes(pos / 256));
+            key[8..16].copy_from_slice(&u64::to_be_bytes(pos % 256));
+        }
+        KeyLayout::ChoiceSequence => {
+            key[..8].copy_from_slice(&u64::to_be_bytes(pos % 256));
+            key[8..16].copy_from_slice(&u64::to_be_bytes(pos / 256));
+        }
+    }
+    let mut value = vec![0u8; value_len];
+    rng.fill_bytes(&mut value);
+    (key, value)
+}
+
+fn run_measure_open(
+    storage: &Arc<dyn Storage>,
+    timings: tidehunter::db::RecoveryTimings,
+    params: &StressClientParameters,
+    report: &mut Report,
+) {
+    report!(
+        report,
+        "RECOVERY: total_ms={} lock_acquire_ms={} read_control_region_ms={} wal_open_ms={} large_table_init_ms={} wal_replay_ms={} index_writer_open_ms={} background_start_ms={} other_ms={} bytes_replayed={} entries_replayed={}",
+        timings.total.as_millis(),
+        timings.lock_acquire.as_millis(),
+        timings.read_control_region.as_millis(),
+        timings.wal_open.as_millis(),
+        timings.large_table_init.as_millis(),
+        timings.wal_replay.as_millis(),
+        timings.index_writer_open.as_millis(),
+        timings.background_start.as_millis(),
+        timings.other.as_millis(),
+        timings.bytes_replayed,
+        timings.entries_replayed,
+    );
+
+    let n = params.first_read_samples;
+    if n == 0 {
+        return;
+    }
+    let total_keys = (params.writes as u64).saturating_mul(params.write_threads as u64);
+    if total_keys == 0 {
+        report!(
+            report,
+            "FIRST_READ: skipped (writes * write_threads = 0; set --writes and --write-threads to match the original fill)"
+        );
+        return;
+    }
+    let mut rng = StdRng::seed_from_u64(0x5236_4649_5253_5400u64.wrapping_add(n as u64));
+    let mut latencies_us: Vec<u64> = Vec::with_capacity(n);
+    let mut hits: usize = 0;
+    let mut mismatches: usize = 0;
+    for _ in 0..n {
+        let pos = rng.gen_range(0..total_keys);
+        let (key, expected) =
+            pos_to_key_value(pos, params.key_len, params.write_size, &params.key_layout);
+        let t = Instant::now();
+        let found = storage.get(&key);
+        latencies_us.push(t.elapsed().as_micros() as u64);
+        if let Some(actual) = found {
+            hits += 1;
+            // After a clean reopen every key we check should round-trip exactly;
+            // a mismatch points to recovery corruption (the bar that R6's
+            // crash-during-relocation experiment is meant to clear).
+            if actual.as_ref() != expected.as_slice() {
+                mismatches += 1;
+            }
+        }
+    }
+    latencies_us.sort_unstable();
+    let pct = |q: f64| -> u64 {
+        let idx = ((latencies_us.len() as f64 * q) as usize).min(latencies_us.len() - 1);
+        latencies_us[idx]
+    };
+    let avg_us = latencies_us.iter().copied().sum::<u64>() / latencies_us.len() as u64;
+    report!(
+        report,
+        "FIRST_READ: samples={} hits={} mismatches={} avg_us={} p50_us={} p99_us={} p999_us={}",
+        n,
+        hits,
+        mismatches,
+        avg_us,
+        pct(0.50),
+        pct(0.99),
+        pct(0.999),
+    );
+    if mismatches > 0 {
+        eprintln!(
+            "RECOVERY CORRUPTION: {mismatches}/{hits} sampled values disagree with the writer's deterministic value"
+        );
     }
 }
 

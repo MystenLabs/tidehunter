@@ -54,6 +54,33 @@ pub type DbResult<T> = Result<T, DbError>;
 pub const MAX_KEY_LEN: usize = u16::MAX as usize;
 pub const CONTROL_REGION_FILE: &str = "cr";
 
+/// Phase-by-phase wall-clock breakdown of `Db::open`. Surfaced via
+/// `Db::open_with_timings` so the recovery-evaluation benchmark can attribute
+/// cold-start cost to the dominant phase (typically WAL replay).
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryTimings {
+    pub lock_acquire: Duration,
+    pub read_control_region: Duration,
+    pub wal_open: Duration,
+    pub large_table_init: Duration,
+    pub wal_replay: Duration,
+    pub index_writer_open: Duration,
+    pub background_start: Duration,
+    /// Time spent in `Db::open` not covered by the named phases (channel
+    /// allocation, contexts, commit-pool/promotion-thread bookkeeping, struct
+    /// construction, memory reporting, canonicalize, file existence checks).
+    pub other: Duration,
+    pub total: Duration,
+    pub bytes_replayed: u64,
+    pub entries_replayed: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReplayStats {
+    entries: u64,
+    bytes: u64,
+}
+
 impl Db {
     pub fn open(
         path: &Path,
@@ -61,14 +88,38 @@ impl Db {
         config: Arc<Config>,
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
+        Self::open_with_timings(path, key_shape, config, metrics).map(|(db, _)| db)
+    }
+
+    /// Same as `open`, but also returns a phase-by-phase breakdown of recovery time.
+    /// Used by the recovery-evaluation benchmarks to measure cold-start cost.
+    pub fn open_with_timings(
+        path: &Path,
+        key_shape: KeyShape,
+        config: Arc<Config>,
+        metrics: Arc<Metrics>,
+    ) -> DbResult<(Arc<Self>, RecoveryTimings)> {
+        let total_start = Instant::now();
+        let mut timings = RecoveryTimings::default();
+
         let path = path.canonicalize()?;
+
+        let t = Instant::now();
         let lock = DbLock::acquire(&path, config.open_lock_retry_timeout)?;
+        timings.lock_acquire = t.elapsed();
+
         Self::maybe_create_shape_file(&path, &key_shape)?;
         Self::maybe_create_config_file(&path, &config)?;
+
+        let t = Instant::now();
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
+        timings.read_control_region = t.elapsed();
+
+        let t = Instant::now();
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
         let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
+        timings.wal_open = t.elapsed();
 
         // Create channels for flusher threads first
         let (flusher_senders, flusher_receivers) = (0..config.num_flusher_threads)
@@ -78,6 +129,8 @@ impl Db {
 
         let flusher = IndexFlusher::new(flusher_senders, metrics.clone(), config.clone());
         let relocator = Relocator(relocator_sender);
+
+        let t = Instant::now();
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
@@ -86,12 +139,22 @@ impl Db {
             metrics.clone(),
             indexes.as_ref(),
         );
+        timings.large_table_init = t.elapsed();
+
         let contexts = KsContextVec::new(&key_shape, config.clone(), metrics.clone());
+
+        let t = Instant::now();
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
-        let wal_writer =
+        let (wal_writer, replay_stats) =
             Self::replay_wal(&contexts, &large_table, wal_iterator, &indexes, &metrics)?;
+        timings.wal_replay = t.elapsed();
+        timings.bytes_replayed = replay_stats.bytes;
+        timings.entries_replayed = replay_stats.entries;
+
+        let t = Instant::now();
         let last_index_position = control_region.last_index_wal_position();
         let index_writer = indexes.writer_after(last_index_position)?;
+        timings.index_writer_open = t.elapsed();
         let control_region_store = Mutex::new(control_region_store);
 
         let commit_pool = if config.commit_pool_size > 0 {
@@ -129,6 +192,7 @@ impl Db {
         this.report_memory_estimates();
         let this = Arc::new(this);
 
+        let t = Instant::now();
         // Now start the flusher threads with the weak reference
         let weak_db = Arc::downgrade(&this);
         let _handles = IndexFlusher::start_threads(flusher_receivers, weak_db, metrics.clone());
@@ -150,10 +214,20 @@ impl Db {
             })
             .collect();
         let _flat_handle = Self::start_flat_promotion_job(Arc::downgrade(&this));
+        timings.background_start = t.elapsed();
 
         // todo: store handles and wait for them on Db drop
 
-        Ok(this)
+        timings.total = total_start.elapsed();
+        let named = timings.lock_acquire
+            + timings.read_control_region
+            + timings.wal_open
+            + timings.large_table_init
+            + timings.wal_replay
+            + timings.index_writer_open
+            + timings.background_start;
+        timings.other = timings.total.saturating_sub(named);
+        Ok((this, timings))
     }
 
     /// Deletes the database directory at `path` if no other process holds the lock.
@@ -796,7 +870,9 @@ impl Db {
         mut wal_iterator: WalIterator,
         indexes: &Wal,
         metrics: &Metrics,
-    ) -> DbResult<WalWriter> {
+    ) -> DbResult<(WalWriter, ReplayStats)> {
+        let start_position = wal_iterator.position();
+        let mut stats = ReplayStats::default();
         let mut batch = VecDeque::new();
         let mut batch_remaining = 0;
         let mut batch_start_position: Option<u64> = None;
@@ -808,7 +884,8 @@ impl Db {
             } else {
                 let entry = wal_iterator.next();
                 if matches!(entry, Err(WalError::Crc(_))) {
-                    break Ok(wal_iterator.into_writer(batch_start_position));
+                    stats.bytes = wal_iterator.position().saturating_sub(start_position);
+                    break Ok((wal_iterator.into_writer(batch_start_position), stats));
                 }
                 let (position, raw_entry) = entry?;
                 let entry = WalEntry::from_bytes(raw_entry);
@@ -826,6 +903,7 @@ impl Db {
             match entry {
                 WalEntry::Record(ks, k, v, relocated) => {
                     metrics.replayed_wal_records.inc();
+                    stats.entries += 1;
                     if relocated {
                         // Nothing needs to be done for the relocated record
                         continue;
@@ -841,6 +919,7 @@ impl Db {
                 }
                 WalEntry::Remove(ks, k) => {
                     metrics.replayed_wal_records.inc();
+                    stats.entries += 1;
                     let context = contexts.ks_context(ks);
                     let reduced_key = context.ks_config.reduced_key_bytes(k);
                     let guard = WalGuard::replay_guard(position);
@@ -853,6 +932,7 @@ impl Db {
                 }
                 WalEntry::DropCells(ks, from_cell, to_cell) => {
                     metrics.replayed_wal_records.inc();
+                    stats.entries += 1;
                     let context = contexts.ks_context(ks);
                     large_table.drop_cells_in_range(context, &from_cell, &to_cell);
                 }

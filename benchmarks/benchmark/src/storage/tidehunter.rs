@@ -4,7 +4,7 @@ use prometheus::Registry;
 use std::path::Path;
 use std::sync::Arc;
 use tidehunter::config::Config;
-use tidehunter::db::Db;
+use tidehunter::db::{Db, RecoveryTimings};
 use tidehunter::key_shape::{KeyShape, KeySpace};
 use tidehunter::metrics::Metrics;
 
@@ -47,16 +47,16 @@ impl Storage for Arc<TidehunterStorage> {
 }
 
 impl TidehunterStorage {
-    pub fn open(
+    pub fn open_with_timings(
         registry: &Registry,
         config: Config,
         path: &Path,
         (key_shape, ks): (KeyShape, KeySpace),
-    ) -> Arc<Self> {
+    ) -> (Arc<Self>, RecoveryTimings) {
         let config = Arc::new(config);
         let metrics = Metrics::from_config_registry(registry, &config);
-        let db = Db::open(path, key_shape, config, metrics).unwrap();
+        let (db, timings) = Db::open_with_timings(path, key_shape, config, metrics).unwrap();
         let this = Self { db, ks };
-        Arc::new(this)
+        (Arc::new(this), timings)
     }
 }

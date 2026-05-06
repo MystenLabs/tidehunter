@@ -373,6 +373,11 @@ impl Wal {
 }
 
 impl WalIterator {
+    /// Current cursor position (the offset of the next entry to be read).
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
     fn new(wal: Arc<Wal>, position: u64) -> Result<Self, WalError> {
         let mut maps = WalMaps::default();
         let (map_id, _) = wal.layout.locate(position);

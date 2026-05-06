@@ -162,6 +162,12 @@ pub struct StressClientParameters {
     pub preserve: bool,
     /// Use pre-generated DB
     pub reuse: Option<String>,
+    /// Use this exact path as the DB directory (created if missing) and run writes
+    /// normally. Unlike `reuse`, this does not skip the write phase. Intended for
+    /// fills with deterministic paths that survive orchestrator cleanup. Mutually
+    /// exclusive with `reuse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_path: Option<String>,
     /// The read mode
     #[serde(default = "defaults::default_read_mode")]
     pub read_mode: ReadMode,
@@ -200,6 +206,27 @@ pub struct StressClientParameters {
     /// Must be a power of two. None = default of 4096 * 32 = 131072.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub num_mutexes: Option<usize>,
+    /// If true, open the database (using `reuse`), report a phase-by-phase recovery
+    /// breakdown plus optional time-to-first-read samples, then exit. Skips the
+    /// write and mixed phases entirely. Tidehunter only.
+    #[serde(default = "defaults::default_measure_open")]
+    pub measure_open: bool,
+    /// Number of single-threaded reads to issue immediately after open when
+    /// `measure_open` is set, for time-to-first-read measurement. 0 disables.
+    #[serde(default = "defaults::default_first_read_samples")]
+    pub first_read_samples: usize,
+    /// If set, spawn a thread that calls `std::process::exit(137)` after this
+    /// many seconds. Bypasses Drop on the Db (no clean shutdown), simulating
+    /// SIGKILL. Used to evaluate recovery from mid-flight crashes (notably:
+    /// crash during relocation). Mutually exclusive with `measure_open`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crash_after_secs: Option<u64>,
+    /// When `measure_open` is set, recursively delete the `reuse` path after
+    /// the measurement (and after the `Db` is dropped so no mmaps remain).
+    /// Used to bound per-machine disk usage in the R6 sweeps; only meaningful
+    /// alongside `measure_open` + `reuse`.
+    #[serde(default = "defaults::default_clean_after_measure")]
+    pub clean_after_measure: bool,
 }
 
 impl Default for StressClientParameters {
@@ -220,6 +247,7 @@ impl Default for StressClientParameters {
             tldr: defaults::default_tldr(),
             preserve: defaults::default_preserve(),
             reuse: None,
+            db_path: None,
             read_mode: defaults::default_read_mode(),
             backend: defaults::default_backend(),
             read_percentage: defaults::default_read_percentage(),
@@ -230,6 +258,10 @@ impl Default for StressClientParameters {
             bloom_filter_count: None,
             cells_per_mutex: None,
             num_mutexes: None,
+            measure_open: defaults::default_measure_open(),
+            first_read_samples: defaults::default_first_read_samples(),
+            crash_after_secs: None,
+            clean_after_measure: defaults::default_clean_after_measure(),
         }
     }
 }
@@ -308,6 +340,18 @@ pub mod defaults {
 
     pub fn default_overwrite_ratio() -> f64 {
         0.0
+    }
+
+    pub fn default_measure_open() -> bool {
+        false
+    }
+
+    pub fn default_first_read_samples() -> usize {
+        0
+    }
+
+    pub fn default_clean_after_measure() -> bool {
+        false
     }
 }
 
@@ -396,6 +440,11 @@ pub struct StressArgs {
     preserve: Option<bool>,
     #[arg(long, help = "Use pre-generated DB")]
     reuse: Option<String>,
+    #[arg(
+        long,
+        help = "Use this exact path as the DB directory (created if missing) and run writes normally. Mutually exclusive with --reuse."
+    )]
+    db_path: Option<String>,
     #[arg(long, help = "Read mode")]
     read_mode: Option<ReadMode>,
     #[arg(long, short = 'b', help = "Backend")]
@@ -437,6 +486,26 @@ pub struct StressArgs {
         help = "Number of Large Table mutexes (must be a power of two). Total cells = num_mutexes * cells_per_mutex"
     )]
     num_mutexes: Option<usize>,
+    #[arg(
+        long,
+        help = "Measure recovery time only: open the DB at --reuse, print phase breakdown, optionally sample reads, then exit. Tidehunter only."
+    )]
+    measure_open: Option<bool>,
+    #[arg(
+        long,
+        help = "Number of single-threaded reads to issue after open for time-to-first-read measurement (only used with --measure-open)"
+    )]
+    first_read_samples: Option<usize>,
+    #[arg(
+        long,
+        help = "If set, exit the process via std::process::exit(137) after this many seconds (bypasses Drop, simulates SIGKILL)"
+    )]
+    crash_after_secs: Option<u64>,
+    #[arg(
+        long,
+        help = "After --measure-open finishes, recursively delete the --reuse path (bounds per-machine disk in sweeps)"
+    )]
+    clean_after_measure: Option<bool>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -492,6 +561,9 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     if let Some(reuse) = args.reuse {
         config.stress_client_parameters.reuse = Some(reuse);
     }
+    if let Some(db_path) = args.db_path {
+        config.stress_client_parameters.db_path = Some(db_path);
+    }
     if let Some(read_mode) = args.read_mode {
         config.stress_client_parameters.read_mode = read_mode;
     }
@@ -539,6 +611,18 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     }
     if let Some(num_mutexes) = args.num_mutexes {
         config.stress_client_parameters.num_mutexes = Some(num_mutexes);
+    }
+    if let Some(measure_open) = args.measure_open {
+        config.stress_client_parameters.measure_open = measure_open;
+    }
+    if let Some(first_read_samples) = args.first_read_samples {
+        config.stress_client_parameters.first_read_samples = first_read_samples;
+    }
+    if let Some(crash_after_secs) = args.crash_after_secs {
+        config.stress_client_parameters.crash_after_secs = Some(crash_after_secs);
+    }
+    if let Some(clean_after_measure) = args.clean_after_measure {
+        config.stress_client_parameters.clean_after_measure = clean_after_measure;
     }
 
     config
