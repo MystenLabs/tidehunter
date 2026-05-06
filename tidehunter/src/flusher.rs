@@ -4,12 +4,15 @@ use crate::cell::CellId;
 use crate::context::KsContext;
 use crate::db::Db;
 use crate::index::index_table::IndexTable;
+use crate::index::index_table::IndexWalPosition;
 use crate::index::levels::IndexLevels;
 use crate::key_shape::KeySpace;
 use crate::large_table::Loader;
 use crate::metrics::Metrics;
 use crate::relocation::updates::RelocationUpdates;
 use crate::wal::position::WalPosition;
+use minibytes::Bytes;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::mpsc;
@@ -171,7 +174,7 @@ impl IndexFlusherThread {
 
                     let ks_context = db.ks_context(command.ks);
                     let is_relocation = matches!(command.flush_kind, FlushKind::ForceRelocate(_));
-                    if let Some((original_index, new_levels)) =
+                    if let Some((original_index, new_levels, on_disk_keys, dropped_from_disk)) =
                         Self::handle_command(&*db, &command, ks_context, None, None)
                     {
                         if is_relocation {
@@ -182,6 +185,8 @@ impl IndexFlusherThread {
                                 command.cell,
                                 original_index,
                                 new_levels,
+                                on_disk_keys,
+                                dropped_from_disk,
                             );
                         }
                     }
@@ -195,13 +200,19 @@ impl IndexFlusherThread {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn handle_command<L: Loader>(
         loader: &L,
         command: &IndexFlushCommand,
         ctx: &KsContext,
         relocation_updates: Option<RelocationUpdates>,
         relocation_cutoff: Option<u64>,
-    ) -> Option<(Arc<IndexTable>, IndexLevels)> {
+    ) -> Option<(
+        Arc<IndexTable>,
+        IndexLevels,
+        HashSet<Bytes>,
+        std::collections::HashMap<Bytes, crate::index::index_table::IndexWalPosition>,
+    )> {
         // Build the merged L0 candidate plus the existing L1 (if any).
         //
         // For `Flush`, `current_levels` describes the cell's pre-flush on-disk
@@ -212,6 +223,30 @@ impl IndexFlusherThread {
         // is always single-level (`existing_l1 = None`). Downstream this means
         // the non-promote branch will `clean_self` (since no L1 sits below)
         // and emit `IndexLevels::single(new_pos)`.
+        // `existing_disk_entries` is a snapshot of keys/positions present on
+        // disk *before* this flush merges in `dirty`. We need it to detect
+        // entries that the compactor or `clean_self` are about to drop from
+        // disk that did not appear in `dirty` — those need to be folded back
+        // into the in-memory entry on flush completion. Without this, a
+        // version that was on disk under a previous flush can vanish from
+        // both memory and disk when a higher version arrives via this flush
+        // (the dirty-overlay-loss bug, second-order form). We capture both
+        // existing L0 and L1 because compactor/clean_self can collapse
+        // entries from either level.
+        let mut existing_disk_entries: HashMap<Bytes, IndexWalPosition> = HashMap::new();
+        if std::env::var_os("FOLDBACK_TRACE").is_some() {
+            let kind = match &command.flush_kind {
+                FlushKind::Flush { loaded, .. } => {
+                    if *loaded {
+                        "Flush(loaded=true)"
+                    } else {
+                        "Flush(loaded=false)"
+                    }
+                }
+                FlushKind::ForceRelocate(_) => "ForceRelocate",
+            };
+            eprintln!("handle_command: kind={kind}");
+        }
         let (original_index, mut merged_l0, existing_l1) = match &command.flush_kind {
             FlushKind::Flush {
                 dirty,
@@ -236,9 +271,41 @@ impl IndexFlusherThread {
                             .expect("Failed to load L0 index in flusher thread"),
                         None => IndexTable::default(),
                     };
+                    // Capture existing L0 keys+positions BEFORE merging dirty.
+                    // We use these to detect compactor/clean_self drops below.
+                    for (k, iwp) in base.iter_with_positions() {
+                        existing_disk_entries.insert(k, iwp);
+                    }
+                    if std::env::var_os("FOLDBACK_TRACE").is_some() {
+                        eprintln!(
+                            "  existing_l0 has {} entries (l0_pos={:?})",
+                            existing_disk_entries.len(),
+                            current_levels.l0(),
+                        );
+                    }
                     base.merge_dirty_and_clean(dirty);
                     base
                 };
+                // Also capture existing L1 entries — they participate in the
+                // promote branch's merge and can be dropped by compactor /
+                // clean_self the same way L0 entries can.
+                if let Some(l1_pos) = current_levels.l1() {
+                    let l1 = loader
+                        .load(&ctx.ks_config, l1_pos)
+                        .expect("Failed to load L1 index in flusher thread");
+                    for (k, iwp) in l1.iter_with_positions() {
+                        // L0 wins over L1 on overlap; don't overwrite a
+                        // captured L0 position with a (necessarily older) L1
+                        // value at the same key.
+                        existing_disk_entries.entry(k).or_insert(iwp);
+                    }
+                    if std::env::var_os("FOLDBACK_TRACE").is_some() {
+                        eprintln!(
+                            "  +existing_l1 → existing_disk has {} entries",
+                            existing_disk_entries.len(),
+                        );
+                    }
+                }
                 (dirty.clone(), merged, current_levels.l1())
             }
             FlushKind::ForceRelocate(levels) => {
@@ -308,7 +375,15 @@ impl IndexFlusherThread {
         let l0_threshold = ctx.l0_max_entries();
         let over_threshold = !is_relocation && merged_l0.len() > l0_threshold;
 
-        let new_levels = if over_threshold {
+        // `on_disk_keys` is the set of keys whose data actually survived
+        // the compactor + clean_self stages and was written to the new
+        // on-disk levels. Returned to `update_flushed_index` so the
+        // in-memory `retain_unprocessed_or_not_on_disk` only drops flat
+        // entries that are actually safe-on-disk. Without this,
+        // entries dropped by compactor or clean_self can be lost from
+        // both memory and disk in the same flush completion (the
+        // dirty-overlay-loss bug, first-order form).
+        let (new_levels, on_disk_keys): (IndexLevels, HashSet<Bytes>) = if over_threshold {
             // Promote: merge the freshly-built L0 with the existing L1 (if
             // any). `merge_dirty_and_clean` lets `merged_l0` win on overlap
             // by treating it as the "dirty" overlay.
@@ -318,6 +393,7 @@ impl IndexFlusherThread {
             // L1 is the deepest level — nothing below to shadow, so drop
             // tombstones (and the keys they shadow) before writing.
             new_l1.clean_self();
+            let on_disk_keys = new_l1.key_set();
             let new_l1_pos = loader
                 .flush(command.ks, &new_l1)
                 .expect("Failed to flush index");
@@ -329,7 +405,7 @@ impl IndexFlusherThread {
                 .l1_bytes_written
                 .with_label_values(&[ctx.name()])
                 .inc_by(new_l1_pos.frame_len() as u64);
-            IndexLevels::promoted(new_l1_pos)
+            (IndexLevels::promoted(new_l1_pos), on_disk_keys)
         } else {
             Self::run_compactor(ctx, &mut merged_l0);
             // If no L1 exists below, this L0 is the deepest level — strip
@@ -337,6 +413,7 @@ impl IndexFlusherThread {
             if existing_l1.is_none() {
                 merged_l0.clean_self();
             }
+            let on_disk_keys = merged_l0.key_set();
             let new_l0_pos = loader
                 .flush(command.ks, &merged_l0)
                 .expect("Failed to flush index");
@@ -350,10 +427,30 @@ impl IndexFlusherThread {
             if let Some(l1) = existing_l1 {
                 levels.set(1, l1);
             }
-            levels
+            (levels, on_disk_keys)
         };
 
-        Some((original_index, new_levels))
+        // `dropped_from_disk`: keys that were on disk in `existing_l0` BEFORE
+        // this flush but did NOT make it into the new on-disk levels. These
+        // get folded back into the in-memory entry by update_flushed_index
+        // so reads can still find them. Otherwise an old version that was
+        // safely on disk vanishes when a higher version arrives via this
+        // flush and the compactor + clean_self collapse the merge to that
+        // higher version (dirty-overlay-loss bug, second-order form).
+        let mut dropped_from_disk: HashMap<Bytes, IndexWalPosition> = HashMap::new();
+        for (k, iwp) in existing_disk_entries {
+            if !on_disk_keys.contains(&k) {
+                dropped_from_disk.insert(k, iwp);
+            }
+        }
+        if std::env::var_os("FOLDBACK_TRACE").is_some() && !dropped_from_disk.is_empty() {
+            eprintln!(
+                "  dropped_from_disk: {} keys, on_disk_keys: {}",
+                dropped_from_disk.len(),
+                on_disk_keys.len(),
+            );
+        }
+        Some((original_index, new_levels, on_disk_keys, dropped_from_disk))
     }
 
     /// Load the L1 blob at `l1`, or return an empty `IndexTable` when `l1` is

@@ -1198,9 +1198,19 @@ impl LargeTable {
         cell: &CellId,
         original_index: Arc<IndexTable>,
         new_levels: IndexLevels,
+        on_disk_keys: HashSet<Bytes>,
+        dropped_from_disk: std::collections::HashMap<
+            Bytes,
+            crate::index::index_table::IndexWalPosition,
+        >,
     ) {
         self.with_promoted_entry(context, cell, |entry| {
-            entry.update_flushed_index(original_index, new_levels);
+            entry.update_flushed_index(
+                original_index,
+                new_levels,
+                &on_disk_keys,
+                &dropped_from_disk,
+            );
         });
     }
 
@@ -1889,17 +1899,27 @@ impl LargeTableEntry {
         };
 
         // Perform a synchronous flush
-        let Some((_original_index, new_levels)) = IndexFlusherThread::handle_command(
-            loader,
-            &IndexFlushCommand::new(self.context.id(), self.cell.clone(), flush_kind),
-            &self.context,
-            relocation_updates,
-            relocation_cutoff,
-        ) else {
+        let Some((_original_index, new_levels, on_disk_keys, dropped_from_disk)) =
+            IndexFlusherThread::handle_command(
+                loader,
+                &IndexFlushCommand::new(self.context.id(), self.cell.clone(), flush_kind),
+                &self.context,
+                relocation_updates,
+                relocation_cutoff,
+            )
+        else {
             return Ok(());
         };
         self.last_processed = last_processed;
-        self.clear_after_flush(new_levels, last_processed, true);
+        if !dropped_from_disk.is_empty() {
+            let table = self.data.make_mut();
+            for (k, iwp) in &dropped_from_disk {
+                if !table.contains_key(k.as_ref()) {
+                    table.insert_raw(k.clone(), *iwp);
+                }
+            }
+        }
+        self.clear_after_flush(new_levels, last_processed, true, &on_disk_keys);
         Ok(())
     }
 
@@ -1950,6 +1970,7 @@ impl LargeTableEntry {
         new_levels: IndexLevels,
         last_processed: LastProcessed,
         unload: bool,
+        on_disk_keys: &HashSet<Bytes>,
     ) {
         self.levels = new_levels;
         if !unload && self.state == LargeTableEntryState::DirtyUnloaded {
@@ -1981,10 +2002,13 @@ impl LargeTableEntry {
             }
             return;
         }
-        // Unloading enabled: retain only entries with offset >= last_processed
+        // Unloading enabled: keep entries that are either (a) unprocessed
+        // (offset > last_processed) — flusher hasn't durably staged them
+        // yet — or (b) not present in `on_disk_keys` — the compactor or
+        // clean_self dropped them on the way to disk and they would
+        // otherwise be lost from both memory and disk.
         // -- diagnostics ----------------------------------------------------
-        let (flat_total, flat_unprocessed) =
-            self.data.flat_unprocessed_diagnostics(last_processed);
+        let (flat_total, flat_unprocessed) = self.data.flat_unprocessed_diagnostics(last_processed);
         self.context.metrics.retain_unprocessed_calls.inc();
         if flat_total > 0 {
             self.context.metrics.retain_unprocessed_with_flat.inc();
@@ -2000,7 +2024,9 @@ impl LargeTableEntry {
                 .inc_by(flat_unprocessed as u64);
         }
         // -------------------------------------------------------------------
-        self.data.make_mut().retain_unprocessed(last_processed);
+        self.data
+            .make_mut()
+            .retain_unprocessed_or_not_on_disk(last_processed, on_disk_keys);
         self.report_loaded_keys_count();
 
         // If all entries were removed, update state to Unloaded
@@ -2026,6 +2052,11 @@ impl LargeTableEntry {
         &mut self,
         original_index: Arc<IndexTable>,
         new_levels: IndexLevels,
+        on_disk_keys: &HashSet<Bytes>,
+        dropped_from_disk: &std::collections::HashMap<
+            Bytes,
+            crate::index::index_table::IndexWalPosition,
+        >,
     ) {
         // For unmerge, we always use the actual last_processed value (not u64::MAX)
         // to ensure we only remove entries that were actually committed
@@ -2038,14 +2069,42 @@ impl LargeTableEntry {
         }
         // Now that flush is complete, commit pending_last_processed.
         let pending_last_processed = self.commit_pending_last_processed();
+        // Fold dropped-from-disk entries back into the in-memory overlay.
+        // Skip keys that are already present (self has a fresher write).
+        // This must run before clear_after_flush so retain sees the
+        // refolded entries and can keep them (they are guaranteed not in
+        // on_disk_keys, so retain's drop predicate will not fire).
+        if !dropped_from_disk.is_empty() {
+            if std::env::var_os("FOLDBACK_TRACE").is_some() {
+                eprintln!(
+                    "foldback (entry update_flushed_index): {} dropped_from_disk entries",
+                    dropped_from_disk.len()
+                );
+                for (k, iwp) in dropped_from_disk {
+                    eprintln!(
+                        "  refolding k={:02x?} iwp={:?}",
+                        &k.as_ref()[..k.len().min(40)],
+                        iwp
+                    );
+                }
+            }
+            let table = self.data.make_mut();
+            for (k, iwp) in dropped_from_disk {
+                if !table.contains_key(k.as_ref()) {
+                    table.insert_raw(k.clone(), *iwp);
+                }
+            }
+        }
         if self.data.same_shared(&original_index) {
             self.context.metrics.update_flushed_index_same_shared.inc();
-            self.clear_after_flush(new_levels, pending_last_processed, true);
+            self.clear_after_flush(new_levels, pending_last_processed, true, on_disk_keys);
         } else {
             self.context.metrics.update_flushed_index_unmerge.inc();
-            self.data
-                .make_mut()
-                .unmerge_flushed(&original_index, pending_last_processed);
+            self.data.make_mut().unmerge_flushed(
+                &original_index,
+                pending_last_processed,
+                on_disk_keys,
+            );
             self.report_loaded_keys_count();
             self.levels = new_levels;
             self.state = LargeTableEntryState::DirtyUnloaded;

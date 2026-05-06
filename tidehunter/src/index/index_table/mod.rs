@@ -108,6 +108,35 @@ impl IndexTable {
         self.checked_insert(k, IndexWalPosition::new_removed(v))
     }
 
+    /// Insert a key with its raw `IndexWalPosition`, preserving the kind
+    /// (Clean/Modified/Removed). Used by `update_flushed_index` to fold
+    /// "dropped from disk" entries back into memory after the flusher's
+    /// compactor or `clean_self` removed them from the new on-disk levels.
+    /// Returns the previous `IndexWalPosition` if the key already existed.
+    pub fn insert_raw(&mut self, k: Bytes, v: IndexWalPosition) -> Option<IndexWalPosition> {
+        match self.data.entry(k) {
+            Entry::Vacant(va) => {
+                self.key_bytes += va.key().len();
+                adjust_dirty_count(&mut self.dirty_count, false, !v.is_clean());
+                va.insert(v);
+                None
+            }
+            Entry::Occupied(mut oc) => {
+                let old = *oc.get();
+                adjust_dirty_count(&mut self.dirty_count, !old.is_clean(), !v.is_clean());
+                oc.insert(v);
+                Some(old)
+            }
+        }
+    }
+
+    pub fn contains_key(&self, k: &[u8]) -> bool {
+        if self.data.contains_key(k) {
+            return true;
+        }
+        self.flat_binary_search(k).is_some()
+    }
+
     fn checked_insert(&mut self, k: Bytes, v: IndexWalPosition) -> Option<WalPosition> {
         let k = k.into_owned();
         // Only update index entry if new entry has higher wal position then the previous entry
@@ -231,8 +260,18 @@ impl IndexTable {
         }
     }
 
-    /// Remove flushed index entries that have offset <= last_processed
-    pub fn unmerge_flushed(&mut self, original: &Self, last_processed: LastProcessed) {
+    /// Remove flushed index entries that have offset <= last_processed AND were
+    /// actually written to the new on-disk levels. The `on_disk_keys` filter is
+    /// what closes the dirty-overlay-loss bug: without it, an entry processed
+    /// at flush time but dropped on the way to disk by the compactor or
+    /// `clean_self` would be unmerged from memory too — vanishing from both
+    /// sides in the same flush completion.
+    pub fn unmerge_flushed(
+        &mut self,
+        original: &Self,
+        last_processed: LastProcessed,
+        on_disk_keys: &HashSet<Bytes>,
+    ) {
         // Walk original.data; remove matching entries from self.data. If promote_flat_job
         // ran between snapshot capture and now, an entry present in original.data may now
         // live in self.flat — record those for the flat-rebuild pass below.
@@ -240,6 +279,11 @@ impl IndexTable {
         for (k, v) in original.data.iter() {
             if !last_processed.is_processed(v) {
                 // Do not unmerge entries that might have in-flight operations
+                continue;
+            }
+            // Compactor or clean_self dropped this key from the new on-disk
+            // levels — don't unmerge it from memory either.
+            if !on_disk_keys.contains(k.as_ref() as &[u8]) {
                 continue;
             }
             let removed_from_data = match self.data.entry(k.clone()) {
@@ -278,17 +322,24 @@ impl IndexTable {
                 while orig_it.peek().map(|(ok, _)| *ok < sk).unwrap_or(false) {
                     orig_it.next();
                 }
+                // Both drop conditions additionally require the key to be in
+                // `on_disk_keys` — the flusher's compactor or clean_self may
+                // have dropped it on the way to disk, in which case the
+                // in-memory copy is the only remaining one.
+                let on_disk = on_disk_keys.contains(sk);
                 // Check for an exact key match in original.flat and consume if found.
                 // Use into_update_position so two distinct Removed entries (both INVALID
                 // via into_wal_position) don't compare equal.
                 let remove_by_flat = if orig_it.peek().map(|(ok, _)| *ok == sk).unwrap_or(false) {
                     let (_, o_iwp) = orig_it.next().unwrap();
-                    last_processed.is_processed(&o_iwp)
+                    on_disk
+                        && last_processed.is_processed(&o_iwp)
                         && s_iwp.into_update_position() == o_iwp.into_update_position()
                 } else {
                     false
                 };
                 let remove_by_data = !remove_by_flat
+                    && on_disk
                     && pending_flat
                         .get(sk)
                         .map(|o_iwp| s_iwp.into_update_position() == o_iwp.into_update_position())
@@ -494,6 +545,18 @@ impl IndexTable {
     /// tombstones on disk (two-level LSM L0 over L1).
     pub fn iter_with_tombstones(&self) -> impl Iterator<Item = (Bytes, WalPosition)> + '_ {
         self.iter_inner(true)
+    }
+
+    /// Iterate every entry with its full `IndexWalPosition` (preserving the
+    /// `kind` discriminator). Used by the flusher to snapshot existing L0
+    /// content before merging in `dirty`, so it can detect entries dropped
+    /// by compactor/clean_self that need to be folded back into memory.
+    pub fn iter_with_positions(&self) -> impl Iterator<Item = (Bytes, IndexWalPosition)> + '_ {
+        let flat_it = FlatIter::new(&self.flat, self.key_size)
+            .filter(|(k, _)| !self.data.contains_key(*k))
+            .map(|(k, iwp)| (Bytes::from(k.to_vec()), iwp));
+        let btree_it = self.data.iter().map(|(k, v)| (k.clone(), *v));
+        flat_it.chain(btree_it)
     }
 
     fn iter_inner(
@@ -958,10 +1021,7 @@ impl IndexTable {
     /// The second value is what the OLD `retain_unprocessed` silently
     /// drops (the bug). Cheap O(flat) walk; safe to call before
     /// retain_unprocessed.
-    pub fn flat_unprocessed_diagnostics(
-        &self,
-        last_processed: LastProcessed,
-    ) -> (usize, usize) {
+    pub fn flat_unprocessed_diagnostics(&self, last_processed: LastProcessed) -> (usize, usize) {
         let mut total = 0usize;
         let mut unprocessed = 0usize;
         for (_, iwp) in FlatIter::new(&self.flat, self.key_size) {
@@ -971,6 +1031,86 @@ impl IndexTable {
             }
         }
         (total, unprocessed)
+    }
+
+    /// Snapshot of all keys present in this index, including tombstones
+    /// (Removed entries). Used by the flusher to tell the in-memory
+    /// state which keys actually made it to the new on-disk levels —
+    /// any flat entry whose key is *not* in this set was dropped by
+    /// the compactor or `clean_self` and must be preserved in memory,
+    /// otherwise `retain_unprocessed` would lose data.
+    pub fn key_set(&self) -> HashSet<Bytes> {
+        let mut out = HashSet::with_capacity(self.flat_len() + self.data.len());
+        for (k, _) in FlatIter::new(&self.flat, self.key_size) {
+            out.insert(Bytes::from(k.to_vec()));
+        }
+        for k in self.data.keys() {
+            out.insert(k.clone());
+        }
+        out
+    }
+
+    /// Like `retain_unprocessed`, but in addition to preserving
+    /// unprocessed entries it also preserves any flat entry whose key
+    /// is *not* present in `on_disk_keys` — i.e. an entry the flusher
+    /// dropped via the compactor or `clean_self` on the way to disk.
+    /// Without this, an entry can vanish from both memory and disk in
+    /// the same flush completion (the dirty-overlay-loss bug).
+    pub fn retain_unprocessed_or_not_on_disk(
+        &mut self,
+        last_processed: LastProcessed,
+        on_disk_keys: &HashSet<Bytes>,
+    ) {
+        let _trace = std::env::var_os("RETAIN_TRACE").is_some();
+        let mut flat_dropped = 0usize;
+        let mut flat_kept = 0usize;
+        let mut data_dropped = 0usize;
+        let mut data_kept = 0usize;
+        // Walk flat: drop only when (processed AND on disk).
+        self.retain_flat(|k, iwp| {
+            let processed = last_processed.is_processed(&iwp);
+            let on_disk = on_disk_keys.contains(k);
+            if processed && on_disk {
+                flat_dropped += 1;
+                None
+            } else {
+                flat_kept += 1;
+                if _trace {
+                    eprintln!(
+                        "retain[flat] KEEP k={:02x?} pos={:?} processed={processed} on_disk={on_disk}",
+                        &k[..k.len().min(8)],
+                        iwp,
+                    );
+                }
+                Some(iwp)
+            }
+        });
+        // Walk BTreeMap: same rule.
+        self.retain(|k, v| {
+            let processed = last_processed.is_processed(v);
+            let on_disk = on_disk_keys.contains(k.as_ref() as &[u8]);
+            let drop = processed && on_disk;
+            if drop {
+                data_dropped += 1;
+            } else {
+                data_kept += 1;
+                if _trace {
+                    eprintln!(
+                        "retain[data] KEEP k={:02x?} pos={:?} processed={processed} on_disk={on_disk}",
+                        &k.as_ref()[..k.len().min(8)],
+                        v,
+                    );
+                }
+            }
+            !drop
+        });
+        if _trace && (flat_dropped > 0 || flat_kept > 0 || data_dropped > 0 || data_kept > 0) {
+            eprintln!(
+                "retain summary: flat dropped={flat_dropped} kept={flat_kept} | data dropped={data_dropped} kept={data_kept} | on_disk_keys={}",
+                on_disk_keys.len()
+            );
+        }
+        self.dirty_count = self.count_dirty_slow();
     }
 
     /// Returns true if this index table has any unprocessed entries.
@@ -1419,7 +1559,8 @@ mod tests {
         index2.insert(vec![1].into(), WalPosition::test_value(5));
         index2.insert(vec![3].into(), WalPosition::test_value(8));
         let len_before = index2.len();
-        index2.unmerge_flushed(&index, LastProcessed::new_test(u64::MAX));
+        let on_disk = index.key_set();
+        index2.unmerge_flushed(&index, LastProcessed::new_test(u64::MAX), &on_disk);
         let len_after = index2.len();
         assert_eq!(len_after as i64 - len_before as i64, -2);
         let data = index2.into_data().into_iter().collect::<Vec<_>>();
@@ -1447,7 +1588,8 @@ mod tests {
 
         // With last_processed=4, only entries at positions 2 and 3 should be unmerged
         let len_before = index2.len();
-        index2.unmerge_flushed(&index, LastProcessed::new_test(4));
+        let on_disk = index.key_set();
+        index2.unmerge_flushed(&index, LastProcessed::new_test(4), &on_disk);
         let len_after = index2.len();
         assert_eq!(len_after as i64 - len_before as i64, -1);
         let data = index2.into_data().into_iter().collect::<Vec<_>>();
@@ -2137,7 +2279,8 @@ mod tests {
         current.insert(vec![5].into(), WalPosition::test_value(6));
 
         let len_before = current.len();
-        current.unmerge_flushed(&original, LastProcessed::new_test(u64::MAX));
+        let on_disk = original.key_set();
+        current.unmerge_flushed(&original, LastProcessed::new_test(u64::MAX), &on_disk);
         let len_after = current.len();
 
         // [1, 2, 3] removed; [4, 5] remain.
@@ -2169,7 +2312,8 @@ mod tests {
         current.insert(vec![4].into(), WalPosition::test_value(5));
 
         let len_before = current.len();
-        current.unmerge_flushed(&original, LastProcessed::new_test(u64::MAX));
+        let on_disk = original.key_set();
+        current.unmerge_flushed(&original, LastProcessed::new_test(u64::MAX), &on_disk);
         let len_after = current.len();
 
         // [1, 2, 3] removed from self.flat; [4] remains in self.data.
@@ -2196,7 +2340,8 @@ mod tests {
         // Overwrite key [1] with a newer position in self.data.
         current.insert(vec![1].into(), WalPosition::test_value(10));
 
-        current.unmerge_flushed(&original, LastProcessed::new_test(u64::MAX));
+        let on_disk = original.key_set();
+        current.unmerge_flushed(&original, LastProcessed::new_test(u64::MAX), &on_disk);
 
         // Key [1] still has its newer position; key [2] fully removed.
         assert_eq!(current.get(&[1]), Some(WalPosition::test_value(10)));

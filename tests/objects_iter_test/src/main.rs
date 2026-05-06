@@ -443,6 +443,44 @@ fn main() {
                             _ => {}
                         }
                     }
+                }
+
+                // Tight invariant: after EVERY op for this id, shadow's
+                // current highest version must be retrievable via direct
+                // db.get. This catches the data loss right where it
+                // happens, instead of waiting for the next reverse-iter.
+                if std::env::var_os("TIGHT_CHECK").is_some() {
+                    let s = shadow.lock();
+                    if let Some(versions) = s.get(&id)
+                        && let Some((exp_v, exp_val)) = versions.iter().next_back()
+                    {
+                            let probe = make_key(&id, *exp_v);
+                            let got = db_ref.get(ks, &probe).unwrap();
+                            if got.as_ref().map(|b| b.as_ref()) != Some(exp_val.as_slice()) {
+                                eprintln!(
+                                    "TIGHT MISMATCH (after op_num={op_num}, op_type={}) id={} highest=v={exp_v} db.get -> {}",
+                                    if roll < 55 { "write_live" }
+                                    else if roll < 70 { "write_tombstone" }
+                                    else { "prune" },
+                                    hex32(&id),
+                                    if got.is_some() { "Some(_) but value differs!" } else { "None" }
+                                );
+                                eprintln!("  shadow versions: {:?}", versions.keys().collect::<Vec<_>>());
+                                for v in versions.keys() {
+                                    let probe = make_key(&id, *v);
+                                    let r = db_ref.get(ks, &probe).unwrap();
+                                    eprintln!(
+                                        "    db.get(v={v}) -> {}",
+                                        if r.is_some() { "Some" } else { "None" }
+                                    );
+                                }
+                                std::process::exit(1);
+                            }
+                    }
+                }
+
+                if roll < 85 {
+                    // No-op; we already handled write/prune above.
                 } else {
                     // Read latest via reverse-range iter — the exact code
                     // path Sui's `get_latest_object_or_tombstone` runs.
@@ -473,6 +511,28 @@ fn main() {
                                     "  shadow versions for id: {:?}",
                                     s.get(&id).map(|m| m.keys().collect::<Vec<_>>())
                                 );
+                                if let Some(versions) = s.get(&id) {
+                                    for vsh in versions.keys() {
+                                        let probe = make_key(&id, *vsh);
+                                        let r = db_ref.get(ks, &probe).unwrap();
+                                        eprintln!(
+                                            "    db.get(v={vsh}) -> {}",
+                                            if r.is_some() { "Some" } else { "None" }
+                                        );
+                                    }
+                                }
+                                let mut fwd = db_ref.iterator(ks);
+                                fwd.set_lower_bound(id_min_key(&id));
+                                fwd.set_upper_bound(id_upper_exclusive(&id));
+                                let fwd_seen: Vec<u64> = fwd
+                                    .map(|r| {
+                                        let (k, _) = r.unwrap();
+                                        let mut vb = [0u8; 8];
+                                        vb.copy_from_slice(&k[OID_SIZE..]);
+                                        u64::from_be_bytes(vb)
+                                    })
+                                    .collect();
+                                eprintln!("  forward iter on id-range: {fwd_seen:?}");
                                 std::process::exit(1);
                             }
                         }
@@ -509,6 +569,29 @@ fn main() {
                                 "  shadow versions for id: {:?}",
                                 s.get(&id).map(|m| m.keys().collect::<Vec<_>>())
                             );
+                            // Probe every shadow version individually.
+                            if let Some(versions) = s.get(&id) {
+                                for v in versions.keys() {
+                                    let probe = make_key(&id, *v);
+                                    let r = db_ref.get(ks, &probe).unwrap();
+                                    eprintln!(
+                                        "    db.get(v={v}) -> {}",
+                                        if r.is_some() { "Some" } else { "None" }
+                                    );
+                                }
+                            }
+                            // Forward iter dump (no bounds for this id).
+                            let mut fwd = db_ref.iterator(ks);
+                            fwd.set_lower_bound(id_min_key(&id));
+                            fwd.set_upper_bound(id_upper_exclusive(&id));
+                            let mut fwd_seen = vec![];
+                            for r in fwd {
+                                let (k, _) = r.unwrap();
+                                let mut vb = [0u8; 8];
+                                vb.copy_from_slice(&k[OID_SIZE..]);
+                                fwd_seen.push(u64::from_be_bytes(vb));
+                            }
+                            eprintln!("  forward iter on id-range: {fwd_seen:?}");
                             std::process::exit(1);
                         }
                         (Some(Err(e)), _) => {

@@ -25,6 +25,7 @@ use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -726,11 +727,22 @@ impl Db {
         cell: CellId,
         original_index: Arc<IndexTable>,
         new_levels: IndexLevels,
+        on_disk_keys: HashSet<Bytes>,
+        dropped_from_disk: std::collections::HashMap<
+            Bytes,
+            crate::index::index_table::IndexWalPosition,
+        >,
     ) {
         let context = self.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::UpdateFlushedIndex);
-        self.large_table
-            .update_flushed_index(context, &cell, original_index, new_levels)
+        self.large_table.update_flushed_index(
+            context,
+            &cell,
+            original_index,
+            new_levels,
+            on_disk_keys,
+            dropped_from_disk,
+        )
     }
 
     pub(crate) fn update_relocated_index(
