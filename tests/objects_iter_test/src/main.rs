@@ -43,7 +43,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use tidehunter::Decision;
 use tidehunter::config::Config;
 use tidehunter::db::Db;
 use tidehunter::key_shape::{KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType};
@@ -51,11 +50,14 @@ use tidehunter::metrics::Metrics;
 use tidehunter::minibytes::Bytes;
 
 /// Number of distinct 32-byte object ids in the hot pool.
-const NUM_OBJECTS: usize = 64;
+const NUM_OBJECTS: usize = 1024;
 /// Worker thread count.
 const NUM_THREADS: usize = 8;
 /// Operations per thread.
-const OPS_PER_THREAD: usize = 200_000;
+const OPS_PER_THREAD: usize = 1_000_000;
+/// Mutex count (power of two). Smaller = more ids per cell = hotter
+/// per-cell race surface for the dirty-overlay-loss window.
+const NUM_MUTEXES: usize = 8;
 /// Object id length, matches `ObjectID` size.
 const OID_SIZE: usize = 32;
 /// Version length (big-endian u64), matches `VersionNumber` serialization.
@@ -185,10 +187,17 @@ fn open_db(
 fn build_key_shape() -> (KeyShape, KeySpace) {
     let mut b = KeyShapeBuilder::new();
 
-    // "keep latest version per object id" — same shape as
-    // `authority_store_tables.rs::open` (tidehunter branch). The
-    // compactor walks keys in reverse and retains only the first
-    // (highest-version) entry per id prefix.
+    // Mirrors `authority_store_tables.rs::open` for the `objects` table:
+    // walk the index in reverse, retain only the first (highest-version)
+    // entry per 32-byte id prefix. The compactor is what creates the bug
+    // condition where the on-disk blob may not contain a still-pending
+    // entry — see "[tidehunter] Preserve unprocessed flat entries in
+    // retain_unprocessed". Without it, every snapshotted entry stays on
+    // disk and the dirty-overlay-loss is harmless.
+    //
+    // The shadow does NOT model the compactor's drops; instead the test
+    // invariant is "highest version per id matches" (the same invariant
+    // Sui's `get_latest_object_or_tombstone` actually depends on).
     let compactor: tidehunter::key_shape::Compactor = Box::new(|iter| {
         let mut retain = HashSet::new();
         let mut previous: Option<Bytes> = None;
@@ -204,25 +213,23 @@ fn build_key_shape() -> (KeyShape, KeySpace) {
         retain
     });
 
-    // Drop tombstone-shaped records during relocation, mirroring the
-    // `apply_relocation_filter` step Sui applies to objects/effects.
-    let relocation_filter = |_k: &[u8], v: &[u8]| -> Decision {
-        if v.first().copied() == Some(TAG_TOMBSTONE) {
-            Decision::Remove
-        } else {
-            Decision::Keep
-        }
-    };
-
+    // We deliberately omit Sui's tombstone-record relocation_filter:
+    // it would drop tombstone-record values during relocation and our
+    // shadow tracks them as live highest versions, producing false
+    // positives. The bug under investigation is in the flush path
+    // (compactor + clean_self + retain_unprocessed), not relocation.
+    // max_dirty_keys=64: bigger than the per-cell `promote_to_flat`
+    // threshold (128 in `index_table::PROMOTE_THRESHOLD`), but still tight
+    // enough that flushes fire often. Larger budget lets `flat`
+    // accumulate unprocessed entries before retain_unprocessed runs —
+    // the precondition for the dirty-overlay-loss bug.
     let cfg = KeySpaceConfig::new()
-        .with_max_dirty_keys(8)
-        .with_compactor(compactor)
-        .with_relocation_filter(relocation_filter);
+        .with_max_dirty_keys(64)
+        .with_compactor(compactor);
 
     // mutexes power-of-two; with KeyType::uniform(1) the cell count
-    // equals the mutex count, so 32 cells total over 64 ids → ~2 ids
-    // per cell, hot enough for the race.
-    let ks = b.add_key_space_config("objects", KEY_SIZE, 32, KeyType::uniform(1), cfg);
+    // equals the mutex count. Tune via NUM_MUTEXES.
+    let ks = b.add_key_space_config("objects", KEY_SIZE, NUM_MUTEXES, KeyType::uniform(1), cfg);
     (b.build(), ks)
 }
 
@@ -318,8 +325,8 @@ fn main() {
                 let restarts_enabled = std::env::var("DISABLE_RESTART").is_err();
                 let relocation_enabled = std::env::var("DISABLE_RELOCATION").is_err();
 
-                // 1% chance: restart db (whole-process unload window).
-                if restarts_enabled && rng.gen_range(0..100) < 1 {
+                // 0.01% chance: restart db (whole-process unload window).
+                if restarts_enabled && rng.gen_range(0..10_000) < 1 {
                     let mut w = db.write();
                     if let Some(old) = w.take() {
                         old.wait_for_background_threads_to_finish();
@@ -386,23 +393,54 @@ fn main() {
                     db_ref.insert(ks, key.clone(), value.clone()).unwrap();
                     shadow.lock().entry(id).or_default().insert(v, value);
                 } else if roll < 85 {
-                    // Prune: remove every version except the highest. Mirrors
-                    // `authority_store_pruner` walking (id, v) and issuing
-                    // REMOVEs below the watermark.
+                    // Prune: REMOVE some subset of versions. Three
+                    // sub-cases, equally likely:
+                    //   (a) Remove versions below the highest live
+                    //       version (matches Sui pruner catching up
+                    //       below the watermark).
+                    //   (b) Remove ALL versions including the highest
+                    //       (matches the pruner catching up past a
+                    //       fully-deleted object).
+                    //   (c) Remove ONLY the highest version, leaving
+                    //       lower live versions intact. This creates
+                    //       the (id, v=lower Modified) + (id, v=higher
+                    //       Removed) state that the compactor +
+                    //       clean_self will collapse to "empty for id"
+                    //       on disk while shadow still expects the
+                    //       lower live version — the precondition for
+                    //       the user-visible dirty-overlay-loss bug.
+                    let sub = rng.gen_range(0..3u32);
                     let mut s = shadow.lock();
-                    if let Some(versions) = s.get_mut(&id)
-                        && versions.len() > 1
-                    {
-                        let highest = *versions.keys().next_back().unwrap();
-                        let to_remove: Vec<u64> = versions
-                            .keys()
-                            .copied()
-                            .filter(|v| *v < highest)
-                            .collect();
-                        for v in to_remove {
-                            let key = make_key(&id, v);
-                            db_ref.remove(ks, key).unwrap();
-                            versions.remove(&v);
+                    if let Some(versions) = s.get_mut(&id) {
+                        match sub {
+                            0 if versions.len() > 1 => {
+                                let highest = *versions.keys().next_back().unwrap();
+                                let to_remove: Vec<u64> = versions
+                                    .keys()
+                                    .copied()
+                                    .filter(|v| *v < highest)
+                                    .collect();
+                                for v in to_remove {
+                                    let key = make_key(&id, v);
+                                    db_ref.remove(ks, key).unwrap();
+                                    versions.remove(&v);
+                                }
+                            }
+                            1 => {
+                                let to_remove: Vec<u64> = versions.keys().copied().collect();
+                                for v in to_remove {
+                                    let key = make_key(&id, v);
+                                    db_ref.remove(ks, key).unwrap();
+                                }
+                                versions.clear();
+                            }
+                            2 if versions.len() > 1 => {
+                                let highest = *versions.keys().next_back().unwrap();
+                                let key = make_key(&id, highest);
+                                db_ref.remove(ks, key).unwrap();
+                                versions.remove(&highest);
+                            }
+                            _ => {}
                         }
                     }
                 } else {
@@ -456,6 +494,17 @@ fn main() {
                                 exp_v,
                                 exp_val
                             );
+                            // Probe directly: iterator-skip vs write-loss.
+                            let probe_key = make_key(&id, *exp_v);
+                            let direct = db_ref.get(ks, &probe_key).unwrap();
+                            eprintln!(
+                                "  direct db.get(id, v={exp_v}) -> {}",
+                                if direct.is_some() {
+                                    "Some(_) (iterator skipped, data is in db)"
+                                } else {
+                                    "None (write actually lost from db)"
+                                }
+                            );
                             eprintln!(
                                 "  shadow versions for id: {:?}",
                                 s.get(&id).map(|m| m.keys().collect::<Vec<_>>())
@@ -493,9 +542,42 @@ fn main() {
         human_bytes(shared_metrics.wal_written_bytes.get() as u64)
     );
 
+    let m = &shared_metrics;
+    println!("\n--- diagnostic counters ---");
+    println!(
+        "  retain_unprocessed: calls={} with_flat={} flat_entries_total={} flat_unprocessed_total={}",
+        m.retain_unprocessed_calls.get(),
+        m.retain_unprocessed_with_flat.get(),
+        m.retain_unprocessed_flat_entries.get(),
+        m.retain_unprocessed_flat_unprocessed.get(),
+    );
+    println!(
+        "  update_flushed_index: same_shared_TRUE={} unmerge={}",
+        m.update_flushed_index_same_shared.get(),
+        m.update_flushed_index_unmerge.get(),
+    );
+    println!(
+        "  promote_to_flat_moved={} promote_flat_arc_replaced={} promote_flat_arc_miss={}",
+        m.promote_to_flat_moved.get(),
+        m.promote_flat_arc_replaced.get(),
+        m.promote_flat_arc_miss.get(),
+    );
+    let flush_clear = m.flush_update.with_label_values(&["clear"]).get();
+    let flush_partial = m.flush_update.with_label_values(&["partial"]).get();
+    println!("  flush_update: clear={flush_clear} partial={flush_partial}");
+    println!(
+        "  promote_total[objects]={} compacted_keys[objects]={}",
+        m.promote_total.with_label_values(&["objects"]).get(),
+        m.compacted_keys.with_label_values(&["objects"]).get(),
+    );
+
     println!("\nTest passed.");
 }
 
+/// Per-id invariant (matches Sui's `get_latest_object_or_tombstone`):
+/// reverse-range scan's first result equals the shadow's highest version.
+/// Older versions may legitimately be missing — the compactor drops them
+/// on flush and the test does not model that. We do not assert on them.
 fn final_verify(
     db: &Arc<RwLock<Option<Arc<Db>>>>,
     ks: KeySpace,
@@ -509,25 +591,63 @@ fn final_verify(
         let mut it = db_ref.iterator(ks);
         it.set_lower_bound(id_min_key(id));
         it.set_upper_bound(id_upper_exclusive(id));
-        let mut db_versions: Vec<(u64, Vec<u8>)> = Vec::new();
-        for r in it {
-            let (k, v) = r.unwrap();
-            assert_eq!(k.len(), KEY_SIZE);
-            assert_eq!(&k[..OID_SIZE], id);
-            let mut vbytes = [0u8; 8];
-            vbytes.copy_from_slice(&k[OID_SIZE..]);
-            db_versions.push((u64::from_be_bytes(vbytes), v.as_ref().to_vec()));
-        }
-        let expected: Vec<(u64, Vec<u8>)> = s
+        it.reverse();
+        let got: Option<(u64, Vec<u8>)> = match it.next() {
+            Some(Ok((k, v))) => {
+                assert_eq!(k.len(), KEY_SIZE);
+                assert_eq!(&k[..OID_SIZE], id);
+                let mut vb = [0u8; 8];
+                vb.copy_from_slice(&k[OID_SIZE..]);
+                Some((u64::from_be_bytes(vb), v.as_ref().to_vec()))
+            }
+            Some(Err(e)) => {
+                eprintln!("iterator error id={} err={e:?}", hex32(id));
+                std::process::exit(1);
+            }
+            None => None,
+        };
+        let expected: Option<(u64, Vec<u8>)> = s
             .get(id)
-            .map(|m| m.iter().map(|(v, val)| (*v, val.clone())).collect())
-            .unwrap_or_default();
-        if db_versions != expected {
+            .and_then(|m| m.iter().next_back())
+            .map(|(v, val)| (*v, val.clone()));
+
+        if got.as_ref().map(|(v, val)| (*v, val.as_slice()))
+            != expected.as_ref().map(|(v, val)| (*v, val.as_slice()))
+        {
             eprintln!(
-                "FINAL MISMATCH id={} db={:?} expected={:?}",
+                "FINAL MISMATCH id={} got={:?} expected={:?}",
                 hex32(id),
-                db_versions.iter().map(|(v, _)| v).collect::<Vec<_>>(),
-                expected.iter().map(|(v, _)| v).collect::<Vec<_>>()
+                got.as_ref().map(|(v, _)| v),
+                expected.as_ref().map(|(v, _)| v),
+            );
+            if let Some((exp_v, _)) = &expected {
+                let key = make_key(id, *exp_v);
+                let direct = db_ref.get(ks, &key).unwrap();
+                eprintln!(
+                    "  direct db.get(id, v={exp_v}) -> {}",
+                    if direct.is_some() {
+                        "Some(_) (iterator skipped, data is in db)"
+                    } else {
+                        "None (write actually lost)"
+                    }
+                );
+            }
+            // Dump everything still visible per id in both directions.
+            let mut fwd = db_ref.iterator(ks);
+            fwd.set_lower_bound(id_min_key(id));
+            fwd.set_upper_bound(id_upper_exclusive(id));
+            let fwd_vs: Vec<u64> = fwd
+                .map(|r| {
+                    let (k, _) = r.unwrap();
+                    let mut b = [0u8; 8];
+                    b.copy_from_slice(&k[OID_SIZE..]);
+                    u64::from_be_bytes(b)
+                })
+                .collect();
+            eprintln!("  forward versions visible: {fwd_vs:?}");
+            eprintln!(
+                "  shadow versions for id:   {:?}",
+                s.get(id).map(|m| m.keys().collect::<Vec<_>>())
             );
             std::process::exit(1);
         }

@@ -223,6 +223,30 @@ pub struct Metrics {
     pub pending_promotion_job_time_mcs: MetricIntCounter,
     pub flat_promotion_job_time_mcs: MetricIntCounter,
     pub promote_flat_arc_miss: MetricIntCounter,
+
+    // -- Diagnostics for dirty-overlay-loss investigation --
+    /// retain_unprocessed call count.
+    pub retain_unprocessed_calls: MetricIntCounter,
+    /// retain_unprocessed calls where flat was non-empty on entry.
+    pub retain_unprocessed_with_flat: MetricIntCounter,
+    /// Sum of flat entries observed across all retain_unprocessed calls
+    /// (gives an avg via /calls).
+    pub retain_unprocessed_flat_entries: MetricIntCounter,
+    /// Sum of flat entries with offset > last_processed at retain_unprocessed
+    /// time. With the OLD code this is the count of entries silently dropped
+    /// (the bug). With the fix in `retain_unprocessed`, the same count of
+    /// entries is preserved instead.
+    pub retain_unprocessed_flat_unprocessed: MetricIntCounter,
+    /// update_flushed_index calls that took the same_shared TRUE branch
+    /// (clear_after_flush path).
+    pub update_flushed_index_same_shared: MetricIntCounter,
+    /// update_flushed_index calls that took the same_shared FALSE branch
+    /// (unmerge_flushed path).
+    pub update_flushed_index_unmerge: MetricIntCounter,
+    /// promote_to_flat invocations where flat actually grew (entries moved).
+    pub promote_to_flat_moved: MetricIntCounter,
+    /// promote_flat_job Phase 3 successful replacements (same_shared TRUE).
+    pub promote_flat_arc_replaced: MetricIntCounter,
 }
 
 macro_rules! gauge (
@@ -460,6 +484,34 @@ impl Metrics {
             ),
             flat_promotion_job_time_mcs: counter!("flat_promotion_job_time_mcs", registry, enabled),
             promote_flat_arc_miss: counter!("promote_flat_arc_miss", registry, enabled),
+            retain_unprocessed_calls: counter!("retain_unprocessed_calls", registry, enabled),
+            retain_unprocessed_with_flat: counter!(
+                "retain_unprocessed_with_flat",
+                registry,
+                enabled
+            ),
+            retain_unprocessed_flat_entries: counter!(
+                "retain_unprocessed_flat_entries",
+                registry,
+                enabled
+            ),
+            retain_unprocessed_flat_unprocessed: counter!(
+                "retain_unprocessed_flat_unprocessed",
+                registry,
+                enabled
+            ),
+            update_flushed_index_same_shared: counter!(
+                "update_flushed_index_same_shared",
+                registry,
+                enabled
+            ),
+            update_flushed_index_unmerge: counter!(
+                "update_flushed_index_unmerge",
+                registry,
+                enabled
+            ),
+            promote_to_flat_moved: counter!("promote_to_flat_moved", registry, enabled),
+            promote_flat_arc_replaced: counter!("promote_flat_arc_replaced", registry, enabled),
         };
         Arc::new(this)
     }

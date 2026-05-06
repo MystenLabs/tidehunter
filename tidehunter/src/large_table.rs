@@ -613,9 +613,12 @@ impl LargeTable {
                     .iter()
                     .filter_map(|(cell, arc)| {
                         let mut table = (**arc).clone();
-                        table
-                            .promote_to_flat()
-                            .then_some((cell.clone(), arc.clone(), table))
+                        if table.promote_to_flat() {
+                            self.metrics.promote_to_flat_moved.inc();
+                            Some((cell.clone(), arc.clone(), table))
+                        } else {
+                            None
+                        }
                     })
                     .collect();
 
@@ -629,6 +632,7 @@ impl LargeTable {
                         };
                         if entry.data.same_shared(&arc) {
                             entry.data = ArcCow::new_owned(promoted_table);
+                            self.metrics.promote_flat_arc_replaced.inc();
                         } else {
                             self.metrics.promote_flat_arc_miss.inc();
                         }
@@ -663,7 +667,9 @@ impl LargeTable {
                         continue;
                     }
                     let table = entry.data.make_mut();
-                    table.promote_to_flat_force();
+                    if table.promote_to_flat_force() {
+                        self.metrics.promote_to_flat_moved.inc();
+                    }
                 }
             }
         }
@@ -1976,6 +1982,24 @@ impl LargeTableEntry {
             return;
         }
         // Unloading enabled: retain only entries with offset >= last_processed
+        // -- diagnostics ----------------------------------------------------
+        let (flat_total, flat_unprocessed) =
+            self.data.flat_unprocessed_diagnostics(last_processed);
+        self.context.metrics.retain_unprocessed_calls.inc();
+        if flat_total > 0 {
+            self.context.metrics.retain_unprocessed_with_flat.inc();
+            self.context
+                .metrics
+                .retain_unprocessed_flat_entries
+                .inc_by(flat_total as u64);
+        }
+        if flat_unprocessed > 0 {
+            self.context
+                .metrics
+                .retain_unprocessed_flat_unprocessed
+                .inc_by(flat_unprocessed as u64);
+        }
+        // -------------------------------------------------------------------
         self.data.make_mut().retain_unprocessed(last_processed);
         self.report_loaded_keys_count();
 
@@ -2015,8 +2039,10 @@ impl LargeTableEntry {
         // Now that flush is complete, commit pending_last_processed.
         let pending_last_processed = self.commit_pending_last_processed();
         if self.data.same_shared(&original_index) {
+            self.context.metrics.update_flushed_index_same_shared.inc();
             self.clear_after_flush(new_levels, pending_last_processed, true);
         } else {
+            self.context.metrics.update_flushed_index_unmerge.inc();
             self.data
                 .make_mut()
                 .unmerge_flushed(&original_index, pending_last_processed);

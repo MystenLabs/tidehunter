@@ -953,6 +953,26 @@ impl IndexTable {
         self.dirty_count = self.count_dirty_slow();
     }
 
+    /// Diagnostic for the dirty-overlay-loss investigation: returns
+    /// `(total_flat_entries, flat_entries_with_offset_gt_last_processed)`.
+    /// The second value is what the OLD `retain_unprocessed` silently
+    /// drops (the bug). Cheap O(flat) walk; safe to call before
+    /// retain_unprocessed.
+    pub fn flat_unprocessed_diagnostics(
+        &self,
+        last_processed: LastProcessed,
+    ) -> (usize, usize) {
+        let mut total = 0usize;
+        let mut unprocessed = 0usize;
+        for (_, iwp) in FlatIter::new(&self.flat, self.key_size) {
+            total += 1;
+            if !last_processed.is_processed(&iwp) {
+                unprocessed += 1;
+            }
+        }
+        (total, unprocessed)
+    }
+
     /// Returns true if this index table has any unprocessed entries.
     /// Only the BTreeMap (write buffer) needs to be checked: flat entries are always
     /// at or below last_processed when this is called (promote runs before capture).
