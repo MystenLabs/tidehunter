@@ -234,19 +234,6 @@ impl IndexFlusherThread {
         // existing L0 and L1 because compactor/clean_self can collapse
         // entries from either level.
         let mut existing_disk_entries: HashMap<Bytes, IndexWalPosition> = HashMap::new();
-        if std::env::var_os("FOLDBACK_TRACE").is_some() {
-            let kind = match &command.flush_kind {
-                FlushKind::Flush { loaded, .. } => {
-                    if *loaded {
-                        "Flush(loaded=true)"
-                    } else {
-                        "Flush(loaded=false)"
-                    }
-                }
-                FlushKind::ForceRelocate(_) => "ForceRelocate",
-            };
-            eprintln!("handle_command: kind={kind}");
-        }
         let (original_index, mut merged_l0, existing_l1) = match &command.flush_kind {
             FlushKind::Flush {
                 dirty,
@@ -276,13 +263,6 @@ impl IndexFlusherThread {
                     for (k, iwp) in base.iter_with_positions() {
                         existing_disk_entries.insert(k, iwp);
                     }
-                    if std::env::var_os("FOLDBACK_TRACE").is_some() {
-                        eprintln!(
-                            "  existing_l0 has {} entries (l0_pos={:?})",
-                            existing_disk_entries.len(),
-                            current_levels.l0(),
-                        );
-                    }
                     base.merge_dirty_and_clean(dirty);
                     base
                 };
@@ -298,12 +278,6 @@ impl IndexFlusherThread {
                         // captured L0 position with a (necessarily older) L1
                         // value at the same key.
                         existing_disk_entries.entry(k).or_insert(iwp);
-                    }
-                    if std::env::var_os("FOLDBACK_TRACE").is_some() {
-                        eprintln!(
-                            "  +existing_l1 → existing_disk has {} entries",
-                            existing_disk_entries.len(),
-                        );
                     }
                 }
                 (dirty.clone(), merged, current_levels.l1())
@@ -442,13 +416,6 @@ impl IndexFlusherThread {
             if !on_disk_keys.contains(&k) {
                 dropped_from_disk.insert(k, iwp);
             }
-        }
-        if std::env::var_os("FOLDBACK_TRACE").is_some() && !dropped_from_disk.is_empty() {
-            eprintln!(
-                "  dropped_from_disk: {} keys, on_disk_keys: {}",
-                dropped_from_disk.len(),
-                on_disk_keys.len(),
-            );
         }
         Some((original_index, new_levels, on_disk_keys, dropped_from_disk))
     }

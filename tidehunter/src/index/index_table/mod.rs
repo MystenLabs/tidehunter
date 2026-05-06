@@ -1061,27 +1061,13 @@ impl IndexTable {
         last_processed: LastProcessed,
         on_disk_keys: &HashSet<Bytes>,
     ) {
-        let _trace = std::env::var_os("RETAIN_TRACE").is_some();
-        let mut flat_dropped = 0usize;
-        let mut flat_kept = 0usize;
-        let mut data_dropped = 0usize;
-        let mut data_kept = 0usize;
         // Walk flat: drop only when (processed AND on disk).
         self.retain_flat(|k, iwp| {
             let processed = last_processed.is_processed(&iwp);
             let on_disk = on_disk_keys.contains(k);
             if processed && on_disk {
-                flat_dropped += 1;
                 None
             } else {
-                flat_kept += 1;
-                if _trace {
-                    eprintln!(
-                        "retain[flat] KEEP k={:02x?} pos={:?} processed={processed} on_disk={on_disk}",
-                        &k[..k.len().min(8)],
-                        iwp,
-                    );
-                }
                 Some(iwp)
             }
         });
@@ -1089,27 +1075,8 @@ impl IndexTable {
         self.retain(|k, v| {
             let processed = last_processed.is_processed(v);
             let on_disk = on_disk_keys.contains(k.as_ref() as &[u8]);
-            let drop = processed && on_disk;
-            if drop {
-                data_dropped += 1;
-            } else {
-                data_kept += 1;
-                if _trace {
-                    eprintln!(
-                        "retain[data] KEEP k={:02x?} pos={:?} processed={processed} on_disk={on_disk}",
-                        &k.as_ref()[..k.len().min(8)],
-                        v,
-                    );
-                }
-            }
-            !drop
+            !(processed && on_disk)
         });
-        if _trace && (flat_dropped > 0 || flat_kept > 0 || data_dropped > 0 || data_kept > 0) {
-            eprintln!(
-                "retain summary: flat dropped={flat_dropped} kept={flat_kept} | data dropped={data_dropped} kept={data_kept} | on_disk_keys={}",
-                on_disk_keys.len()
-            );
-        }
         self.dirty_count = self.count_dirty_slow();
     }
 

@@ -2075,19 +2075,6 @@ impl LargeTableEntry {
         // refolded entries and can keep them (they are guaranteed not in
         // on_disk_keys, so retain's drop predicate will not fire).
         if !dropped_from_disk.is_empty() {
-            if std::env::var_os("FOLDBACK_TRACE").is_some() {
-                eprintln!(
-                    "foldback (entry update_flushed_index): {} dropped_from_disk entries",
-                    dropped_from_disk.len()
-                );
-                for (k, iwp) in dropped_from_disk {
-                    eprintln!(
-                        "  refolding k={:02x?} iwp={:?}",
-                        &k.as_ref()[..k.len().min(40)],
-                        iwp
-                    );
-                }
-            }
             let table = self.data.make_mut();
             for (k, iwp) in dropped_from_disk {
                 if !table.contains_key(k.as_ref()) {
