@@ -313,46 +313,56 @@ pub fn main() {
             storage_len as f64 / 1024. / 1024. / 1024.
         );
     }
-    if stress.parameters.pause_between_phases_secs > 0 {
+    let ops_sec = if stress.parameters.mixed_duration_secs == 0 {
+        // Skip the mixed phase entirely. Running it with duration 0 produces
+        // an empty latency histogram, and `Stress::measure`'s percentile
+        // extraction unwraps a `None` and panics. Used by R6 fill-only entries
+        // and any other "fill, then exit" workflow.
+        report!(report, "Mixed phase skipped (mixed_duration_secs = 0)");
+        String::new()
+    } else {
+        if stress.parameters.pause_between_phases_secs > 0 {
+            report!(
+                report,
+                "Pausing for {} seconds between phases",
+                stress.parameters.pause_between_phases_secs
+            );
+            thread::sleep(Duration::from_secs(
+                stress.parameters.pause_between_phases_secs,
+            ));
+        }
         report!(
             report,
-            "Pausing for {} seconds between phases",
-            stress.parameters.pause_between_phases_secs
+            "Starting mixed read/write test for {} seconds ({}% reads, {}% writes)",
+            stress.parameters.mixed_duration_secs,
+            stress.parameters.read_percentage,
+            100 - stress.parameters.read_percentage
         );
-        thread::sleep(Duration::from_secs(
-            stress.parameters.pause_between_phases_secs,
-        ));
-    }
-    report!(
-        report,
-        "Starting mixed read/write test for {} seconds ({}% reads, {}% writes)",
-        stress.parameters.mixed_duration_secs,
-        stress.parameters.read_percentage,
-        100 - stress.parameters.read_percentage
-    );
-    let manual_stop = if stress.parameters.background_writes > 0 {
-        stress.background(
-            stress.parameters.write_threads,
-            StressThread::run_background_writes,
-        )
-    } else {
-        Default::default()
+        let manual_stop = if stress.parameters.background_writes > 0 {
+            stress.background(
+                stress.parameters.write_threads,
+                StressThread::run_background_writes,
+            )
+        } else {
+            Default::default()
+        };
+        let (elapsed, total_ops) = stress.measure(
+            stress.parameters.mixed_threads,
+            StressThread::run_mixed_operations,
+            &mut report,
+        );
+        manual_stop.store(true, Ordering::Relaxed);
+        let total_bytes = total_ops * stress.parameters.write_size;
+        let msecs = elapsed.as_millis() as usize;
+        let ops_sec = dec_div(total_ops / msecs * 1000);
+        report!(
+            report,
+            "Mixed test done in {elapsed:?}: {} ops/s, {}/sec",
+            ops_sec,
+            byte_div(total_bytes / msecs * 1000),
+        );
+        ops_sec
     };
-    let (elapsed, total_ops) = stress.measure(
-        stress.parameters.mixed_threads,
-        StressThread::run_mixed_operations,
-        &mut report,
-    );
-    manual_stop.store(true, Ordering::Relaxed);
-    let total_bytes = total_ops * stress.parameters.write_size;
-    let msecs = elapsed.as_millis() as usize;
-    let ops_sec = dec_div(total_ops / msecs * 1000);
-    report!(
-        report,
-        "Mixed test done in {elapsed:?}: {} ops/s, {}/sec",
-        ops_sec,
-        byte_div(total_bytes / msecs * 1000),
-    );
     if print_report {
         report!(report, "Writing report file");
         fs::write("report.txt", &report.lines).unwrap();
