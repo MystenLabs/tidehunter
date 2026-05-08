@@ -6,8 +6,8 @@ use ::prometheus::Registry;
 use bytes::BufMut;
 use clap::Parser;
 use configs::{
-    Backend, KeyLayout, ReadMode, RelocationConfig, StressArgs, StressClientParameters,
-    StressTestConfigs,
+    Backend, EpochFilterMode, KeyLayout, ReadMode, RelocationConfig, StressArgs,
+    StressClientParameters, StressTestConfigs,
 };
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
@@ -17,12 +17,12 @@ use rand_distr::{Distribution, Zipf};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 use tidehunter::key_shape::{KeyShape, KeySpaceConfig, KeyType};
-use tidehunter::{RelocationStrategy, compute_target_position_from_ratio};
+use tidehunter::{Decision, RelocationStrategy, compute_target_position_from_ratio};
 
 mod configs;
 mod metrics;
@@ -133,6 +133,17 @@ pub fn main() {
         format!("0.0.0.0:{METRICS_PORT}").parse().unwrap(),
         &registry,
     );
+
+    // Cumulative count of foreground (app-side) bytes written. Incremented
+    // by writer threads on each insert; consumed by the relocation driver
+    // (when `epoch_budget_bytes` is set) to decide when to trigger the next
+    // pass, and reported at the end as the denominator for foreground WA.
+    let app_bytes_written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    // Bytes the relocation filter has seen during the current pass. Reset
+    // to 0 by the relocation driver at the start of each pass; incremented
+    // by the filter closure on each WAL entry visited in Phase A.
+    let bytes_seen_in_pass: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
     let storage: Arc<dyn Storage> = match config.stress_client_parameters.backend {
         Backend::Tidehunter => {
             if config.db_parameters.direct_io {
@@ -171,20 +182,46 @@ pub fn main() {
                 panic!("cells_per_mutex only applies to key_layout: Uniform");
             }
             report!(report, "Cells per mutex: **{cells_per_mutex}**");
+            let epoch_filter = config
+                .stress_client_parameters
+                .epoch_budget_bytes
+                .map(|budget| {
+                    report!(
+                        report,
+                        "Epoch filter **enabled** (budget={} bytes, mode={:?})",
+                        budget,
+                        config.stress_client_parameters.epoch_filter_mode
+                    );
+                    EpochFilterArgs {
+                        bytes_seen: bytes_seen_in_pass.clone(),
+                        budget,
+                        mode: config.stress_client_parameters.epoch_filter_mode,
+                    }
+                });
             let (key_shape, ks) = match config.stress_client_parameters.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     key_len,
                     mutexes,
                     KeyType::uniform(cells_per_mutex),
-                    key_space_config(bloom),
+                    key_space_config(bloom, epoch_filter.clone()),
                 ),
                 KeyLayout::SequenceChoice => {
                     let key_type = KeyType::prefix_uniform(8, 2);
-                    KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config(bloom))
+                    KeyShape::new_single_config(
+                        key_len,
+                        mutexes,
+                        key_type,
+                        key_space_config(bloom, epoch_filter.clone()),
+                    )
                 }
                 KeyLayout::ChoiceSequence => {
                     let key_type = KeyType::prefix_uniform(15, 5);
-                    KeyShape::new_single_config(key_len, mutexes, key_type, key_space_config(bloom))
+                    KeyShape::new_single_config(
+                        key_len,
+                        mutexes,
+                        key_type,
+                        key_space_config(bloom, epoch_filter.clone()),
+                    )
                 }
             };
             let (storage, timings) = TidehunterStorage::open_with_timings(
@@ -204,15 +241,47 @@ pub fn main() {
 
                 // Start continuous relocation if enabled
                 if let Some(ref relocation_config) = config.stress_client_parameters.relocation {
+                    let epoch_budget = config.stress_client_parameters.epoch_budget_bytes;
                     report!(
                         report,
-                        "Starting continuous {:?} relocation",
-                        relocation_config
+                        "Starting continuous {:?} relocation (trigger: {})",
+                        relocation_config,
+                        match epoch_budget {
+                            Some(b) => format!("every {b} app bytes written"),
+                            None => "every 30s".to_string(),
+                        }
                     );
                     let db_clone = storage.db.clone();
                     let relocation_config = relocation_config.clone();
+                    let app_bytes_clone = app_bytes_written.clone();
+                    let bytes_seen_clone = bytes_seen_in_pass.clone();
                     thread::spawn(move || {
+                        let mut last_trigger_bytes = 0u64;
                         loop {
+                            // Wait for the next trigger.
+                            match epoch_budget {
+                                Some(budget) => {
+                                    // Bytes-based: poll until the writer has
+                                    // produced `budget` more bytes since the
+                                    // last pass, then reset the filter's
+                                    // pass-local counter.
+                                    loop {
+                                        let cur = app_bytes_clone.load(Ordering::Relaxed);
+                                        if cur.saturating_sub(last_trigger_bytes) >= budget {
+                                            last_trigger_bytes = cur;
+                                            break;
+                                        }
+                                        thread::sleep(Duration::from_secs(5));
+                                    }
+                                    bytes_seen_clone.store(0, Ordering::Relaxed);
+                                }
+                                None => {
+                                    // Time-based: existing behavior. The
+                                    // sleep happens *after* the pass below so
+                                    // the first pass starts immediately.
+                                }
+                            }
+
                             // Convert RelocationConfig to RelocationStrategy for this iteration
                             let strategy = match &relocation_config {
                                 RelocationConfig::Wal => RelocationStrategy::WalBased,
@@ -230,8 +299,10 @@ pub fn main() {
                             // Start relocation and let it run to completion
                             db_clone.start_blocking_relocation_with_strategy(strategy);
 
-                            // Take a 30 second break between relocations
-                            thread::sleep(Duration::from_secs(30));
+                            if epoch_budget.is_none() {
+                                // Take a 30 second break between relocations
+                                thread::sleep(Duration::from_secs(30));
+                            }
                         }
                     });
                 }
@@ -282,6 +353,7 @@ pub fn main() {
         storage,
         parameters: Arc::new(config.stress_client_parameters),
         benchmark_metrics,
+        app_bytes_written: app_bytes_written.clone(),
     };
     report!(report, "Starting write test");
     let write_sec;
@@ -363,6 +435,15 @@ pub fn main() {
         );
         ops_sec
     };
+    {
+        let total_app_bytes = stress.app_bytes_written.load(Ordering::Relaxed);
+        report!(
+            report,
+            "App bytes written total: {} ({})",
+            total_app_bytes,
+            byte_div(total_app_bytes as usize)
+        );
+    }
     if print_report {
         report!(report, "Writing report file");
         fs::write("report.txt", &report.lines).unwrap();
@@ -509,7 +590,23 @@ fn run_measure_open(
     }
 }
 
-fn key_space_config(bloom: Option<(f32, u32)>) -> KeySpaceConfig {
+/// Args for the byte-counting relocation filter (R2-D6).
+#[derive(Clone)]
+struct EpochFilterArgs {
+    /// Shared with the relocation driver so it can reset to 0 before each pass.
+    bytes_seen: Arc<AtomicU64>,
+    /// Per-pass byte budget. Once `bytes_seen >= budget` and `mode == Stop`,
+    /// the filter returns `Decision::StopRelocation`.
+    budget: u64,
+    /// `Stop` is the production-canonical short-circuit. `Keep` is the
+    /// ablation that disables the short-circuit.
+    mode: EpochFilterMode,
+}
+
+fn key_space_config(
+    bloom: Option<(f32, u32)>,
+    epoch_filter: Option<EpochFilterArgs>,
+) -> KeySpaceConfig {
     use tidehunter::index::index_format::IndexFormatType;
     use tidehunter::index::uniform_lookup::UniformLookupIndex;
     let mut cfg = KeySpaceConfig::new()
@@ -520,6 +617,25 @@ fn key_space_config(bloom: Option<(f32, u32)>) -> KeySpaceConfig {
     if let Some((rate, count)) = bloom {
         cfg = cfg.with_bloom_filter(rate, count);
     }
+    if let Some(args) = epoch_filter {
+        let EpochFilterArgs {
+            bytes_seen,
+            budget,
+            mode,
+        } = args;
+        cfg = cfg.with_relocation_filter(move |key: &[u8], value: &[u8]| {
+            let prev = bytes_seen.fetch_add((key.len() + value.len()) as u64, Ordering::Relaxed);
+            if prev >= budget && mode == EpochFilterMode::Stop {
+                Decision::StopRelocation
+            } else {
+                // Keep is fine here even though entries are about to be
+                // bulk-dropped: WAL-based relocation only consults the filter
+                // for StopRelocation in Phase A; Keep/Remove are silently
+                // ignored. See tidehunter/src/relocation/mod.rs:333-338.
+                Decision::Keep
+            }
+        });
+    }
     cfg
 }
 
@@ -527,6 +643,10 @@ struct Stress {
     storage: Arc<dyn Storage>,
     parameters: Arc<StressClientParameters>,
     benchmark_metrics: Arc<BenchmarkMetrics>,
+    /// Cumulative app-side bytes written across all writer threads.
+    /// Read by the relocation driver (bytes-based trigger) and reported
+    /// at end-of-run as the foreground-WA denominator.
+    app_bytes_written: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -613,6 +733,7 @@ impl Stress {
                 latency_errors: latency_errors.clone(),
                 benchmark_metrics: self.benchmark_metrics.clone(),
                 operations_counter: operations_counter.clone(),
+                app_bytes_written: self.app_bytes_written.clone(),
             };
             let f = f.clone();
             let thread = thread::spawn(move || f(thread));
@@ -664,6 +785,7 @@ struct StressThread {
     latency_errors: Arc<AtomicUsize>,
     benchmark_metrics: Arc<BenchmarkMetrics>,
     operations_counter: Arc<AtomicUsize>,
+    app_bytes_written: Arc<AtomicU64>,
 }
 
 impl StressThread {
@@ -690,6 +812,7 @@ impl StressThread {
     pub fn run_writes(self) {
         #[allow(clippy::let_underscore_lock)] // RWLock here acts as a barrier
         let _ = self.start_lock.read();
+        let bytes_per_op = (self.parameters.key_len + self.parameters.write_size) as u64;
         for pos in 0..self.parameters.writes {
             let pos = self.global_pos(pos);
             let (key, value) = self.key_value(pos);
@@ -708,6 +831,8 @@ impl StressThread {
                 self.latency_errors.fetch_add(1, Ordering::Relaxed);
             }
             self.operations_counter.fetch_add(1, Ordering::Relaxed);
+            self.app_bytes_written
+                .fetch_add(bytes_per_op, Ordering::Relaxed);
         }
     }
 
@@ -716,12 +841,15 @@ impl StressThread {
         let delay = Duration::from_micros(1_000_000 / writes_per_thread as u64);
         let mut deadline = Instant::now();
         let mut pos = u32::MAX;
+        let bytes_per_op = (self.parameters.key_len + self.parameters.write_size) as u64;
         while !self.manual_stop.load(Ordering::Relaxed) {
             deadline += delay;
             pos -= 1;
             let pos = self.global_pos(pos as usize);
             let (key, value) = self.key_value(pos);
             self.db.insert(key.into(), value.into());
+            self.app_bytes_written
+                .fetch_add(bytes_per_op, Ordering::Relaxed);
             thread::sleep(
                 deadline
                     .checked_duration_since(Instant::now())
@@ -833,6 +961,7 @@ impl StressThread {
                 };
 
                 let (key, value) = self.key_value(pos);
+                let bytes_this_op = (key.len() + value.len()) as u64;
                 let timer = Instant::now();
                 self.db.insert(key.into(), value.into());
                 // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
@@ -847,6 +976,8 @@ impl StressThread {
                 if self.latency.increment(latency as u64).is_err() {
                     self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
+                self.app_bytes_written
+                    .fetch_add(bytes_this_op, Ordering::Relaxed);
             }
 
             // Track operations for reporting

@@ -9,5 +9,6 @@ tidehunter = { path = "../../tidehunter" }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 
 

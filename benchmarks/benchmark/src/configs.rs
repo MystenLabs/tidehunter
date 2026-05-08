@@ -92,6 +92,30 @@ impl FromStr for ReadMode {
     }
 }
 
+/// Behavior of the byte-counting relocation filter while still under budget.
+///
+/// `Stop` returns `Decision::StopRelocation` once the budget is exceeded — the
+/// production-canonical behavior, used for R2-D6 E1.
+/// `Keep` returns `Decision::Keep` always — the ablation, where Phase A of
+/// WAL-based relocation scans the entire WAL because no entry signals stop.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EpochFilterMode {
+    Stop,
+    Keep,
+}
+
+impl FromStr for EpochFilterMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "stop" => Ok(Self::Stop),
+            "keep" => Ok(Self::Keep),
+            _ => anyhow::bail!("epoch_filter_mode must be 'stop' or 'keep'"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Backend {
     Tidehunter,
@@ -227,6 +251,19 @@ pub struct StressClientParameters {
     /// alongside `measure_open` + `reuse`.
     #[serde(default = "defaults::default_clean_after_measure")]
     pub clean_after_measure: bool,
+    /// When set, attaches a byte-counting relocation filter to the Tidehunter
+    /// key space and switches the continuous relocation driver from a
+    /// time-based loop (every 30s) to a bytes-based loop: every
+    /// `epoch_budget_bytes` of foreground writes, a relocation pass is
+    /// triggered. Within the pass, the filter (with `epoch_filter_mode = Stop`)
+    /// returns `StopRelocation` once it has seen `epoch_budget_bytes` of WAL.
+    /// Used for R2-D6 (epoch-based GC) experiments. Tidehunter only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch_budget_bytes: Option<u64>,
+    /// Behavior of the byte-counting filter while still under budget. Only
+    /// meaningful when `epoch_budget_bytes` is set.
+    #[serde(default = "defaults::default_epoch_filter_mode")]
+    pub epoch_filter_mode: EpochFilterMode,
 }
 
 impl Default for StressClientParameters {
@@ -262,13 +299,15 @@ impl Default for StressClientParameters {
             first_read_samples: defaults::default_first_read_samples(),
             crash_after_secs: None,
             clean_after_measure: defaults::default_clean_after_measure(),
+            epoch_budget_bytes: None,
+            epoch_filter_mode: defaults::default_epoch_filter_mode(),
         }
     }
 }
 
 /// Default values for the benchmark parameters
 pub mod defaults {
-    use super::{Backend, KeyLayout, ReadMode};
+    use super::{Backend, EpochFilterMode, KeyLayout, ReadMode};
 
     pub fn default_mixed_threads() -> usize {
         1
@@ -352,6 +391,10 @@ pub mod defaults {
 
     pub fn default_clean_after_measure() -> bool {
         false
+    }
+
+    pub fn default_epoch_filter_mode() -> EpochFilterMode {
+        EpochFilterMode::Stop
     }
 }
 
@@ -506,6 +549,16 @@ pub struct StressArgs {
         help = "After --measure-open finishes, recursively delete the --reuse path (bounds per-machine disk in sweeps)"
     )]
     clean_after_measure: Option<bool>,
+    #[arg(
+        long,
+        help = "Per-pass byte budget for byte-counting relocation filter. When set, the filter is attached to the Tidehunter key space and the continuous relocation driver triggers every N foreground bytes (instead of every 30s). Used for R2-D6 epoch-based GC experiments."
+    )]
+    epoch_budget_bytes: Option<u64>,
+    #[arg(
+        long,
+        help = "Filter behavior under budget: 'stop' (default) returns StopRelocation when budget exceeded; 'keep' is the ablation that disables the short-circuit."
+    )]
+    epoch_filter_mode: Option<EpochFilterMode>,
 }
 
 /// Override default arguments with the ones provided by the user
@@ -623,6 +676,12 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
     }
     if let Some(clean_after_measure) = args.clean_after_measure {
         config.stress_client_parameters.clean_after_measure = clean_after_measure;
+    }
+    if let Some(epoch_budget_bytes) = args.epoch_budget_bytes {
+        config.stress_client_parameters.epoch_budget_bytes = Some(epoch_budget_bytes);
+    }
+    if let Some(epoch_filter_mode) = args.epoch_filter_mode {
+        config.stress_client_parameters.epoch_filter_mode = epoch_filter_mode;
     }
 
     config
