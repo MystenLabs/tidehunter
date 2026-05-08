@@ -1,5 +1,7 @@
 use anyhow::Result;
-use benchmark::configs::{Backend, KeyLayout, ReadMode, RelocationConfig, StressTestConfigs};
+use benchmark::configs::{
+    Backend, EpochFilterMode, KeyLayout, ReadMode, RelocationConfig, StressTestConfigs,
+};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
@@ -17,6 +19,10 @@ enum Mode {
     ValueScaling,
     /// R6 revision experiments: recovery cold-start + snapshot interval sweep.
     R6Recovery,
+    /// R2-D6 revision experiment: epoch-based GC evaluation. Generates a
+    /// budget sweep (E1) plus the StopRelocation ablation (E2). E2.a is
+    /// identical to E1's middle run, so this emits 4 unique configs.
+    R2D6EpochGc,
 }
 
 const KEY_LEN: usize = 32;
@@ -29,6 +35,7 @@ fn main() -> Result<()> {
     match args.mode {
         Mode::ValueScaling => generate_value_scaling(),
         Mode::R6Recovery => generate_r6_recovery(),
+        Mode::R2D6EpochGc => generate_r2d6_epoch_gc(),
     }
 }
 
@@ -295,4 +302,90 @@ fn generate_r6_recovery() -> Result<()> {
 fn writes_for_size_with_threads(size_gb: u64, write_threads: u64, write_size: usize) -> usize {
     let bytes_per_write = (KEY_LEN + write_size) as u64;
     ((size_gb * 1024 * 1024 * 1024) / (bytes_per_write * write_threads)) as usize
+}
+
+fn generate_r2d6_epoch_gc() -> Result<()> {
+    // R2-D6 — epoch-based GC evaluation.
+    //
+    // Each run does a 50 GB pre-fill followed by a 60-minute pure-write mixed
+    // phase, with continuous WAL-based relocation triggered every
+    // `epoch_budget_bytes` of foreground writes. The byte-counting filter
+    // (registered via `--epoch-budget-bytes`) returns `StopRelocation` once it
+    // has seen the budget, modeling Sui's epoch-driven `apply_relocation_filter`
+    // (sui/crates/sui-core/src/authority/authority_store_pruner.rs:968-993)
+    // without an epoch-id-in-key encoding.
+    //
+    // The sweep covers two experiments simultaneously:
+    //
+    //   E1 — Per-pass budget sweep: budget ∈ {25 GB, 50 GB, 100 GB}, mode=Stop.
+    //   E2 — `StopRelocation` ablation: budget=50 GB, mode={Stop, Keep}.
+    //        E2.a (Stop) is the same as E1's 50 GB run, so the ablation only
+    //        adds the Keep variant. With Keep, Phase A scans the entire WAL
+    //        each pass (no short-circuit), isolating the read-I/O saving the
+    //        StopRelocation mechanism provides.
+    //
+    // Pure-write mixed phase (`read_percentage = 0`) avoids tangling
+    // foreground latency measurements with read-of-deleted-key semantics:
+    // the byte-budgeted filter is, by design, dropping older keys from the
+    // index as their WAL bytes are bulk-reclaimed.
+
+    const VALUE_SIZE: usize = 1024;
+    const FILL_GB: u64 = 50;
+    const MIXED_DURATION_SECS: u64 = 3600; // 60 minutes
+    const REPLICATES: usize = 2;
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    // (label, budget_bytes, mode)
+    let runs: [(&str, u64, EpochFilterMode); 4] = [
+        ("budget25-stop", 25 * GB, EpochFilterMode::Stop),
+        ("budget50-stop", 50 * GB, EpochFilterMode::Stop),
+        ("budget100-stop", 100 * GB, EpochFilterMode::Stop),
+        ("budget50-keep", 50 * GB, EpochFilterMode::Keep),
+    ];
+
+    let mut base = StressTestConfigs::default();
+    base.stress_client_parameters.backend = Backend::Tidehunter;
+    base.stress_client_parameters.mixed_threads = 36;
+    base.stress_client_parameters.write_threads = 36;
+    base.stress_client_parameters.write_size = VALUE_SIZE;
+    base.stress_client_parameters.key_len = KEY_LEN;
+    base.stress_client_parameters.key_layout = KeyLayout::Uniform;
+    base.stress_client_parameters.read_mode = ReadMode::Get;
+    // Pure-write mixed phase (see comment above).
+    base.stress_client_parameters.read_percentage = 0;
+    base.stress_client_parameters.overwrite_ratio = 0.0;
+    base.stress_client_parameters.no_snapshot = false;
+    base.stress_client_parameters.report = true;
+    base.stress_client_parameters.tldr = String::new();
+    base.stress_client_parameters.preserve = false;
+    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.relocation = Some(RelocationConfig::Wal);
+    base.stress_client_parameters.bloom_filter_rate = None;
+    base.stress_client_parameters.bloom_filter_count = None;
+    base.stress_client_parameters.mixed_duration_secs = MIXED_DURATION_SECS;
+    base.stress_client_parameters.pause_between_phases_secs = 0;
+    base.stress_client_parameters.writes = writes_for_size_with_threads(
+        FILL_GB,
+        base.stress_client_parameters.write_threads as u64,
+        base.stress_client_parameters.write_size,
+    );
+    base.db_parameters.frag_size = FRAG_SIZE;
+    base.db_parameters.max_maps = MAX_MAPS;
+    base.db_parameters.max_dirty_keys = DEFAULT_MAX_DIRTY_KEYS;
+    base.db_parameters.num_flusher_threads = 12;
+    base.db_parameters.metrics_enabled = false;
+    base.db_parameters.direct_io = false;
+
+    let mut items: Vec<StressTestConfigs> = Vec::new();
+    for replicate in 1..=REPLICATES {
+        for (label, budget, mode) in &runs {
+            let mut item = base.clone();
+            item.stress_client_parameters.epoch_budget_bytes = Some(*budget);
+            item.stress_client_parameters.epoch_filter_mode = *mode;
+            item.stress_client_parameters.tldr = format!("r2d6-{label}-r{replicate}");
+            items.push(item);
+        }
+    }
+
+    write_configs(&items, "orchestrator/assets/target_configs.yml")
 }

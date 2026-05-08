@@ -320,7 +320,12 @@ impl RelocationDriver {
         let mut terminal_position = 0;
         loop {
             let entry = wal_iterator.next();
-            if matches!(entry, Err(WalError::Crc(_))) {
+            // `EndOfWal` arises when the iterator advances to a position whose
+            // WAL file is no longer present (concurrent GC). Treat it as a
+            // graceful end of the scan, not an error — `terminal_position`
+            // remains 0 (or whatever was set by a prior break) and Phase B
+            // will see no work to do this pass.
+            if matches!(entry, Err(WalError::Crc(_)) | Err(WalError::EndOfWal)) {
                 break;
             }
             let (position, raw_entry) = entry?;

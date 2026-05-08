@@ -300,9 +300,21 @@ impl Wal {
         self.maps.load().get(id).cloned()
     }
 
-    /// Resize file to fit the specified map id
+    /// Resize file to fit the specified map id.
+    ///
+    /// Returns Ok(()) silently when the file is not present in `files` — this
+    /// happens when a concurrent GC has advanced `min_file_id` past the
+    /// requested map's file between the caller capturing a position and
+    /// reaching this point. Callers detect the missing file via the
+    /// subsequent `files.get_checked(...)` (e.g. `WalIterator::make_map`,
+    /// which then returns `Ok(None)` and lets the iterator end gracefully).
+    /// The mapper-thread caller (`WalMapper::make_map`) ensures the file
+    /// exists in `files` before invoking this and then calls `files.get(...)`
+    /// on the next line, preserving the original assertion for that path.
     fn extend_to_map_id(layout: &WalLayout, files: &WalFiles, map_id: MapId) -> io::Result<()> {
-        let file = files.get(layout.file_for_map(map_id));
+        let Some(file) = files.get_checked(layout.file_for_map(map_id)) else {
+            return Ok(());
+        };
         let mut end = layout.offset_in_wal_file(layout.map_range(map_id).end);
         if end == 0 {
             // If the map range end equals wal_file_size, set the end explicitly instead of using 0
