@@ -210,6 +210,10 @@ pub struct StressClientParameters {
     /// Ratio of writes that overwrite existing keys (0.0 to 1.0, default 0.0)
     #[serde(default = "defaults::default_overwrite_ratio")]
     pub overwrite_ratio: f64,
+    /// Ratio of writes that are deletes of existing keys (0.0 to 1.0, default 0.0).
+    /// `overwrite_ratio + delete_ratio` must not exceed 1.0; the remainder is fresh inserts.
+    #[serde(default = "defaults::default_delete_ratio")]
+    pub delete_ratio: f64,
     /// Bloom filter false-positive rate for Tidehunter key spaces (e.g. 0.01 for 1%).
     /// When set together with `bloom_filter_count`, enables a bloom filter sized to
     /// approximate that FPR for the configured number of expected items per cell.
@@ -291,6 +295,7 @@ impl Default for StressClientParameters {
             zipf_exponent: defaults::default_zipf_exponent(),
             relocation: None,
             overwrite_ratio: defaults::default_overwrite_ratio(),
+            delete_ratio: defaults::default_delete_ratio(),
             bloom_filter_rate: None,
             bloom_filter_count: None,
             cells_per_mutex: None,
@@ -378,6 +383,10 @@ pub mod defaults {
     }
 
     pub fn default_overwrite_ratio() -> f64 {
+        0.0
+    }
+
+    pub fn default_delete_ratio() -> f64 {
         0.0
     }
 
@@ -509,6 +518,11 @@ pub struct StressArgs {
         help = "Ratio of writes that overwrite existing keys (0.0 to 1.0)"
     )]
     overwrite_ratio: Option<f64>,
+    #[arg(
+        long,
+        help = "Ratio of writes that delete existing keys (0.0 to 1.0). overwrite_ratio + delete_ratio must not exceed 1.0"
+    )]
+    delete_ratio: Option<f64>,
     #[arg(
         long,
         help = "Bloom filter false-positive rate (e.g. 0.01 for 1%). Requires --bloom-filter-count to take effect"
@@ -652,6 +666,23 @@ pub fn override_default_args(args: StressArgs, mut config: StressTestConfigs) ->
             std::process::exit(1);
         }
         config.stress_client_parameters.overwrite_ratio = overwrite_ratio;
+    }
+    if let Some(delete_ratio) = args.delete_ratio {
+        if !(0.0..=1.0).contains(&delete_ratio) {
+            eprintln!("Error: delete_ratio must be between 0.0 and 1.0");
+            std::process::exit(1);
+        }
+        config.stress_client_parameters.delete_ratio = delete_ratio;
+    }
+    let combined_mutation_ratio = config.stress_client_parameters.overwrite_ratio
+        + config.stress_client_parameters.delete_ratio;
+    if combined_mutation_ratio > 1.0 {
+        eprintln!(
+            "Error: overwrite_ratio ({}) + delete_ratio ({}) must not exceed 1.0",
+            config.stress_client_parameters.overwrite_ratio,
+            config.stress_client_parameters.delete_ratio,
+        );
+        std::process::exit(1);
     }
     if let Some(bloom_filter_rate) = args.bloom_filter_rate {
         config.stress_client_parameters.bloom_filter_rate = Some(bloom_filter_rate);

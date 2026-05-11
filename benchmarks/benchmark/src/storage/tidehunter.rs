@@ -41,6 +41,10 @@ impl Storage for Arc<TidehunterStorage> {
         self.db.exists(self.ks, k).unwrap()
     }
 
+    fn delete(&self, k: Bytes) {
+        self.db.remove(self.ks, k).unwrap()
+    }
+
     fn name(&self) -> &'static str {
         "tidehunter"
     }

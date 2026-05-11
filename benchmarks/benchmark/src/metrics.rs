@@ -5,6 +5,7 @@ use std::sync::Arc;
 pub struct BenchmarkMetrics {
     pub bench_reads: HistogramVec,
     pub bench_writes: HistogramVec,
+    pub bench_deletes: HistogramVec,
     pub get_lt_result: IntCounterVec,
 
     // Parameter gauge metrics
@@ -39,6 +40,14 @@ impl BenchmarkMetrics {
             bench_writes: prometheus::register_histogram_vec_with_registry!(
                 "bench_writes",
                 "bench_writes",
+                &["db"],
+                latency_buckets.clone(),
+                registry
+            )
+            .unwrap(),
+            bench_deletes: prometheus::register_histogram_vec_with_registry!(
+                "bench_deletes",
+                "bench_deletes",
                 &["db"],
                 latency_buckets.clone(),
                 registry

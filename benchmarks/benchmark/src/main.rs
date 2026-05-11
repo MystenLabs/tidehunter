@@ -945,32 +945,46 @@ impl StressThread {
                     self.latency_errors.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
-                // Perform a write operation
-                let should_overwrite = thread_rng.r#gen::<f64>() < self.parameters.overwrite_ratio
-                    && local_write_pos_counter > 0;
+                // Pick one of: delete an existing key, overwrite an existing key, or
+                // insert a fresh key. The two ratios share a single random draw so
+                // their sum is the probability of touching an existing key.
+                let r: f64 = thread_rng.r#gen::<f64>();
+                let has_existing_keys = local_write_pos_counter > 0;
+                let do_delete = has_existing_keys && r < self.parameters.delete_ratio;
+                let do_overwrite = has_existing_keys
+                    && !do_delete
+                    && r < self.parameters.delete_ratio + self.parameters.overwrite_ratio;
 
-                let pos = if should_overwrite {
-                    // Select existing key to overwrite using same logic as reads
+                let (histogram, timer, bytes_this_op) = if do_delete {
                     let highest_local_pos = local_write_pos_counter.saturating_sub(1);
-                    self.select_existing_key(&mut thread_rng, highest_local_pos)
+                    let pos = self.select_existing_key(&mut thread_rng, highest_local_pos);
+                    let key = self.key(pos);
+                    let bytes_this_op = key.len() as u64;
+                    let timer = Instant::now();
+                    self.db.delete(key.into());
+                    (&self.benchmark_metrics.bench_deletes, timer, bytes_this_op)
                 } else {
-                    // Create new key (current behavior)
-                    let pos = self.global_pos(local_write_pos_counter);
-                    local_write_pos_counter += 1;
-                    pos
+                    let pos = if do_overwrite {
+                        let highest_local_pos = local_write_pos_counter.saturating_sub(1);
+                        self.select_existing_key(&mut thread_rng, highest_local_pos)
+                    } else {
+                        let pos = self.global_pos(local_write_pos_counter);
+                        local_write_pos_counter += 1;
+                        pos
+                    };
+                    let (key, value) = self.key_value(pos);
+                    let bytes_this_op = (key.len() + value.len()) as u64;
+                    let timer = Instant::now();
+                    self.db.insert(key.into(), value.into());
+                    (&self.benchmark_metrics.bench_writes, timer, bytes_this_op)
                 };
 
-                let (key, value) = self.key_value(pos);
-                let bytes_this_op = (key.len() + value.len()) as u64;
-                let timer = Instant::now();
-                self.db.insert(key.into(), value.into());
                 // Clamp to the histogram's max recordable value (2^LATENCY_HISTOGRAM_MAX_VALUE_POWER)
                 let latency = timer
                     .elapsed()
                     .as_micros()
                     .min((1u128 << LATENCY_HISTOGRAM_MAX_VALUE_POWER) - 1);
-                self.benchmark_metrics
-                    .bench_writes
+                histogram
                     .with_label_values(&[self.db.name()])
                     .observe(latency as f64);
                 if self.latency.increment(latency as u64).is_err() {
