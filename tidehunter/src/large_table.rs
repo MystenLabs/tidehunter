@@ -792,9 +792,8 @@ impl LargeTable {
         let mut replay_from: Option<u64> = None;
         // Collect all cells from all rows into one BTreeMap
         let mut ks_data = BTreeMap::new();
-        const SNAPSHOT_ROW_SLEEP: Duration = Duration::from_millis(2);
         for mutex in ks_table.rows.mutexes() {
-            thread::sleep(SNAPSHOT_ROW_SLEEP);
+            thread::yield_now();
             let mut row = mutex.lock();
             for entry in row.entries.iter_mut() {
                 // Important - read last_processed_wal_position before promote_pending.
