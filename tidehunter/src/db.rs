@@ -81,6 +81,14 @@ struct ReplayStats {
     bytes: u64,
 }
 
+/// Message sent from the replay reader to a worker thread.
+enum ReplayWorkerMsg {
+    Apply(WalPosition, WalEntry),
+    /// Drain marker: the worker acks once it has processed every prior `Apply`
+    /// from its queue. Used by `DropCells` to fence ordering across shards.
+    Barrier(mpsc::Sender<()>),
+}
+
 impl Db {
     pub fn open(
         path: &Path,
@@ -145,8 +153,18 @@ impl Db {
 
         let t = Instant::now();
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
-        let (wal_writer, replay_stats) =
-            Self::replay_wal(&contexts, &large_table, wal_iterator, &indexes, &metrics)?;
+        let (wal_writer, replay_stats) = if config.num_replay_threads <= 1 {
+            Self::replay_wal(&contexts, &large_table, wal_iterator, &indexes, &metrics)?
+        } else {
+            Self::replay_wal_parallel(
+                &contexts,
+                &large_table,
+                wal_iterator,
+                &indexes,
+                &metrics,
+                config.num_replay_threads,
+            )?
+        };
         timings.wal_replay = t.elapsed();
         timings.bytes_replayed = replay_stats.bytes;
         timings.entries_replayed = replay_stats.entries;
@@ -901,43 +919,211 @@ impl Db {
                 continue;
             }
             match entry {
-                WalEntry::Record(ks, k, v, relocated) => {
-                    metrics.replayed_wal_records.inc();
-                    stats.entries += 1;
-                    if relocated {
-                        // Nothing needs to be done for the relocated record
-                        continue;
-                    }
-                    let context = contexts.ks_context(ks);
-                    let full_key = k.clone();
-                    let reduced_key = context.ks_config.reduced_key_bytes(k);
-                    let guard = WalGuard::replay_guard(position);
-                    large_table.insert(context, reduced_key, full_key, guard, &v, indexes)?;
-                }
-                WalEntry::Index(_ks, _bytes) => {
-                    unreachable!("Should not have index entries in wal");
-                }
-                WalEntry::Remove(ks, k) => {
-                    metrics.replayed_wal_records.inc();
-                    stats.entries += 1;
-                    let context = contexts.ks_context(ks);
-                    let reduced_key = context.ks_config.reduced_key_bytes(k);
-                    let guard = WalGuard::replay_guard(position);
-                    large_table.remove(context, reduced_key, guard, indexes)?;
-                }
                 WalEntry::BatchStart(size) => {
                     batch_start_position = Some(position.offset());
                     batch = VecDeque::with_capacity(size as usize);
                     batch_remaining = size;
                 }
-                WalEntry::DropCells(ks, from_cell, to_cell) => {
-                    metrics.replayed_wal_records.inc();
+                WalEntry::Index(_ks, _bytes) => {
+                    unreachable!("Should not have index entries in wal");
+                }
+                entry @ (WalEntry::Record(..) | WalEntry::Remove(..) | WalEntry::DropCells(..)) => {
                     stats.entries += 1;
-                    let context = contexts.ks_context(ks);
-                    large_table.drop_cells_in_range(context, &from_cell, &to_cell);
+                    Self::apply_entry(contexts, large_table, indexes, metrics, position, entry)?;
                 }
             }
         }
+    }
+
+    fn apply_entry(
+        contexts: &KsContextVec,
+        large_table: &LargeTable,
+        indexes: &Wal,
+        metrics: &Metrics,
+        position: WalPosition,
+        entry: WalEntry,
+    ) -> DbResult<()> {
+        match entry {
+            WalEntry::Record(ks, k, v, relocated) => {
+                metrics.replayed_wal_records.inc();
+                if relocated {
+                    // Nothing needs to be done for the relocated record
+                    return Ok(());
+                }
+                let context = contexts.ks_context(ks);
+                let full_key = k.clone();
+                let reduced_key = context.ks_config.reduced_key_bytes(k);
+                let guard = WalGuard::replay_guard(position);
+                large_table.insert(context, reduced_key, full_key, guard, &v, indexes)?;
+            }
+            WalEntry::Remove(ks, k) => {
+                metrics.replayed_wal_records.inc();
+                let context = contexts.ks_context(ks);
+                let reduced_key = context.ks_config.reduced_key_bytes(k);
+                let guard = WalGuard::replay_guard(position);
+                large_table.remove(context, reduced_key, guard, indexes)?;
+            }
+            WalEntry::DropCells(ks, from_cell, to_cell) => {
+                metrics.replayed_wal_records.inc();
+                let context = contexts.ks_context(ks);
+                large_table.drop_cells_in_range(context, &from_cell, &to_cell);
+            }
+            WalEntry::BatchStart(_) | WalEntry::Index(..) => {
+                unreachable!("BatchStart/Index must be handled by the reader");
+            }
+        }
+        Ok(())
+    }
+
+    /// Routes a replay entry to a worker shard by hashing its cell, matching
+    /// the flusher's `cell.mutex_seed() % num_shards` scheme so per-cell WAL
+    /// order is preserved within each worker's FIFO queue.
+    fn entry_shard(contexts: &KsContextVec, entry: &WalEntry, num_shards: usize) -> Option<usize> {
+        match entry {
+            WalEntry::Record(ks, k, _, _) | WalEntry::Remove(ks, k) => {
+                let context = contexts.ks_context(*ks);
+                let cell = context.ks_config.cell_id(k);
+                Some(cell.mutex_seed() % num_shards)
+            }
+            WalEntry::DropCells(..) => None,
+            WalEntry::BatchStart(_) | WalEntry::Index(..) => {
+                unreachable!("BatchStart/Index must be handled by the reader");
+            }
+        }
+    }
+
+    /// Parallel WAL replay: one reader thread streams entries from `wal_iterator`
+    /// in WAL order and routes each to a fixed worker by hashing the cell ID,
+    /// so per-cell WAL ordering is preserved (each worker drains its queue FIFO).
+    ///
+    /// `DropCells` spans cells, so it drains all workers and applies inline before
+    /// resuming dispatch. The single-threaded fallback remains in [`Self::replay_wal`]
+    /// and is selected by `Config::num_replay_threads`.
+    fn replay_wal_parallel(
+        contexts: &KsContextVec,
+        large_table: &LargeTable,
+        mut wal_iterator: WalIterator,
+        indexes: &Wal,
+        metrics: &Metrics,
+        num_workers: usize,
+    ) -> DbResult<(WalWriter, ReplayStats)> {
+        assert!(num_workers > 0, "num_workers must be > 0");
+        let start_position = wal_iterator.position();
+        let mut stats = ReplayStats::default();
+        let mut batch: VecDeque<(WalPosition, WalEntry)> = VecDeque::new();
+        let mut batch_remaining: u32 = 0;
+        let mut batch_start_position: Option<u64> = None;
+
+        thread::scope(|scope| -> DbResult<()> {
+            // One channel per worker shard; the reader picks a shard by hashing
+            // the entry's cell.
+            let (senders, receivers): (Vec<_>, Vec<_>) = (0..num_workers)
+                .map(|_| mpsc::channel::<ReplayWorkerMsg>())
+                .unzip();
+
+            let handles: Vec<_> = receivers
+                .into_iter()
+                .map(|rx| {
+                    scope.spawn(move || -> DbResult<()> {
+                        for msg in rx {
+                            match msg {
+                                ReplayWorkerMsg::Apply(position, entry) => {
+                                    Self::apply_entry(
+                                        contexts,
+                                        large_table,
+                                        indexes,
+                                        metrics,
+                                        position,
+                                        entry,
+                                    )?;
+                                }
+                                ReplayWorkerMsg::Barrier(ack) => {
+                                    // If the reader has already given up (e.g. error
+                                    // propagation), swallow the send failure.
+                                    let _ = ack.send(());
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+
+            'reader: loop {
+                let (position, entry) = if batch_remaining == 0 && !batch.is_empty() {
+                    batch_start_position = None;
+                    batch.pop_front().expect("invariant checked")
+                } else {
+                    let next = wal_iterator.next();
+                    if matches!(next, Err(WalError::Crc(_))) {
+                        stats.bytes = wal_iterator.position().saturating_sub(start_position);
+                        break 'reader;
+                    }
+                    let (position, raw_entry) = next?;
+                    let entry = WalEntry::from_bytes(raw_entry);
+                    (position, entry)
+                };
+                if batch_remaining > 0 {
+                    assert!(
+                        matches!(entry, WalEntry::Record(..) | WalEntry::Remove(..)),
+                        "encountered entry {entry:?} at position {position:?} during replay, while expected record or tombstone"
+                    );
+                    batch_remaining -= 1;
+                    batch.push_back((position, entry));
+                    continue;
+                }
+                match entry {
+                    WalEntry::BatchStart(size) => {
+                        batch_start_position = Some(position.offset());
+                        batch = VecDeque::with_capacity(size as usize);
+                        batch_remaining = size;
+                    }
+                    WalEntry::Index(..) => {
+                        unreachable!("Should not have index entries in wal");
+                    }
+                    WalEntry::DropCells(..) => {
+                        // DropCells may span multiple shards. Drain all workers,
+                        // then apply inline so subsequent dispatch sees a clean state.
+                        let (ack_tx, ack_rx) = mpsc::channel::<()>();
+                        for tx in &senders {
+                            tx.send(ReplayWorkerMsg::Barrier(ack_tx.clone()))
+                                .expect("replay worker died");
+                        }
+                        drop(ack_tx);
+                        for _ in 0..senders.len() {
+                            ack_rx.recv().expect("replay worker died");
+                        }
+                        stats.entries += 1;
+                        Self::apply_entry(
+                            contexts,
+                            large_table,
+                            indexes,
+                            metrics,
+                            position,
+                            entry,
+                        )?;
+                    }
+                    e @ (WalEntry::Record(..) | WalEntry::Remove(..)) => {
+                        let shard = Self::entry_shard(contexts, &e, num_workers)
+                            .expect("Record/Remove always map to a shard");
+                        stats.entries += 1;
+                        senders[shard]
+                            .send(ReplayWorkerMsg::Apply(position, e))
+                            .expect("replay worker died");
+                    }
+                }
+            }
+
+            // Closing the senders lets each worker's `for msg in rx` loop terminate
+            // once it drains its queue.
+            drop(senders);
+            for h in handles {
+                h.join().expect("replay worker panicked")?;
+            }
+            Ok(())
+        })?;
+
+        Ok((wal_iterator.into_writer(batch_start_position), stats))
     }
 
     pub fn rebuild_control_region(&self) -> DbResult<u64> {

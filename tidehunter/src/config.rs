@@ -59,6 +59,11 @@ pub struct Config {
     /// instance at the same path to fully close before giving up.
     #[serde(default = "default_open_lock_retry_timeout")]
     pub open_lock_retry_timeout: Duration,
+    /// Number of worker threads for parallel WAL replay during recovery. `1` uses
+    /// the single-threaded replay path; higher values fan entries out across N
+    /// workers keyed by cell, preserving per-cell WAL order.
+    #[serde(default = "default_num_replay_threads")]
+    pub num_replay_threads: usize,
 }
 
 fn default_open_lock_retry_timeout() -> Duration {
@@ -71,6 +76,10 @@ fn default_metrics_enabled() -> bool {
 
 fn default_num_pending_promotion_threads() -> usize {
     4
+}
+
+fn default_num_replay_threads() -> usize {
+    12
 }
 
 fn default_relocation_max_reclaim_pct() -> u8 {
@@ -99,6 +108,7 @@ impl Default for Config {
             commit_pool_size: 0,
             num_pending_promotion_threads: default_num_pending_promotion_threads(),
             open_lock_retry_timeout: default_open_lock_retry_timeout(),
+            num_replay_threads: default_num_replay_threads(),
         }
     }
 }
@@ -125,6 +135,7 @@ impl Config {
             commit_pool_size: 0,
             num_pending_promotion_threads: default_num_pending_promotion_threads(),
             open_lock_retry_timeout: default_open_lock_retry_timeout(),
+            num_replay_threads: default_num_replay_threads(),
         }
     }
 

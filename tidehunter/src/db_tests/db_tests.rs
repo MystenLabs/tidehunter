@@ -3020,6 +3020,50 @@ fn test_drop_db() {
     drop_db(default_key_shape())
 }
 
+// Guards the single-threaded `replay_wal` fallback path against regression.
+// The default `Config::small()` exercises the parallel path; this test forces
+// `num_replay_threads = 1` to keep both branches of the `open_with_timings`
+// dispatch covered by CI.
+#[test]
+fn test_replay_wal_single_threaded_fallback() {
+    let dir = tempdir::TempDir::new("test-replay-st").unwrap();
+    let (key_shape, ks) = KeyShape::new_single(10, 2, KeyType::uniform(2));
+    let mut config = Config::small();
+    config.num_replay_threads = 1;
+    let config = Arc::new(config);
+
+    let db = Db::open(
+        dir.path(),
+        key_shape.clone(),
+        config.clone(),
+        Metrics::new(),
+    )
+    .unwrap();
+
+    db.insert(ks, hex!("00000000000000000000"), vec![1])
+        .unwrap();
+    db.insert(ks, hex!("40000000000000000000"), vec![2])
+        .unwrap();
+    db.insert(ks, hex!("80000000000000000000"), vec![3])
+        .unwrap();
+    db.remove(ks, hex!("00000000000000000000").to_vec())
+        .unwrap();
+
+    let ksd = db.key_shape.ks(ks);
+    let (first_key, last_key) = ksd.cell_range(&crate::cell::CellId::Integer(1));
+    db.drop_cells_in_range(ks, &first_key, &last_key).unwrap();
+
+    drop(db);
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+
+    assert_eq!(None, db.get(ks, &hex!("00000000000000000000")).unwrap());
+    assert_eq!(None, db.get(ks, &hex!("40000000000000000000")).unwrap());
+    assert_eq!(
+        Some(vec![3].into()),
+        db.get(ks, &hex!("80000000000000000000")).unwrap()
+    );
+}
+
 pub(super) fn drop_db((key_shape, ks): (KeyShape, KeySpace)) {
     let dir = tempdir::TempDir::new("test-drop-db").unwrap();
     let path = dir.path().to_path_buf();
