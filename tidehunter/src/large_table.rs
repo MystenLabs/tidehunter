@@ -722,6 +722,48 @@ impl LargeTable {
         Ok(Some(entry.data.clone_shared()))
     }
 
+    /// Diagnostic: return the post-recovery state of the cell containing `key`,
+    /// plus whether the merged in-memory index has an entry for it. Used by the
+    /// R6 missing-key investigation to correlate a `MISSING_KEY` event with the
+    /// snapshot's claimed coverage for that cell.
+    pub(crate) fn debug_cell_info<L: Loader>(
+        &self,
+        context: &KsContext,
+        key: &[u8],
+        loader: &L,
+    ) -> Result<String, L::Error> {
+        let cell = context.ks_config.cell_id(key);
+        let reduced_key = context
+            .ks_config
+            .reduced_key_bytes(Bytes::copy_from_slice(key));
+        let mutex_idx = context.ks_config.mutex_for_cell(&cell);
+        let mut row = self.row_by_mutex(context, mutex_idx);
+        let entry = match row.try_entry_mut(&cell) {
+            Some(e) => e,
+            None => return Ok(format!("cell={cell:?} state=NONE")),
+        };
+        // Force-load so the on-disk index contributes to in_memory_has below;
+        // without this, a still-Unloaded cell would always report in_memory=false.
+        entry.maybe_load(loader)?;
+        let state_kind = match &entry.state {
+            LargeTableEntryState::Empty => "Empty",
+            LargeTableEntryState::Unloaded(_) => "Unloaded",
+            LargeTableEntryState::Loaded(_) => "Loaded",
+            LargeTableEntryState::DirtyUnloaded(_) => "DirtyUnloaded",
+            LargeTableEntryState::DirtyLoaded(_) => "DirtyLoaded",
+        };
+        let state_pos = entry.state.wal_position().offset();
+        let lp = entry.last_processed.as_u64();
+        let mem_pos = entry.data.get_update_position(&reduced_key);
+        let in_memory = mem_pos.is_some();
+        let mem_pos_str = mem_pos
+            .map(|p| p.offset().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        Ok(format!(
+            "cell={cell:?} state={state_kind} state_pos={state_pos} lp={lp} in_memory={in_memory} in_memory_pos={mem_pos_str}"
+        ))
+    }
+
     pub fn sync_flush_for_relocation<L: Loader>(
         &self,
         context: &KsContext,
