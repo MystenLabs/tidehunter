@@ -549,7 +549,12 @@ fn run_measure_open(
     let mut latencies_us: Vec<u64> = Vec::with_capacity(n);
     let mut hits: usize = 0;
     let mut mismatches: usize = 0;
-    for _ in 0..n {
+    // Collect miss diagnostics so R6's `hits<samples` cases are debuggable
+    // without re-running. The deterministic RNG seed means `i` is reproducible
+    // across runs: a miss at the same `i` in two runs points at the same key
+    // position, which lets us correlate against unload/relocation activity.
+    let mut misses: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+    for i in 0..n {
         let pos = rng.gen_range(0..total_keys);
         let (key, expected) =
             pos_to_key_value(pos, params.key_len, params.write_size, &params.key_layout);
@@ -564,6 +569,8 @@ fn run_measure_open(
             if actual.as_ref() != expected.as_slice() {
                 mismatches += 1;
             }
+        } else {
+            misses.push((i, pos, key));
         }
     }
     latencies_us.sort_unstable();
@@ -583,6 +590,10 @@ fn run_measure_open(
         pct(0.99),
         pct(0.999),
     );
+    for (i, pos, key) in &misses {
+        let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        report!(report, "MISSING_KEY: i={i} pos={pos} key_hex={key_hex}");
+    }
     if mismatches > 0 {
         eprintln!(
             "RECOVERY CORRUPTION: {mismatches}/{hits} sampled values disagree with the writer's deterministic value"
