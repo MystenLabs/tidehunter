@@ -46,10 +46,6 @@ pub struct Db {
     /// One handle per pending-promotion shard, for waking threads after batch commits.
     /// Index `i` owns mutex shards where `mutex_idx % len == i`.
     pending_promotion_threads: Box<[OnceLock<thread::Thread>]>,
-    /// WAL position the last-persisted control region claims to cover; equals
-    /// the snapshot's `replay_from` and is the lower bound of this open's WAL
-    /// replay. Captured for diagnostics (R6 missing-key investigation).
-    recovery_replay_from: u64,
     _lock: Mutex<Option<DbLock>>,
 }
 
@@ -156,8 +152,7 @@ impl Db {
         let contexts = KsContextVec::new(&key_shape, config.clone(), metrics.clone());
 
         let t = Instant::now();
-        let recovery_replay_from = control_region.last_position();
-        let wal_iterator = wal.wal_iterator(recovery_replay_from)?;
+        let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let (wal_writer, replay_stats) = if config.num_replay_threads <= 1 {
             Self::replay_wal(&contexts, &large_table, wal_iterator, &indexes, &metrics)?
         } else {
@@ -210,7 +205,6 @@ impl Db {
             relocator,
             commit_pool,
             pending_promotion_threads,
-            recovery_replay_from,
             _lock: Mutex::new(Some(lock)),
         };
         this.report_memory_estimates();
@@ -744,26 +738,6 @@ impl Db {
 
     pub fn ks_name(&self, ks: KeySpace) -> &str {
         self.key_shape.ks(ks).name()
-    }
-
-    /// Lower bound of this open's WAL replay, taken from the control region.
-    /// Exposed so the recovery benchmark can correlate `MISSING_KEY` events
-    /// against the snapshot's claimed coverage.
-    pub fn recovery_replay_from(&self) -> u64 {
-        self.recovery_replay_from
-    }
-
-    /// Current WAL write tail. Exposed alongside `recovery_replay_from` so the
-    /// recovery benchmark can report the replay window width.
-    pub fn wal_position(&self) -> u64 {
-        self.wal_writer.position()
-    }
-
-    /// Diagnostic: snapshot-persisted state of the cell containing `key`. See
-    /// `LargeTable::debug_cell_info`.
-    pub fn debug_cell_info(&self, ks: KeySpace, key: &[u8]) -> DbResult<String> {
-        let context = self.ks_context(ks);
-        self.large_table.debug_cell_info(context, key, self)
     }
 
     pub(crate) fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {

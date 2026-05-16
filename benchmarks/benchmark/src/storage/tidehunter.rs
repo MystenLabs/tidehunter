@@ -48,14 +48,6 @@ impl Storage for Arc<TidehunterStorage> {
     fn name(&self) -> &'static str {
         "tidehunter"
     }
-
-    fn debug_miss(&self, k: &[u8]) -> Option<String> {
-        self.db.debug_cell_info(self.ks, k).ok()
-    }
-
-    fn recovery_wal_window(&self) -> Option<(u64, u64)> {
-        Some((self.db.recovery_replay_from(), self.db.wal_position()))
-    }
 }
 
 impl TidehunterStorage {

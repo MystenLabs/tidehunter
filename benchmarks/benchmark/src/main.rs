@@ -532,13 +532,6 @@ fn run_measure_open(
         timings.bytes_replayed,
         timings.entries_replayed,
     );
-    if let Some((replay_from, tail)) = storage.recovery_wal_window() {
-        report!(
-            report,
-            "RECOVERY_INFO: replay_from={replay_from} wal_tail={tail} replay_window={}",
-            tail.saturating_sub(replay_from),
-        );
-    }
 
     let n = params.first_read_samples;
     if n == 0 {
@@ -599,14 +592,7 @@ fn run_measure_open(
     );
     for (i, pos, key) in &misses {
         let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
-        let cell_info = storage
-            .debug_miss(key)
-            .map(|s| format!(" {s}"))
-            .unwrap_or_default();
-        report!(
-            report,
-            "MISSING_KEY: i={i} pos={pos} key_hex={key_hex}{cell_info}"
-        );
+        report!(report, "MISSING_KEY: i={i} pos={pos} key_hex={key_hex}");
     }
     if mismatches > 0 {
         eprintln!(
