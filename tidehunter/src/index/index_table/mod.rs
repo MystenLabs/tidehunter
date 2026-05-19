@@ -1396,6 +1396,15 @@ impl IndexTable {
 
     /// Retain only entries with offset >= last_processed. Applied to both flat and data.
     /// `retain_flat` runs first so `retain`'s internal recount sees the final flat.
+    ///
+    /// todo multi-gen: `last_processed` is a raw G0 offset; the
+    /// `iwp.offset >= last_processed` comparison treats every non-G0 entry
+    /// as "above" (their offset has the high gen-flag bit set, so it's
+    /// huge by raw u64 magnitude). The flusher uses this on `merged_l0`
+    /// after applying `RelocationUpdates`, and non-G0 entries pass through
+    /// retained — which is the desired outcome, but it works by accident
+    /// of the encoding, not by design. Make the predicate
+    /// generation-aware before the call sites grow new semantics.
     pub fn retain_above_position(&mut self, last_processed: u64) {
         self.retain_flat(|_, iwp| (iwp.offset >= last_processed).then_some(iwp));
         self.retain(|_, v| v.offset >= last_processed);

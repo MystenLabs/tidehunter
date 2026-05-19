@@ -474,6 +474,18 @@ impl Db {
     /// offset 0 until it hits EndOfWal/CRC — there is no control-region
     /// tracking for side WALs yet, so this is the simplest correct way to
     /// find the tail.
+    ///
+    /// todo multi-gen: `config.wal_generations` is not persisted. If a DB is
+    /// reopened with a different N, `Config::generation_bits()` changes and
+    /// every stored non-G0 `WalPosition` is silently reinterpreted (the
+    /// payload-bit count and generation-id-bit count both shift). Persist
+    /// the value in the shape file or control region and reject mismatched
+    /// reopens before relocation starts producing G1+ positions.
+    ///
+    /// todo multi-gen: each side WAL has its own `WalWriter::gc()` watermark
+    /// and there is no per-generation tracking in the relocation watermark
+    /// file (`rel`). The relocator will need a per-gen watermark story
+    /// before it can actually GC side-WAL files.
     fn open_generation_wals(
         path: &Path,
         config: &Config,
