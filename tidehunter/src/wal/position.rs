@@ -97,6 +97,93 @@ impl WalPosition {
     pub fn test_value(v: u64) -> Self {
         Self::new(v, 0)
     }
+
+    /// Bit reserved at the top of `offset` as the generation flag.
+    /// 0 means generation 0 (the normal WAL); 1 means non-G0.
+    const GEN_FLAG_BIT: u8 = 63;
+
+    /// Encode a generation-tagged offset.
+    ///
+    /// `generation == 0` returns `raw_offset` unchanged. For `generation >= 1`
+    /// the high bit is set and the next `generation_bits` bits encode
+    /// `generation - 1`. `raw_offset` must fit in the remaining bits.
+    ///
+    /// `generation_bits` is the value returned by `Config::generation_bits()`;
+    /// it can be 0 when there is exactly one non-G0 generation.
+    pub fn encode_offset(generation: u8, raw_offset: u64, generation_bits: u8) -> u64 {
+        if generation == 0 {
+            assert_eq!(
+                raw_offset >> Self::GEN_FLAG_BIT,
+                0,
+                "G0 offset {raw_offset} overflows the encoded range"
+            );
+            return raw_offset;
+        }
+        let payload_bits = Self::GEN_FLAG_BIT - generation_bits;
+        assert_eq!(
+            raw_offset >> payload_bits,
+            0,
+            "non-G0 offset {raw_offset} overflows {payload_bits} payload bits"
+        );
+        let gen_idx = (generation - 1) as u64;
+        if generation_bits > 0 {
+            let max_gen = (1u64 << generation_bits) - 1;
+            assert!(
+                gen_idx <= max_gen,
+                "generation {generation} does not fit in {generation_bits} bits"
+            );
+        } else {
+            assert_eq!(
+                gen_idx, 0,
+                "generation {generation} requires generation_bits > 0"
+            );
+        }
+        (1u64 << Self::GEN_FLAG_BIT) | (gen_idx << payload_bits) | raw_offset
+    }
+
+    /// Inverse of `encode_offset`: returns `(generation, raw_offset)`.
+    ///
+    /// Must not be called on `INVALID`.
+    pub fn decode_offset(offset: u64, generation_bits: u8) -> (u8, u64) {
+        if offset >> Self::GEN_FLAG_BIT == 0 {
+            return (0, offset);
+        }
+        let payload_bits = Self::GEN_FLAG_BIT - generation_bits;
+        let payload_mask = if payload_bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << payload_bits) - 1
+        };
+        let gen_idx = if generation_bits == 0 {
+            0
+        } else {
+            (offset >> payload_bits) & ((1u64 << generation_bits) - 1)
+        };
+        let raw = offset & payload_mask;
+        ((gen_idx + 1) as u8, raw)
+    }
+
+    /// Build a `WalPosition` from a generation tag, in-generation offset and length.
+    pub fn for_generation(generation: u8, raw_offset: u64, len: u32, generation_bits: u8) -> Self {
+        Self::new(
+            Self::encode_offset(generation, raw_offset, generation_bits),
+            len,
+        )
+    }
+
+    /// Returns the generation tag encoded in this position. `0` is the default
+    /// (G0) WAL. Panics if called on `INVALID`.
+    pub fn generation(&self, generation_bits: u8) -> u8 {
+        assert!(self.is_valid(), "called generation() on INVALID");
+        Self::decode_offset(self.offset, generation_bits).0
+    }
+
+    /// Returns the in-generation offset (i.e. the offset inside the per-gen WAL).
+    /// Panics if called on `INVALID`.
+    pub fn raw_offset(&self, generation_bits: u8) -> u64 {
+        assert!(self.is_valid(), "called raw_offset() on INVALID");
+        Self::decode_offset(self.offset, generation_bits).1
+    }
 }
 
 impl HasOffset for WalPosition {
@@ -169,5 +256,47 @@ mod tests {
         let mut buf = bytes.as_ref();
         let position = WalPosition::read_from_buf(&mut buf);
         assert_eq!(position, WalPosition::TEST);
+    }
+
+    #[test]
+    fn test_generation_encoding_g0_passthrough() {
+        // G0 must be a no-op for any generation_bits.
+        for gen_bits in 0..=4u8 {
+            let enc = WalPosition::encode_offset(0, 12345, gen_bits);
+            assert_eq!(enc, 12345);
+            assert_eq!(WalPosition::decode_offset(enc, gen_bits), (0, 12345));
+        }
+    }
+
+    #[test]
+    fn test_generation_encoding_single_non_g0() {
+        // Two generations total -> only G1 exists in non-G0 space, no bits needed.
+        let gen_bits = 0;
+        let enc = WalPosition::encode_offset(1, 999, gen_bits);
+        assert_eq!(WalPosition::decode_offset(enc, gen_bits), (1, 999));
+        // Top bit must be set.
+        assert_ne!(enc >> 63, 0);
+    }
+
+    #[test]
+    fn test_generation_encoding_multiple_non_g0() {
+        // 4 generations: G1..G3 need 2 bits.
+        let gen_bits = 2;
+        for g in 1u8..=3 {
+            for raw in [0u64, 1, 1024, (1u64 << 50) - 1] {
+                let enc = WalPosition::encode_offset(g, raw, gen_bits);
+                let (decoded_gen, decoded_raw) = WalPosition::decode_offset(enc, gen_bits);
+                assert_eq!((decoded_gen, decoded_raw), (g, raw));
+            }
+        }
+    }
+
+    #[test]
+    fn test_generation_round_trip_via_wal_position() {
+        let gen_bits = 1;
+        let p = WalPosition::for_generation(2, 42, 16, gen_bits);
+        assert_eq!(p.generation(gen_bits), 2);
+        assert_eq!(p.raw_offset(gen_bits), 42);
+        assert_eq!(p.frame_len(), 16);
     }
 }

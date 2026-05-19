@@ -234,7 +234,7 @@ impl WalWriter {
         self.wal
             .metrics
             .gc_position
-            .with_label_values(&[self.wal.layout.kind.name()])
+            .with_label_values(&[self.wal.layout.label.as_str()])
             .set(watermark as i64);
         Ok(())
     }
@@ -787,7 +787,7 @@ impl WalIterator {
 
         self.clear_fragment_from_position(position);
 
-        let syncer = WalSyncer::start(self.wal.metrics.clone(), self.wal.layout.kind.name());
+        let syncer = WalSyncer::start(self.wal.metrics.clone(), self.wal.layout.label.clone());
         self.wal.maps.store(Arc::new(self.maps));
         let mapper = WalMapper::start(
             self.wal.maps.clone(),
@@ -979,6 +979,7 @@ mod tests {
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         };
         // todo - add second test case when there is no space for skip marker after large
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
@@ -1041,6 +1042,7 @@ mod tests {
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         };
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let wal_writer = wal.wal_iterator_for_writer(0).unwrap().into_writer(None);
@@ -1103,6 +1105,7 @@ mod tests {
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         };
         let wal = Wal::open(dir.path(), layout, Metrics::new()).unwrap();
         let wal_iterator = wal.wal_iterator_for_writer(0).unwrap();
@@ -1153,6 +1156,7 @@ mod tests {
             direct_io: false,
             wal_file_size: 10 << 12,
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         };
 
         // Write an entry into the WAL and extract just the position (not the guard)
@@ -1188,6 +1192,7 @@ mod tests {
             direct_io: false,
             wal_file_size: 8192,
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         };
         let wal = Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap();
         let writer = wal.wal_iterator_for_writer(0).unwrap().into_writer(None);
@@ -1232,6 +1237,7 @@ mod tests {
             direct_io: false,
             wal_file_size: 1024 << 12, // 4MB to handle 1000 writes
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         };
 
         let wal = Arc::new(Wal::open(dir.path(), layout.clone(), Metrics::new()).unwrap());
@@ -1320,6 +1326,7 @@ mod tests {
             direct_io: false,
             wal_file_size: 1024 << 12, // 4MB
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         };
 
         let pos1 = {
@@ -1375,6 +1382,7 @@ mod tests {
             direct_io: false,
             wal_file_size,
             kind: WalKind::Index,
+            label: WalKind::Index.name().to_string(),
         }
     }
 

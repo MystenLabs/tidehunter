@@ -18,6 +18,13 @@ pub struct WalLayout {
     pub direct_io: bool,
     pub wal_file_size: u64,
     pub kind: WalKind,
+    /// Observability identity: metric label values and background-thread
+    /// name prefixes. Defaults to the kind name (`wal` / `index`); side WALs
+    /// override it with their generation directory name (`gen0001`, ...) so
+    /// every WAL publishes its own metric series instead of flapping a
+    /// shared one between unrelated address spaces. Not used for on-disk
+    /// file naming — that stays on `kind`.
+    pub label: String,
 }
 
 impl WalLayout {
@@ -130,6 +137,7 @@ impl WalLayout {
             max_maps: 1,
             direct_io: false,
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         }
     }
 }
@@ -151,6 +159,7 @@ fn test_first_in_frag() {
         direct_io: false,
         wal_file_size: 1024,
         kind: WalKind::Replay,
+        label: WalKind::Replay.name().to_string(),
     };
 
     assert_eq!(0, layout.first_in_frag(MapId::new(0)));
@@ -167,6 +176,7 @@ fn test_wal_file_range() {
         direct_io: false,
         wal_file_size: 8192,
         kind: WalKind::Replay,
+        label: WalKind::Replay.name().to_string(),
     };
 
     // File 0 should contain positions 0..8192

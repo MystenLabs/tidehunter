@@ -14,6 +14,7 @@ fn benchmark_wal_allocator(c: &mut Criterion) {
         direct_io: false,
         wal_file_size: 10 * 1024 * 1024 * 1024, // 10GB
         kind: WalKind::Replay,
+        label: WalKind::Replay.name().to_string(),
     };
 
     // Test with different thread counts: 1, 4, 8, 16, 32

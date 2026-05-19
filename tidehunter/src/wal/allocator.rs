@@ -202,6 +202,7 @@ mod tests {
             direct_io: false,
             wal_file_size: frag_size * 10,
             kind: WalKind::Replay,
+            label: WalKind::Replay.name().to_string(),
         }
     }
 }

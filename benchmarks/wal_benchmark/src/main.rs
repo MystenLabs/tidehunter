@@ -161,6 +161,7 @@ fn main() {
         direct_io: args.direct_io,
         wal_file_size: 10 * 1024 * 1024 * 1024,
         kind: WalKind::Replay,
+        label: WalKind::Replay.name().to_string(),
     };
 
     // Create multiple WAL instances in separate subdirectories

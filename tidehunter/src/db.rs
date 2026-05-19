@@ -50,6 +50,12 @@ pub struct Db {
     pub(crate) indexes: Arc<Wal>,
     pub(crate) wal_writer: WalWriter,
     pub(crate) index_writer: WalWriter,
+    /// Side WALs for non-G0 generations. Indexed by `generation - 1`. Empty
+    /// when `config.wal_generations <= 1`. Each side WAL lives in its own
+    /// subdirectory (`gen<N>`) and is not replayed into the index — it is the
+    /// destination of relocation promotions.
+    pub(crate) generation_wals: Vec<Arc<Wal>>,
+    pub(crate) generation_writers: Vec<WalWriter>,
     pub(crate) control_region_store: Mutex<ControlRegionStore>,
     pub(crate) config: Arc<Config>,
     metrics: Arc<Metrics>,
@@ -98,6 +104,8 @@ impl Db {
         Self::maybe_create_config_file(&path, &config)?;
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
         let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
+        let (generation_wals, generation_writers) =
+            Self::open_generation_wals(&path, &config, &metrics)?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         if registry_dirty {
@@ -190,6 +198,8 @@ impl Db {
             index_writer,
             wal,
             indexes,
+            generation_wals,
+            generation_writers,
             control_region_store,
             config,
             metrics: metrics.clone(),
@@ -454,6 +464,56 @@ impl Db {
         let control_region = ControlRegion::read_or_create(&path, key_shape);
         let control_region_store = ControlRegionStore::new(path, &control_region);
         Ok((control_region_store, control_region))
+    }
+
+    /// Opens side WALs for non-G0 generations. Each generation lives in
+    /// `<path>/gen<N>/` and is independent of the main replay/index WALs.
+    /// Returns vectors indexed by `generation - 1`.
+    ///
+    /// The writer's resume position is recovered by walking the side WAL from
+    /// offset 0 until it hits EndOfWal/CRC — there is no control-region
+    /// tracking for side WALs yet, so this is the simplest correct way to
+    /// find the tail.
+    fn open_generation_wals(
+        path: &Path,
+        config: &Config,
+        metrics: &Arc<Metrics>,
+    ) -> DbResult<(Vec<Arc<Wal>>, Vec<WalWriter>)> {
+        let n = config.wal_generations as usize;
+        assert!(n >= 1, "wal_generations must be >= 1");
+        if n == 1 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let mut wals = Vec::with_capacity(n - 1);
+        let mut writers = Vec::with_capacity(n - 1);
+        for g in 1..n {
+            let gen_path = path.join(format!("gen{g:04}"));
+            if !gen_path.exists() {
+                std::fs::create_dir(&gen_path)?;
+            }
+            let mut layout = config.wal_layout(WalKind::Replay);
+            // Side WALs share the main WAL's on-disk format (`kind` stays
+            // `Replay` for file naming) but publish their own metric series
+            // and thread names — otherwise every generation would write to
+            // the main WAL's gauges, flapping them between unrelated
+            // address spaces.
+            layout.label = format!("gen{g:04}");
+            let wal = Wal::open(&gen_path, layout, metrics.clone())?;
+            // Walk from 0 to find the writer tail. New (empty) side WAL stops
+            // immediately at EndOfWal and converts into a writer at offset 0.
+            let mut iter = wal.wal_iterator_for_writer(0)?;
+            loop {
+                match iter.next() {
+                    Ok(_) => continue,
+                    Err(WalError::EndOfWal | WalError::Crc(_)) => break,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            let writer = iter.into_writer(None);
+            wals.push(wal);
+            writers.push(writer);
+        }
+        Ok((wals, writers))
     }
 
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
@@ -1208,6 +1268,33 @@ impl Db {
         }
     }
 
+    /// Decodes a possibly generation-encoded `WalPosition` and returns the
+    /// `Wal` it lives in plus the in-generation position to read at. G0
+    /// positions are returned unchanged; non-G0 positions are routed to the
+    /// matching side WAL with the gen bits stripped from the offset.
+    fn value_wal_for(&self, position: WalPosition) -> (&Wal, WalPosition) {
+        assert!(position.is_valid(), "value_wal_for called on INVALID");
+        let generation_bits = self.config.generation_bits();
+        let (generation, raw_offset) =
+            WalPosition::decode_offset(position.offset(), generation_bits);
+        if generation == 0 {
+            return (self.wal.as_ref(), position);
+        }
+        let idx = (generation as usize)
+            .checked_sub(1)
+            .expect("generation >= 1");
+        let wal = self.generation_wals.get(idx).unwrap_or_else(|| {
+            panic!(
+                "generation {generation} is not configured (wal_generations = {})",
+                self.config.wal_generations
+            )
+        });
+        (
+            wal.as_ref(),
+            WalPosition::new(raw_offset, position.frame_len_u32()),
+        )
+    }
+
     /// Read the record matching `indexed_key` at `position`. `indexed_key` is
     /// what the large-table index stores — for keyspaces without reduction it
     /// equals the full key; for reducing keyspaces it is the result of
@@ -1239,6 +1326,10 @@ impl Db {
     /// Returns `None` when the position is unreachable (its WAL file was
     /// garbage-collected); callers rely on that to treat stale index entries
     /// as gone.
+    ///
+    /// `position` may be generation-encoded: the frame is read from the WAL
+    /// of its generation (see `value_wal_for`). Compressed batches live only
+    /// in G0, so the batch cache stays keyed by the position as given.
     fn resolve_record_frame(
         &self,
         context: &KsContext,
@@ -1247,7 +1338,8 @@ impl Db {
         if let Some(body) = self.cached_batch_body(context, position) {
             return Ok(Some(RecordFrame::Batch(body)));
         }
-        let Some(entry) = self.read_report_entry(&self.wal, position)? else {
+        let (wal, target_position) = self.value_wal_for(position);
+        let Some(entry) = self.read_report_entry(wal, target_position)? else {
             return Ok(None);
         };
         match entry {
@@ -1306,13 +1398,16 @@ impl Db {
         loop {
             let batch_entry = match entry.take() {
                 Some(batch_entry) => batch_entry,
-                None => match self.read_report_entry(&self.wal, position)? {
-                    Some(batch_entry @ WalEntry::CompressedBatch(..)) => batch_entry,
-                    Some(other) => {
-                        panic!("Unexpected wal entry where expected record/batch: {other:?}")
+                None => {
+                    let (wal, target_position) = self.value_wal_for(position);
+                    match self.read_report_entry(wal, target_position)? {
+                        Some(batch_entry @ WalEntry::CompressedBatch(..)) => batch_entry,
+                        Some(other) => {
+                            panic!("Unexpected wal entry where expected record/batch: {other:?}")
+                        }
+                        None => return Ok(None),
                     }
-                    None => return Ok(None),
-                },
+                }
             };
             let decompress = || {
                 let _timer = context.read_decompress_mcs.clone().mcs_timer();
@@ -1332,6 +1427,71 @@ impl Db {
                 CacheOutcome::RetryRead => {}
             }
         }
+    }
+
+    /// Reads a record at the given (possibly generation-encoded) WAL position.
+    /// Decodes the generation tag and routes to the matching WAL — G0 reads
+    /// from the main replay WAL, G1+ reads from the corresponding side WAL.
+    ///
+    /// Returns `(key, value)` if the position holds a `WalEntry::Record`.
+    /// Panics on a `CompressedBatch` frame (callers that may encounter one
+    /// must go through `read_record_for_indexed_key` instead).
+    ///
+    /// todo multi-gen: only used by the generation_wal test today; the
+    /// relocator will call this once it actually reads from side WALs.
+    #[allow(dead_code)]
+    pub(crate) fn read_record(&self, position: WalPosition) -> DbResult<Option<(Bytes, Bytes)>> {
+        let (wal, target_position) = self.value_wal_for(position);
+        let Some(entry) = self.read_report_entry(wal, target_position)? else {
+            return Ok(None);
+        };
+        if let WalEntry::Record(KeySpace(_), k, v, _relocated) = entry {
+            Ok(Some((k, v)))
+        } else {
+            panic!("Unexpected wal entry where expected record");
+        }
+    }
+
+    /// Writes a record to the WAL of the given generation and returns a
+    /// generation-encoded `WalPosition`. Generation 0 maps to the main
+    /// replay WAL; generations 1.. write to per-generation side WALs.
+    ///
+    /// This does **not** update any index — it only appends a frame so the
+    /// caller can later read the bytes back via [`Db::read_record`].
+    /// Intended for the relocation promotion path.
+    pub fn write_to_generation(
+        &self,
+        generation: u8,
+        ks: KeySpace,
+        key: impl Into<Bytes>,
+        value: impl Into<Bytes>,
+    ) -> DbResult<WalPosition> {
+        let key = key.into();
+        let value = value.into();
+        let w = PreparedWalWrite::new(&WalEntry::Record(ks, key, value, true));
+        let generation_bits = self.config.generation_bits();
+        if generation == 0 {
+            // G0 writes go through the normal WAL writer; no encoding needed.
+            let guard = self.wal_writer.write(&w)?;
+            return Ok(*guard.wal_position());
+        }
+        let idx = (generation as usize)
+            .checked_sub(1)
+            .expect("generation >= 1 here");
+        let writer = self.generation_writers.get(idx).unwrap_or_else(|| {
+            panic!(
+                "generation {generation} is not configured (wal_generations = {})",
+                self.config.wal_generations
+            )
+        });
+        let guard = writer.write(&w)?;
+        let raw_pos = *guard.wal_position();
+        Ok(WalPosition::for_generation(
+            generation,
+            raw_pos.offset(),
+            raw_pos.frame_len_u32(),
+            generation_bits,
+        ))
     }
 
     fn report_read(&self, entry: &WalEntry, read_type: ReadType) {
@@ -2090,6 +2250,67 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 #[path = "db_tests/generated.rs"]
 mod tests;
+
+#[cfg(test)]
+mod generation_wal_tests {
+    use super::*;
+    use crate::key_shape::{KeyShapeBuilder, KeyType};
+    use tempdir::TempDir;
+
+    #[test]
+    fn test_write_read_and_restart_generation_wal() {
+        let dir = TempDir::new("test_generation_wal").unwrap();
+
+        let mut config = Config::small();
+        config.wal_generations = 2; // G0 + G1
+
+        let mut builder = KeyShapeBuilder::new();
+        builder.add_key_space("test", 4, 1, KeyType::uniform(1));
+        let key_shape = builder.build();
+
+        let key = b"k001".to_vec();
+        let value = b"hello-generation-1".to_vec();
+
+        let pos_g1 = {
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                Arc::new(config.clone()),
+                Metrics::new(),
+            )
+            .unwrap();
+
+            let pos = db
+                .write_to_generation(1, KeySpace(0), key.clone(), value.clone())
+                .unwrap();
+
+            // High generation flag bit must be set.
+            assert_ne!(pos.offset() >> 63, 0, "G1 position must have gen flag set");
+            let gen_bits = db.config.generation_bits();
+            assert_eq!(pos.generation(gen_bits), 1);
+
+            let (k, v) = db
+                .read_record(pos)
+                .unwrap()
+                .expect("just-written record must be readable");
+            assert_eq!(k.as_ref(), key.as_slice());
+            assert_eq!(v.as_ref(), value.as_slice());
+
+            db.wait_for_background_threads_to_finish();
+            pos
+        };
+
+        // Reopen with the same config and verify the record survives restart.
+        let db = Db::open(dir.path(), key_shape, Arc::new(config), Metrics::new()).unwrap();
+
+        let (k, v) = db
+            .read_record(pos_g1)
+            .unwrap()
+            .expect("record must still be readable after restart");
+        assert_eq!(k.as_ref(), key.as_slice());
+        assert_eq!(v.as_ref(), value.as_slice());
+    }
+}
 
 #[cfg(test)]
 mod multi_flusher_tests {

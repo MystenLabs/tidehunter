@@ -155,6 +155,13 @@ pub struct Config {
     /// `index_blob_cache_bytes` is `None`.
     #[serde(default = "default_index_blob_cache_min_bytes")]
     pub index_blob_cache_min_bytes: usize,
+    /// Total number of WAL generations (must be >= 1). Generation 0 is the
+    /// normal user-write WAL; generations 1..N are side WALs that relocation
+    /// will eventually promote surviving records into. With `wal_generations`
+    /// = 1 the database behaves exactly as before — no encoding bits are
+    /// stolen from WAL positions and no side WALs are opened.
+    #[serde(default = "default_wal_generations")]
+    pub wal_generations: u8,
 }
 
 fn default_index_blob_cache_min_bytes() -> usize {
@@ -183,6 +190,10 @@ fn default_relocation_stripe_bytes() -> u64 {
 
 fn default_index_min_occupancy_pct() -> u8 {
     15
+}
+
+fn default_wal_generations() -> u8 {
+    1
 }
 
 impl Default for Config {
@@ -214,6 +225,7 @@ impl Default for Config {
             compressed_batch_cache_bytes: None,
             index_blob_cache_bytes: None,
             index_blob_cache_min_bytes: default_index_blob_cache_min_bytes(),
+            wal_generations: default_wal_generations(),
         }
     }
 }
@@ -247,6 +259,23 @@ impl Config {
             compressed_batch_cache_bytes: None,
             index_blob_cache_bytes: None,
             index_blob_cache_min_bytes: default_index_blob_cache_min_bytes(),
+            wal_generations: default_wal_generations(),
+        }
+    }
+
+    /// Number of high offset bits reserved to encode a non-G0 generation id.
+    /// Returns 0 when there is at most one non-G0 generation (no disambiguation
+    /// needed). The top offset bit is always the gen-flag and is not counted
+    /// here.
+    pub fn generation_bits(&self) -> u8 {
+        let n = self.wal_generations as u32;
+        assert!(n >= 1, "wal_generations must be >= 1");
+        let non_g0 = n.saturating_sub(1);
+        if non_g0 <= 1 {
+            0
+        } else {
+            // ceil(log2(non_g0))
+            (32 - (non_g0 - 1).leading_zeros()) as u8
         }
     }
 
@@ -346,6 +375,7 @@ impl Config {
             direct_io: self.direct_io,
             wal_file_size: self.wal_file_size,
             kind,
+            label: kind.name().to_string(),
         }
     }
 
@@ -452,5 +482,72 @@ mod tests {
     fn validate_rejects_zero_auto_shard_threshold() {
         let mut config = Config::small();
         config.with_index_auto_shard_threshold(0);
+    }
+
+    fn bits_for(n: u8) -> u8 {
+        let mut c = Config::small();
+        c.wal_generations = n;
+        c.generation_bits()
+    }
+
+    #[test]
+    fn test_wal_layout_label_defaults_to_kind_name() {
+        let config = Config::small();
+        assert_eq!(config.wal_layout(WalKind::Replay).label, "wal");
+        assert_eq!(config.wal_layout(WalKind::Index).label, "index");
+    }
+
+    #[test]
+    fn test_generation_bits_table() {
+        // (wal_generations, expected_bits) — bits encode the non-G0 generation id
+        // and only need to disambiguate among `wal_generations - 1` values.
+        let cases = [
+            (1u8, 0u8), // no non-G0 generations
+            (2, 0),     // 1 non-G0 gen, no bits needed
+            (3, 1),     // 2 non-G0 gens -> 1 bit
+            (4, 2),     // 3 non-G0 gens -> 2 bits
+            (5, 2),     // 4 non-G0 gens -> 2 bits
+            (6, 3),
+            (8, 3), // 7 non-G0 gens -> 3 bits
+            (9, 3), // 8 non-G0 gens -> 3 bits
+            (10, 4),
+            (17, 4), // 16 non-G0 gens -> 4 bits
+            (18, 5),
+        ];
+        for (n, expected) in cases {
+            assert_eq!(bits_for(n), expected, "wal_generations = {n}");
+        }
+    }
+
+    #[test]
+    fn test_generation_bits_fit_encoding() {
+        // For each supported N, the bit count must be enough to represent every
+        // non-G0 generation id (1..=N-1).
+        for n in 1u8..=32 {
+            let bits = bits_for(n);
+            let non_g0 = (n as u32).saturating_sub(1);
+            if non_g0 <= 1 {
+                assert_eq!(bits, 0);
+            } else {
+                let capacity = 1u32 << bits;
+                assert!(
+                    capacity >= non_g0,
+                    "bits={bits} can encode {capacity} values, need {non_g0} for N={n}",
+                );
+                // And it must be the *minimum* such bit count.
+                if bits > 0 {
+                    let smaller = 1u32 << (bits - 1);
+                    assert!(smaller < non_g0, "bits={bits} is not minimal for N={n}",);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "wal_generations must be >= 1")]
+    fn test_generation_bits_zero_panics() {
+        let mut c = Config::small();
+        c.wal_generations = 0;
+        let _ = c.generation_bits();
     }
 }

@@ -54,14 +54,16 @@ struct UnlinkMessage {
 }
 
 impl UnlinkWorker {
-    fn start(metrics: Arc<Metrics>, kind: &'static str) -> Self {
+    fn start(metrics: Arc<Metrics>, label: String) -> Self {
         let (sender, receiver) = mpsc::channel::<UnlinkMessage>();
-        let time_mcs = metrics.wal_unlinker_time_mcs.with_label_values(&[kind]);
+        let time_mcs = metrics
+            .wal_unlinker_time_mcs
+            .with_label_values(&[label.as_str()]);
         let retry_count = metrics
             .wal_unlinker_close_retry_count
-            .with_label_values(&[kind]);
+            .with_label_values(&[label.as_str()]);
         let jh = thread::Builder::new()
-            .name("wal-unlinker".to_string())
+            .name(format!("{label}-unlinker"))
             .spawn(move || {
                 for msg in receiver {
                     let _timer = time_mcs.clone().mcs_timer();
@@ -169,7 +171,8 @@ impl WalMapper {
         }
         let maps = WalMaps::clone(&maps);
         let (sender, receiver) = mpsc::sync_channel(5);
-        let unlinker = UnlinkWorker::start(metrics.clone(), layout.kind.name());
+        let unlinker = UnlinkWorker::start(metrics.clone(), layout.label.clone());
+        let mapper_thread_name = format!("{}-mapper", layout.label);
         let this = WalMapperThread {
             maps,
             maps_arc,
@@ -181,7 +184,7 @@ impl WalMapper {
             unlinker,
         };
         let jh = thread::Builder::new()
-            .name("wal-mapper".to_string())
+            .name(mapper_thread_name)
             .spawn(move || this.run())
             .expect("failed to start wal-mapper thread");
         let sender = Some(sender);

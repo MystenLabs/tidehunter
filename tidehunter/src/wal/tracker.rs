@@ -112,7 +112,7 @@ struct WalTrackerThread {
     mapper: Arc<WalMapper>,
     layout: WalLayout,
     metrics: Arc<Metrics>,
-    /// Gauge handles resolved once for this tracker's fixed `kind` label, so
+    /// Gauge handles resolved once for this tracker's fixed layout label, so
     /// `publish()` avoids a `with_label_values` lookup on every WAL write.
     metric_external: MetricIntGauge,
     metric_internal: MetricIntGauge,
@@ -178,14 +178,16 @@ impl WalTracker {
         let (sender, receiver) = mpsc::channel();
         shared.set(last_processed);
         let mapper = Arc::new(mapper);
-        let kind = layout.kind.name();
+        let label = layout.label.clone();
         let metric_external = metrics
             .wal_last_processed_position
-            .with_label_values(&[kind]);
+            .with_label_values(&[label.as_str()]);
         let metric_internal = metrics
             .wal_internal_last_processed_position
-            .with_label_values(&[kind]);
-        let metric_active_latches = metrics.wal_active_latches.with_label_values(&[kind]);
+            .with_label_values(&[label.as_str()]);
+        let metric_active_latches = metrics
+            .wal_active_latches
+            .with_label_values(&[label.as_str()]);
         let thread = WalTrackerThread {
             receiver,
             state: WalTrackerState::new_empty(last_processed),
@@ -202,7 +204,7 @@ impl WalTracker {
             metric_active_latches,
         };
         let jh = thread::Builder::new()
-            .name("wal-tracker".to_string())
+            .name(format!("{label}-tracker"))
             .spawn(move || thread.run())
             .expect("failed to start wal-tracker thread");
         Self {
