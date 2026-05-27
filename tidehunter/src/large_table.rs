@@ -33,9 +33,20 @@ use smallvec::SmallVec;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{cmp, mem, thread};
+
+/// Reference `Instant` for the "partial retain" diagnostic rate-limiter.
+/// Lazily initialised on first emit so we don't pay the clock read at startup.
+static PARTIAL_RETAIN_LOG_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+/// Millis-since-`PARTIAL_RETAIN_LOG_EPOCH` of the last emit; rate-limits
+/// `clear_after_flush` debug output to at most once every 15 seconds across
+/// all cells/keyspaces.
+static LAST_PARTIAL_RETAIN_LOG_MS: AtomicU64 = AtomicU64::new(0);
+const PARTIAL_RETAIN_LOG_INTERVAL_MS: u64 = 15_000;
+const PARTIAL_RETAIN_LOG_MIN_ENTRIES: usize = 32;
 
 pub struct LargeTable {
     table: Vec<KsTable>,
@@ -2257,6 +2268,24 @@ impl LargeTableEntry {
                 .flush_update
                 .with_label_values(&["partial"])
                 .inc();
+            let retained = self.data.len();
+            if retained > PARTIAL_RETAIN_LOG_MIN_ENTRIES {
+                let now_ms = PARTIAL_RETAIN_LOG_EPOCH.elapsed().as_millis() as u64;
+                let last = LAST_PARTIAL_RETAIN_LOG_MS.load(Ordering::Relaxed);
+                if now_ms.saturating_sub(last) >= PARTIAL_RETAIN_LOG_INTERVAL_MS
+                    && LAST_PARTIAL_RETAIN_LOG_MS
+                        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    eprintln!(
+                        "[tidehunter] partial flush retained {} entries (ks={}, cell={:?}, last_processed={})",
+                        retained,
+                        self.context.name(),
+                        self.cell,
+                        last_processed.as_u64(),
+                    );
+                }
+            }
         }
     }
 
