@@ -232,21 +232,23 @@ impl LastProcessed {
 
     /// Returns whether the position is processed(included in the index).
     ///
-    /// todo multi-gen: this comparison is meaningful only for G0 positions —
-    /// the `last_processed` watermark lives in the main WAL's address space.
-    /// A non-G0 `pos` has the high gen-flag bit set in its raw offset, so
-    /// `pos.offset() < self.0` is always false and the entry would look
-    /// perpetually "in-flight" to consumers like
-    /// `IndexTable::retain_unprocessed` / `has_unprocessed` / `unmerge_flushed`.
-    /// Today non-G0 positions only live in `entry.levels` (on-disk index
-    /// blobs) and never reach the dirty overlay where these predicates fire,
-    /// so this is latent. Make is_processed generation-aware (or add a
-    /// debug assert at the call sites that the position is G0) before any
-    /// code path can stage non-G0 positions into `self.data` / `self.flat`.
+    /// Panics if the caller passes an INVALID or non-G0 position. The
+    /// `last_processed` watermark lives in the main WAL's address space, so
+    /// the comparison is only meaningful when the high gen-flag bit is
+    /// clear, and the INVALID sentinel (`u64::MAX`) has no place here. By
+    /// the `IndexTable` invariants only entries in `data` reach this
+    /// predicate, and `data` holds only genuine main-WAL-offset writes.
     pub(crate) fn is_processed<T: HasOffset>(self, pos: &T) -> bool {
+        let off = pos.offset();
+        assert_ne!(off, u64::MAX, "is_processed called on INVALID position");
+        assert_eq!(
+            off >> 63,
+            0,
+            "is_processed called on non-G0 position (offset 0x{off:x})"
+        );
         // Offset is processed if it is below (but not equal) to last_processed position
         // last_processed points to a next allocated position
-        pos.offset() < self.0
+        off < self.0
     }
 
     #[cfg(test)]
