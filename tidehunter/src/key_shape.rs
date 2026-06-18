@@ -73,6 +73,12 @@ pub struct KeySpaceConfig {
     unloaded_iterator: bool,
     #[serde(skip)]
     relocation_filter: Option<Arc<Box<dyn RelocationFilter>>>,
+    /// When true, records surviving relocation are written to the next
+    /// generation's side WAL rather than back to G0. Keyspaces with this
+    /// flag opt in to multi-generation behavior; everything else keeps the
+    /// single-WAL relocation behavior.
+    #[serde(default)]
+    promote_during_relocation: bool,
 }
 
 impl Default for KeySpaceConfig {
@@ -87,6 +93,7 @@ impl Default for KeySpaceConfig {
             index_format: IndexFormatType::default(),
             unloaded_iterator: true,
             relocation_filter: None,
+            promote_during_relocation: false,
         }
     }
 }
@@ -528,6 +535,14 @@ impl KeySpaceDesc {
         self.config.unloaded_iterator
     }
 
+    /// Whether surviving records from this keyspace should be promoted to
+    /// the next WAL generation during relocation. Opt-in per keyspace via
+    /// `KeySpaceConfig::with_promote_during_relocation`.
+    #[allow(dead_code)] // wired up once the relocator gains multi-gen support
+    pub(crate) fn promote_during_relocation(&self) -> bool {
+        self.config.promote_during_relocation
+    }
+
     #[doc(hidden)] // Used by tools/tideconsole to display keyspace names
     pub fn name(&self) -> &str {
         &self.name
@@ -686,6 +701,14 @@ impl KeySpaceConfig {
     /// still walks a cell unloaded while an async flush of it is in flight.
     pub fn with_unloaded_iterator(mut self, enabled: bool) -> Self {
         self.unloaded_iterator = enabled;
+        self
+    }
+
+    /// Opt this keyspace in to multi-generation WAL: records that survive
+    /// relocation are written to the next generation's side WAL instead of
+    /// back to G0. Requires `Config::wal_generations >= 2`.
+    pub fn with_promote_during_relocation(mut self, enabled: bool) -> Self {
+        self.promote_during_relocation = enabled;
         self
     }
 
