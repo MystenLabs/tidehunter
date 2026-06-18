@@ -2400,3 +2400,293 @@ fn stripe_crash_child(path: &Path, exit_code: i32) -> ! {
     // closed on the way out.
     std::process::exit(exit_code)
 }
+
+// Multi-generation relocation: a keyspace with `promote_during_relocation` set
+// should have its surviving records rewritten to the G1 side WAL during
+// relocation. After relocation, the G1 directory holds the relocated frames,
+// regular reads still return the expected values (routed through the
+// generation-aware dispatcher), and a Db restart preserves them.
+#[test]
+fn test_multi_gen_relocation_promotes_to_g1() {
+    let dir = tempdir::TempDir::new("test_multi_gen_relocation").unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    config.wal_generations = 2; // G0 + G1
+    let config = force_unload_config(&config);
+
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new().with_promote_during_relocation(true),
+    );
+    let key_shape = ksb.build();
+
+    let big = |b: u8| -> Vec<u8> { vec![b; 12 * 1000] };
+
+    // Phase 1: write enough to exercise relocation, run it, sanity-check.
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+
+        let sample = 3u64;
+        db.insert(ks, sample.to_be_bytes().to_vec(), big(1))
+            .unwrap();
+        for i in 1000..3000u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+
+        // Pin last_processed at the current frontier so subsequent inserts push
+        // the writer ahead of it. WAL-based relocation only sets a non-zero
+        // `terminal_position` when the scan encounters records past
+        // `upper_limit` (= captured `last_processed`).
+        let _checkpoint = db.checkpoint();
+        for i in 3000..3100u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+
+        let g1_position_before = db.generation_writers[0].position();
+        db.start_blocking_relocation();
+        let g1_position_after = db.generation_writers[0].position();
+
+        let kept = metrics.relocation_kept.with_label_values(&["k"]).get();
+        assert!(
+            kept > 0,
+            "relocation must have relocated entries for the promotion to be observable"
+        );
+
+        // The G1 writer's position must have advanced — proves the relocator
+        // actually dispatched writes to the side WAL rather than silently
+        // falling back to G0. (Checking `gen0001/` file size doesn't work:
+        // `Wal::open_file` pre-allocates the first fragment to `frag_size`,
+        // so the directory has non-zero bytes regardless of whether the
+        // relocator wrote anything.)
+        assert!(
+            g1_position_after > g1_position_before,
+            "G1 writer position must advance during promotion \
+             (before={g1_position_before}, after={g1_position_after})"
+        );
+
+        // Live reads still work — they now route through the G1 side WAL via
+        // the generation-aware dispatcher in `read_record`.
+        assert_eq!(
+            db.get(ks, &sample.to_be_bytes()).unwrap(),
+            Some(big(1).into()),
+            "sample key must be readable after promotion to G1"
+        );
+        for i in [1000u64, 1500, 2500, 2999] {
+            assert_eq!(
+                db.get(ks, &i.to_be_bytes()).unwrap(),
+                Some(big(7).into()),
+                "key {i} must be readable after promotion to G1"
+            );
+        }
+
+        // Drop the checkpoint before tearing the Db down — it holds an
+        // `Arc<Db>` that would otherwise prevent shutdown from draining.
+        drop(_checkpoint);
+        db.wait_for_background_threads_to_finish();
+    }
+
+    // Phase 2: reopen Db; the side WAL must survive restart and reads must
+    // still resolve via G1.
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics).unwrap();
+    let ks = db.ks("k");
+    let sample = 3u64;
+    assert_eq!(
+        db.get(ks, &sample.to_be_bytes()).unwrap(),
+        Some(big(1).into()),
+        "sample key must be readable from G1 after restart"
+    );
+    for i in [1000u64, 1500, 2500, 2999] {
+        assert_eq!(
+            db.get(ks, &i.to_be_bytes()).unwrap(),
+            Some(big(7).into()),
+            "key {i} must be readable from G1 after restart"
+        );
+    }
+}
+
+// A second relocation pass over a keyspace that already had records promoted
+// to G1 must NOT re-copy those records: their stored positions are encoded
+// with the gen flag bit set, so the WAL-based relocator's `offset <
+// target_position` check naturally skips them. This is the central
+// efficiency claim of multi-gen — already-promoted records stop being
+// re-copied each cycle. The test inserts a small batch of NEW data between
+// the two relocation passes and asserts the second pass only relocates the
+// new batch's worth of records, not the full set again.
+#[test]
+fn test_multi_gen_second_relocation_does_not_recopy_g1() {
+    let dir = tempdir::TempDir::new("test_multi_gen_second_pass").unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    config.wal_generations = 2;
+    let config = force_unload_config(&config);
+
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new().with_promote_during_relocation(true),
+    );
+    let key_shape = ksb.build();
+
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.ks("k");
+
+    let big = |b: u8| -> Vec<u8> { vec![b; 12 * 1000] };
+
+    // First batch (the "old" data, to be promoted in pass #1).
+    for i in 1000..3000u64 {
+        db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+    }
+    let cp1 = db.checkpoint();
+    for i in 3000..3100u64 {
+        db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+    }
+    db.start_blocking_relocation();
+    drop(cp1);
+
+    let kept_after_pass1 = metrics.relocation_kept.with_label_values(&["k"]).get();
+    let g1_position_after_pass1 = db.generation_writers[0].position();
+    assert!(
+        kept_after_pass1 > 0,
+        "pass #1 must have relocated entries (kept={kept_after_pass1})"
+    );
+
+    // A small batch of NEW data. Pass #2 should relocate this batch and
+    // skip everything the first pass already moved to G1.
+    let new_batch_size = 200u64;
+    for i in 4000..(4000 + new_batch_size) {
+        db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+    }
+    let cp2 = db.checkpoint();
+    for i in 5000..5100u64 {
+        db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+    }
+    db.start_blocking_relocation();
+    drop(cp2);
+
+    let kept_after_pass2 = metrics.relocation_kept.with_label_values(&["k"]).get();
+    let pass2_new_kept = kept_after_pass2 - kept_after_pass1;
+    let g1_position_after_pass2 = db.generation_writers[0].position();
+    let g1_growth_pass2 = g1_position_after_pass2 - g1_position_after_pass1;
+
+    // Pass 2 should have kept only the new batch's worth of records, not
+    // re-counted the full pre-existing G1 set. Allow a small slack for the
+    // padding writes that get promoted alongside.
+    assert!(
+        pass2_new_kept <= 2 * new_batch_size,
+        "pass #2 must not re-relocate already-G1 records: \
+         pass1_kept={kept_after_pass1}, pass2_total_kept={kept_after_pass2}, \
+         pass2_new={pass2_new_kept}, new_batch={new_batch_size}"
+    );
+
+    // And the G1 writer should have grown by roughly one new-batch worth of
+    // bytes, not by the full original 2000+ records again.
+    let new_batch_bytes = new_batch_size * 12_000;
+    assert!(
+        g1_growth_pass2 < 5 * new_batch_bytes,
+        "pass #2 G1 growth ({g1_growth_pass2} bytes) suggests entire G1 \
+         set was re-copied (new batch is ~{new_batch_bytes} bytes)"
+    );
+
+    // Reads still resolve correctly for both old and new keys.
+    for i in [1000u64, 2500, 2999, 4000, 4050, 4199] {
+        assert_eq!(
+            db.get(ks, &i.to_be_bytes()).unwrap(),
+            Some(big(7).into()),
+            "key {i} must be readable after two relocation passes"
+        );
+    }
+}
+
+// Opening a Db with `promote_during_relocation = true` on a keyspace but
+// `Config::wal_generations < 2` is a misconfiguration — the relocator would
+// silently fall back to G0 promotion (== single-WAL behavior), defeating the
+// flag. `Db::open` must reject it loudly.
+#[test]
+#[should_panic(expected = "promote_during_relocation")]
+fn test_promote_during_relocation_without_multi_gen_rejected() {
+    let dir = tempdir::TempDir::new("test_promote_rejected").unwrap();
+    let mut config = Config::small();
+    config.wal_generations = 1; // not enough for promotion
+    let config = Arc::new(config);
+
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new().with_promote_during_relocation(true),
+    );
+    let key_shape = ksb.build();
+
+    let _ = Db::open(dir.path(), key_shape, config, Metrics::new());
+}
+
+// The WAL-based relocation pass routes filtered keyspaces to the
+// clear-below-terminal path and never writes relocated batches, so the
+// promote flag would be silently inert — `Db::open` must reject the
+// combination.
+#[test]
+#[should_panic(expected = "relocation filter")]
+fn test_promote_during_relocation_with_filter_rejected() {
+    let dir = tempdir::TempDir::new("test_promote_filter_rejected").unwrap();
+    let mut config = Config::small();
+    config.wal_generations = 2;
+    let config = Arc::new(config);
+
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new()
+            .with_promote_during_relocation(true)
+            .with_relocation_filter(|_key: &[u8], _value: &[u8]| Decision::Keep),
+    );
+    let key_shape = ksb.build();
+
+    let _: DbResult<Arc<Db>> = Db::open(dir.path(), key_shape, config, Metrics::new());
+}
+
+// Index-based relocation GCs G0 files without rebuilding the control region
+// first; promotion must not ride that path until it does — `Db::open` must
+// reject the configured combination.
+#[test]
+#[should_panic(expected = "IndexBased")]
+fn test_promote_during_relocation_with_index_based_strategy_rejected() {
+    let dir = tempdir::TempDir::new("test_promote_index_based_rejected").unwrap();
+    let mut config = Config::small();
+    config.wal_generations = 2;
+    config.relocation_strategy = RelocationStrategy::IndexBased(None);
+    let config = Arc::new(config);
+
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new().with_promote_during_relocation(true),
+    );
+    let key_shape = ksb.build();
+
+    let _: DbResult<Arc<Db>> = Db::open(dir.path(), key_shape, config, Metrics::new());
+}

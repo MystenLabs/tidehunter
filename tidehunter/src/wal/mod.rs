@@ -529,8 +529,25 @@ impl Wal {
     }
 
     /// Ensure the file is written to disk (blocking call).
+    ///
+    /// Covers only the newest file; frames in older files are msync'd by the
+    /// background `WalSyncer` with no completion guarantee. Sufficient for
+    /// WALs whose contents are re-derived by replay; use [`Self::fsync_all`]
+    /// when persisted references into the whole WAL must survive a crash.
     pub fn fsync(&self) -> io::Result<()> {
         self.files.load().current_file().sync_all()
+    }
+
+    /// Ensure every live file of this WAL is written to disk (blocking call).
+    ///
+    /// Needed before persisting a control region that references positions
+    /// anywhere in a side WAL: side WALs are not replayed on restart, so the
+    /// control region is the only recovery path for those bytes.
+    pub fn fsync_all(&self) -> io::Result<()> {
+        for file in self.files.load().all_files() {
+            file.sync_all()?;
+        }
+        Ok(())
     }
 
     /// Get the minimum WAL position based on the oldest WAL file present.

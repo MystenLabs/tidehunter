@@ -72,6 +72,11 @@ impl WalFiles {
             .expect("unable to find current WAL file")
     }
 
+    /// All live files, oldest first.
+    pub(crate) fn all_files(&self) -> impl Iterator<Item = &Arc<File>> {
+        self.files.values()
+    }
+
     pub(crate) fn get_checked(&self, id: WalFileId) -> Option<&Arc<File>> {
         self.files.get(&id)
     }

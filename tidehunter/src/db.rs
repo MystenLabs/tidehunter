@@ -101,6 +101,11 @@ impl Db {
         let path = path.canonicalize()?;
         let lock = DbLock::acquire(&path, config.open_lock_retry_timeout)?;
         let (key_shape, keyspaces, registry_dirty) = Self::reconcile_key_shape(&path, key_shape)?;
+        // Validate the *reconciled* shape: a keyspace retained from the
+        // persisted registry (dropped from the declared shape) carries its
+        // registry config — including promote_during_relocation — and must
+        // pass the same checks as declared keyspaces.
+        Self::validate_key_shape_against_config(&key_shape, &config);
         Self::maybe_create_config_file(&path, &config)?;
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
         let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
@@ -466,6 +471,51 @@ impl Db {
         Ok((control_region_store, control_region))
     }
 
+    /// Cross-validate per-keyspace settings against global `Config`. Called
+    /// from `Db::open` to catch misconfigurations that the keyspace builder
+    /// can't see (because `Config` is global, not per-keyspace).
+    fn validate_key_shape_against_config(key_shape: &KeyShape, config: &Config) {
+        for ks in key_shape.iter_ks() {
+            if !ks.promote_during_relocation() {
+                continue;
+            }
+            assert!(
+                config.wal_generations >= 2,
+                "keyspace {:?} sets promote_during_relocation but Config::wal_generations \
+                 is {} (must be >= 2)",
+                ks.name(),
+                config.wal_generations,
+            );
+            // The WAL-based relocation pass routes filtered keyspaces to the
+            // clear-below-terminal path and never writes relocated batches —
+            // the promote flag would be silently inert, the exact fallback
+            // it exists to prevent.
+            assert!(
+                ks.relocation_filter().is_none(),
+                "keyspace {:?} sets promote_during_relocation together with a relocation \
+                 filter; promotion is not supported for filtered keyspaces",
+                ks.name(),
+            );
+            // Index-based relocation GCs G0 files without rebuilding the
+            // control region first, so a promoted entry's G0 original can be
+            // reclaimed while the persisted control region still references
+            // it — and side WALs are not replayed. Reject until that path
+            // rebuilds the control region before GC. (This guards the
+            // configured strategy; an ad-hoc strategy passed to
+            // `start_blocking_relocation_with_strategy` bypasses it.)
+            assert!(
+                !matches!(
+                    config.relocation_strategy,
+                    RelocationStrategy::IndexBased(_)
+                ),
+                "keyspace {:?} sets promote_during_relocation but \
+                 Config::relocation_strategy is IndexBased; promotion requires the \
+                 WAL-based strategy",
+                ks.name(),
+            );
+        }
+    }
+
     /// Opens side WALs for non-G0 generations. Each generation lives in
     /// `<path>/gen<N>/` and is independent of the main replay/index WALs.
     /// Returns vectors indexed by `generation - 1`.
@@ -478,9 +528,11 @@ impl Db {
     /// todo multi-gen: `config.wal_generations` is not persisted. If a DB is
     /// reopened with a different N, `Config::generation_bits()` changes and
     /// every stored non-G0 `WalPosition` is silently reinterpreted (the
-    /// payload-bit count and generation-id-bit count both shift). Persist
-    /// the value in the shape file or control region and reject mismatched
-    /// reopens before relocation starts producing G1+ positions.
+    /// payload-bit count and generation-id-bit count both shift). This
+    /// hazard is live: relocation promotion persists flagged positions into
+    /// control regions. Persist the value in the shape file or control
+    /// region and reject mismatched reopens before changing
+    /// `wal_generations` on any real deployment.
     ///
     /// todo multi-gen: each side WAL has its own `WalWriter::gc()` watermark
     /// and there is no per-generation tracking in the relocation watermark
@@ -980,21 +1032,29 @@ impl Db {
             size_bytes,
         } = batch;
         let context = self.ks_context(ks);
+        let target_generation = self.relocation_target_generation(ks);
 
         self.metrics
             .relocation_written_bytes
             .inc_by(size_bytes as u64);
-        let positions = self.write_relocated_batch_into_wal(&prepared_writes)?;
-        // Index the copies only once every frame below them is applied. The
-        // next control region rebuild persists the blob written below, and a
-        // frame still being written when the process crashes is torn: replay
-        // stops at it, so a copy above it is unreachable and, since replay
-        // skips relocated frames, never re-derived, while GC has already
-        // reclaimed the original. With every frame below the copies applied,
-        // a crash can only cut the WAL above them. The wait covers at least
-        // every write allocated before the copies; their own guards are
-        // already dropped, so it cannot wait on itself.
-        self.wal_writer.wait_processed();
+        let positions = self.write_relocated_batch_into_wal(&prepared_writes, target_generation)?;
+        if target_generation == 0 {
+            // Index the copies only once every frame below them is applied.
+            // The next control region rebuild persists the blob written
+            // below, and a frame still being written when the process
+            // crashes is torn: replay stops at it, so a copy above it is
+            // unreachable and, since replay skips relocated frames, never
+            // re-derived, while GC has already reclaimed the original. With
+            // every frame below the copies applied, a crash can only cut the
+            // WAL above them. The wait covers at least every write allocated
+            // before the copies; their own guards are already dropped, so it
+            // cannot wait on itself.
+            //
+            // Copies promoted to a side WAL need no such wait: a side WAL is
+            // not replayed, and a control region store fsyncs every side WAL
+            // before it persists a position into one.
+            self.wal_writer.wait_processed();
+        }
         let mut updates = RelocationUpdates::new(last_processed);
         for (pos, key) in positions.into_iter().zip(keys.into_iter()) {
             let reduced_key = context.ks_config.reduced_key_bytes(key);
@@ -1008,6 +1068,19 @@ impl Db {
         )?;
         self.retire_index_blobs(&dropped);
         Ok(())
+    }
+
+    /// The WAL generation surviving records should be written to during a
+    /// relocation pass. Returns G0 unless this keyspace opted in via
+    /// `KeySpaceConfig::with_promote_during_relocation` AND the database is
+    /// configured for at least two generations. First-cut policy: single-hop
+    /// G0 → G1 promotion; multi-hop tiering comes later.
+    fn relocation_target_generation(&self, ks: KeySpace) -> u8 {
+        if self.key_shape.ks(ks).promote_during_relocation() && self.config.wal_generations >= 2 {
+            1
+        } else {
+            0
+        }
     }
 
     /// Per-record batch write (default path): one `BatchStart(N)` marker
@@ -1049,23 +1122,50 @@ impl Db {
         Ok((vec![guard], positions))
     }
 
-    /// Appends the relocated copies and returns their positions. The guards
+    /// Appends the relocated copies to the WAL of `target_generation` and
+    /// returns their positions, generation-encoded for a side WAL. The guards
     /// are dropped at once: a copy is not an acknowledged write of its own,
     /// its original stays readable until relocation reclaims the WAL under
     /// it (at the end of the stripe, or of an index-based run), and
     /// [`Self::write_relocated_batch`] waits for the tracker's frontier to
-    /// pass the copies before it indexes them.
+    /// pass G0 copies before it indexes them.
     fn write_relocated_batch_into_wal(
         &self,
         prepared_writes: &[PreparedWalWrite],
+        target_generation: u8,
     ) -> DbResult<Vec<WalPosition>> {
+        if target_generation == 0 {
+            return prepared_writes
+                .iter()
+                .map(|write| {
+                    self.wal_writer
+                        .write(write)
+                        .map_err(DbError::from)
+                        .map(|g| *g.wal_position())
+                })
+                .collect();
+        }
+        let idx = (target_generation as usize)
+            .checked_sub(1)
+            .expect("target_generation >= 1");
+        let writer = self.generation_writers.get(idx).unwrap_or_else(|| {
+            panic!(
+                "generation {target_generation} not configured (wal_generations = {})",
+                self.config.wal_generations
+            )
+        });
+        let generation_bits = self.config.generation_bits();
         prepared_writes
             .iter()
             .map(|write| {
-                self.wal_writer
-                    .write(write)
-                    .map_err(DbError::from)
-                    .map(|g| *g.wal_position())
+                let guard = writer.write(write).map_err(DbError::from)?;
+                let raw = *guard.wal_position();
+                Ok(WalPosition::for_generation(
+                    target_generation,
+                    raw.offset(),
+                    raw.frame_len_u32(),
+                    generation_bits,
+                ))
             })
             .collect()
     }
@@ -1613,6 +1713,16 @@ impl Db {
         };
         self.indexes.fsync()?;
         self.wal.fsync()?;
+        // Side WALs also need to be on disk before we persist the control
+        // region — it points into them via gen-encoded `WalPosition`s and
+        // they are not replayed on restart. `fsync_all`, not `fsync`: the
+        // latter covers only the newest file, while a promotion burst can
+        // span several files whose background msyncs carry no completion
+        // guarantee. A crash post-CR-store must not lose any side-WAL byte
+        // the CR references.
+        for gen_wal in &self.generation_wals {
+            gen_wal.fsync_all()?;
+        }
         // Persist the control region BEFORE unlinking files. A crash between
         // these steps must leave the on-disk CR consistent with the files
         // still present: extra (un-deleted) files are tolerated by the next

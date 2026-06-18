@@ -538,7 +538,6 @@ impl KeySpaceDesc {
     /// Whether surviving records from this keyspace should be promoted to
     /// the next WAL generation during relocation. Opt-in per keyspace via
     /// `KeySpaceConfig::with_promote_during_relocation`.
-    #[allow(dead_code)] // wired up once the relocator gains multi-gen support
     pub(crate) fn promote_during_relocation(&self) -> bool {
         self.config.promote_during_relocation
     }
