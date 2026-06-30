@@ -1,0 +1,15 @@
+[package]
+name = "antithesis_harness"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tidehunter = { path = "../../tidehunter", features = ["test-utils"] }
+rand = "0.8"
+antithesis_sdk = { version = "=0.2.5", optional = true, features = ["full"] }
+
+[features]
+default = []
+sdk = ["dep:antithesis_sdk"]
+
+[workspace]
