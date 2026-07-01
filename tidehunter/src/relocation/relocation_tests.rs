@@ -2614,6 +2614,261 @@ fn test_multi_gen_second_relocation_does_not_recopy_g1() {
     }
 }
 
+// A key promoted to G1 by relocation must remain writable: the follow-up G0
+// write is logically newer than the promoted copy even though its raw offset
+// is numerically smaller (the G1 encoding sets the top bit). Recency across
+// generations is "lower generation wins" — data only flows into deeper
+// generations, so a coexisting G0 entry must postdate the promoted copy.
+//
+// Covers the full lifecycle: overwrite → read → flush → read → second
+// relocation pass (re-promotes the new value) → read → restart → read.
+fn overwrite_after_promotion(ksc: KeySpaceConfig, label: &'static str) {
+    let dir = tempdir::TempDir::new(label).unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    config.wal_generations = 2;
+    let config = force_unload_config(&config);
+
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        ksc.with_promote_during_relocation(true),
+    );
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+
+    let big = |b: u8| -> Vec<u8> { vec![b; 12 * 1000] };
+    let key = 3u64.to_be_bytes().to_vec();
+
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+
+        db.insert(ks, key.clone(), big(1)).unwrap();
+        for i in 1000..3000u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        let cp = db.checkpoint();
+        for i in 3000..3100u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        db.start_blocking_relocation();
+        drop(cp);
+
+        let kept = metrics.relocation_kept.with_label_values(&["k"]).get();
+        assert!(kept > 0, "relocation must have promoted entries");
+        assert!(
+            db.generation_writers[0].position() > 0,
+            "promoted copies must land in the G1 side WAL"
+        );
+
+        // The regression: overwrite a key whose current index position is a
+        // G1-encoded promoted copy. Must not panic and must win reads.
+        db.insert(ks, key.clone(), big(2)).unwrap();
+        assert_eq!(
+            db.get(ks, &key).unwrap(),
+            Some(big(2).into()),
+            "overwrite after promotion must win reads immediately"
+        );
+
+        // Push the overwrite through the flush/merge machinery.
+        db.force_rebuild_control_region().unwrap();
+        assert_eq!(
+            db.get(ks, &key).unwrap(),
+            Some(big(2).into()),
+            "overwrite must survive a flush over the G1-holding blob"
+        );
+
+        // Second relocation pass: the overwritten value is the as-of value
+        // now and gets promoted itself.
+        let cp2 = db.checkpoint();
+        for i in 4000..4100u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        db.start_blocking_relocation();
+        drop(cp2);
+        assert_eq!(
+            db.get(ks, &key).unwrap(),
+            Some(big(2).into()),
+            "overwrite must survive a second relocation pass"
+        );
+
+        db.wait_for_background_threads_to_finish();
+    }
+
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.ks("k");
+    assert_eq!(
+        db.get(ks, &key).unwrap(),
+        Some(big(2).into()),
+        "overwrite must survive restart"
+    );
+    for i in [1000u64, 2500, 2999] {
+        assert_eq!(
+            db.get(ks, &i.to_be_bytes()).unwrap(),
+            Some(big(7).into()),
+            "untouched key {i} must still be readable"
+        );
+    }
+}
+
+#[test]
+fn test_multi_gen_overwrite_after_promotion_unload() {
+    // Default unloading: the cell unloads after relocation, the overwrite
+    // lands in a fresh dirty overlay, and the flush merges it over a blob
+    // whose flat holds the G1 promoted copy (merge_dirty / fold paths).
+    overwrite_after_promotion(
+        KeySpaceConfig::new(),
+        "test_multi_gen_overwrite_promoted_unload",
+    );
+}
+
+#[test]
+fn test_multi_gen_overwrite_after_promotion_no_unload() {
+    // Unloading disabled: the relocation sync-flush rebases the live cell
+    // onto the as-of blob (`rebase_on_as_of`), so the in-memory `flat` holds
+    // the key's G1 position when the overwrite arrives — exercising the
+    // `checked_insert` flat-probe recency comparison directly.
+    overwrite_after_promotion(
+        KeySpaceConfig::new().disable_unload(),
+        "test_multi_gen_overwrite_promoted_no_unload",
+    );
+}
+
+// A promoted key resident in a *loaded* cell's index table: after relocation
+// promotes the key to G1 and the cell unloads, stepping an iterator on a
+// `with_unloaded_iterator(false)` keyspace calls `maybe_load`, folding the L0
+// blob — including the key's G1-encoded position — into the live table. The
+// live write path must not rank that flagged position above the incoming G0
+// write/delete (by raw offset it outranks every future G0 offset), or the
+// update is hidden behind it: stale reads forever and an undeletable key.
+// The `overwrite_after_promotion` variants cannot catch this — their cells
+// stay unloaded when the overwrite lands, so no flagged position is in the
+// table the write is ordered against.
+#[test]
+fn test_multi_gen_update_promoted_key_in_loaded_cell() {
+    let dir = tempdir::TempDir::new("test_multi_gen_update_promoted_loaded").unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    config.wal_generations = 2;
+    // Default snapshot threshold: the background snapshot loop must not
+    // re-unload the cell between the iterator step below and the updates.
+    let config = Arc::new(config);
+
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new()
+            .with_unloaded_iterator(false)
+            .with_promote_during_relocation(true),
+    );
+    // Filler traffic lives in its own keyspace, creating the WAL span
+    // relocation needs while the promoted keys' cell stays far below the L0
+    // threshold — so its relocation flush writes an L0 blob (an over-threshold
+    // cell would promote straight to L1, which `maybe_load` never folds into
+    // the live table).
+    ksb.add_key_space_config("fill", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+
+    let big = |b: u8| -> Vec<u8> { vec![b; 12 * 1000] };
+    let overwrite_key = 3u64.to_be_bytes().to_vec();
+    let delete_key = 4u64.to_be_bytes().to_vec();
+
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        let fill = db.ks("fill");
+
+        db.insert(ks, overwrite_key.clone(), big(1)).unwrap();
+        db.insert(ks, delete_key.clone(), big(1)).unwrap();
+        for i in 1000..3000u64 {
+            db.insert(fill, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        let cp = db.checkpoint();
+        for i in 3000..3100u64 {
+            db.insert(fill, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        db.start_blocking_relocation();
+        drop(cp);
+
+        let kept = metrics.relocation_kept.with_label_values(&["k"]).get();
+        assert_eq!(kept, 2, "both promoted keys must survive relocation");
+        assert!(
+            db.generation_writers[0].position() > 0,
+            "promoted copies must land in the G1 side WAL"
+        );
+        assert_eq!(
+            db.get(ks, &overwrite_key).unwrap(),
+            Some(big(1).into()),
+            "promoted key must be readable through its G1 position"
+        );
+
+        // Load the (clean) cell holding the promoted keys: with unloaded
+        // iteration off, stepping an iterator folds the L0 blob — and the
+        // keys' G1 positions — into the live table.
+        assert!(db.iterator(ks).next().is_some());
+
+        db.insert(ks, overwrite_key.clone(), big(2)).unwrap();
+        assert_eq!(
+            db.get(ks, &overwrite_key).unwrap(),
+            Some(big(2).into()),
+            "overwrite of a promoted key in a loaded cell must win reads"
+        );
+        db.remove(ks, delete_key.clone()).unwrap();
+        assert_eq!(
+            db.get(ks, &delete_key).unwrap(),
+            None,
+            "delete of a promoted key in a loaded cell must take effect"
+        );
+
+        db.force_rebuild_control_region().unwrap();
+        assert_eq!(
+            db.get(ks, &overwrite_key).unwrap(),
+            Some(big(2).into()),
+            "overwrite must survive a flush over the G1-holding blob"
+        );
+        assert_eq!(
+            db.get(ks, &delete_key).unwrap(),
+            None,
+            "delete must survive a flush over the G1-holding blob"
+        );
+
+        db.wait_for_background_threads_to_finish();
+    }
+
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.ks("k");
+    assert_eq!(
+        db.get(ks, &overwrite_key).unwrap(),
+        Some(big(2).into()),
+        "overwrite must survive restart"
+    );
+    assert_eq!(
+        db.get(ks, &delete_key).unwrap(),
+        None,
+        "delete must survive restart"
+    );
+}
+
 // Opening a Db with `promote_during_relocation = true` on a keyspace but
 // `Config::wal_generations < 2` is a misconfiguration — the relocator would
 // silently fall back to G0 promotion (== single-WAL behavior), defeating the

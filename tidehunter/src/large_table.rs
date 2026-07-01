@@ -2034,6 +2034,26 @@ impl LargeTableEntry {
                 return;
             }
         }
+        // Skip records this cell's control-region levels already cover:
+        // everything strictly below the CR-loaded `last_processed` was in
+        // the cell's persisted blobs when the control region was stored. The
+        // global replay start is the *minimum* frontier across cells, so a
+        // laggard cell can put another cell's already-covered records back
+        // into the replay range. Re-applying them was harmless duplication
+        // when levels held only G0 positions (the replayed copy is
+        // value-equal); once levels can hold generation-flagged positions
+        // (relocation-promoted copies), a covered G0 record or tombstone
+        // replayed into the overlay would shadow the flagged entry — and
+        // side WALs are not replayed, so nothing would re-establish it.
+        // `IndexWalPosition::newer_than`'s soundness argument relies on
+        // this filter.
+        let covered = entries.partition_point(|(_, iwp)| self.last_processed.is_processed(iwp));
+        if covered > 0 {
+            entries.drain(..covered);
+            if entries.is_empty() {
+                return;
+            }
+        }
         debug_assert!(
             self.data.is_empty(),
             "apply_replay_buffer expects a fresh entry — replay never auto-loads L0",
@@ -3141,6 +3161,91 @@ mod tests {
         assert_eq!(row.entry_mut(&cell).0.context.name(), "a");
         let (mut row, cell) = l.row(l.ks_context(b), &[5, 2, 3, 4]);
         assert_eq!(row.entry_mut(&cell).0.context.name(), "b");
+    }
+
+    #[test]
+    fn test_apply_replay_buffer_skips_covered_records() {
+        // Records below a cell's CR-loaded `last_processed` are already
+        // covered by its persisted levels and must not be re-applied — the
+        // global replay start is the minimum frontier across cells, so a
+        // laggard cell can put another cell's covered records back into the
+        // replay range. A replayed tombstone or stale value would shadow a
+        // generation-flagged entry the levels hold (side WALs are not
+        // replayed, so nothing would re-establish it).
+        use crate::index::index_table::IndexWalPosition;
+        use crate::replay_buffer::CellReplayBuffer;
+
+        let config = Config::small();
+        let mut ks = KeyShapeBuilder::new();
+        ks.add_key_space("a", 8, 1, KeyType::uniform(1));
+        ks.add_key_space("b", 8, 1, KeyType::uniform(1));
+        let ks = ks.build();
+        let kss = crate::key_shape::KeySpaces::from_key_shape(&ks);
+        let a = kss.ks("a");
+        let b = kss.ks("b");
+        let tmp_dir = tempdir::TempDir::new("test_replay_skips_covered").unwrap();
+        let wal = Wal::open(
+            tmp_dir.path(),
+            config.wal_layout(WalKind::Replay),
+            Metrics::new(),
+        )
+        .unwrap();
+        let l = LargeTable::from_unloaded(
+            &ks,
+            &LargeTableContainer::new_from_key_shape(&ks, SnapshotEntryData::empty()),
+            Arc::new(config),
+            IndexFlusher::new_unstarted_for_test(),
+            Metrics::new(),
+            SharedLastProcessed::default(),
+            wal.as_ref(),
+        );
+
+        let key_below: Bytes = 1u64.to_be_bytes().to_vec().into();
+        let key_above: Bytes = 2u64.to_be_bytes().to_vec().into();
+        let (mut row, cell) = l.row(l.ks_context(a), &key_below);
+        let entry = row.entry_mut(&cell).0;
+        // Simulate a CR-loaded cell whose levels cover everything below 500.
+        entry.last_processed = LastProcessed::new(500);
+
+        let buffer: CellReplayBuffer = vec![
+            (
+                key_below.clone(),
+                IndexWalPosition::new_modified(WalPosition::test_value(100)),
+            ),
+            (
+                key_above.clone(),
+                IndexWalPosition::new_modified(WalPosition::test_value(700)),
+            ),
+        ];
+        entry.apply_replay_buffer(buffer, u64::MAX);
+        assert_eq!(
+            entry.data.get(&key_below),
+            None,
+            "record below last_processed is covered by levels and must be skipped"
+        );
+        assert_eq!(
+            entry.data.get(&key_above),
+            Some(WalPosition::test_value(700)),
+            "record at or above last_processed must be applied"
+        );
+
+        // A fully-covered buffer must be a no-op that leaves the entry clean.
+        let (mut row, cell) = l.row(l.ks_context(b), &key_below);
+        let entry = row.entry_mut(&cell).0;
+        entry.last_processed = LastProcessed::new(500);
+        let buffer: CellReplayBuffer = vec![(
+            key_below.clone(),
+            IndexWalPosition::new_modified(WalPosition::test_value(100)),
+        )];
+        entry.apply_replay_buffer(buffer, u64::MAX);
+        assert!(
+            entry.data.is_empty(),
+            "fully-covered buffer must be a no-op"
+        );
+        assert!(
+            !entry.state.is_dirty(),
+            "a fully-covered replay must not dirty the entry"
+        );
     }
 
     #[test]

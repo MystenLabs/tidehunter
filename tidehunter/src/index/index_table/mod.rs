@@ -221,7 +221,7 @@ impl IndexTable {
     fn checked_insert(&mut self, k: Bytes, v: IndexWalPosition) -> WriteOrder {
         let k = k.into_owned();
 
-        // Enforce the ordering assertion for keys promoted to flat but not yet
+        // Enforce the recency assertion for keys promoted to flat but not yet
         // in `data`. Done before `entry` so the immutable flat read doesn't
         // overlap the mutable `data` borrow the entry holds (the `contains_key`
         // probe is debug/test-only — release does a single `data` descent).
@@ -230,9 +230,11 @@ impl IndexTable {
         // older than a write landing now. A `Clean` flat entry is disk-derived
         // (`maybe_load`, `rebase_on_as_of`) or a demoted in-memory write, and
         // a disk-derived entry's offset says nothing about ordering: a
-        // relocated copy sits at a WAL-tail offset that can exceed a write
-        // allocated before the copy, and a disk tombstone carries the
-        // `INVALID` sentinel.
+        // relocated copy sits at a WAL-tail offset (or, promoted to a side
+        // WAL, at a generation-flagged one) that can exceed a write allocated
+        // before the copy, and a disk tombstone carries the `INVALID`
+        // sentinel. The check is `newer_than`, not raw offset order, so a
+        // flagged entry never outranks the incoming main-WAL write.
         #[cfg(any(debug_assertions, feature = "test_methods"))]
         if !self.data.contains_key(&k)
             && let Some(existing) = self.flat_binary_search(&k)
@@ -240,7 +242,7 @@ impl IndexTable {
             && existing.offset != WalPosition::INVALID.offset()
         {
             assert!(
-                existing.offset < v.offset,
+                v.newer_than(&existing),
                 "Index WAL position must be increasing (flat)"
             );
         }
@@ -248,7 +250,10 @@ impl IndexTable {
         match self.data.entry(k) {
             Entry::Occupied(mut oc) => {
                 // `positions` is non-empty and ascending by IWP, so the latest
-                // is its last element.
+                // is its last element. Raw offset order is correct here because
+                // `data` holds only genuine main-WAL (G0) writes — flagged
+                // positions (relocated side-WAL copies, tombstone sentinels)
+                // live exclusively in `flat`; see the `flat` field invariant.
                 let prev = *oc.get().last().unwrap();
                 if prev.offset > v.offset {
                     // Stale: order it behind the newer position. Same canary
@@ -324,9 +329,17 @@ impl IndexTable {
         // (`iter_with_tombstones`), after the frontier filter has run.
         for (k, positions) in dirty.data.iter() {
             for v in positions {
+                // Contract check ("dirty is the fresher side") is only
+                // decidable when both offsets live in the main WAL: a flagged
+                // offset (relocated side-WAL copy / tombstone sentinel) is not
+                // ordered against a G0 offset by magnitude, and its true
+                // recency depends on which merge produced it — see
+                // `IndexWalPosition::newer_than`.
                 #[cfg(any(debug_assertions, feature = "test_methods"))]
                 if promote_to_clean
                     && let Some(found) = self.data_get_latest(k)
+                    && !WalPosition::offset_is_flagged(found.offset)
+                    && !WalPosition::offset_is_flagged(v.offset)
                     && found.offset > v.offset
                 {
                     panic!("found.offset {} > v.offset {}", found.offset, v.offset);
@@ -476,10 +489,14 @@ impl IndexTable {
                 for e in &stale {
                     // Caller contract: any same-key `self.data` position is older
                     // than the dirty.flat value shadowing it — dropping a newer
-                    // one here would lose a write. (A tombstone winner sits at the
-                    // INVALID sentinel offset u64::MAX, trivially satisfying this.)
+                    // one here would lose a write. Checkable only when both
+                    // offsets live in the main WAL; flagged offsets (relocated
+                    // copies, tombstone sentinels) carry no magnitude order
+                    // against G0 — see the Equal-arm comment above.
                     debug_assert!(
-                        e.offset <= winner.offset,
+                        WalPosition::offset_is_flagged(e.offset)
+                            || WalPosition::offset_is_flagged(winner.offset)
+                            || e.offset <= winner.offset,
                         "fold_dirty_flat: dropping self.data position at offset {} newer than \
                          the dirty.flat value at offset {} that shadows it",
                         e.offset,
@@ -1397,14 +1414,12 @@ impl IndexTable {
     /// Retain only entries with offset >= last_processed. Applied to both flat and data.
     /// `retain_flat` runs first so `retain`'s internal recount sees the final flat.
     ///
-    /// todo multi-gen: `last_processed` is a raw G0 offset; the
-    /// `iwp.offset >= last_processed` comparison treats every non-G0 entry
-    /// as "above" (their offset has the high gen-flag bit set, so it's
-    /// huge by raw u64 magnitude). The flusher uses this on `merged_l0`
-    /// after applying `RelocationUpdates`, and non-G0 entries pass through
-    /// retained — which is the desired outcome, but it works by accident
-    /// of the encoding, not by design. Make the predicate
-    /// generation-aware before the call sites grow new semantics.
+    /// `last_processed` is a main-WAL (G0) offset, always below the
+    /// generation flag bit, so `iwp.offset >= last_processed` retains every
+    /// flagged entry (relocated side-WAL copies, tombstone sentinels) by
+    /// construction. That is the intended semantics: flagged entries are
+    /// durable outside the main WAL and no G0 cutoff can obsolete them —
+    /// the comparison doubles as the generation check.
     pub fn retain_above_position(&mut self, last_processed: u64) {
         self.retain_flat(|_, iwp| (iwp.offset >= last_processed).then_some(iwp));
         self.retain(|_, v| v.offset >= last_processed);
@@ -2013,6 +2028,32 @@ impl IndexTable {
 }
 
 impl IndexWalPosition {
+    /// Logical recency across WAL generations for two same-key positions.
+    ///
+    /// Data only flows *down* into deeper generations: relocation promotes an
+    /// as-of value into a side WAL and replaces its index entry, replay skips
+    /// records already covered by a cell's `last_processed`, and the overlay
+    /// filters drop pre-frontier positions once flushed — so a stale G0 entry
+    /// never coexists with its own promoted copy. Hence when a G0 position
+    /// (generation flag bit clear) and a flagged position (promoted side-WAL
+    /// copy, or the INVALID disk-tombstone sentinel) coexist for one key, the
+    /// G0 write postdates the flagged entry. Within one class, raw WAL offset
+    /// order is write order.
+    ///
+    /// Positions from *different* non-G0 generations are not ordered by this
+    /// relation; single-hop promotion (everything lands in G1) means the case
+    /// cannot arise today. Revisit when multi-hop tiering lands.
+    ///
+    /// The live write path needs no such check: `checked_insert` orders a
+    /// write against `data` alone, which holds only G0 positions, and never
+    /// against a flagged `flat` entry.
+    // Only called from debug/test-gated assertions today; keep it compiled in
+    // release so the relation stays checked and available for future callers.
+    #[allow(dead_code)]
+    pub(super) fn newer_than(&self, other: &IndexWalPosition) -> bool {
+        WalPosition::offset_newer_than(self.offset, other.offset)
+    }
+
     fn new_clean(w: WalPosition) -> Self {
         debug_assert_ne!(w, WalPosition::INVALID);
         Self {

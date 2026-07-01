@@ -35,14 +35,14 @@ impl RelocationUpdates {
     /// latest position already sits at or above the relocation frontier,
     /// leaves the table untouched.
     ///
-    /// todo multi-gen: `v.offset() < self.last_processed` is a raw u64
-    /// comparison and is only meaningful when both sides are G0 offsets.
-    /// Once relocation promotes records to G1+, `v` may already be a
-    /// non-G0 position from a previous pass — its offset has the gen-flag
-    /// bit set, so the comparison is always false and the update is
-    /// silently dropped. That happens to be the right outcome here
-    /// ("don't overwrite a higher-gen entry with a lower-gen one") but
-    /// it's accidental. Make the compare-and-set generation-aware.
+    /// Compare-and-set: an update re-points an entry only if it still holds
+    /// the pre-relocation position — a main-WAL (G0) offset below the
+    /// relocation frontier. `last_processed` is a G0 offset, always below
+    /// the generation flag bit, so the raw comparison also rejects every
+    /// flagged position by construction: an entry already re-pointed to a
+    /// side WAL (by this pass reading a stale snapshot, or by a previous
+    /// pass) is never demoted back. This is intended — the comparison
+    /// doubles as the generation check.
     pub fn apply(self, index: &mut IndexTable) -> bool {
         let mut changed = false;
         for update in self.updates {

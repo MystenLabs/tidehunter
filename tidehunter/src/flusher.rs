@@ -397,13 +397,11 @@ impl IndexFlusherThread {
         };
         let existing_l1 = current_levels.l1();
 
-        // todo multi-gen: both `cutoff` and `loader.min_wal_position()` are
-        // raw G0 offsets. Non-G0 entries have the gen-flag bit set in their
-        // raw offset, so they are always "above" any reasonable G0
-        // watermark and pass through retained. That matches the desired
-        // behavior (don't drop relocated entries during a G0-driven flush),
-        // but it works by accident of the encoding. When per-generation
-        // relocation lands, this needs an explicit generation check.
+        // Both `cutoff` and `loader.min_wal_position()` are main-WAL (G0)
+        // offsets, always below the generation flag bit, so flagged entries
+        // (relocated side-WAL copies) pass through retained by construction
+        // — a G0 cutoff cannot obsolete data that is durable outside the
+        // main WAL. See `IndexTable::retain_above_position`.
         match cutoff {
             Some(cutoff) => {
                 let length = merged_l0.len();

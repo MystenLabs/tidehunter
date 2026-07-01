@@ -102,6 +102,30 @@ impl WalPosition {
     /// 0 means generation 0 (the normal WAL); 1 means non-G0.
     const GEN_FLAG_BIT: u8 = 63;
 
+    /// Whether an encoded offset has the generation flag bit set — i.e. the
+    /// position lives in a non-G0 side WAL, or is the INVALID sentinel
+    /// (`u64::MAX`, used on disk for tombstones). Flagged offsets are not
+    /// comparable to main-WAL offsets by raw magnitude; see
+    /// `IndexWalPosition::newer_than` for the cross-generation recency rule.
+    #[inline]
+    pub(crate) fn offset_is_flagged(offset: u64) -> bool {
+        offset >> Self::GEN_FLAG_BIT != 0
+    }
+
+    /// Logical recency of two same-key offsets across WAL generations: an
+    /// unflagged (G0) offset postdates any coexisting flagged one — data only
+    /// flows down into deeper generations — and within one class raw offset
+    /// order is write order. See `IndexWalPosition::newer_than` for the full
+    /// rationale.
+    #[inline]
+    pub(crate) fn offset_newer_than(a: u64, b: u64) -> bool {
+        match (Self::offset_is_flagged(a), Self::offset_is_flagged(b)) {
+            (false, true) => true,
+            (true, false) => false,
+            _ => a > b,
+        }
+    }
+
     /// Encode a generation-tagged offset.
     ///
     /// `generation == 0` returns `raw_offset` unchanged. For `generation >= 1`
@@ -312,5 +336,23 @@ mod tests {
         assert_eq!(p.generation(gen_bits), 2);
         assert_eq!(p.raw_offset(gen_bits), 42);
         assert_eq!(p.frame_len(), 16);
+    }
+
+    #[test]
+    fn test_offset_newer_than() {
+        let flagged = |x: u64| (1u64 << 63) | x;
+        // Same class: raw offset order, strict.
+        assert!(WalPosition::offset_newer_than(2, 1));
+        assert!(!WalPosition::offset_newer_than(1, 2));
+        assert!(!WalPosition::offset_newer_than(1, 1));
+        assert!(WalPosition::offset_newer_than(flagged(2), flagged(1)));
+        // Cross class: a G0 offset postdates any flagged one regardless of
+        // magnitude.
+        assert!(WalPosition::offset_newer_than(1, flagged(50)));
+        assert!(!WalPosition::offset_newer_than(flagged(50), 1));
+        // The INVALID sentinel (u64::MAX) is flagged: a live G0 write
+        // postdates a disk tombstone.
+        assert!(WalPosition::offset_newer_than(1, u64::MAX));
+        assert!(!WalPosition::offset_newer_than(u64::MAX, 1));
     }
 }
