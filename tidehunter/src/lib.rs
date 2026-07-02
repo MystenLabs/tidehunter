@@ -16,6 +16,7 @@ pub mod db;
 mod failpoints;
 pub mod file_reader;
 mod flusher;
+mod gen_watermark;
 pub mod index;
 mod index_blob_cache;
 pub mod iterators;

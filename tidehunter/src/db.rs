@@ -9,6 +9,7 @@ use crate::context::{DbOpKind, KsContext, ReadType, WalEntryKind};
 use crate::control::{ControlRegion, ControlRegionStore, RelocateFiles};
 use crate::crc::IntoBytesFixed;
 use crate::flusher::{IndexFlusher, RelocationFlush};
+use crate::gen_watermark;
 use crate::index::index_format::{IndexFormat, IndexIterCaches};
 use crate::index::index_table::IndexTable;
 use crate::index::levels::IndexLevels;
@@ -56,6 +57,9 @@ pub struct Db {
     /// destination of relocation promotions.
     pub(crate) generation_wals: Vec<Arc<Wal>>,
     pub(crate) generation_writers: Vec<WalWriter>,
+    /// Directory of each side WAL (indexed by `generation - 1`); holds the
+    /// generation's `durable` watermark file next to its WAL files.
+    generation_paths: Vec<PathBuf>,
     pub(crate) control_region_store: Mutex<ControlRegionStore>,
     pub(crate) config: Arc<Config>,
     metrics: Arc<Metrics>,
@@ -87,6 +91,14 @@ pub struct Db {
 
 pub type DbResult<T> = Result<T, DbError>;
 
+/// Side-WAL handles for non-G0 generations, all indexed by `generation - 1`.
+#[derive(Default)]
+struct GenerationWals {
+    wals: Vec<Arc<Wal>>,
+    writers: Vec<WalWriter>,
+    paths: Vec<PathBuf>,
+}
+
 pub const MAX_KEY_LEN: usize = u16::MAX as usize;
 pub const CONTROL_REGION_FILE: &str = "cr";
 
@@ -109,8 +121,11 @@ impl Db {
         Self::maybe_create_config_file(&path, &config)?;
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
         let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
-        let (generation_wals, generation_writers) =
-            Self::open_generation_wals(&path, &config, &metrics)?;
+        let GenerationWals {
+            wals: generation_wals,
+            writers: generation_writers,
+            paths: generation_paths,
+        } = Self::open_generation_wals(&path, &config, &metrics)?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         if registry_dirty {
@@ -205,6 +220,7 @@ impl Db {
             indexes,
             generation_wals,
             generation_writers,
+            generation_paths,
             control_region_store,
             config,
             metrics: metrics.clone(),
@@ -520,10 +536,15 @@ impl Db {
     /// `<path>/gen<N>/` and is independent of the main replay/index WALs.
     /// Returns vectors indexed by `generation - 1`.
     ///
-    /// The writer's resume position is recovered by walking the side WAL from
-    /// offset 0 until it hits EndOfWal/CRC — there is no control-region
-    /// tracking for side WALs yet, so this is the simplest correct way to
-    /// find the tail.
+    /// The writer's resume position is recovered by walking the side WAL
+    /// from the generation's persisted durable watermark (see
+    /// `crate::gen_watermark`) until it hits EndOfWal/CRC. Starting at the
+    /// watermark — not offset 0 — is what keeps control-region-referenced
+    /// frames safe: a write that was in flight at a crash can leave a torn
+    /// frame *below* referenced frames, and a scan that stopped there would
+    /// zero the fragment tail and re-use the offsets. It also bounds the
+    /// open-time scan to the tail written since the last control-region
+    /// store.
     ///
     /// todo multi-gen: `config.wal_generations` is not persisted. If a DB is
     /// reopened with a different N, `Config::generation_bits()` changes and
@@ -542,14 +563,15 @@ impl Db {
         path: &Path,
         config: &Config,
         metrics: &Arc<Metrics>,
-    ) -> DbResult<(Vec<Arc<Wal>>, Vec<WalWriter>)> {
+    ) -> DbResult<GenerationWals> {
         let n = config.wal_generations as usize;
         assert!(n >= 1, "wal_generations must be >= 1");
         if n == 1 {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(GenerationWals::default());
         }
         let mut wals = Vec::with_capacity(n - 1);
         let mut writers = Vec::with_capacity(n - 1);
+        let mut paths = Vec::with_capacity(n - 1);
         for g in 1..n {
             let gen_path = path.join(format!("gen{g:04}"));
             if !gen_path.exists() {
@@ -563,9 +585,11 @@ impl Db {
             // address spaces.
             layout.label = format!("gen{g:04}");
             let wal = Wal::open(&gen_path, layout, metrics.clone())?;
-            // Walk from 0 to find the writer tail. New (empty) side WAL stops
-            // immediately at EndOfWal and converts into a writer at offset 0.
-            let mut iter = wal.wal_iterator_for_writer(0)?;
+            // Walk from the durable watermark to find the writer tail. A new
+            // (empty) side WAL has watermark 0 and stops immediately at
+            // EndOfWal, converting into a writer at offset 0.
+            let durable = gen_watermark::read(&gen_path)?;
+            let mut iter = wal.wal_iterator_for_writer(durable)?;
             loop {
                 match iter.next() {
                     Ok(_) => continue,
@@ -576,8 +600,13 @@ impl Db {
             let writer = iter.into_writer(None);
             wals.push(wal);
             writers.push(writer);
+            paths.push(gen_path);
         }
-        Ok((wals, writers))
+        Ok(GenerationWals {
+            wals,
+            writers,
+            paths,
+        })
     }
 
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
@@ -1720,8 +1749,18 @@ impl Db {
         // span several files whose background msyncs carry no completion
         // guarantee. A crash post-CR-store must not lose any side-WAL byte
         // the CR references.
-        for gen_wal in &self.generation_wals {
+        //
+        // After each sync, persist the generation's durable watermark — the
+        // side allocator's frontier, above every position this control
+        // region can reference. The next open resumes the tail scan from it,
+        // so a torn in-flight frame left below referenced frames by a crash
+        // can never truncate them (see `crate::gen_watermark`). Saved before
+        // `crs.store` so no control region ever references positions above
+        // the persisted watermark.
+        for (idx, gen_wal) in self.generation_wals.iter().enumerate() {
+            let durable = self.generation_writers[idx].position();
             gen_wal.fsync_all()?;
+            gen_watermark::save(&self.generation_paths[idx], durable)?;
         }
         // Persist the control region BEFORE unlinking files. A crash between
         // these steps must leave the on-disk CR consistent with the files

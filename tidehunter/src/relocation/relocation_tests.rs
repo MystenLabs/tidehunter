@@ -2869,6 +2869,159 @@ fn test_multi_gen_update_promoted_key_in_loaded_cell() {
     );
 }
 
+// Mid-WAL corruption below the side WAL's durable watermark must not make
+// tail rediscovery truncate — or hand back for re-use — frames the control
+// region references. Side WALs are not replayed, and index blobs reference
+// any completed side-WAL frame regardless of the side tracker's frontier,
+// so a write that was in flight at a crash can sit torn *below* frames a
+// persisted control region points at. The watermark (`gen0001/durable`)
+// records the side allocator's frontier at the last control-region store:
+// the open-time scan resumes from it instead of offset 0, so garbage below
+// it can neither stop the scan early (zeroing the fragment tail) nor
+// rewind the writer over durable frames.
+#[test]
+fn test_side_wal_tail_rediscovery_respects_durable_watermark() {
+    let dir = tempdir::TempDir::new("test_side_wal_watermark").unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    config.wal_generations = 2;
+    let config = Arc::new(config);
+
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new().with_promote_during_relocation(true),
+    );
+    // Filler traffic lives in its own keyspace, creating the WAL span
+    // relocation needs; only the "k" records are promoted into the side WAL.
+    ksb.add_key_space_config("fill", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    let key_shape = ksb.build();
+
+    let big = |b: u8| -> Vec<u8> { vec![b; 12 * 1000] };
+
+    let durable_after_first_pass;
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        let fill = db.ks("fill");
+        for i in 0..6u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        for i in 1000..3000u64 {
+            db.insert(fill, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        let cp = db.checkpoint();
+        for i in 3000..3100u64 {
+            db.insert(fill, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        db.start_blocking_relocation();
+        drop(cp);
+        assert_eq!(
+            metrics.relocation_kept.with_label_values(&["k"]).get(),
+            6,
+            "all six keys must be promoted into the side WAL"
+        );
+        durable_after_first_pass = db.generation_writers[0].position();
+        // Fsyncs the side WAL and persists its durable watermark + the CR.
+        db.force_rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+
+    // Corrupt bytes inside the second promoted frame (~14 KiB into the side
+    // WAL) — the shape a torn in-flight write leaves behind.
+    {
+        use std::os::unix::fs::FileExt;
+        let gen_file = dir.path().join("gen0001").join(format!("wal_{:016x}", 0));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&gen_file)
+            .unwrap();
+        file.write_all_at(&[0xAB; 16], 14 * 1024).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        let fill = db.ks("fill");
+        // Frames beyond the corrupted one must still be readable — the tail
+        // scan must not have zeroed them.
+        for i in [0u64, 2, 3, 5] {
+            assert_eq!(
+                db.get(ks, &i.to_be_bytes()).unwrap(),
+                Some(big(7).into()),
+                "key {i} must survive reopen despite unrelated corruption below the watermark"
+            );
+        }
+        // The corrupted frame itself is unreadable, loudly.
+        assert!(
+            db.get(ks, &1u64.to_be_bytes()).is_err(),
+            "the corrupted frame must surface as a read error, not silent data"
+        );
+        // The tail scan resumed from the watermark: garbage below it must
+        // never rewind the writer over durable frames.
+        assert!(
+            db.generation_writers[0].position() >= durable_after_first_pass,
+            "side writer must resume at or above the durable watermark"
+        );
+        // A second promotion pass must append beyond the durable tail, never
+        // over surviving frames.
+        db.insert(ks, 100u64.to_be_bytes().to_vec(), big(8))
+            .unwrap();
+        for i in 4000..6000u64 {
+            db.insert(fill, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        let cp = db.checkpoint();
+        for i in 6000..6100u64 {
+            db.insert(fill, i.to_be_bytes().to_vec(), big(7)).unwrap();
+        }
+        db.start_blocking_relocation();
+        drop(cp);
+        assert!(
+            db.generation_writers[0].position() > durable_after_first_pass,
+            "second promotion pass must append to the side WAL"
+        );
+        assert_eq!(
+            db.get(ks, &100u64.to_be_bytes()).unwrap(),
+            Some(big(8).into()),
+            "newly promoted key must be readable through the side WAL"
+        );
+        assert_eq!(
+            db.get(ks, &3u64.to_be_bytes()).unwrap(),
+            Some(big(7).into()),
+            "promoting after reopen must not overwrite surviving frames"
+        );
+        db.force_rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.ks("k");
+    for (i, b) in [(0u64, 7u8), (3, 7), (5, 7), (100, 8)] {
+        assert_eq!(
+            db.get(ks, &i.to_be_bytes()).unwrap(),
+            Some(big(b).into()),
+            "key {i} must be readable after the second restart"
+        );
+    }
+}
+
 // Opening a Db with `promote_during_relocation = true` on a keyspace but
 // `Config::wal_generations < 2` is a misconfiguration — the relocator would
 // silently fall back to G0 promotion (== single-WAL behavior), defeating the
