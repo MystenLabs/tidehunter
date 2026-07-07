@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tidehunter::config::Config;
 use tidehunter::db::Db;
-use tidehunter::key_shape::{KeyShape, KeyShapeBuilder, KeySpace, KeyType};
+use tidehunter::key_shape::{KeyShape, KeyShapeBuilder, KeyType};
 use tidehunter::metrics::Metrics;
 use tidehunter::{RelocationStrategy, compute_target_position_from_ratio};
 
@@ -39,7 +39,6 @@ macro_rules! th_assert_always {
 #[derive(Clone)]
 struct Space {
     name: &'static str,
-    ks: KeySpace,
     key_len: usize,
     salt: u64,
 }
@@ -170,27 +169,25 @@ impl Harness {
         fs::create_dir_all(&snapshot_root).expect("create harness snapshot directory");
 
         let mut key_shape_builder = KeyShapeBuilder::new();
-        let main = key_shape_builder.add_key_space("main", 8, 8, KeyType::uniform(16));
-        let secondary = key_shape_builder.add_key_space("secondary", 4, 8, KeyType::uniform(16));
-        let durable = key_shape_builder.add_key_space("durable", 8, 8, KeyType::uniform(16));
+        key_shape_builder
+            .add_key_space("main", 8, 8, KeyType::uniform(16))
+            .add_key_space("secondary", 4, 8, KeyType::uniform(16))
+            .add_key_space("durable", 8, 8, KeyType::uniform(16));
         let key_shape = key_shape_builder.build();
 
         let spaces = vec![
             Space {
                 name: "main",
-                ks: main,
                 key_len: 8,
                 salt: 0xa4a4_0000_0000_0001,
             },
             Space {
                 name: "secondary",
-                ks: secondary,
                 key_len: 4,
                 salt: 0xb5b5_0000_0000_0002,
             },
             Space {
                 name: "durable",
-                ks: durable,
                 key_len: 8,
                 salt: 0xc6c6_0000_0000_0003,
             },
@@ -325,7 +322,7 @@ impl Harness {
         self.model = (0..self.spaces.len()).map(|_| BTreeMap::new()).collect();
 
         for (space_idx, space) in self.spaces.iter().enumerate() {
-            let entries = collect_iterator(db.iterator(space.ks), 0, space.name);
+            let entries = collect_iterator(db.iterator(db.ks(space.name)), 0, space.name);
             for (key, value) in entries {
                 let decoded = validate_value(space_idx, &key, &value).unwrap_or_else(|err| {
                     sdk::unreachable(&format!(
@@ -356,8 +353,8 @@ impl Harness {
         let value = self.make_value(DURABLE_SPACE_INDEX, &key, version, rng);
         let space = self.spaces[DURABLE_SPACE_INDEX].clone();
 
-        self.db()
-            .insert(space.ks, key.clone(), value.clone())
+        let db = self.db();
+        db.insert(db.ks(space.name), key.clone(), value.clone())
             .unwrap_or_else(|err| panic!("durable insert failed at op {op_idx}: {err:?}"));
         self.model[DURABLE_SPACE_INDEX].insert(key.clone(), value);
         self.verify_key(op_idx, DURABLE_SPACE_INDEX, &key);
@@ -371,8 +368,8 @@ impl Harness {
         let value = self.make_value(space_idx, &key, version, rng);
         let space = self.spaces[space_idx].clone();
 
-        self.db()
-            .insert(space.ks, key.clone(), value.clone())
+        let db = self.db();
+        db.insert(db.ks(space.name), key.clone(), value.clone())
             .unwrap_or_else(|err| panic!("insert failed at op {op_idx}: {err:?}"));
         self.model[space_idx].insert(key.clone(), value);
         self.verify_key(op_idx, space_idx, &key);
@@ -383,8 +380,8 @@ impl Harness {
         let key = self.random_key(space_idx, rng);
         let space = self.spaces[space_idx].clone();
 
-        self.db()
-            .remove(space.ks, key.clone())
+        let db = self.db();
+        db.remove(db.ks(space.name), key.clone())
             .unwrap_or_else(|err| panic!("remove failed at op {op_idx}: {err:?}"));
         self.model[space_idx].remove(&key);
         self.verify_key(op_idx, space_idx, &key);
@@ -413,7 +410,7 @@ impl Harness {
         let space = &self.spaces[space_idx];
         let expected = self.model[space_idx].contains_key(&key);
         let actual = db
-            .exists(space.ks, &key)
+            .exists(db.ks(space.name), &key)
             .unwrap_or_else(|err| panic!("exists failed at op {op_idx}: {err:?}"));
         th_assert_always!(
             actual == expected,
@@ -447,14 +444,14 @@ impl Harness {
                 let version = self.next_value_version;
                 self.next_value_version += 1;
                 let value = self.make_value(space_idx, &key, version, rng);
-                batch.write(space.ks, key.clone(), value.clone());
+                batch.write(db.ks(space.name), key.clone(), value.clone());
                 ops.push(BatchOp::Insert {
                     space: space_idx,
                     key,
                     value,
                 });
             } else {
-                batch.delete(space.ks, key.clone());
+                batch.delete(db.ks(space.name), key.clone());
                 ops.push(BatchOp::Remove {
                     space: space_idx,
                     key,
@@ -636,7 +633,7 @@ impl Harness {
         for version in 1..=self.checkpoint_version {
             let key = durable_key(version);
             let value = db
-                .get(space.ks, &key)
+                .get(db.ks(space.name), &key)
                 .unwrap_or_else(|err| panic!("durable get failed at op {op_idx}: {err:?}"));
             th_assert_always!(
                 value.is_some(),
@@ -666,7 +663,7 @@ impl Harness {
         let space = &self.spaces[space_idx];
         let expected = self.model[space_idx].get(key).cloned();
         let actual = db
-            .get(space.ks, key)
+            .get(db.ks(space.name), key)
             .unwrap_or_else(|err| panic!("get failed at op {op_idx}: {err:?}"))
             .map(|value| value.as_ref().to_vec());
 
@@ -696,7 +693,7 @@ impl Harness {
         );
 
         let exists = db
-            .exists(space.ks, key)
+            .exists(db.ks(space.name), key)
             .unwrap_or_else(|err| panic!("exists failed at op {op_idx}: {err:?}"));
         th_assert_always!(
             exists == expected.is_some(),
@@ -709,7 +706,7 @@ impl Harness {
     fn verify_iterator_full(&self, op_idx: u64, space_idx: usize) {
         let db = self.db();
         let space = &self.spaces[space_idx];
-        let actual = collect_iterator(db.iterator(space.ks), op_idx, space.name);
+        let actual = collect_iterator(db.iterator(db.ks(space.name)), op_idx, space.name);
         self.validate_iterator_values(op_idx, space_idx, &actual, false);
         let expected: Vec<(Vec<u8>, Vec<u8>)> = self.model[space_idx]
             .iter()
@@ -728,7 +725,7 @@ impl Harness {
             std::mem::swap(&mut lower, &mut upper);
         }
 
-        let mut iterator = db.iterator(space.ks);
+        let mut iterator = db.iterator(db.ks(space.name));
         iterator.set_lower_bound(lower.clone());
         iterator.set_upper_bound(upper.clone());
 
