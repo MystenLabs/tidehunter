@@ -18,7 +18,6 @@ use tidehunter::index::index_format::IndexFormat;
 use tidehunter::index::index_table::IndexTable;
 use tidehunter::index::lookup_header::LookupHeaderIndex;
 use tidehunter::index::uniform_lookup::UniformLookupIndex;
-use tidehunter::key_shape::KeySpace;
 use tidehunter::key_shape::{KeyShape, KeyType};
 use tidehunter::lookup::FileRange;
 use tidehunter::metrics::Metrics;
@@ -37,8 +36,8 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     file.write_all(&n_indices.to_be_bytes())?;
 
     // Create KeyShape for the benchmark
-    let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::uniform(1)); // Using 32-byte keys
-    let ks_desc = key_shape.ks(ks);
+    let key_shape = KeyShape::new_single(32, 1, KeyType::uniform(1)); // Using 32-byte keys
+    let ks_desc = key_shape.iter_ks().next().unwrap();
 
     let start = Instant::now();
 
@@ -170,7 +169,6 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 struct IndexBenchmark {
     readers: Vec<FileRange>,
     key_shape: KeyShape,
-    ks: KeySpace,
 }
 
 impl IndexBenchmark {
@@ -203,13 +201,9 @@ impl IndexBenchmark {
             ));
         }
 
-        let (key_shape, ks) = KeyShape::new_single(32, 1, KeyType::uniform(1));
+        let key_shape = KeyShape::new_single(32, 1, KeyType::uniform(1));
 
-        Ok(Self {
-            readers,
-            key_shape,
-            ks,
-        })
+        Ok(Self { readers, key_shape })
     }
 
     fn run_benchmark_multithreaded<P: IndexFormat + Clone + Send + 'static>(
@@ -225,7 +219,7 @@ impl IndexBenchmark {
         );
 
         // Use thread::scope to manage threads and collect results
-        let ks_desc = self.key_shape.ks(self.ks);
+        let ks_desc = self.key_shape.iter_ks().next().unwrap();
         let start = Instant::now();
 
         let thread_durations = thread::scope(|s| {

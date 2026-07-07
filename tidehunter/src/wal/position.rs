@@ -137,6 +137,12 @@ impl LastProcessed {
         self.0
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)] // Used by benches/index_iter_benchmarks to drive as-of lookups
+    pub fn from_u64_for_test(value: u64) -> Self {
+        Self(value)
+    }
+
     /// Returns whether the position is processed(included in the index).
     pub(crate) fn is_processed<T: HasOffset>(self, pos: &T) -> bool {
         // Offset is processed if it is below (but not equal) to last_processed position

@@ -26,12 +26,13 @@ fn build_bench_db(record_count: usize) -> BenchDb {
     std::fs::create_dir_all(&path).unwrap();
 
     let mut builder = KeyShapeBuilder::new();
-    let ks = builder.add_key_space("ks", 8, 32, KeyType::uniform(8));
+    builder.add_key_space("ks", 8, 32, KeyType::uniform(8));
     let key_shape = builder.build();
 
     let config = Arc::new(Config::default());
     let metrics = Metrics::new();
     let db = Db::open(&path, key_shape, config, metrics).unwrap();
+    let ks = db.ks("ks");
 
     let batch_size = 100;
     let mut i = 0;

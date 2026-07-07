@@ -284,7 +284,7 @@ pub mod test {
 
     use crate::index::index_format::Direction;
     use crate::index::index_format::binary_search;
-    use crate::key_shape::{KeyType, MAX_U32_PLUS_ONE};
+    use crate::key_shape::{KeySpace, KeyType, MAX_U32_PLUS_ONE};
     use crate::lookup::RandomRead;
     use crate::{
         index::{index_format::IndexFormat, index_table::IndexTable},
@@ -333,7 +333,8 @@ pub mod test {
 
     pub fn test_index_lookup_inner(pi: &impl IndexFormat) {
         let metrics = Metrics::new();
-        let (shape, ks) = KeyShape::new_single(16, 8, KeyType::uniform(8));
+        let shape = KeyShape::new_single(16, 8, KeyType::uniform(8));
+        let ks = KeySpace::first();
         let ks = shape.ks(ks);
         let mut index = IndexTable::default();
         index.insert(k128(1), w(5));
@@ -376,7 +377,8 @@ pub mod test {
         let metrics = Metrics::new();
         const M: usize = 8;
         const P: usize = 8;
-        let (shape, ks) = KeyShape::new_single(4, M, KeyType::uniform(P));
+        let shape = KeyShape::new_single(4, M, KeyType::uniform(P));
+        let ks = KeySpace::first();
         let ks = shape.ks(ks);
         let mut index = IndexTable::default();
         let mut rng = ThreadRng::default();
@@ -505,7 +507,8 @@ pub mod test {
     /// Generic test for next_entry_unloaded that can be used by both index implementations
     pub fn test_next_entry_unloaded_inner(index_format: &impl IndexFormat) {
         let metrics = Metrics::new();
-        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id);
 
         // Create an index with sorted entries
@@ -645,7 +648,8 @@ pub mod test {
     /// Generic test for an empty index
     pub fn test_next_entry_unloaded_empty_index_inner(index_format: &impl IndexFormat) {
         let metrics = Metrics::new();
-        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id);
 
         // Create an empty index

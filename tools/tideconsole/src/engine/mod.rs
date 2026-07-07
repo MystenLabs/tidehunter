@@ -318,8 +318,7 @@ pub fn create_engine(ctx: Arc<Mutex<ConsoleContext>>) -> Engine {
                         })?
                         .clone()
                         .cast::<i64>() as usize;
-                    let _: KeySpace =
-                        builder.add_key_space(&name, key_size, 16, KeyType::uniform(key_size));
+                    builder.add_key_space(&name, key_size, 16, KeyType::uniform(key_size));
                 }
                 let key_shape = builder.build();
                 let config = Config::default();

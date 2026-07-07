@@ -686,18 +686,19 @@ impl<'a> IndexTableHeaderBuilder<'a> {
 mod tests {
     use super::*;
     use crate::index::index_format::test::*;
-    use crate::key_shape::{KeyIndexing, KeyShape, KeyType};
+    use crate::key_shape::{KeyIndexing, KeyShape, KeySpace, KeyType};
     use minibytes::Bytes;
 
     #[test]
     fn test_varlen_index_lookup_and_roundtrip() {
         let metrics = Metrics::new();
-        let (shape, ks_id) = KeyShape::new_single_config_indexing(
+        let shape = KeyShape::new_single_config_indexing(
             KeyIndexing::variable_length(),
             1,
             KeyType::uniform(1),
             Default::default(),
         );
+        let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id);
 
         let mut index = IndexTable::default();
@@ -781,12 +782,13 @@ mod tests {
     /// pointing at offset `u64::MAX`, silently losing the tombstone.
     #[test]
     fn test_varlen_tombstone_roundtrip() {
-        let (shape, ks_id) = KeyShape::new_single_config_indexing(
+        let shape = KeyShape::new_single_config_indexing(
             KeyIndexing::variable_length(),
             1,
             KeyType::uniform(1),
             Default::default(),
         );
+        let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id);
         let index_format = LookupHeaderIndex;
 
@@ -858,7 +860,8 @@ mod tests {
     fn test_next_entry_micro_cell_boundary() {
         let metrics = Metrics::new();
         // Create a key shape with a larger key space to ensure multiple micro cells
-        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id);
 
         // Create an index with entries that span multiple micro cells
@@ -943,7 +946,8 @@ mod tests {
     fn test_next_entry_cache_reduces_io() {
         let metrics = Metrics::new();
         // Use a small key space so all keys land in few micro-cells.
-        let (shape, ks_id) = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+        let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id);
 
         let mut table = IndexTable::default();
@@ -1019,12 +1023,13 @@ mod tests {
     #[test]
     fn test_varlen_next_entry_unloaded() {
         let metrics = Metrics::new();
-        let (shape, ks_id) = KeyShape::new_single_config_indexing(
+        let shape = KeyShape::new_single_config_indexing(
             KeyIndexing::variable_length(),
             1,
             KeyType::uniform(1),
             Default::default(),
         );
+        let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id);
 
         // Build a sorted key list to compare against iterator output.

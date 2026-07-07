@@ -32,7 +32,7 @@ use layout::WalLayout;
 use mapper::WalMapper;
 use position::{LastProcessed, MapId, WalPosition};
 use syncer::WalSyncer;
-use tracker::{WalGuard, WalTracker};
+use tracker::{WalGuard, WalTracker, WalTrackerLatch};
 
 pub struct WalWriter {
     wal: Arc<Wal>,
@@ -174,6 +174,22 @@ impl WalWriter {
         self.wal_tracker.last_processed()
     }
 
+    /// Acquires a latch that pins the externally observed `last_processed`
+    /// position (see [`WalTrackerLatch`]). Blocks until every position below the
+    /// latch's [`WalTrackerLatch::position`] (the received frontier captured
+    /// when the latch was acquired) has been processed into the in-memory index.
+    /// While the returned latch is held, [`Self::last_processed`] will not
+    /// advance past that position.
+    pub fn latch(&self) -> WalTrackerLatch {
+        self.wal_tracker.latch()
+    }
+
+    /// Releases a latch acquired via [`Self::latch`] (see
+    /// [`WalTracker::release_latch`]).
+    pub fn release_latch(&self, latch: WalTrackerLatch) {
+        self.wal_tracker.release_latch(latch)
+    }
+
     /// Requests deletion of WAL files that have been fully processed by the relocation process up to the watermark position.
     ///
     /// Given watermark positions will be preserved.
@@ -203,7 +219,6 @@ impl WalWriter {
         Ok(())
     }
 
-    #[cfg(test)]
     /// Waits until wal_tracker processes all in-flight messages.
     pub fn wal_tracker_barrier(&self) {
         self.wal_tracker.barrier()

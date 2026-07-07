@@ -185,6 +185,12 @@ pub struct Metrics {
     pub wal_write_wait: MetricIntCounter,
     pub wal_synced_position: MetricIntGaugeVec,
     pub wal_last_processed_position: MetricIntGaugeVec,
+    /// Internal `last_processed` tracked by the WAL tracker. While a latch is
+    /// held this keeps advancing even though `wal_last_processed_position`
+    /// (the externally observed value) is pinned; the gap is the latch lag.
+    pub wal_internal_last_processed_position: MetricIntGaugeVec,
+    /// Number of latches currently held on the WAL tracker.
+    pub wal_active_latches: MetricIntGaugeVec,
     pub db_op_mcs: MetricHistogramVec,
     pub map_time_mcs: MetricHistogram,
     pub wal_mapper_time_mcs: MetricIntCounter,
@@ -410,6 +416,13 @@ impl Metrics {
                 registry,
                 enabled
             ),
+            wal_internal_last_processed_position: gauge_vec!(
+                "wal_internal_last_processed_position",
+                &["kind"],
+                registry,
+                enabled
+            ),
+            wal_active_latches: gauge_vec!("wal_active_latches", &["kind"], registry, enabled),
             db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry, enabled),
             map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry, enabled),
             wal_mapper_time_mcs: counter!("wal_mapper_time_mcs", registry, enabled),

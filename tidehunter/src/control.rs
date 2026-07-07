@@ -41,8 +41,10 @@ pub struct ControlRegion {
     /// 0 when wal is empty or nothing has been processed
     last_position: u64,
     snapshot: LargeTableContainer<SnapshotEntryData>,
-    /// Keyspace names in order - used to verify that keyspaces haven't been reordered
-    /// or inserted in the middle. Only new keyspaces can be added at the end.
+    /// Keyspace names in canonical id order — used to verify that the
+    /// canonical shape resolved at open matches the one this snapshot was
+    /// written with, and to recover the canonical order for databases that
+    /// predate the shape file.
     #[serde(default)]
     keyspace_names: Vec<String>,
 }
@@ -240,19 +242,24 @@ impl ControlRegion {
         }
     }
 
+    /// Verifies that the canonical `key_shape` matches the shape this control
+    /// region was written with. `Db::open` resolves the declared keyspace
+    /// order to the canonical one before reading the control region, so a
+    /// mismatch here means the canonical registry (shape file) and the
+    /// control region have diverged — not a user-level reorder.
     fn verify_shape(&self, key_shape: &KeyShape) {
         let snapshot_len = self.snapshot.data.len();
         let num_ks = key_shape.num_ks();
 
-        // We allow adding keyspaces at the end, but not removing or reordering
+        // We allow adding keyspaces at the end of the canonical order, but
+        // not removing them
         if snapshot_len > num_ks {
             panic!(
                 "Control region has {snapshot_len} key spaces, while configuration has {num_ks}. Removing key spaces is not supported"
             );
         }
 
-        // Verify that existing keyspaces match by name in the same order
-        // This ensures that keyspaces are only added at the end, not inserted in the middle
+        // Verify that existing keyspaces match by name in canonical order
         for (idx, ks_desc) in key_shape.iter_ks().enumerate().take(snapshot_len) {
             let current_name = ks_desc.name();
 
@@ -261,10 +268,9 @@ impl ControlRegion {
                 let stored_name = &self.keyspace_names[idx];
                 if current_name != stored_name {
                     panic!(
-                        "Keyspace mismatch at position {idx}: control region has keyspace '{stored_name}', \
-                         but configuration has '{current_name}'. \
-                         Reordering or renaming keyspaces is not supported. \
-                         Only adding new keyspaces at the end is allowed."
+                        "Keyspace mismatch at canonical position {idx}: control region has keyspace '{stored_name}', \
+                         but configuration resolved to '{current_name}'. \
+                         The shape file and control region disagree; renaming keyspaces is not supported."
                     );
                 }
             }
@@ -502,12 +508,11 @@ mod tests {
     /// Returns a minimal key_shape with one uniform keyspace of a few cells,
     /// suitable for round-tripping control regions through disk.
     fn tiny_shape() -> KeyShape {
-        let (shape, _ks) = KeyShape::new_single(
+        KeyShape::new_single(
             /*key_size=*/ 8,
             /*mutexes=*/ 2,
             KeyType::Uniform(UniformKeyConfig::new(/*cells_per_mutex=*/ 2)),
-        );
-        shape
+        )
     }
 
     #[test]

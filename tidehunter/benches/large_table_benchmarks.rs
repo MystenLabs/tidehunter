@@ -22,7 +22,7 @@ fn benchmark_large_table_insert(c: &mut Criterion) {
 
                 // Create key shape with a single keyspace matching the key size
                 let mut builder = KeyShapeBuilder::new();
-                let ks = builder.add_key_space("bench", key_size, 16, KeyType::uniform(16));
+                builder.add_key_space("bench", key_size, 16, KeyType::uniform(16));
                 let key_shape = builder.build();
 
                 // Use default config
@@ -36,6 +36,7 @@ fn benchmark_large_table_insert(c: &mut Criterion) {
                     Metrics::new(),
                 )
                 .unwrap();
+                let ks = db.ks("bench");
 
                 // Create test data with fixed value size of 256 bytes
                 let value = vec![42u8; 256];
@@ -79,7 +80,7 @@ fn benchmark_large_table_insert_batch(c: &mut Criterion) {
 
                     // Create key shape with a single keyspace
                     let mut builder = KeyShapeBuilder::new();
-                    let ks = builder.add_key_space("bench", *key_size, 16, KeyType::uniform(16));
+                    builder.add_key_space("bench", *key_size, 16, KeyType::uniform(16));
                     let key_shape = builder.build();
 
                     // Use default config
@@ -93,6 +94,7 @@ fn benchmark_large_table_insert_batch(c: &mut Criterion) {
                         Metrics::new(),
                     )
                     .unwrap();
+                    let ks = db.ks("bench");
 
                     // Create test data with fixed value size of 256 bytes
                     let value = vec![42u8; 256];
@@ -134,7 +136,7 @@ fn benchmark_large_table_insert_with_overwrites(c: &mut Criterion) {
 
                 // Create key shape with a single keyspace
                 let mut builder = KeyShapeBuilder::new();
-                let ks = builder.add_key_space("bench", key_size, 16, KeyType::uniform(16));
+                builder.add_key_space("bench", key_size, 16, KeyType::uniform(16));
                 let key_shape = builder.build();
 
                 // Use default config
@@ -148,6 +150,7 @@ fn benchmark_large_table_insert_with_overwrites(c: &mut Criterion) {
                     Metrics::new(),
                 )
                 .unwrap();
+                let ks = db.ks("bench");
 
                 // Pre-populate with some keys
                 let value = vec![42u8; 256];

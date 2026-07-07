@@ -47,5 +47,15 @@ required-features = ["test-utils"]
 name = "wal_allocator_benchmarks"
 harness = false
 
+[[bench]]
+name = "index_iter_benchmarks"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "index_insert_benchmarks"
+harness = false
+required-features = ["test-utils"]
+
 [lints.clippy]
 len_without_is_empty = "allow"

@@ -137,12 +137,12 @@ pub(crate) fn replay_wal(
             }
             WalEntry::DropCells(ks, from_cell, to_cell) => {
                 metrics.replayed_wal_records.inc();
+                let context = contexts.ks_context(ks);
                 // Drop on both sides: the buffer (so pre-drop writes don't
                 // resurrect at apply time) and `large_table` (in case the
                 // cells exist as Unloaded entries from a CR snapshot loaded
                 // at replay start).
                 buffer.drop_cells_in_range(ks, &from_cell, &to_cell);
-                let context = contexts.ks_context(ks);
                 large_table.drop_cells_in_range(context, &from_cell, &to_cell);
             }
             entry @ WalEntry::CompressedBatch(..) => {

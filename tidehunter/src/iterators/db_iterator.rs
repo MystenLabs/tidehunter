@@ -1,12 +1,60 @@
 use crate::cell::CellId;
+use crate::checkpoint::DbCheckpoint;
 use crate::db::{Db, DbResult};
 use crate::index::index_format::IndexIterCaches;
-use crate::key_shape::KeySpace;
+use crate::iterators::IteratorResult;
+use crate::key_shape::{KeySpace, KeySpaceDesc};
 use minibytes::Bytes;
 use std::sync::Arc;
 
+/// Backing store a [`DbIterator`] walks: either a live [`Db`] or a
+/// point-in-time [`DbCheckpoint`]. Holding the `Arc` keeps the source alive
+/// for the iterator's lifetime — for a checkpoint that also pins its latch.
+/// `ks`/`next_cell` are identical for both; only `next_entry` differs (the
+/// checkpoint filters to its frontier), so the read-mode distinction does not
+/// leak into the iterator logic.
+pub(crate) enum IterationSource {
+    Db(Arc<Db>),
+    Checkpoint(Arc<DbCheckpoint>),
+}
+
+impl IterationSource {
+    fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
+        match self {
+            IterationSource::Db(db) => db.ks_desc(ks),
+            IterationSource::Checkpoint(cp) => cp.ks(ks),
+        }
+    }
+
+    fn next_cell(&self, ks: &KeySpaceDesc, cell: &CellId, reverse: bool) -> Option<CellId> {
+        match self {
+            IterationSource::Db(db) => db.next_cell(ks, cell, reverse),
+            IterationSource::Checkpoint(cp) => cp.next_cell(ks, cell, reverse),
+        }
+    }
+
+    fn next_entry(
+        &self,
+        ks: KeySpace,
+        cell: CellId,
+        prev_key: Option<Bytes>,
+        end_cell_exclusive: &Option<CellId>,
+        reverse: bool,
+        cache: &mut IndexIterCaches,
+    ) -> DbResult<Option<IteratorResult<Bytes>>> {
+        match self {
+            IterationSource::Db(db) => {
+                db.next_entry(ks, cell, prev_key, end_cell_exclusive, reverse, cache)
+            }
+            IterationSource::Checkpoint(cp) => {
+                cp.next_entry(ks, cell, prev_key, end_cell_exclusive, reverse, cache)
+            }
+        }
+    }
+}
+
 pub struct DbIterator {
-    db: Arc<Db>,
+    source: IterationSource,
     ks: KeySpace,
     cell: Option<CellId>,
     prev_key: Option<Bytes>,
@@ -22,12 +70,12 @@ pub struct DbIterator {
 }
 
 impl DbIterator {
-    pub(crate) fn new(db: Arc<Db>, ks: KeySpace) -> Self {
-        let ksd = db.ks(ks);
+    pub(crate) fn new(source: IterationSource, ks: KeySpace) -> Self {
+        let ksd = source.ks(ks);
         let with_key_reduction = ksd.need_check_index_key();
         let cell = ksd.first_cell();
         Self {
-            db,
+            source,
             ks,
             cell: Some(cell),
             prev_key: None,
@@ -45,12 +93,12 @@ impl DbIterator {
     pub fn set_lower_bound(&mut self, lower_bound: impl Into<Bytes>) {
         self.iter_cache.clear();
         let full_lower_bound = lower_bound.into();
-        let ks = self.db.ks(self.ks);
+        let ks = self.source.ks(self.ks);
         ks.assert_supports_iterator_bound();
         let reduced_lower_bound = ks.reduced_key_bytes(full_lower_bound.clone());
         if self.reverse {
             self.end_cell_exclusive =
-                self.db
+                self.source
                     .next_cell(ks, &ks.cell_id(&reduced_lower_bound), true);
             // When iterating in reverse with only a lower bound,
             // we need to start from the end if no upper bound has been set yet
@@ -76,7 +124,7 @@ impl DbIterator {
     pub fn set_upper_bound(&mut self, upper_bound: impl Into<Bytes>) {
         self.iter_cache.clear();
         let full_upper_bound = upper_bound.into();
-        let ks = self.db.ks(self.ks);
+        let ks = self.source.ks(self.ks);
         ks.assert_supports_iterator_bound();
         let reduced_upper_bound = ks.reduced_key_bytes(full_upper_bound.clone());
         if self.reverse {
@@ -93,7 +141,7 @@ impl DbIterator {
             };
         } else {
             self.end_cell_exclusive =
-                self.db
+                self.source
                     .next_cell(ks, &ks.cell_id(&reduced_upper_bound), false);
         }
         self.full_upper_bound = Some(full_upper_bound);
@@ -101,7 +149,7 @@ impl DbIterator {
 
     pub fn reverse(&mut self) {
         self.iter_cache.clear();
-        let ks = self.db.ks(self.ks);
+        let ks = self.source.ks(self.ks);
         ks.assert_supports_iterator_bound();
         self.reverse = !self.reverse;
         if self.full_upper_bound.is_none() {
@@ -128,7 +176,7 @@ impl DbIterator {
                 self.check_bounds(prev_key)?;
             }
         }
-        match self.db.next_entry(
+        match self.source.next_entry(
             self.ks,
             cell,
             prev_key,
@@ -138,7 +186,7 @@ impl DbIterator {
         ) {
             Ok(Some(result)) => {
                 self.cell = result.cell;
-                let ks = self.db.ks(self.ks);
+                let ks = self.source.ks(self.ks);
                 self.prev_key = Some(ks.reduced_key_bytes(result.key.clone()));
                 self.check_bounds(&result.key)?;
                 Ok(Some(Ok((result.key, result.value))))

@@ -10,7 +10,7 @@ use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Debug;
 use std::num::NonZeroUsize;
@@ -90,7 +90,7 @@ impl Default for KeySpaceConfig {
 ///
 /// This allows for various use cases such as
 /// * Key reduction (reducing index size by using fewer bytes from the key in the index)
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyIndexing {
     Fixed(usize),
     Reduction(usize, Range<usize>),
@@ -98,18 +98,18 @@ pub enum KeyIndexing {
     Hash,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyType {
     Uniform(UniformKeyConfig),
     PrefixedUniform(PrefixedUniformKeyConfig),
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniformKeyConfig {
     cells_per_mutex: usize,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrefixedUniformKeyConfig {
     /// First prefix_len_bytes of a key considered a 'prefix'
     prefix_len_bytes: usize,
@@ -146,13 +146,17 @@ impl KeyShapeBuilder {
         Self { key_spaces: vec![] }
     }
 
+    /// Declares a key space. The build-time order does not pin its on-disk
+    /// id — `Db::open` reconciles by name and returns the canonical
+    /// [`KeySpace`] handles via [`KeySpaces`]. Returns `&mut Self` for
+    /// chaining; obtain the handle from `Db::open`'s [`KeySpaces`].
     pub fn add_key_space(
         &mut self,
         name: impl Into<String>,
         key_size: usize,
         mutexes: usize,
         key_type: KeyType,
-    ) -> KeySpace {
+    ) -> &mut Self {
         self.add_key_space_config(name, key_size, mutexes, key_type, KeySpaceConfig::default())
     }
 
@@ -163,7 +167,7 @@ impl KeyShapeBuilder {
         mutexes: usize,
         key_type: KeyType,
         config: KeySpaceConfig,
-    ) -> KeySpace {
+    ) -> &mut Self {
         self.add_key_space_config_indexing(
             name,
             KeyIndexing::fixed(key_size),
@@ -180,8 +184,12 @@ impl KeyShapeBuilder {
         mutexes: usize,
         key_type: KeyType,
         config: KeySpaceConfig,
-    ) -> KeySpace {
+    ) -> &mut Self {
         let name = name.into();
+        assert!(
+            self.key_spaces.iter().all(|ks| ks.name() != name),
+            "Duplicate key space name '{name}'"
+        );
         assert!(mutexes > 0, "mutexes should be greater then 0");
         // also see test_prefix_falls_in_range
         assert!(
@@ -195,9 +203,9 @@ impl KeyShapeBuilder {
             u8::MAX
         );
 
-        let ks = KeySpace(self.key_spaces.len() as u8);
+        let id = KeySpace(self.key_spaces.len() as u8);
         let key_space = KeySpaceDescInner {
-            id: ks,
+            id,
             name,
             key_indexing,
             mutexes,
@@ -208,7 +216,7 @@ impl KeyShapeBuilder {
             inner: Arc::new(key_space),
         };
         self.key_spaces.push(key_space);
-        ks
+        self
     }
 
     pub fn build(self) -> KeyShape {
@@ -233,6 +241,54 @@ impl KeyShapeBuilder {
 impl KeySpaceDesc {
     pub(crate) fn check_key(&self, k: &[u8]) {
         self.key_indexing.check_key_size(k.len(), self.name());
+    }
+
+    /// Panics if `self` (a declared key space) has a different on-disk layout
+    /// than `stored` (the same-named key space recorded in the registry).
+    ///
+    /// The mutex count, key type (uniform vs prefixed, cells-per-mutex, prefix
+    /// bits) and key indexing (indexing kind and key length) all determine how
+    /// keys map to cells. Changing any of them across reopens would misroute
+    /// reads against data laid out by the original configuration, so it is
+    /// rejected loudly rather than silently corrupting.
+    pub(crate) fn assert_layout_matches(&self, stored: &KeySpaceDesc) {
+        if self.mutexes == stored.mutexes
+            && self.key_type == stored.key_type
+            && self.key_indexing == stored.key_indexing
+        {
+            return;
+        }
+        panic!(
+            "Key space '{}' was created with a different layout than the \
+             configuration declares and cannot be changed (it would misroute \
+             existing data).\n  stored:   mutexes={}, key_type={:?}, key_indexing={:?}\n  declared: mutexes={}, key_type={:?}, key_indexing={:?}",
+            self.name(),
+            stored.mutexes,
+            stored.key_type,
+            stored.key_indexing,
+            self.mutexes,
+            self.key_type,
+            self.key_indexing,
+        );
+    }
+
+    /// Returns a copy of this descriptor with the given id.
+    /// Used when reordering a declared `KeyShape` into canonical order.
+    pub(crate) fn with_id(&self, id: KeySpace) -> KeySpaceDesc {
+        if self.id == id {
+            return self.clone();
+        }
+        let inner = KeySpaceDescInner {
+            id,
+            name: self.name.clone(),
+            key_indexing: self.key_indexing.clone(),
+            mutexes: self.mutexes,
+            key_type: self.key_type,
+            config: self.config.clone(),
+        };
+        KeySpaceDesc {
+            inner: Arc::new(inner),
+        }
     }
 
     /* Nomenclature for the various conversion methods below:
@@ -614,7 +670,10 @@ impl KeyShape {
         serde_yaml::from_str(yaml)
     }
 
-    pub fn new_single(key_size: usize, mutexes: usize, key_type: KeyType) -> (Self, KeySpace) {
+    /// Builds a shape with a single keyspace named `root`. Like the builder,
+    /// it does not hand back a handle — obtain it from `Db::open`'s
+    /// [`KeySpaces`] via [`KeySpaces::single`] (or `ks("root")`).
+    pub fn new_single(key_size: usize, mutexes: usize, key_type: KeyType) -> Self {
         Self::new_single_config(key_size, mutexes, key_type, Default::default())
     }
 
@@ -623,7 +682,7 @@ impl KeyShape {
         mutexes: usize,
         key_type: KeyType,
         config: KeySpaceConfig,
-    ) -> (Self, KeySpace) {
+    ) -> Self {
         Self::new_single_config_indexing(KeyIndexing::fixed(key_size), mutexes, key_type, config)
     }
 
@@ -632,7 +691,7 @@ impl KeyShape {
         mutexes: usize,
         key_type: KeyType,
         config: KeySpaceConfig,
-    ) -> (Self, KeySpace) {
+    ) -> Self {
         assert!(
             mutexes.is_power_of_two(),
             "mutexes should be power of 2, given {mutexes}"
@@ -649,13 +708,89 @@ impl KeyShape {
             inner: Arc::new(key_space),
         };
         let key_spaces = vec![key_space];
-        let this = Self { key_spaces };
-        (this, KeySpace(0))
+        Self { key_spaces }
     }
 
     #[doc(hidden)] // Used by tools/tideconsole for iterating over keyspaces
     pub fn iter_ks(&self) -> impl Iterator<Item = &KeySpaceDesc> + '_ {
         self.key_spaces.iter()
+    }
+
+    /// Reconciles this declared shape against the canonical order the database
+    /// was created with (the `registry` shape), assigning each keyspace its
+    /// canonical id (its position in the registry). With no registry the
+    /// declared order itself is canonical.
+    ///
+    /// Matching is by name. A keyspace in the registry but absent from the
+    /// declared shape is **retained**: it keeps its canonical id and stored
+    /// configuration and stays a live keyspace internally (its data is
+    /// preserved and replayed), it is simply not exposed in the returned
+    /// [`KeySpaces`] — so re-declaring its name later reconnects to the same
+    /// id with its data intact. This mirrors RocksDB, which never drops a
+    /// column family implicitly. Declared keyspaces new to the registry are
+    /// appended after it.
+    ///
+    /// Returns the canonical-ordered shape (the full set of keyspaces ever
+    /// created, used for everything internal: WAL bytes, index, control
+    /// region), the [`KeySpaces`] map exposing the **declared** keyspaces by
+    /// name, and whether the registry changed (keyspaces appended) and must be
+    /// rewritten. Removing a keyspace from the declared shape does not change
+    /// the registry.
+    pub(crate) fn reorder_to_canonical(
+        self,
+        registry: Option<&KeyShape>,
+    ) -> (KeyShape, KeySpaces, bool) {
+        let mut ordered: Vec<KeySpaceDesc> = Vec::new();
+        let mut exposed: HashMap<String, KeySpace> = HashMap::new();
+        let mut remaining: Vec<Option<KeySpaceDesc>> =
+            self.key_spaces.into_iter().map(Some).collect();
+        let mut changed = false;
+        let next_id = |ordered: &Vec<KeySpaceDesc>| {
+            // The id must stay below u8::MAX: KeySpace::increment relies on
+            // ids never reaching 255 to avoid wrapping during iteration.
+            assert!(
+                ordered.len() < u8::MAX as usize,
+                "Maximum 255 key spaces (including retained removed key spaces) exceeded"
+            );
+            KeySpace(ordered.len() as u8)
+        };
+        let take_declared = |remaining: &mut Vec<Option<KeySpaceDesc>>, name: &str| {
+            let idx = remaining
+                .iter()
+                .position(|d| d.as_ref().is_some_and(|d| d.name() == name))?;
+            Some(remaining[idx].take().unwrap())
+        };
+        // Registry order is canonical. A declared keyspace overrides its slot
+        // (and is exposed, possibly with updated config); an undeclared
+        // registry keyspace is retained as a live orphan (registry config),
+        // not exposed.
+        for reg in registry.into_iter().flat_map(KeyShape::iter_ks) {
+            let id = next_id(&ordered);
+            match take_declared(&mut remaining, reg.name()) {
+                Some(desc) => {
+                    // The declared config overrides the registry's, but its
+                    // on-disk layout (mutexes/key type/indexing) must match.
+                    desc.assert_layout_matches(reg);
+                    exposed.insert(desc.name().to_string(), id);
+                    ordered.push(desc.with_id(id));
+                }
+                None => ordered.push(reg.with_id(id)),
+            }
+        }
+        // Declared keyspaces new to the registry are appended.
+        for desc in remaining.into_iter().flatten() {
+            changed = true;
+            let id = next_id(&ordered);
+            exposed.insert(desc.name().to_string(), id);
+            ordered.push(desc.with_id(id));
+        }
+        (
+            KeyShape {
+                key_spaces: ordered,
+            },
+            KeySpaces { by_name: exposed },
+            changed,
+        )
     }
 
     pub(crate) fn num_ks(&self) -> usize {
@@ -668,6 +803,65 @@ impl KeyShape {
             panic!("Key space {} not found", ks.0)
         };
         key_space
+    }
+}
+
+/// Canonical name → [`KeySpace`] handle map built by `Db::open` and stored in
+/// the `Db`. Not exposed directly; callers resolve handles by name through
+/// `Db::ks` / `Db::try_ks` / `Db::single_ks`.
+///
+/// The build-time declaration order of a [`KeyShape`] does not pin a key
+/// space's on-disk id; `Db::open` reconciles the declared shape against the
+/// persisted registry (matching by name, supporting reorder/add/remove) and
+/// records this map so callers address key spaces by their stable name and
+/// receive the canonical handle to use in all database operations.
+pub(crate) struct KeySpaces {
+    by_name: HashMap<String, KeySpace>,
+}
+
+impl KeySpaces {
+    /// Builds a name→handle map exposing every keyspace in `shape`. Used by
+    /// tests that construct internal structures directly from a shape rather
+    /// than through `Db::open`.
+    #[cfg(test)]
+    pub(crate) fn from_key_shape(shape: &KeyShape) -> Self {
+        let by_name = shape
+            .iter_ks()
+            .map(|ksd| (ksd.name().to_string(), ksd.id()))
+            .collect();
+        Self { by_name }
+    }
+
+    /// Canonical handle for `name`. Panics if no live key space has that name.
+    pub(crate) fn ks(&self, name: &str) -> KeySpace {
+        self.try_ks(name)
+            .unwrap_or_else(|| panic!("Unknown key space '{name}'"))
+    }
+
+    /// Canonical handle for `name`, or `None` if there is no live key space
+    /// with that name.
+    pub(crate) fn try_ks(&self, name: &str) -> Option<KeySpace> {
+        self.by_name.get(name).copied()
+    }
+
+    /// Names of all live key spaces, in arbitrary order.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.by_name.keys().map(String::as_str)
+    }
+
+    /// Canonical handle for the sole exposed key space. Panics unless exactly
+    /// one key space is exposed. Convenience for single-keyspace databases
+    /// (e.g. those built with [`KeyShape::new_single`]); always resolves to
+    /// the correct canonical id, even if the database retains other
+    /// (undeclared) key spaces ahead of it.
+    pub(crate) fn single(&self) -> KeySpace {
+        assert_eq!(
+            self.by_name.len(),
+            1,
+            "KeySpaces::single requires exactly one exposed key space, found {}",
+            self.by_name.len()
+        );
+        *self.by_name.values().next().unwrap()
     }
 }
 
@@ -1021,7 +1215,8 @@ mod tests {
 
     #[test]
     fn index_prefix_test() {
-        let (key_shape, ks) = KeyShape::new_single(4, 2, KeyType::prefix_uniform(2, 0));
+        let key_shape = KeyShape::new_single(4, 2, KeyType::prefix_uniform(2, 0));
+        let ks = KeySpace::first();
         let ks = key_shape.ks(ks);
 
         assert_eq!(c(&hex!("1234")), ks.cell_id(&hex!("12345678")));
@@ -1059,7 +1254,8 @@ mod tests {
     }
 
     fn test_prefix_falls_in_range_impl(mutexes: usize, key_type: KeyType) {
-        let (key_shape, ks) = KeyShape::new_single(32, mutexes, key_type);
+        let key_shape = KeyShape::new_single(32, mutexes, key_type);
+        let ks = KeySpace::first();
         let ks = key_shape.ks(ks);
         let mut rng = StdRng::from_seed(Default::default());
         for _ in 0..1024 {
@@ -1150,7 +1346,8 @@ mod tests {
     fn test_from_prefix_bits_8_bits() {
         // Test 8-bit prefix: first byte determines the cell
         let key_type = KeyType::from_prefix_bits(8);
-        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let key_shape = KeyShape::new_single(32, 16, key_type);
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Keys with same first byte map to same cell
@@ -1165,7 +1362,8 @@ mod tests {
     fn test_from_prefix_bits_12_bits() {
         // Test 12-bit prefix: first byte + top 4 bits of second byte
         let key_type = KeyType::from_prefix_bits(12);
-        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let key_shape = KeyShape::new_single(32, 16, key_type);
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Keys with same top 12 bits map to same cell
@@ -1189,7 +1387,8 @@ mod tests {
     fn test_from_prefix_bits_1_bit() {
         // Test 1-bit prefix: only the MSB of first byte matters
         let key_type = KeyType::from_prefix_bits(1);
-        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let key_shape = KeyShape::new_single(32, 16, key_type);
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Keys with MSB=0 map to same cell
@@ -1217,7 +1416,8 @@ mod tests {
     fn test_from_prefix_bits_9_bits() {
         // Test 9-bit prefix: first byte + top 1 bit of second byte
         let key_type = KeyType::from_prefix_bits(9);
-        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let key_shape = KeyShape::new_single(32, 16, key_type);
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Keys with same top 9 bits map to same cell
@@ -1241,7 +1441,8 @@ mod tests {
     fn test_from_prefix_bits_15_bits() {
         // Test 15-bit prefix: first byte + top 7 bits of second byte
         let key_type = KeyType::from_prefix_bits(15);
-        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let key_shape = KeyShape::new_single(32, 16, key_type);
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Keys with same top 15 bits map to same cell
@@ -1265,7 +1466,8 @@ mod tests {
     fn test_from_prefix_bits_16_bits() {
         // Test 16-bit prefix: first two bytes determine the cell
         let key_type = KeyType::from_prefix_bits(16);
-        let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+        let key_shape = KeyShape::new_single(32, 16, key_type);
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Keys with same first two bytes map to same cell
@@ -1292,7 +1494,8 @@ mod tests {
     #[test]
     fn test_cell_range_uniform() {
         // Create a key shape with 4 cells (2 mutexes, 2 cells per mutex)
-        let (key_shape, ks) = KeyShape::new_single(10, 2, KeyType::uniform(2));
+        let key_shape = KeyShape::new_single(10, 2, KeyType::uniform(2));
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Test cell 0: range 0x00000000..0x40000000
@@ -1314,7 +1517,8 @@ mod tests {
     #[test]
     fn test_cell_range_prefixed_uniform() {
         // Create a key shape with 2-byte prefix
-        let (key_shape, ks) = KeyShape::new_single(10, 16, KeyType::from_prefix_bits(16));
+        let key_shape = KeyShape::new_single(10, 16, KeyType::from_prefix_bits(16));
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Test cell [0x12, 0x34]
@@ -1333,7 +1537,8 @@ mod tests {
     #[test]
     fn test_map_key_range_to_cell_range_uniform() {
         // Create a key shape with 4 cells (2 mutexes, 2 cells per mutex)
-        let (key_shape, ks) = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let key_shape = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Each cell covers (u32::MAX + 1) / 4 = 0x40000000 u32 values
@@ -1368,7 +1573,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "from_inclusive is not the first key in its cell")]
     fn test_map_key_range_invalid_from_key_uniform() {
-        let (key_shape, ks) = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let key_shape = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // First key with non-zero byte at position 5
@@ -1382,7 +1588,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "to_inclusive is not the last key in its cell")]
     fn test_map_key_range_invalid_to_key_uniform() {
-        let (key_shape, ks) = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let key_shape = KeyShape::new_single(32, 2, KeyType::uniform(2));
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         let from_key = vec![0u8; 32];
@@ -1397,7 +1604,8 @@ mod tests {
     #[test]
     fn test_map_key_range_to_cell_range_prefixed_uniform() {
         // Create a key shape with 2-byte prefix
-        let (key_shape, ks) = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let key_shape = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Test range from one cell to another
@@ -1419,7 +1627,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "from_inclusive is not the first key in its cell")]
     fn test_map_key_range_invalid_from_key_prefixed() {
-        let (key_shape, ks) = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let key_shape = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // First key with non-zero byte after prefix
@@ -1435,7 +1644,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "to_inclusive is not the last key in its cell")]
     fn test_map_key_range_invalid_to_key_prefixed() {
-        let (key_shape, ks) = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let key_shape = KeyShape::new_single(32, 16, KeyType::prefix_uniform(2, 0));
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         let from_key = vec![0u8; 32];
@@ -1455,7 +1665,8 @@ mod tests {
         // Key length = 2 bytes, prefix = 4 bits
         // This means prefix_len_bytes = 1, cluster_bits = 4
         let key_type = KeyType::from_prefix_bits(4);
-        let (key_shape, ks) = KeyShape::new_single(2, 16, key_type);
+        let key_shape = KeyShape::new_single(2, 16, key_type);
+        let ks = KeySpace::first();
         let ksd = key_shape.ks(ks);
 
         // Test edge case: prefix 0b0000_0000 should cover 0b0000_xxxx

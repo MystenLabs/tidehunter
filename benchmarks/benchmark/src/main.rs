@@ -108,7 +108,7 @@ pub fn main() {
             }
             use crate::storage::tidehunter::TidehunterStorage;
             let mutexes = 4096 * 32;
-            let (key_shape, ks) = match config.stress_client_parameters.key_layout {
+            let key_shape = match config.stress_client_parameters.key_layout {
                 KeyLayout::Uniform => KeyShape::new_single_config(
                     32,
                     mutexes,
@@ -125,7 +125,7 @@ pub fn main() {
                 }
             };
             let storage =
-                TidehunterStorage::open(&registry, config.db_parameters, &path, (key_shape, ks));
+                TidehunterStorage::open(&registry, config.db_parameters, &path, key_shape);
             if !config.stress_client_parameters.no_snapshot {
                 report!(report, "Periodic snapshot **enabled**");
                 storage.db.start_periodic_snapshot();

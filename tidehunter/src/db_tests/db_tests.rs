@@ -6,7 +6,7 @@ use crate::failpoints::FailPoint;
 use crate::index::index_format::IndexFormatType;
 use crate::index::uniform_lookup::UniformLookupIndex;
 use crate::key_shape::{
-    Compactor, KeyIndexing, KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeyType,
+    Compactor, KeyIndexing, KeyShape, KeyShapeBuilder, KeySpace, KeySpaceConfig, KeySpaces, KeyType,
 };
 use crate::latch::Latch;
 use crate::metrics::Metrics;
@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 // see generate.py
-pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
+pub(super) fn db_test(key_shape: KeyShape) {
     let dir = tempdir::TempDir::new("test-wal").unwrap();
     let config = Arc::new(Config::small());
     {
@@ -31,6 +31,7 @@ pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
         db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
         assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
@@ -44,6 +45,7 @@ pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
         assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
         thread::sleep(Duration::from_millis(10)); // todo replace this with wal tracker barrier
@@ -62,6 +64,7 @@ pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
             metrics.clone(),
         )
         .unwrap();
+        let ks = db.single_ks();
         // nothing replayed from wal since we just rebuilt the control region
         assert_eq!(metrics.replayed_wal_records.get(), 0);
         assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
@@ -78,6 +81,7 @@ pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
             metrics.clone(),
         )
         .unwrap();
+        let ks = db.single_ks();
         assert_eq!(metrics.replayed_wal_records.get(), 1);
         assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
         assert_eq!(Some(vec![8].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
@@ -90,6 +94,7 @@ pub(super) fn db_test((key_shape, ks): (KeyShape, KeySpace)) {
             Metrics::new().clone(),
         )
         .unwrap();
+        let ks = db.single_ks();
         db.insert(ks, vec![3, 4, 5, 6], vec![9]).unwrap();
         assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
         assert_eq!(Some(vec![9].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
@@ -106,7 +111,7 @@ fn test_db_lock() {
         let db_path_str = env::var("TEST_DB_PATH").unwrap();
         let db_path = Path::new(&db_path_str);
         let config = Arc::new(Config::small());
-        let (key_shape, _) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+        let key_shape = KeyShape::new_single(8, 16, KeyType::uniform(16));
 
         let result = Db::open(db_path, key_shape, config, Metrics::new());
         std::process::exit(match (mode.as_str(), result) {
@@ -118,7 +123,7 @@ fn test_db_lock() {
 
     let dir = tempdir::TempDir::new("test-lock").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, _) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(8, 16, KeyType::uniform(16));
 
     let run_subprocess = |mode: &str| {
         Command::new(env::current_exe().unwrap())
@@ -147,8 +152,9 @@ fn test_multi_thread_write() {
     let dir = tempdir::TempDir::new("test-batch").unwrap();
     let config = Config::small();
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(8, 16, KeyType::uniform(16));
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.single_ks();
     let threads = 8u64;
     let mut jhs = Vec::with_capacity(threads as usize);
     let iterations = 256u64;
@@ -179,6 +185,65 @@ fn test_multi_thread_write() {
     }
 }
 
+// `force_rebuild_control_region` must include all recent writes in the snapshot,
+// leaving the table fully clean even when the async WAL tracker lags behind writes
+// under load (a lagging tracker used to leave flushed entries stuck dirty).
+#[test]
+fn test_force_rebuild_clean_under_load() {
+    // Spinners keep all cores busy so the WAL tracker lags behind writes.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut spinners = Vec::new();
+    for _ in 0..8 {
+        let stop = stop.clone();
+        spinners.push(thread::spawn(move || {
+            let mut x = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                std::hint::black_box(x);
+            }
+        }));
+    }
+
+    for iter in 0..60 {
+        let dir = tempdir::TempDir::new("test-rebuild-clean").unwrap();
+        let mut builder = KeyShapeBuilder::new();
+        builder.add_key_space("objects", 8, 16, KeyType::uniform(8));
+        builder.add_key_space("metadata", 8, 16, KeyType::uniform(8));
+        let key_shape = builder.build();
+        let db = Db::open(
+            dir.path(),
+            key_shape,
+            Arc::new(Config::default()),
+            Metrics::new(),
+        )
+        .unwrap();
+        let objects = db.ks("objects");
+        let metadata = db.ks("metadata");
+        for i in 0..5u8 {
+            db.insert(objects, format!("key{i:02}___").into_bytes(), vec![i; 16])
+                .unwrap();
+        }
+        for i in 0..3u8 {
+            db.insert(
+                metadata,
+                format!("key{i:02}___").into_bytes(),
+                vec![i + 10; 8],
+            )
+            .unwrap();
+        }
+        db.force_rebuild_control_region().unwrap();
+        assert!(
+            db.large_table.is_all_clean(),
+            "iter {iter}: table not clean after force_rebuild_control_region",
+        );
+    }
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for s in spinners {
+        s.join().unwrap();
+    }
+}
+
 #[test]
 fn test_batch() {
     test_batch_impl(Config::small());
@@ -194,9 +259,10 @@ fn test_batch_commit_pool() {
 fn test_batch_impl(config: Config) {
     let dir = tempdir::TempDir::new("test-batch").unwrap();
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
     let metrics = Metrics::new();
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.single_ks();
     let mut batch = db.write_batch();
     batch.write(ks, vec![5, 6, 7, 8], vec![15]);
     batch.write(ks, vec![6, 7, 8, 9], vec![17]);
@@ -246,10 +312,11 @@ fn test_batch_lru() {
 
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_value_cache_size(100);
-    let ks = ksb.add_key_space_config("ks", 4, 16, KeyType::uniform(16), ksc);
+    ksb.add_key_space_config("ks", 4, 16, KeyType::uniform(16), ksc);
     let key_shape = ksb.build();
 
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.ks("ks");
 
     // Test batch writes populate LRU cache during promote_pending
     let mut batch = db.write_batch();
@@ -318,7 +385,7 @@ fn test_batch_replay_compressed() {
 fn test_batch_replay_impl(config: Config) {
     let dir = tempdir::TempDir::new("test_batch_replay").unwrap();
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
     {
         let db = Db::open(
             dir.path(),
@@ -327,12 +394,14 @@ fn test_batch_replay_impl(config: Config) {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         let mut batch = db.write_batch();
         batch.write(ks, vec![5, 6, 7, 8], vec![15]);
         batch.write(ks, vec![6, 7, 8, 9], vec![17]);
         batch.commit().unwrap();
     }
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.single_ks();
     assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
     assert_eq!(Some(vec![17].into()), db.get(ks, &[6, 7, 8, 9]).unwrap());
 }
@@ -349,7 +418,7 @@ fn test_compressed_batch_dedups_duplicate_keys() {
     let mut config = Config::small();
     config.batch_codec = Some(BatchCodec::Lz4);
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
 
     {
         let db = Db::open(
@@ -359,6 +428,7 @@ fn test_compressed_batch_dedups_duplicate_keys() {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
 
         // Repeated inserts — last value wins.
         let mut batch = db.write_batch();
@@ -385,6 +455,7 @@ fn test_compressed_batch_dedups_duplicate_keys() {
 
     // Reopen and re-verify — replay walks the same deduped frames.
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.single_ks();
     assert_eq!(Some(vec![30].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
     assert_eq!(None, db.get(ks, &[5, 6, 7, 8]).unwrap());
     assert_eq!(Some(vec![99].into()), db.get(ks, &[9, 9, 9, 9]).unwrap());
@@ -418,7 +489,7 @@ fn test_replay_recovers_from_missing_next_fragment_file() {
     config.frag_size = 8 * 1024;
     config.wal_file_size = 8 * 1024;
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(16, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(16, 16, KeyType::uniform(16));
 
     let key_a = vec![0x01u8; 16];
     let key_b = vec![0x02u8; 16];
@@ -441,6 +512,7 @@ fn test_replay_recovers_from_missing_next_fragment_file() {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         db.insert(ks, key_a.clone(), value_a.clone()).unwrap();
         db.insert(ks, key_b.clone(), value_b.clone()).unwrap();
     }
@@ -487,6 +559,7 @@ fn test_replay_recovers_from_missing_next_fragment_file() {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         assert_eq!(
             db.get(ks, &key_a).unwrap(),
             Some(value_a.clone().into()),
@@ -514,6 +587,7 @@ fn test_replay_recovers_from_missing_next_fragment_file() {
     // survives; record B is still absent.
     {
         let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+        let ks = db.single_ks();
         assert_eq!(db.get(ks, &key_a).unwrap(), Some(value_a.into()));
         assert_eq!(db.get(ks, &key_b).unwrap(), None);
         assert_eq!(db.get(ks, &key_c).unwrap(), Some(value_c.into()));
@@ -527,7 +601,7 @@ fn test_corrupted_batch_replay() {
     let (key_a, key_b) = (vec![5, 6, 7, 8], vec![6, 7, 8, 9]);
     let (value_a, value_b) = (vec![15], vec![17]);
 
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
     let (position, file) = {
         let db = Db::open(
             dir.path(),
@@ -536,6 +610,7 @@ fn test_corrupted_batch_replay() {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         let mut batch = db.write_batch();
         batch.write(ks, key_a.clone(), value_a.clone());
         batch.write(ks, key_b.clone(), value_b.clone());
@@ -559,6 +634,7 @@ fn test_corrupted_batch_replay() {
     file.write_all_at(&data, position).unwrap();
 
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.single_ks();
     assert_eq!(Some(value_a.into()), db.get(ks, &key_a).unwrap());
     assert_eq!(Some(value_b.into()), db.get(ks, &key_b).unwrap());
 }
@@ -568,8 +644,9 @@ fn test_concurrent_batch() {
     let dir = tempdir::TempDir::new("test_concurrent_batch").unwrap();
     let config = Arc::new(Config::small());
     let ksc = KeySpaceConfig::new().with_value_cache_size(10);
-    let (key_shape, ks) = KeyShape::new_single_config(1, 16, KeyType::uniform(16), ksc);
+    let key_shape = KeyShape::new_single_config(1, 16, KeyType::uniform(16), ksc);
     let (key_a, key_b, key_c) = (vec![15], vec![16], vec![17]);
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
     let get_value = |db: &Arc<Db>, key: _| {
         let bytes = db.get(ks, key).unwrap().unwrap();
         usize::from_be_bytes(bytes.as_ref().try_into().unwrap())
@@ -619,7 +696,7 @@ fn test_concurrent_batch() {
 }
 
 // see generate.py
-pub(super) fn test_remove((key_shape, ks): (KeyShape, KeySpace)) {
+pub(super) fn test_remove(key_shape: KeyShape) {
     let dir = tempdir::TempDir::new("test-remove").unwrap();
     let config = Arc::new(Config::small());
     {
@@ -630,6 +707,7 @@ pub(super) fn test_remove((key_shape, ks): (KeyShape, KeySpace)) {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
         db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
         assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
@@ -647,6 +725,7 @@ pub(super) fn test_remove((key_shape, ks): (KeyShape, KeySpace)) {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
         db.insert(ks, vec![1, 2, 3, 4], vec![9, 10]).unwrap();
         assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
@@ -665,6 +744,7 @@ pub(super) fn test_remove((key_shape, ks): (KeyShape, KeySpace)) {
             metrics.clone(),
         )
         .unwrap();
+        let ks = db.single_ks();
         assert_eq!(metrics.replayed_wal_records.get(), 1);
         assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
         assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
@@ -672,7 +752,7 @@ pub(super) fn test_remove((key_shape, ks): (KeyShape, KeySpace)) {
 }
 
 // see generate.py
-pub(super) fn test_iterator((key_shape, ks): (KeyShape, KeySpace)) {
+pub(super) fn test_iterator(key_shape: KeyShape) {
     let dir = tempdir::TempDir::new("test-iterator").unwrap();
     let config = Arc::new(Config::small());
     let mut data = Vec::with_capacity(1024);
@@ -684,6 +764,7 @@ pub(super) fn test_iterator((key_shape, ks): (KeyShape, KeySpace)) {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         let mut it = db.iterator(ks);
         assert!(it.next().is_none());
         for v in 0..1024u32 {
@@ -706,6 +787,7 @@ pub(super) fn test_iterator((key_shape, ks): (KeyShape, KeySpace)) {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         let it = db.iterator(ks);
         let s: DbResult<Vec<_>> = it.collect();
         let s = s.unwrap();
@@ -777,7 +859,7 @@ fn test_iterator_gen() {
 fn test_iterator_run(data: Vec<u128>, key_indexing: KeyIndexing) {
     let dir = tempdir::TempDir::new("test-iterator").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+    let key_shape = KeyShape::new_single_config_indexing(
         key_indexing,
         4,
         KeyType::uniform(4),
@@ -790,6 +872,7 @@ fn test_iterator_run(data: Vec<u128>, key_indexing: KeyIndexing) {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
     for (i, k) in data.iter().enumerate() {
         if i % 2 == 0 {
             db.insert(ks, ku128(*k), vu128(*k)).unwrap();
@@ -848,7 +931,7 @@ fn test_extensive_iterator_random_ranges_for_key_type(key_type: KeyType) {
     println!("Testing extensive iterator with KeyType: {:?}", key_type);
     let dir = tempdir::TempDir::new("test-extensive-iterator").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 16, key_type);
+    let key_shape = KeyShape::new_single(2, 16, key_type);
 
     let db = Db::open(
         dir.path(),
@@ -857,6 +940,7 @@ fn test_extensive_iterator_random_ranges_for_key_type(key_type: KeyType) {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     // Fill a database with values
     const MAX: u16 = 0xffff;
@@ -1022,7 +1106,7 @@ fn test_extensive_iterator_random_ranges_for_key_type(key_type: KeyType) {
 fn test_ordered_iterator() {
     let dir = tempdir::TempDir::new("test-ordered-iterator").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(5, 16, KeyType::uniform(16));
     {
         let db = Db::open(
             dir.path(),
@@ -1031,6 +1115,7 @@ fn test_ordered_iterator() {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         let mut it = db.iterator(ks);
         assert!(it.next().is_none());
         db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
@@ -1060,6 +1145,7 @@ fn test_ordered_iterator() {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         let mut it = db.iterator(ks);
         it.set_lower_bound(vec![1, 2, 3, 4, 0]);
         it.set_upper_bound(vec![1, 2, 3, 4, 10]);
@@ -1081,7 +1167,7 @@ fn test_ordered_iterator() {
 fn test_iterator_with_tombstones() {
     let dir = tempdir::TempDir::new("test-insert-while-iterating").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(2, 16, KeyType::uniform(16));
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -1089,6 +1175,7 @@ fn test_iterator_with_tombstones() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
     db.insert(ks, vec![1, 2], vec![1]).unwrap();
     db.insert(ks, vec![1, 3], vec![2]).unwrap();
     db.insert(ks, vec![1, 4], vec![3]).unwrap();
@@ -1109,7 +1196,7 @@ fn test_iterator_with_tombstones() {
 fn test_insert_while_iterating() {
     let dir = tempdir::TempDir::new("test-insert-while-iterating").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(5, 16, KeyType::uniform(16));
     let db = Db::open(
         dir.path(),
         key_shape.clone(),
@@ -1117,6 +1204,7 @@ fn test_insert_while_iterating() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
     db.insert(ks, vec![1, 2, 3, 4, 5], vec![1]).unwrap();
     db.insert(ks, vec![1, 2, 3, 4, 8], vec![2]).unwrap();
     let mut it = db.iterator(ks);
@@ -1137,7 +1225,7 @@ fn test_insert_while_iterating() {
 fn test_iterator_bounds_no_reduction() {
     let dir = tempdir::TempDir::new("test-iterator-bounds").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
 
     let db = Db::open(
         dir.path(),
@@ -1146,6 +1234,7 @@ fn test_iterator_bounds_no_reduction() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
     db.insert(ks, vec![0, 0, 0, 1], vec![1]).unwrap();
@@ -1228,7 +1317,7 @@ fn test_iterator_bounds_with_reduction() {
     let dir = tempdir::TempDir::new("test-iterator-bounds-with-reduction").unwrap();
     let config = Arc::new(Config::small());
     let key_indexing = KeyIndexing::key_reduction(4, 0..2);
-    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+    let key_shape = KeyShape::new_single_config_indexing(
         key_indexing,
         1,
         KeyType::uniform(1),
@@ -1241,6 +1330,7 @@ fn test_iterator_bounds_with_reduction() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     db.insert(ks, vec![0, 0, 0, 0], vec![1]).unwrap();
     db.insert(ks, vec![255, 255, 255, 253], vec![2]).unwrap();
@@ -1302,7 +1392,7 @@ fn test_iterator_bounds_with_reduction() {
 fn test_empty() {
     let dir = tempdir::TempDir::new("test-empty").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(5, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(5, 16, KeyType::uniform(16));
     {
         let db = Db::open(
             dir.path(),
@@ -1311,6 +1401,7 @@ fn test_empty() {
             Metrics::new(),
         )
         .unwrap();
+        let ks = db.single_ks();
         assert!(db.is_empty());
         db.insert(ks, vec![1, 2, 3, 4, 0], vec![1]).unwrap();
         assert!(!db.is_empty());
@@ -1332,10 +1423,10 @@ fn test_small_keys() {
     let dir = tempdir::TempDir::new("test-small-keys").unwrap();
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
-    let ks0 = ksb.add_key_space("a", 0, 16, KeyType::uniform(16));
-    let ks1 = ksb.add_key_space("b", 1, 16, KeyType::uniform(16));
-    let ks2 = ksb.add_key_space("c", 2, 16, KeyType::uniform(16));
-    let _ks3 = ksb.add_key_space("d", 3, 16, KeyType::uniform(16));
+    ksb.add_key_space("a", 0, 16, KeyType::uniform(16));
+    ksb.add_key_space("b", 1, 16, KeyType::uniform(16));
+    ksb.add_key_space("c", 2, 16, KeyType::uniform(16));
+    ksb.add_key_space("d", 3, 16, KeyType::uniform(16));
     let key_shape = ksb.build();
     {
         let db = Db::open(
@@ -1345,6 +1436,9 @@ fn test_small_keys() {
             Metrics::new(),
         )
         .unwrap();
+        let ks0 = db.ks("a");
+        let ks1 = db.ks("b");
+        let ks2 = db.ks("c");
         db.insert(ks0, vec![], vec![1]).unwrap();
         db.insert(ks1, vec![1], vec![2]).unwrap();
         db.insert(ks2, vec![1, 2], vec![3]).unwrap();
@@ -1360,6 +1454,9 @@ fn test_small_keys() {
             Metrics::new(),
         )
         .unwrap();
+        let ks0 = db.ks("a");
+        let ks1 = db.ks("b");
+        let ks2 = db.ks("c");
         assert_eq!(db.get(ks0, &[]).unwrap(), Some(vec![1].into()));
         assert_eq!(db.get(ks1, &[1]).unwrap(), Some(vec![2].into()));
         assert_eq!(db.get(ks2, &[1, 2]).unwrap(), Some(vec![3].into()));
@@ -1372,7 +1469,7 @@ fn test_value_cache() {
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_value_cache_size(512);
-    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let db = Db::open(
@@ -1382,6 +1479,7 @@ fn test_value_cache() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.ks("k");
 
     for i in 0..1024u64 {
         db.insert(ks, i.to_be_bytes().to_vec(), vec![]).unwrap();
@@ -1404,7 +1502,7 @@ fn test_bloom_filter() {
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
-    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let db = Db::open(
@@ -1414,6 +1512,7 @@ fn test_bloom_filter() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.ks("k");
 
     for i in 0..1000u64 {
         db.insert(ks, i.to_be_bytes().to_vec(), vec![]).unwrap();
@@ -1452,7 +1551,8 @@ fn test_bloom_filter() {
 
 fn test_dirty_unloading_with_config(config: Arc<Config>) {
     let dir = tempdir::TempDir::new("test-dirty-unloading").unwrap();
-    let (key_shape, ks) = KeyShape::new_single(5, 2, KeyType::uniform(1024));
+    let key_shape = KeyShape::new_single(5, 2, KeyType::uniform(1024));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
     #[track_caller]
     fn check_all(db: &Db, ks: KeySpace, last: u8) {
         for i in 5u8..=last {
@@ -1601,7 +1701,7 @@ fn test_value_cache_update_remove() {
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_value_cache_size(10);
-    let ks = ksb.add_key_space_config("k", 1, 1, KeyType::uniform(1), ksc);
+    ksb.add_key_space_config("k", 1, 1, KeyType::uniform(1), ksc);
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let db = Db::open(
@@ -1611,6 +1711,7 @@ fn test_value_cache_update_remove() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.ks("k");
     db.insert(ks, vec![1], vec![2]).unwrap();
     db.insert(ks, vec![2], vec![3]).unwrap();
     assert_eq!(&db.get(ks, &[1]).unwrap().unwrap(), &[2]);
@@ -1684,7 +1785,8 @@ fn test_concurrent_single_value_update_iteration(
 ) {
     let dir = tempdir::TempDir::new(&format!("test-concurrent-single-value-update-{i}")).unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
+    let key_shape = KeyShape::new_single_config(4, 1, KeyType::uniform(1), ks_config);
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
     let cached_value;
     let key = Bytes::from(15u32.to_be_bytes().to_vec());
     {
@@ -1744,7 +1846,7 @@ fn test_key_reduction() {
     let dir = tempdir::TempDir::new("test_key_reduction").unwrap();
     let config = Arc::new(Config::small());
     let key_indexing = KeyIndexing::key_reduction(4, 0..2);
-    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+    let key_shape = KeyShape::new_single_config_indexing(
         key_indexing,
         1,
         KeyType::uniform(1),
@@ -1757,6 +1859,7 @@ fn test_key_reduction() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     db.insert(ks, vec![1, 2, 3, 4], vec![1]).unwrap();
     db.insert(ks, vec![1, 3, 3, 4], vec![2]).unwrap();
@@ -1821,7 +1924,7 @@ fn test_key_reduction_lru() {
     let config = Arc::new(Config::small());
     let key_indexing = KeyIndexing::key_reduction(4, 0..2);
     let ks_config = KeySpaceConfig::new().with_value_cache_size(2);
-    let (key_shape, ks) =
+    let key_shape =
         KeyShape::new_single_config_indexing(key_indexing, 1, KeyType::uniform(1), ks_config);
     let metrics = Metrics::new();
     let db = Db::open(
@@ -1831,6 +1934,7 @@ fn test_key_reduction_lru() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     db.insert(ks, vec![1, 2, 3, 4], vec![1]).unwrap();
     assert_eq!(db.get(ks, &[1, 2, 3, 4]).unwrap().unwrap().as_ref(), &[1]);
@@ -1871,7 +1975,7 @@ fn test_cluster_bits(sc: bool) {
     } else {
         KeyType::prefix_uniform(15, 4)
     };
-    let (key_shape, ks) = KeyShape::new_single(32, 16, key_type);
+    let key_shape = KeyShape::new_single(32, 16, key_type);
     let metrics = Metrics::new();
     let db = Db::open(
         dir.path(),
@@ -1880,6 +1984,7 @@ fn test_cluster_bits(sc: bool) {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.single_ks();
     let mut rng = StdRng::from_seed(Default::default());
 
     for i in 0..0xffff {
@@ -1899,15 +2004,15 @@ fn test_cluster_bits(sc: bool) {
         .each_entry(|entry| println!("Dirty {}", entry.data.len()));
 }
 
-pub(super) fn default_key_shape() -> (KeyShape, KeySpace) {
+pub(super) fn default_key_shape() -> KeyShape {
     KeyShape::new_single(4, 16, KeyType::uniform(16))
 }
 
-pub(super) fn prefix_key_shape() -> (KeyShape, KeySpace) {
+pub(super) fn prefix_key_shape() -> KeyShape {
     KeyShape::new_single(4, 16, KeyType::prefix_uniform(2, 0))
 }
 
-pub(super) fn hashed_index_key_shape() -> (KeyShape, KeySpace) {
+pub(super) fn hashed_index_key_shape() -> KeyShape {
     KeyShape::new_single_config_indexing(
         KeyIndexing::hash(),
         16,
@@ -1950,33 +2055,40 @@ pub(super) fn uniform_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
     let mut builder = KeyShapeBuilder::new();
 
     // First key space with default LookupHeader index format
-    let ks1 = builder.add_key_space("lookup_header", 4, 16, KeyType::uniform(16));
+    builder.add_key_space("lookup_header", 4, 16, KeyType::uniform(16));
 
     // Second key space with UniformLookup index format
     let uniform_index = UniformLookupIndex::new();
     let ks2_config =
         KeySpaceConfig::default().with_index_format(IndexFormatType::Uniform(uniform_index));
-    let ks2 =
-        builder.add_key_space_config("uniform_lookup", 4, 16, KeyType::uniform(16), ks2_config);
+    builder.add_key_space_config("uniform_lookup", 4, 16, KeyType::uniform(16), ks2_config);
 
-    (builder.build(), ks1, ks2)
+    let key_shape = builder.build();
+    let kss = KeySpaces::from_key_shape(&key_shape);
+    let ks1 = kss.ks("lookup_header");
+    let ks2 = kss.ks("uniform_lookup");
+    (key_shape, ks1, ks2)
 }
 
 pub(super) fn prefix_two_key_spaces() -> (KeyShape, KeySpace, KeySpace) {
     let mut builder = KeyShapeBuilder::new();
-    let ks1 = builder.add_key_space("lookup_header", 4, 16, KeyType::prefix_uniform(2, 0));
+    builder.add_key_space("lookup_header", 4, 16, KeyType::prefix_uniform(2, 0));
     // Second key space with UniformLookup index format
     let uniform_index = UniformLookupIndex::new();
     let ks2_config =
         KeySpaceConfig::default().with_index_format(IndexFormatType::Uniform(uniform_index));
-    let ks2 = builder.add_key_space_config(
+    builder.add_key_space_config(
         "prefix_lookup",
         4,
         16,
         KeyType::prefix_uniform(2, 0),
         ks2_config,
     );
-    (builder.build(), ks1, ks2)
+    let key_shape = builder.build();
+    let kss = KeySpaces::from_key_shape(&key_shape);
+    let ks1 = kss.ks("lookup_header");
+    let ks2 = kss.ks("prefix_lookup");
+    (key_shape, ks1, ks2)
 }
 
 pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeySpace, KeySpace)) {
@@ -2132,7 +2244,8 @@ pub(super) fn test_multiple_index_formats((key_shape, ks1, ks2): (KeyShape, KeyS
 fn test_value_corruption() {
     let dir = tempdir::TempDir::new("test_value_corruption").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
 
     let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
     let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
@@ -2200,7 +2313,8 @@ fn test_value_corruption() {
 fn test_header_corruption() {
     let dir = tempdir::TempDir::new("test_header_corruption").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
 
     let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
     let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
@@ -2267,7 +2381,8 @@ fn test_header_corruption() {
 fn test_max_value_header_corruption() {
     let dir = tempdir::TempDir::new("test_max_value_header_corruption").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
 
     let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
     let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
@@ -2333,7 +2448,8 @@ fn test_state_snapshot() {
     let db_path = tempdir::TempDir::new("test-state-snapshot-db").unwrap();
     let snapshot_path = tempdir::TempDir::new("test-state-snapshot-saved").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(2, 16, KeyType::uniform(16));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
 
     let (key_1, value_1) = (vec![1, 1], vec![1, 11]);
     let (key_2, value_2) = (vec![2, 2], vec![2, 12]);
@@ -2406,7 +2522,7 @@ fn test_state_snapshot_empty() {
     let db_path = tempdir::TempDir::new("test-state-snapshot-empty-db").unwrap();
     let snapshot_path = tempdir::TempDir::new("test-state-snapshot-empty-saved").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
 
     // Create a new database
     let last_position = {
@@ -2436,6 +2552,7 @@ fn test_state_snapshot_empty() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     // Check that the last position in the WAL matches the last position before snapshot
     let recovered_position = db.wal_writer.position();
@@ -2452,7 +2569,7 @@ fn test_bloom_filter_restore() {
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
-    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     {
@@ -2463,6 +2580,7 @@ fn test_bloom_filter_restore() {
             metrics.clone(),
         )
         .unwrap();
+        let ks = db.ks("k");
         for i in 0..10u64 {
             db.insert(ks, i.to_be_bytes().to_vec(), vec![0, 1, 2])
                 .unwrap();
@@ -2478,6 +2596,7 @@ fn test_bloom_filter_restore() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.ks("k");
     for key in 0..10u64 {
         assert!(db.exists(ks, &key.to_be_bytes()).unwrap());
     }
@@ -2521,12 +2640,13 @@ fn test_variable_length_keys_it() {
     let config = Arc::new(config);
     let metrics = Metrics::new();
     let ks_config = KeySpaceConfig::default().with_max_dirty_keys(1);
-    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+    let key_shape = KeyShape::new_single_config_indexing(
         KeyIndexing::VariableLength,
         16,
         KeyType::uniform(1),
         ks_config,
     );
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
     let key1 = vec![];
     let key2 = vec![1u8];
     let key3 = vec![2u8, 3];
@@ -2604,12 +2724,13 @@ fn test_variable_length_keys_many() {
     // max_dirty_keys=1 forces every insert to flush, so lookups after the first
     // insert hit the on-disk binary-search path.
     let ks_config = KeySpaceConfig::default().with_max_dirty_keys(1);
-    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+    let key_shape = KeyShape::new_single_config_indexing(
         KeyIndexing::VariableLength,
         16,
         KeyType::uniform(1),
         ks_config,
     );
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
 
     // Build keys of varying lengths to spread across many micro-cells.
     // Single-byte keys [0x00]..[0xff] naturally cover the full key-space prefix range.
@@ -2732,12 +2853,13 @@ fn test_variable_length_keys_unloaded_iterator() {
     let metrics = Metrics::new();
     // max_dirty_keys=1 forces every insert to flush so cells are unloaded on reopen.
     let ks_config = KeySpaceConfig::default().with_max_dirty_keys(1);
-    let (key_shape, ks) = KeyShape::new_single_config_indexing(
+    let key_shape = KeyShape::new_single_config_indexing(
         KeyIndexing::VariableLength,
         16,
         KeyType::uniform(1),
         ks_config,
     );
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
 
     // 256 single-byte keys spread across all micro-cells.
     let keys: Vec<Vec<u8>> = (0u8..=255).map(|b| vec![b]).collect();
@@ -2811,7 +2933,7 @@ fn test_reverse_iterator_without_bounds() {
     // Test that reverse iterator works without setting any bounds
     let dir = tempdir::TempDir::new("test-reverse-no-bounds").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(8, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(8, 16, KeyType::uniform(16));
 
     let db = Db::open(
         dir.path(),
@@ -2820,6 +2942,7 @@ fn test_reverse_iterator_without_bounds() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     // Insert some test data with 8-byte keys
     let test_data = vec![
@@ -2876,8 +2999,8 @@ fn test_rebuild_replay_from_monotonic_across_keyspaces() {
     let dir = tempdir::TempDir::new("test-replay-monotonic").unwrap();
     let config = Arc::new(Config::small());
     let mut builder = KeyShapeBuilder::new();
-    let ks1 = builder.add_key_space("ks1", 8, 1, KeyType::uniform(8));
-    let ks2 = builder.add_key_space("ks2", 8, 1, KeyType::uniform(8));
+    builder.add_key_space("ks1", 8, 1, KeyType::uniform(8));
+    builder.add_key_space("ks2", 8, 1, KeyType::uniform(8));
     let key_shape = builder.build();
 
     let db = Db::open(
@@ -2887,6 +3010,8 @@ fn test_rebuild_replay_from_monotonic_across_keyspaces() {
         Metrics::new(),
     )
     .unwrap();
+    let ks1 = db.ks("ks1");
+    let ks2 = db.ks("ks2");
 
     db.insert(ks1, 1u64.to_be_bytes().to_vec(), vec![1])
         .unwrap();
@@ -2909,7 +3034,7 @@ fn test_rebuild_replay_from_monotonic_across_keyspaces() {
 fn test_force_rebuild_control_region() {
     let dir = tempdir::TempDir::new("test-force-rebuild").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
 
     let db = Db::open(
         dir.path(),
@@ -2918,6 +3043,7 @@ fn test_force_rebuild_control_region() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     // Insert some data
     db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
@@ -2974,11 +3100,11 @@ fn db_test_snapshot_unload_threshold() {
 
     // Use KeyShapeBuilder instead of KeyShape::new_single
     let mut builder = KeyShapeBuilder::new();
-    let ks = builder.add_key_space("test", 8, 16, KeyType::uniform(16));
+    builder.add_key_space("test", 8, 16, KeyType::uniform(16));
     // Make sure ks that only was written once does not affect forced snapshot
-    let ks2 = builder.add_key_space("small", 8, 16, KeyType::uniform(16));
+    builder.add_key_space("small", 8, 16, KeyType::uniform(16));
     // Make sure empty key space does not affect forced snapshot
-    let _ks2 = builder.add_key_space("empty", 8, 16, KeyType::uniform(16));
+    builder.add_key_space("empty", 8, 16, KeyType::uniform(16));
     let key_shape = builder.build();
 
     let metrics = Metrics::new();
@@ -2990,6 +3116,8 @@ fn db_test_snapshot_unload_threshold() {
         metrics.clone(),
     )
     .expect("open failed");
+    let ks = db.ks("test");
+    let ks2 = db.ks("small");
 
     // Write 20 values, each approximately 1KB
     let value_size = 1024;
@@ -3061,8 +3189,8 @@ fn test_index_gc_low_occupancy_files_relocated() {
         let mut builder = KeyShapeBuilder::new();
         // "rare" — written once and never again. Its blob sits in the earliest
         // index file and pins `min_wal_position` unless ForceRelocate moves it.
-        let ks_rare = builder.add_key_space("rare", 8, 1, KeyType::uniform(1));
-        let ks_bulk = builder.add_key_space("bulk", 8, 4, KeyType::uniform(4));
+        builder.add_key_space("rare", 8, 1, KeyType::uniform(1));
+        builder.add_key_space("bulk", 8, 4, KeyType::uniform(4));
         let key_shape = builder.build();
 
         let metrics = Metrics::new();
@@ -3073,6 +3201,8 @@ fn test_index_gc_low_occupancy_files_relocated() {
             metrics.clone(),
         )
         .expect("open failed");
+        let ks_rare = db.ks("rare");
+        let ks_bulk = db.ks("bulk");
 
         let bulk_key = |i: u32| -> Vec<u8> {
             let mut k = [0u8; 8];
@@ -3168,8 +3298,8 @@ fn test_sparse_gc_deletes_empty_middle_index_files() {
     let config = Arc::new(config);
 
     let mut builder = KeyShapeBuilder::new();
-    let ks_rare = builder.add_key_space("rare", 8, 1, KeyType::uniform(1));
-    let ks_bulk = builder.add_key_space("bulk", 8, 16, KeyType::uniform(8));
+    builder.add_key_space("rare", 8, 1, KeyType::uniform(1));
+    builder.add_key_space("bulk", 8, 16, KeyType::uniform(8));
     let key_shape = builder.build();
 
     let metrics = Metrics::new();
@@ -3180,6 +3310,8 @@ fn test_sparse_gc_deletes_empty_middle_index_files() {
         metrics.clone(),
     )
     .expect("open failed");
+    let ks_rare = db.ks("rare");
+    let ks_bulk = db.ks("bulk");
 
     let rare_key = 0u64.to_be_bytes().to_vec();
     db.insert(ks_rare, rare_key.clone(), vec![0x11; 16])
@@ -3268,7 +3400,7 @@ fn test_sparse_gc_reopen_with_dead_window() {
     let config = Arc::new(config);
 
     let mut builder = KeyShapeBuilder::new();
-    let ks = builder.add_key_space("ks", 8, 1, KeyType::uniform(1));
+    builder.add_key_space("ks", 8, 1, KeyType::uniform(1));
     let key_shape = builder.build();
 
     let rare_key = 0u64.to_be_bytes().to_vec();
@@ -3282,6 +3414,7 @@ fn test_sparse_gc_reopen_with_dead_window() {
             Metrics::new(),
         )
         .expect("open failed");
+        let ks = db.ks("ks");
 
         // Single insert + snapshot pins the only live index valpos in file 0.
         db.insert(ks, rare_key.clone(), rare_value.clone())
@@ -3334,6 +3467,7 @@ fn test_sparse_gc_reopen_with_dead_window() {
 
     // Reopen must not panic — this is the regression guard.
     let db = Db::open(dir.path(), key_shape, config, Metrics::new()).expect("reopen failed");
+    let ks = db.ks("ks");
     let v = db.get(ks, &rare_key).expect("read after reopen");
     assert_eq!(v.as_deref(), Some(&rare_value[..]));
 }
@@ -3357,8 +3491,8 @@ fn test_force_relocate_dirty_entry_preserves_data() {
     // "rare" keyspace: 1 cell — the rarely-updated entry
     // "bulk" keyspace: 128 cells — used to advance WAL and establish high positions
     let mut builder = KeyShapeBuilder::new();
-    let ks_rare = builder.add_key_space("rare", 8, 1, KeyType::uniform(1));
-    let ks_bulk = builder.add_key_space("bulk", 8, 16, KeyType::uniform(8));
+    builder.add_key_space("rare", 8, 1, KeyType::uniform(1));
+    builder.add_key_space("bulk", 8, 16, KeyType::uniform(8));
     let key_shape = builder.build();
 
     let rare_key = 0u64.to_be_bytes().to_vec();
@@ -3385,6 +3519,8 @@ fn test_force_relocate_dirty_entry_preserves_data() {
             metrics.clone(),
         )
         .expect("open failed");
+        let ks_rare = db.ks("rare");
+        let ks_bulk = db.ks("bulk");
 
         // Write to rare entry
         db.insert(ks_rare, rare_key.clone(), initial_value.clone())
@@ -3471,6 +3607,7 @@ fn test_force_relocate_dirty_entry_preserves_data() {
             metrics.clone(),
         )
         .expect("reopen failed");
+        let ks_rare = db.ks("rare");
 
         let val = db.get(ks_rare, &rare_key).expect("get failed");
         assert_eq!(
@@ -3497,7 +3634,7 @@ fn test_concurrent_index_reclaim() {
     // handful of file advances this test performs.
     config.max_index_maps = Some(3);
     let config = Arc::new(config);
-    let (key_shape, ks) = KeyShape::new_single(2, 1, KeyType::uniform(1));
+    let key_shape = KeyShape::new_single(2, 1, KeyType::uniform(1));
 
     let db = Db::open(
         dir.path(),
@@ -3506,6 +3643,7 @@ fn test_concurrent_index_reclaim() {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     const SLEEP: u64 = 200;
 
@@ -3565,7 +3703,7 @@ fn test_empty_value_read_optimization() {
     let config = Arc::new(Config::small());
 
     // Use hash indexing which allows the optimization (need_check_index_key() == false)
-    let (key_shape, ks) = hashed_index_key_shape();
+    let key_shape = hashed_index_key_shape();
     let metrics = Metrics::new();
 
     let db = Db::open(
@@ -3575,6 +3713,7 @@ fn test_empty_value_read_optimization() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.single_ks();
 
     // Insert keys with empty values - these should benefit from the optimization
     for i in 0..10u32 {
@@ -3681,7 +3820,8 @@ fn setup_corrupted_db(
 fn test_batch_after_incomplete_batch() {
     let dir = tempdir::TempDir::new("test_wal_failpoint_panic_during_batch").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
 
     // Set up database with incomplete batch
     setup_corrupted_db(dir.path(), &key_shape, &config, ks);
@@ -3732,7 +3872,8 @@ fn test_batch_after_incomplete_batch() {
 fn test_standalone_write_after_incomplete_batch() {
     let dir = tempdir::TempDir::new("test_wal_failpoint_standalone_write").unwrap();
     let config = Arc::new(Config::small());
-    let (key_shape, ks) = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
 
     // Set up database with incomplete batch
     setup_corrupted_db(dir.path(), &key_shape, &config, ks);
@@ -3781,7 +3922,8 @@ fn test_standalone_write_after_incomplete_batch() {
 #[test]
 fn test_drop_cells_in_range_uniform() {
     let dir = tempdir::TempDir::new("test-drop-cells").unwrap();
-    let (key_shape, ks) = KeyShape::new_single(10, 2, KeyType::uniform(2));
+    let key_shape = KeyShape::new_single(10, 2, KeyType::uniform(2));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
     let config = Arc::new(Config::small());
 
     let db = Db::open(
@@ -3853,9 +3995,55 @@ fn test_drop_cells_in_range_uniform() {
 }
 
 #[test]
+fn test_drop_cells_clears_value_cache() {
+    // Regression: drop_cells_in_range must invalidate the per-cell value LRU.
+    // For Uniform (Array-backed) keyspaces the entry is cleared in place rather
+    // than removed, and `get` consults the value LRU before the Empty-state
+    // check — so a retained cache entry would serve a stale value for a key
+    // whose cell was dropped.
+    let dir = tempdir::TempDir::new("test-drop-cells-value-cache").unwrap();
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new().with_value_cache_size(512);
+    ksb.add_key_space_config("k", 10, 2, KeyType::uniform(2), ksc);
+    let key_shape = ksb.build();
+    let config = Arc::new(Config::small());
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.ks("k");
+
+    // Cell 0 and cell 2; cell 2 is the control that must survive.
+    db.insert(ks, hex!("00000000000000000000"), vec![1])
+        .unwrap();
+    db.insert(ks, hex!("80000000000000000000"), vec![5])
+        .unwrap();
+    // Read both so the value LRU is populated.
+    assert_eq!(
+        Some(vec![1].into()),
+        db.get(ks, &hex!("00000000000000000000")).unwrap()
+    );
+    assert_eq!(
+        Some(vec![5].into()),
+        db.get(ks, &hex!("80000000000000000000")).unwrap()
+    );
+
+    let ksd = db.key_shape.ks(ks);
+    let (first_key, _) = ksd.cell_range(&crate::cell::CellId::Integer(0));
+    let (_, last_key) = ksd.cell_range(&crate::cell::CellId::Integer(1));
+    db.drop_cells_in_range(ks, &first_key, &last_key).unwrap();
+
+    // The dropped key must not be served stale from the value LRU.
+    assert_eq!(None, db.get(ks, &hex!("00000000000000000000")).unwrap());
+    // The untouched cell still serves its cached value.
+    assert_eq!(
+        Some(vec![5].into()),
+        db.get(ks, &hex!("80000000000000000000")).unwrap()
+    );
+}
+
+#[test]
 fn test_drop_cells_in_range_prefixed_uniform() {
     let dir = tempdir::TempDir::new("test-drop-cells-prefixed").unwrap();
-    let (key_shape, ks) = KeyShape::new_single(10, 16, KeyType::from_prefix_bits(16));
+    let key_shape = KeyShape::new_single(10, 16, KeyType::from_prefix_bits(16));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
     let config = Arc::new(Config::small());
 
     let db = Db::open(
@@ -3936,12 +4124,13 @@ fn test_drop_db() {
     drop_db(default_key_shape())
 }
 
-pub(super) fn drop_db((key_shape, ks): (KeyShape, KeySpace)) {
+pub(super) fn drop_db(key_shape: KeyShape) {
     let dir = tempdir::TempDir::new("test-drop-db").unwrap();
     let path = dir.path().to_path_buf();
     let config = Arc::new(Config::small());
 
     let db = Db::open(&path, key_shape, config, Metrics::new()).unwrap();
+    let ks = db.single_ks();
     db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
 
     // DB is open — drop_db must fail
@@ -3997,9 +4186,10 @@ fn test_compact_with_preserves_tombstones_shadowing_l1() {
     let ks_config = KeySpaceConfig::new()
         .with_compactor(compactor)
         .with_l0_max_entries(4);
-    let (key_shape, ks) = KeyShape::new_single_config(2, 1, KeyType::uniform(1), ks_config);
+    let key_shape = KeyShape::new_single_config(2, 1, KeyType::uniform(1), ks_config);
 
     let db = Db::open(dir.path(), key_shape, config.clone(), Metrics::new()).unwrap();
+    let ks = db.single_ks();
 
     // Phase 1: write 8 distinct-prefix keys (one is the victim we will later
     // delete) and force a flush. 8 > l0_max_entries=4 → `over_threshold`
@@ -4088,7 +4278,8 @@ fn test_auto_sharding_concurrent() {
     config.with_index_auto_sharding();
     let config = Arc::new(config);
 
-    let (key_shape, ks) = KeyShape::new_single(8, 2, KeyType::uniform(1));
+    let key_shape = KeyShape::new_single(8, 2, KeyType::uniform(1));
+    let ks = KeySpaces::from_key_shape(&key_shape).single();
     let metrics = Metrics::new();
     let mut db = Db::open(
         dir.path(),

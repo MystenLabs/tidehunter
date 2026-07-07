@@ -45,7 +45,7 @@ fn test_list_wal_files() {
     std::fs::create_dir_all(&path).unwrap();
 
     let mut builder = KeyShapeBuilder::new();
-    let ks = builder.add_key_space("ks", 8, 16, KeyType::uniform(8));
+    builder.add_key_space("ks", 8, 16, KeyType::uniform(8));
     let key_shape = builder.build();
 
     let config = Arc::new(Config {
@@ -55,6 +55,7 @@ fn test_list_wal_files() {
     });
     let metrics = Metrics::new();
     let db = Db::open(&path, key_shape, config, metrics).unwrap();
+    let ks = db.ks("ks");
 
     // Write enough records to span several WAL files.
     for i in 0..100u8 {
@@ -190,10 +191,11 @@ fn test_load_index_returns_entries() {
     std::fs::create_dir_all(&path).unwrap();
 
     let mut builder = KeyShapeBuilder::new();
-    let ks = builder.add_key_space("objects", 8, 16, KeyType::uniform(8));
+    builder.add_key_space("objects", 8, 16, KeyType::uniform(8));
     let key_shape = builder.build();
     let config = Arc::new(Config::default());
     let db = Db::open(&path, key_shape, config, Metrics::new()).unwrap();
+    let ks = db.ks("objects");
 
     let mut batch = db.write_batch();
     for i in 0..3u8 {

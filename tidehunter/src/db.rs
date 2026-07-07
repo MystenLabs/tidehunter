@@ -1,5 +1,6 @@
 use crate::batch::{PendingOp, RelocatedWriteBatch, WriteBatch};
 use crate::cell::CellId;
+use crate::checkpoint::DbCheckpoint;
 use crate::compressed_batch::{
     BatchCodec, CompressedBatch, decompress_wal_entry, find_record, find_record_by,
 };
@@ -12,8 +13,8 @@ use crate::index::index_format::{IndexFormat, IndexIterCaches};
 use crate::index::index_table::IndexTable;
 use crate::index::levels::IndexLevels;
 use crate::iterators::IteratorResult;
-use crate::iterators::db_iterator::DbIterator;
-use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeyType};
+use crate::iterators::db_iterator::{DbIterator, IterationSource};
+use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc, KeySpaces, KeyType};
 use crate::large_table::{GetResult, LargeTable, Loader, PendingBatchOp};
 use crate::lock::DbLock;
 use crate::metrics::{Metrics, TimerExt};
@@ -29,6 +30,7 @@ use minibytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::io::Write;
 use std::iter;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak, mpsc};
@@ -45,6 +47,9 @@ pub struct Db {
     pub(crate) config: Arc<Config>,
     metrics: Arc<Metrics>,
     pub(crate) key_shape: KeyShape,
+    /// Canonical name → handle map for the keyspaces the caller declared;
+    /// resolved via [`Db::ks`] / [`Db::try_ks`] / [`Db::single_ks`].
+    keyspaces: KeySpaces,
     relocator: Relocator,
     commit_pool: Option<rayon::ThreadPool>,
     /// One handle per pending-promotion shard, for waking threads after batch commits.
@@ -68,12 +73,19 @@ impl Db {
         config.validate();
         let path = path.canonicalize()?;
         let lock = DbLock::acquire(&path, config.open_lock_retry_timeout)?;
-        Self::maybe_create_shape_file(&path, &key_shape)?;
+        let (key_shape, keyspaces, registry_dirty) = Self::reconcile_key_shape(&path, key_shape)?;
         Self::maybe_create_config_file(&path, &config)?;
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
         let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
+        if registry_dirty {
+            // Persisted only after the control region verified the canonical
+            // shape, so a bad declaration never overwrites the registry.
+            // No WAL write can happen before `open` returns, so the registry
+            // is always durable before the first write that uses a new id.
+            Self::write_shape_file(&path, &key_shape)?;
+        }
 
         // Create channels for flusher threads first
         let (flusher_senders, flusher_receivers) = (0..config.num_flusher_threads)
@@ -131,6 +143,7 @@ impl Db {
             config,
             metrics: metrics.clone(),
             key_shape,
+            keyspaces,
             relocator,
             commit_pool,
             pending_promotion_threads,
@@ -173,36 +186,112 @@ impl Db {
         std::fs::remove_dir_all(path)
     }
 
-    pub fn shape_file_path(path: &Path) -> PathBuf {
+    /// Path of the canonical keyspace registry: the shape in canonical id
+    /// order, written during `Db::open` — before any WAL write can happen —
+    /// at creation and whenever a keyspace is added or removed. The entry
+    /// order in this file defines the keyspace ids used in WAL bytes and
+    /// the control region.
+    pub(crate) fn shape_v2_file_path(path: &Path) -> PathBuf {
+        path.join("shape_v2.yaml")
+    }
+
+    /// Path of the legacy shape file. Written once at creation by older
+    /// versions and never updated, so it may lack keyspaces added later.
+    /// Read-only fallback for databases that predate `shape_v2.yaml`.
+    fn shape_file_path(path: &Path) -> PathBuf {
         path.join("shape.yaml")
     }
 
-    /// Create shape file if it doesn't exist
-    fn maybe_create_shape_file(path: &Path, key_shape: &KeyShape) -> DbResult<()> {
-        let shape_file_path = Self::shape_file_path(path);
-        if !shape_file_path.exists() {
-            let yaml = key_shape.to_yaml().map_err(|e| {
-                DbError::Io(io::Error::other(format!(
-                    "Failed to serialize key shape: {e}"
-                )))
-            })?;
-            std::fs::write(&shape_file_path, yaml)?;
+    /// Establishes the canonical keyspace order for this database and the set
+    /// of keyspaces exposed to the caller.
+    ///
+    /// The canonical order is the order keyspaces were first created in,
+    /// recorded in the `shape_v2.yaml` registry. The declared `KeyShape` may
+    /// list the registry's keyspaces — matched by name — in any order; new
+    /// keyspaces are appended. A keyspace in the registry but absent from the
+    /// declared shape is **retained** as a live keyspace internally (data
+    /// preserved, never destroyed) but is simply not exposed — re-declaring
+    /// its name later reconnects to the same id with its data intact (this
+    /// mirrors RocksDB, which never drops a column family implicitly).
+    ///
+    /// Returns the canonical-ordered shape (the full set of keyspaces, used
+    /// for everything internal: WAL bytes, index, control region), the
+    /// [`KeySpaces`] map exposing the declared keyspaces by name (returned by
+    /// `Db::open`), and whether the registry needs to be (re)written. The
+    /// caller persists the registry only after the control region verified
+    /// the canonical shape, so a bad declaration never overwrites it; no WAL
+    /// write can happen before `open` returns, so the registry is always
+    /// durable before the first write that uses a new id.
+    ///
+    /// When the registry does not exist, the declared order itself is
+    /// canonical: databases written before the registry existed allowed
+    /// appending keyspaces only, so their declared order always matches the
+    /// ids in the WAL. Reordering keyspaces of such a database requires
+    /// opening it once with the original shape first (which creates the
+    /// registry).
+    fn reconcile_key_shape(
+        path: &Path,
+        declared: KeyShape,
+    ) -> DbResult<(KeyShape, KeySpaces, bool)> {
+        let registry_path = Self::shape_v2_file_path(path);
+        // Only the name order is taken from the stored shape; runtime
+        // configuration (compactors, bloom filters, etc.) comes from the
+        // declared shape for exposed keyspaces and from the registry for
+        // retained (undeclared) ones.
+        let registry = if registry_path.exists() {
+            Some(Self::load_shape_from_file(&registry_path)?)
+        } else {
+            None
+        };
+        let (key_shape, keyspaces, changed) = declared.reorder_to_canonical(registry.as_ref());
+        let registry_dirty = registry.is_none() || changed;
+        Ok((key_shape, keyspaces, registry_dirty))
+    }
+
+    /// Atomically writes the canonical shape to `shape_v2.yaml`
+    /// (write to a temp file, fsync, rename).
+    fn write_shape_file(path: &Path, key_shape: &KeyShape) -> DbResult<()> {
+        let shape_file_path = Self::shape_v2_file_path(path);
+        let yaml = key_shape.to_yaml().map_err(|e| {
+            DbError::Io(io::Error::other(format!(
+                "Failed to serialize key shape: {e}"
+            )))
+        })?;
+        let temp_file = shape_file_path.with_extension("yaml.tmp");
+        {
+            let mut file = std::fs::File::create(&temp_file)?;
+            file.write_all(yaml.as_bytes())?;
+            file.sync_all()?;
         }
+        std::fs::rename(&temp_file, &shape_file_path)?;
         Ok(())
     }
 
-    /// Load key shape from database directory
+    /// Load key shape from database directory.
+    /// Prefers the canonical `shape_v2.yaml`, falling back to the legacy
+    /// `shape.yaml` for databases that predate it.
     #[doc(hidden)] // Used by tools/tideconsole for loading database schema
     pub fn load_key_shape(path: &Path) -> DbResult<KeyShape> {
-        let shape_file_path = Self::shape_file_path(path);
-        if !shape_file_path.exists() {
-            return Err(DbError::Io(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Key shape file not found at {}", shape_file_path.display()),
-            )));
+        let v2_path = Self::shape_v2_file_path(path);
+        if v2_path.exists() {
+            return Self::load_shape_from_file(&v2_path);
         }
+        let legacy_path = Self::shape_file_path(path);
+        if legacy_path.exists() {
+            return Self::load_shape_from_file(&legacy_path);
+        }
+        Err(DbError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "Key shape file not found at {} or {}",
+                v2_path.display(),
+                legacy_path.display()
+            ),
+        )))
+    }
 
-        let yaml = std::fs::read_to_string(&shape_file_path)?;
+    fn load_shape_from_file(shape_file_path: &Path) -> DbResult<KeyShape> {
+        let yaml = std::fs::read_to_string(shape_file_path)?;
         KeyShape::from_yaml(&yaml).map_err(|e| {
             DbError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -362,15 +451,46 @@ impl Db {
         }
     }
 
+    /// Opens a checkpoint: a stable, point-in-time read view of the database as
+    /// of the current WAL frontier.
+    ///
+    /// Acquiring the checkpoint takes a [`WalTrackerLatch`], which (a) blocks
+    /// until every WAL position written before this call is recorded in the
+    /// in-memory index, and (b) pins the externally observed `last_processed`
+    /// at that frontier for as long as the returned [`DbCheckpoint`] is held.
+    /// Writes that land after this call sit at or above the frontier and stay
+    /// in the index overlay instead of being promoted into flat, so
+    /// [`DbCheckpoint::get`] can filter them out and keep returning the value
+    /// as of the checkpoint even as the live database advances.
+    ///
+    /// The checkpoint pins the index frontier but does not itself hold WAL
+    /// files from being reclaimed, so it is intended for short-lived reads.
+    ///
+    /// Returned as an `Arc` so it can back a [`DbCheckpoint::iterator`] (which
+    /// needs `Arc<Self>` to keep the latch alive for the iterator's lifetime).
+    pub fn checkpoint(self: &Arc<Self>) -> Arc<DbCheckpoint> {
+        Arc::new(DbCheckpoint::new(self.clone(), self.wal_writer.latch()))
+    }
+
     pub fn exists(&self, ks: KeySpace, k: &[u8]) -> DbResult<bool> {
         let context = self.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::Exists);
-        // todo check collision ?
         let reduced_key = context.ks_config.reduce_key(k);
-        Ok(self
-            .large_table
-            .get(context, reduced_key.as_ref(), self)?
-            .is_found())
+        match self.large_table.get(context, reduced_key.as_ref(), self)? {
+            GetResult::Value(full_key, _) => {
+                Ok(!context.ks_config.need_check_index_key() || full_key.as_ref() == k)
+            }
+            GetResult::WalPosition(w) => {
+                if context.ks_config.need_check_index_key() {
+                    // With key reduction an index hit may be a different key that
+                    // reduces to the same index key, so read the record to compare.
+                    Ok(self.read_record_check_key(context, k, w)?.is_some())
+                } else {
+                    Ok(true)
+                }
+            }
+            GetResult::NotFound => Ok(false),
+        }
     }
 
     /// Drops all cells in the specified key range for the given key space.
@@ -699,7 +819,7 @@ impl Db {
 
     /// Ordered iterator over DB in the specified range
     pub fn iterator(self: &Arc<Self>, ks: KeySpace) -> DbIterator {
-        DbIterator::new(self.clone(), ks)
+        DbIterator::new(IterationSource::Db(self.clone()), ks)
     }
 
     /// Returns true if this storage is empty.
@@ -710,11 +830,35 @@ impl Db {
         self.large_table.is_empty()
     }
 
+    /// Canonical handle for the key space named `name`, as declared in the
+    /// `KeyShape` passed to [`Db::open`]. Panics if no such key space was
+    /// declared. Use the returned handle in all database operations.
+    pub fn ks(&self, name: &str) -> KeySpace {
+        self.keyspaces.ks(name)
+    }
+
+    /// Canonical handle for `name`, or `None` if it was not declared.
+    pub fn try_ks(&self, name: &str) -> Option<KeySpace> {
+        self.keyspaces.try_ks(name)
+    }
+
+    /// Canonical handle for the sole declared key space. Panics unless exactly
+    /// one was declared; convenience for single-keyspace databases (those
+    /// built with [`KeyShape::new_single`]).
+    pub fn single_ks(&self) -> KeySpace {
+        self.keyspaces.single()
+    }
+
+    /// Names of all declared key spaces, in arbitrary order.
+    pub fn ks_names(&self) -> impl Iterator<Item = &str> {
+        self.keyspaces.names()
+    }
+
     pub fn ks_name(&self, ks: KeySpace) -> &str {
         self.key_shape.ks(ks).name()
     }
 
-    pub(crate) fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
+    pub(crate) fn ks_desc(&self, ks: KeySpace) -> &KeySpaceDesc {
         self.key_shape.ks(ks)
     }
 
@@ -754,6 +898,7 @@ impl Db {
             end_cell_exclusive,
             reverse,
             cache,
+            None,
         )?
         else {
             return Ok(None);
@@ -811,7 +956,7 @@ impl Db {
             .update_relocated_index(context, &cell, new_levels);
     }
 
-    fn read_record_check_key(
+    pub(crate) fn read_record_check_key(
         &self,
         context: &KsContext,
         k: &[u8],
@@ -909,6 +1054,8 @@ impl Db {
     }
 
     pub fn force_rebuild_control_region(&self) -> DbResult<u64> {
+        // Wait for the async WAL tracker to catch up so all recent writes are included in the snapshot.
+        self.wal_writer.wal_tracker_barrier();
         self.rebuild_control_region_from(self.wal_writer.position())
     }
 
@@ -1259,7 +1406,7 @@ impl Db {
     /// the `clean_self` stale-record bug.
     #[cfg(feature = "test-utils")]
     pub fn test_promote_flat_force(&self) {
-        self.large_table.test_promote_flat_force()
+        self.large_table.test_promote_flat_force(self)
     }
 }
 

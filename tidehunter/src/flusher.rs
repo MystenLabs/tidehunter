@@ -212,6 +212,10 @@ impl IndexFlusherThread {
                     if let Some((original_index, new_levels)) =
                         Self::handle_command(&*db, &command, ks_context, None, None)
                     {
+                        // Failpoint between the flush work and its visible
+                        // completion: lets tests pause here to interleave
+                        // writes with an in-flight flush deterministically.
+                        db.large_table.fp.fp_flush_before_completion();
                         if is_relocation {
                             db.update_relocated_index(command.ks, command.cell, new_levels);
                         } else {
@@ -326,6 +330,16 @@ impl IndexFlusherThread {
             }
         };
         let existing_l1 = current_levels.l1();
+
+        // Unprocessed entries may still be read by an in-flight checkpoint, so
+        // don't merge them to disk; keep them in the in-memory overlay.
+        //
+        // Ordering: this frontier filter must run before
+        // `RelocationUpdates::apply` below. `apply` lifts re-pointed
+        // disk-derived entries (relocated copies at WAL-tail offsets, i.e.
+        // >= the frontier) into `data`, where this offset predicate would
+        // misread them as unprocessed in-flight writes and drop them.
+        merged_l0.retain_processed(loader.last_processed_wal_position());
 
         // `RelocationUpdates::apply` uses compare-and-set semantics — it can
         // only rewrite positions for keys already in `merged_l0`. Keys that
@@ -906,7 +920,13 @@ mod tests {
         }
 
         fn last_processed_wal_position(&self) -> LastProcessed {
-            LastProcessed::none()
+            // The seeded/flushed entries represent already-processed data being
+            // flushed, so report a frontier above every seeded offset (it is
+            // strictly less than `current_wal_position`). This keeps the
+            // flusher's `retain_processed` filter a no-op for these tests; with
+            // `none()` (= 0) every entry would count as unprocessed and the
+            // whole blob would be dropped.
+            LastProcessed::new(u64::MAX / 2)
         }
 
         fn current_wal_position(&self) -> u64 {
@@ -928,8 +948,9 @@ mod tests {
         if auto_sharding {
             config.with_index_auto_sharding();
         }
-        let (shape, ks_id) =
+        let shape =
             KeyShape::new_single_config(8, 1, KeyType::uniform(8), KeySpaceConfig::default());
+        let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id).clone();
         KsContext::new(Arc::new(config), ks, Metrics::new())
     }

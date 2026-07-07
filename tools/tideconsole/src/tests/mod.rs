@@ -59,8 +59,8 @@ pub fn setup_db() -> TestDb {
     std::fs::create_dir_all(&path).unwrap();
 
     let mut builder = KeyShapeBuilder::new();
-    let ks = builder.add_key_space("ks", 8, 16, KeyType::uniform(8));
-    let ks2 = builder.add_key_space("ks2", 8, 16, KeyType::uniform(8));
+    builder.add_key_space("ks", 8, 16, KeyType::uniform(8));
+    builder.add_key_space("ks2", 8, 16, KeyType::uniform(8));
     let key_shape = builder.build();
 
     let db = Db::open(
@@ -70,6 +70,8 @@ pub fn setup_db() -> TestDb {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.ks("ks");
+    let ks2 = db.ks("ks2");
 
     let mut batch = db.write_batch();
     for i in 0..5u8 {
@@ -96,8 +98,8 @@ pub fn setup_db_with_cr() -> (TempDir, PathBuf) {
     std::fs::create_dir_all(&path).unwrap();
 
     let mut builder = KeyShapeBuilder::new();
-    let ks = builder.add_key_space("objects", 8, 16, KeyType::uniform(8));
-    let ks2 = builder.add_key_space("metadata", 8, 16, KeyType::uniform(8));
+    builder.add_key_space("objects", 8, 16, KeyType::uniform(8));
+    builder.add_key_space("metadata", 8, 16, KeyType::uniform(8));
     let key_shape = builder.build();
 
     let db = Db::open(
@@ -107,6 +109,8 @@ pub fn setup_db_with_cr() -> (TempDir, PathBuf) {
         Metrics::new(),
     )
     .unwrap();
+    let ks = db.ks("objects");
+    let ks2 = db.ks("metadata");
 
     let mut batch = db.write_batch();
     for i in 0..5u8 {

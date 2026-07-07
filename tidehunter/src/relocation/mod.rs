@@ -3,10 +3,10 @@ use crate::batch::RelocatedWriteBatch;
 use crate::db::{Db, DbResult, WalEntry};
 use crate::index::index_table::IndexTable;
 use crate::key_shape::KeySpace;
-use crate::large_table::Loader;
 use crate::metrics::Metrics;
 use crate::relocation::watermark::RelocationWatermarks;
 use crate::wal::WalError;
+use crate::wal::position::LastProcessed;
 pub use cell_reference::CellReference;
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -315,7 +315,8 @@ impl RelocationDriver {
             db.config.batch_codec.is_none(),
             "wal-based relocation does not support Config::batch_codec yet"
         );
-        let upper_limit = db.wal_writer.last_processed().as_u64();
+        let last_processed = db.wal_writer.last_processed();
+        let upper_limit = last_processed.as_u64();
         let min_wal_position = db.wal.min_wal_position();
         let mut wal_iterator = db.wal.wal_iterator_for_scan(min_wal_position)?;
 
@@ -385,9 +386,20 @@ impl RelocationDriver {
             let batch_limit = db.config.relocation_batch_max_bytes();
             let mut batch =
                 RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), target_position);
+            // Relocate the value as of the checkpoint frontier, not the live
+            // latest: a post-frontier overwrite would otherwise strand the
+            // as-of value (which GC reclaims) that a held checkpoint reads.
+            // `get_index_for_cell` returns that as-of view directly — the overlay
+            // is filtered to < `last_processed` before any latest-per-key collapse,
+            // and the on-disk levels it merges under are already as-of-safe.
             let index = db
                 .large_table
-                .get_index_for_cell(db.ks_context(cell.keyspace), &cell.cell_id, db.as_ref())?
+                .get_index_for_cell(
+                    db.ks_context(cell.keyspace),
+                    &cell.cell_id,
+                    db.as_ref(),
+                    last_processed,
+                )?
                 .unwrap_or(IndexTable::default().into());
             let context = db.ks_context(cell.keyspace);
             for (reduced_key, position) in index.iter() {
@@ -446,19 +458,24 @@ impl RelocationDriver {
         db: &Arc<Db>,
         effective_limit: u64,
     ) -> DbResult<CellProcessingContext> {
-        let batch = RelocatedWriteBatch::new(
-            cell_ref.keyspace,
-            cell_ref.cell_id.clone(),
-            db.last_processed_wal_position().as_u64(),
-        );
+        // The CAS threshold must be the same frontier the as-of index view
+        // below is built with. Any write newer than that view sits at an
+        // offset >= `effective_limit`; a higher threshold (e.g. the live
+        // frontier) would let the CAS re-point such a write to the relocated
+        // copy of the older as-of value, losing the overwrite. (The WAL-based
+        // path passes its `target_position` for the same reason.)
+        let batch =
+            RelocatedWriteBatch::new(cell_ref.keyspace, cell_ref.cell_id.clone(), effective_limit);
         let mut context = CellProcessingContext::new(batch);
         let mut removed_count = 0;
 
-        // Phase A: Get shared reference to cell index
+        // Phase A: Get shared reference to cell index, as of the relocation
+        // frontier (filters the overlay before any latest-per-key collapse).
         let index = match db.large_table.get_index_for_cell(
             db.ks_context(cell_ref.keyspace),
             &cell_ref.cell_id,
             db.as_ref(),
+            LastProcessed::new(effective_limit),
         )? {
             Some(index) => index,
             None => {
@@ -483,6 +500,10 @@ impl RelocationDriver {
         // - Fall back to current value-based approach when needed
         let ks_context = db.ks_context(cell_ref.keyspace);
         let keyspace_desc = &ks_context.ks_config;
+        // Relocate the value as of the checkpoint frontier, not the live latest
+        // (see the WAL-based path for why). `get_index_for_cell` already returns
+        // the as-of view; the loop below skips any on-disk entry still at >= the
+        // cutoff.
         for (key, position) in index.iter() {
             if position.offset() >= effective_limit {
                 continue;

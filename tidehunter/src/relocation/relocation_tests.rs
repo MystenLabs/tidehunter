@@ -1,7 +1,14 @@
+use std::collections::HashSet;
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
-use crate::key_shape::KeySpaceConfig;
+use crate::control::RelocateFiles;
+use crate::failpoints::FailPoint;
+use crate::key_shape::{KeySpace, KeySpaceConfig};
+use crate::large_table::Loader;
+use crate::latch::Latch;
+use crate::relocation::CellReference;
 use crate::relocation::watermark::WatermarkData;
+use crate::wal::layout::WalKind;
 use crate::{
     RelocationStrategy,
     config::Config,
@@ -10,6 +17,7 @@ use crate::{
     relocation::RelocationWatermarks,
 };
 use crate::{metrics::Metrics, relocation::Decision};
+use minibytes::Bytes;
 
 fn force_unload_config(config: &Config) -> Arc<Config> {
     let mut config2 = Config::clone(config);
@@ -58,6 +66,177 @@ fn list_wal_files(path: &Path) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
+// A checkpoint must keep reading the as-of-frontier values across a relocation
+// that runs while it is held: a pre-checkpoint key is overwritten after the
+// checkpoint and then relocation rewrites positions / reclaims WAL files. Run
+// against two configs (see the two tests below): forced unload, where the cell
+// unloads and the as-of value is read from the relocated on-disk blob; and
+// unloading disabled, where the cell stays loaded and the as-of value must
+// survive in the in-memory overlay.
+fn checkpoint_survives_relocation(config: Arc<Config>, ksc: KeySpaceConfig) {
+    let dir = tempdir::TempDir::new("test_ckpt_reloc").unwrap();
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.ks("k");
+
+    let big = |b: u8| -> Vec<u8> { vec![b; 12 * 1000] };
+    let overwritten = 3u64;
+    let untouched = 7u64;
+
+    db.insert(ks, overwritten.to_be_bytes().to_vec(), big(1))
+        .unwrap();
+    db.insert(ks, untouched.to_be_bytes().to_vec(), big(5))
+        .unwrap();
+    // Enough padding to push the relocation target past several WAL files so it
+    // actually relocates (rewrites positions), not a no-op.
+    for i in 1000..3000u64 {
+        db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+    }
+
+    let checkpoint = db.checkpoint();
+
+    db.insert(ks, overwritten.to_be_bytes().to_vec(), big(2))
+        .unwrap();
+    for i in 3000..3100u64 {
+        db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+    }
+
+    db.start_blocking_relocation();
+
+    // Sanity: relocation actually relocated entries (otherwise this test is
+    // vacuous — it must exercise the position-rewrite path).
+    let kept = metrics.relocation_kept.with_label_values(&["k"]).get();
+    assert!(
+        kept > 0,
+        "relocation must have relocated entries for this test to be meaningful"
+    );
+
+    // Checkpoint reads the as-of-frontier values.
+    assert_eq!(
+        checkpoint.get(ks, &overwritten.to_be_bytes()).unwrap(),
+        Some(big(1).into()),
+        "overwritten key as of checkpoint"
+    );
+    assert_eq!(
+        checkpoint.get(ks, &untouched.to_be_bytes()).unwrap(),
+        Some(big(5).into()),
+        "untouched key as of checkpoint (relocation rewrite hazard)"
+    );
+    // Live reads reflect the latest values after relocation.
+    assert_eq!(
+        db.get(ks, &untouched.to_be_bytes()).unwrap(),
+        Some(big(5).into())
+    );
+    assert_eq!(
+        db.get(ks, &overwritten.to_be_bytes()).unwrap(),
+        Some(big(2).into())
+    );
+}
+
+#[test]
+fn test_checkpoint_survives_relocation_with_unload() {
+    // Forced unload during the held checkpoint (snapshot_unload_threshold = 0):
+    // the cell unloads, so the checkpoint reads the as-of value from the
+    // relocated on-disk blob rather than the post-checkpoint value.
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    checkpoint_survives_relocation(force_unload_config(&config), KeySpaceConfig::new());
+}
+
+#[test]
+fn test_checkpoint_survives_relocation_without_unload() {
+    // Unloading disabled: the cell stays loaded, so the as-of value must survive
+    // relocation in the in-memory overlay (relocation rewrites its position to
+    // >= L and reclaims the original frame).
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    checkpoint_survives_relocation(Arc::new(config), KeySpaceConfig::new().disable_unload());
+}
+
+// Regression: a key overwritten after a checkpoint, whose as-of value lives as a
+// distinct *overlay* position (not promoted to flat/L1) in a multi-level/unloaded
+// cell, must survive relocation. Before the fix, `get_index_for_cell` collapsed
+// the overlay to latest-per-key before `retain_processed`, discarding the
+// below-frontier value; it was never relocated, and GC reclaimed its WAL file, so
+// the held checkpoint read `None`.
+#[test]
+fn test_checkpoint_survives_relocation_overlay_asof_value() {
+    let dir = tempdir::TempDir::new("ckpt_reloc_overlay_asof").unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    let config = force_unload_config(&config); // snapshot_unload_threshold = 0
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    ksb.add_key_space_config("k2", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.ks("k");
+    let ks2 = db.ks("k2");
+
+    let big = |b: u8| -> Vec<u8> { vec![b; 12 * 1000] };
+    let target = 3u64;
+
+    // 1. Build a cell from OTHER keys (not `target`); flush it to disk
+    //    synchronously so the bulk lives on-disk and the overlay is clean.
+    //    Two force-rebuilds encourage an L0->L1 compaction (multi-level cell).
+    for i in 1000..3000u64 {
+        db.insert(ks, i.to_be_bytes().to_vec(), big(7)).unwrap();
+    }
+    db.force_rebuild_control_region().unwrap();
+    db.force_rebuild_control_region().unwrap();
+
+    // 2. Insert the target's as-of value into a fresh overlay over the on-disk
+    //    cell. One dirty key (< max_dirty_keys=32) => stays in `data`.
+    db.insert(ks, target.to_be_bytes().to_vec(), big(1))
+        .unwrap();
+
+    // 3. Pin a checkpoint at this frontier (target == big(1) as of here).
+    let checkpoint = db.checkpoint();
+    assert_eq!(
+        checkpoint.get(ks, &target.to_be_bytes()).unwrap(),
+        Some(big(1).into()),
+        "SANITY: as-of read works right after checkpoint"
+    );
+
+    // 4. Overwrite target after the frontier => overlay holds BOTH positions.
+    db.insert(ks, target.to_be_bytes().to_vec(), big(2))
+        .unwrap();
+    assert_eq!(
+        checkpoint.get(ks, &target.to_be_bytes()).unwrap(),
+        Some(big(1).into()),
+        "SANITY: as-of read still works after the post-frontier overwrite (pre-relocation)"
+    );
+
+    // 5. Advance the global WAL position via a different keyspace/cell so
+    //    relocation's target_position passes the as-of value's offset.
+    for i in 0..4000u64 {
+        db.insert(ks2, i.to_be_bytes().to_vec(), big(9)).unwrap();
+    }
+
+    // 6. Relocate (default WAL-based) => GC reclaims files below target_position.
+    db.start_blocking_relocation();
+    assert!(
+        metrics.relocation_kept.with_label_values(&["k"]).get() > 0,
+        "relocation must have relocated entries"
+    );
+
+    assert_eq!(
+        db.get(ks, &target.to_be_bytes()).unwrap(),
+        Some(big(2).into()),
+        "live get must be the overwrite"
+    );
+    assert_eq!(
+        checkpoint.get(ks, &target.to_be_bytes()).unwrap(),
+        Some(big(1).into()),
+        "checkpoint must read the as-of value big(1) after relocation; \
+         None => the below-frontier overlay value was lost"
+    );
+}
+
 #[test]
 fn test_wal_relocation_basic_flow() {
     let dir = tempdir::TempDir::new("test_relocation_filter").unwrap();
@@ -73,8 +252,8 @@ fn test_wal_relocation_basic_flow() {
             Decision::Remove
         }
     });
-    let ks = ksb.add_key_space_config("k", 4, 1, KeyType::uniform(1), ksc);
-    let ks2 = ksb.add_key_space_config("k2", 4, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    ksb.add_key_space_config("k", 4, 1, KeyType::uniform(1), ksc);
+    ksb.add_key_space_config("k2", 4, 1, KeyType::uniform(1), KeySpaceConfig::new());
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let sample_key = 3_u32.to_be_bytes().to_vec();
@@ -88,6 +267,8 @@ fn test_wal_relocation_basic_flow() {
             metrics.clone(),
         )
         .unwrap();
+        let ks = db.ks("k");
+        let ks2 = db.ks("k2");
         for i in 0..insert_count {
             db.insert(ks, i.to_be_bytes().to_vec(), value.clone())
                 .unwrap();
@@ -125,6 +306,8 @@ fn test_wal_relocation_basic_flow() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.ks("k");
+    let ks2 = db.ks("k2");
     assert_eq!(db.get(ks, &sample_key).unwrap(), None);
     assert_eq!(
         db.get(ks2, &sample_key).unwrap(),
@@ -142,7 +325,7 @@ fn test_index_based_relocation_point_deletes() {
     let dir = tempdir::TempDir::new("test_index_based_relocation_point_deletes").unwrap();
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
-    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let db = Db::open(
@@ -152,6 +335,7 @@ fn test_index_based_relocation_point_deletes() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.ks("k");
     for key in 0..200u64 {
         db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
             .unwrap();
@@ -206,7 +390,7 @@ fn test_index_based_relocation_filter() {
             Decision::Remove
         }
     });
-    let ks = ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), ksc);
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let sample_key = 3_u64.to_be_bytes().to_vec();
@@ -219,6 +403,7 @@ fn test_index_based_relocation_filter() {
             metrics.clone(),
         )
         .unwrap();
+        let ks = db.ks("k");
         loop {
             db.insert(ks, insert_count.to_be_bytes().to_vec(), vec![0, 1, 2])
                 .unwrap();
@@ -258,6 +443,7 @@ fn test_index_based_relocation_filter() {
             metrics.clone(),
         )
         .unwrap();
+        let ks = db.ks("k");
         for key in insert_count..(insert_count + 100) {
             db.insert(ks, key.to_be_bytes().to_vec(), vec![0, 1, 2])
                 .unwrap();
@@ -278,6 +464,7 @@ fn test_index_based_relocation_filter() {
         metrics.clone(),
     )
     .unwrap();
+    let ks = db.ks("k");
 
     // Verify sample_key still exists (wasn't filtered because no relocation occurred)
     assert_eq!(db.get(ks, &sample_key).unwrap(), Some(vec![0, 1, 2].into()));
@@ -312,14 +499,14 @@ fn test_relocation_strategies_produce_identical_results() {
     // Create identical keyspace configurations
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
-    let ks = ksb.add_key_space_config("test", 8, 1, KeyType::uniform(1), ksc);
+    ksb.add_key_space_config("test", 8, 1, KeyType::uniform(1), ksc);
     let key_shape = ksb.build();
 
     let metrics_wal = Metrics::new();
     let metrics_index = Metrics::new();
 
     // Create identical databases with identical operations
-    let (db_wal, db_index) = {
+    let (db_wal, db_index, ks) = {
         let db_wal = Db::open(
             dir1.path(),
             key_shape.clone(),
@@ -334,6 +521,7 @@ fn test_relocation_strategies_produce_identical_results() {
             metrics_index.clone(),
         )
         .unwrap();
+        let ks = db_wal.ks("test");
 
         // Apply identical operations to both databases
         for key in 0..1000u64 {
@@ -363,7 +551,7 @@ fn test_relocation_strategies_produce_identical_results() {
             db_index.remove(ks, key.to_be_bytes().to_vec()).unwrap();
         }
 
-        (db_wal, db_index)
+        (db_wal, db_index, ks)
     };
 
     // Run different relocation strategies
@@ -411,11 +599,12 @@ fn test_both_strategies_handle_concurrent_writes() {
         };
         let mut ksb = KeyShapeBuilder::new();
         let ksc = KeySpaceConfig::new();
-        let ks = ksb.add_key_space_config("concurrent", 8, 1, KeyType::uniform(1), ksc);
+        ksb.add_key_space_config("concurrent", 8, 1, KeyType::uniform(1), ksc);
         let key_shape = ksb.build();
         let metrics = Metrics::new();
 
-        let db = Arc::new(Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap());
+        let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+        let ks = db.ks("concurrent");
 
         // Pre-populate data
         for i in 0..1000u64 {
@@ -543,8 +732,8 @@ fn test_index_based_relocation_progress_tracking() {
 
     // Create multiple keyspaces to ensure cross-keyspace progress tracking
     let mut ksb = KeyShapeBuilder::new();
-    let ks1 = ksb.add_key_space_config("ks1", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
-    let ks2 = ksb.add_key_space_config("ks2", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    ksb.add_key_space_config("ks1", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    ksb.add_key_space_config("ks2", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
     let key_shape = ksb.build();
     let metrics = Metrics::new();
 
@@ -557,6 +746,8 @@ fn test_index_based_relocation_progress_tracking() {
             metrics.clone(),
         )
         .unwrap();
+        let ks1 = db.ks("ks1");
+        let ks2 = db.ks("ks2");
 
         for ks in [ks1, ks2] {
             for key in 0..500u64 {
@@ -601,11 +792,12 @@ fn test_index_based_relocation_empty_and_sparse_cells() {
     let dir = tempdir::TempDir::new("test_sparse_cells").unwrap();
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new();
-    let ks = ksb.add_key_space_config("sparse", 8, 4, KeyType::uniform(128), ksc); // 128 cells per mutex (power of 2)
+    ksb.add_key_space_config("sparse", 8, 4, KeyType::uniform(128), ksc); // 128 cells per mutex (power of 2)
     let key_shape = ksb.build();
     let metrics = Metrics::new();
 
     let db = Db::open(dir.path(), key_shape, index_based_config(), metrics.clone()).unwrap();
+    let ks = db.ks("sparse");
 
     // Create very sparse data - only populate every 10th cell
     for cell_idx in (0..128).step_by(10) {
@@ -646,11 +838,12 @@ fn test_index_based_relocation_large_cells() {
     let mut ksb = KeyShapeBuilder::new();
     let ksc = KeySpaceConfig::new();
     // Use fewer cells so we can pack more entries per cell
-    let ks = ksb.add_key_space_config("dense", 8, 2, KeyType::uniform(2), ksc); // Only 2 cells per mutex
+    ksb.add_key_space_config("dense", 8, 2, KeyType::uniform(2), ksc); // Only 2 cells per mutex
     let key_shape = ksb.build();
     let metrics = Metrics::new();
 
     let db = Db::open(dir.path(), key_shape, index_based_config(), metrics.clone()).unwrap();
+    let ks = db.ks("dense");
 
     // Fill cells with many entries each
     let entries_per_cell = 1000u64;
@@ -696,11 +889,12 @@ fn test_index_based_relocation_large_cells() {
 fn test_watermark_highest_wal_position_tracking() {
     let dir = tempdir::TempDir::new("test_watermark_wal_position").unwrap();
     let mut ksb = KeyShapeBuilder::new();
-    let ks = ksb.add_key_space_config("test", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    ksb.add_key_space_config("test", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
     let key_shape = ksb.build();
     let metrics = Metrics::new();
 
     let db = Db::open(dir.path(), key_shape, index_based_config(), metrics.clone()).unwrap();
+    let ks = db.ks("test");
 
     // Insert multiple entries to create WAL entries at different positions
     for key in 0..50u64 {
@@ -800,10 +994,11 @@ fn test_index_based_relocation_with_target_position() {
     let dir = tempdir::TempDir::new("test_target_position").unwrap();
     let config = index_based_config();
     let mut ksb = KeyShapeBuilder::new();
-    let ks = ksb.add_key_space("default", 8, 1, KeyType::uniform(1));
+    ksb.add_key_space("default", 8, 1, KeyType::uniform(1));
     let key_shape = ksb.build();
     let metrics = Metrics::new();
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.ks("default");
 
     // Insert 1000 entries sequentially
     for i in 0..500u64 {
@@ -864,6 +1059,239 @@ fn test_index_based_relocation_with_target_position() {
     assert_eq!(watermark.target_position, Some(mid_position));
 }
 
+// Regression: the index-based CAS threshold must be the relocation frontier
+// (`effective_limit`), not the live frontier. For a key overwritten after the
+// frontier, the as-of view still relocates the older value; a live-frontier
+// threshold lets `RelocationUpdates::apply` re-point the newer write to the
+// relocated copy of that older value, losing the overwrite. The same state
+// arises with a write that lands concurrently with a relocation run, so this
+// also pins the concurrent-overwrite case deterministically.
+#[test]
+fn test_index_based_relocation_preserves_overwrite_above_target() {
+    let dir = tempdir::TempDir::new("test_index_cas_overwrite").unwrap();
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space("k", 8, 1, KeyType::uniform(1));
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    // No forced unload: the cell must stay loaded so the as-of value is still
+    // a distinct overlay position when relocation runs (a flush would collapse
+    // the key to latest-per-key and nothing would be relocated).
+    let db = Db::open(
+        dir.path(),
+        key_shape,
+        Arc::new(Config::small()),
+        metrics.clone(),
+    )
+    .unwrap();
+    let ks = db.ks("k");
+
+    let key = 3u64.to_be_bytes().to_vec();
+    db.insert(ks, key.clone(), vec![1; 64]).unwrap();
+    db.wal_writer.wal_tracker_barrier();
+    let frontier = db.wal_writer.last_processed().as_u64();
+
+    // Overwrite after the frontier; the barrier ensures the live frontier at
+    // relocation time is past the overwrite.
+    db.insert(ks, key.clone(), vec![2; 64]).unwrap();
+    db.wal_writer.wal_tracker_barrier();
+
+    db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(Some(frontier)));
+
+    // The as-of value must actually have been relocated, otherwise the CAS
+    // never runs and this test is vacuous.
+    assert!(
+        metrics.relocation_kept.with_label_values(&["k"]).get() > 0,
+        "relocation must have relocated the as-of value"
+    );
+    assert_eq!(
+        db.get(ks, &key).unwrap(),
+        Some(vec![2; 64].into()),
+        "the overwrite must survive relocation; the relocated copy of the \
+         as-of value must not be CAS'd over it"
+    );
+}
+
+// Regression: a write racing a clean `ForceRelocate` on a Loaded `[L0, L1]`
+// cell must not lose the keys below L0.
+//
+// A loaded cell's overlay covers L0 only; reads reach L1-resident keys by
+// walking `disk_levels_to_walk` -> `iter_below_l0`. A clean ForceRelocate
+// collapses L0+L1 into a single blob in the L0 slot. When a write lands while
+// that flush is in flight, the completion (`update_relocated_position`)
+// reaches the DirtyLoaded arm with an overlay that no longer covers the new
+// L0 blob (it lacks the former-L1-only keys). Before the fix that arm kept
+// the cell loaded, violating the "Loaded => data covers L0" invariant:
+// - reads: `iter_below_l0` on the single-level cell walks nothing, so
+//   former-L1-only keys returned None immediately;
+// - the next normal flush cloned the overlay as the cell's only level,
+//   dropping those keys from the index permanently.
+// The fix retains only the racing writes and demotes the cell to
+// DirtyUnloaded, so reads and flushes consult the relocated blob again.
+//
+// The relocation runs on the production flusher; the
+// `fp_flush_before_completion` failpoint pauses it between the flush work and
+// the completion, so the racing write deterministically lands inside the
+// in-flight window.
+#[test]
+fn test_force_relocate_concurrent_write_keeps_below_l0_keys() {
+    let dir = tempdir::TempDir::new("force_relocate_dirty_loaded").unwrap();
+    // Forced unload (threshold 0) so the flushed cell unloads; the later read
+    // reloads it folding only L0 into the overlay, leaving L1 on disk.
+    let config = force_unload_config(&Config::small());
+    let mut ksb = KeyShapeBuilder::new();
+    // Unloaded iteration off so that stepping an iterator loads the cell
+    // (point reads never load; this is the only read-path load trigger).
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new().with_unloaded_iterator(false),
+    );
+    let key_shape = ksb.build();
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.ks("k");
+
+    let value = |b: u8| -> Vec<u8> { vec![b; 100] };
+    let key = |i: u64| -> Vec<u8> { i.to_be_bytes().to_vec() };
+
+    // Build an L1: enough keys for an L0->L1 promote (l0_max_entries =
+    // 8 * max_dirty_keys = 256 for Config::small), then a small fresh L0.
+    for i in 0..300u64 {
+        db.insert(ks, key(i), value(1)).unwrap();
+    }
+    // Advance the tracker frontier past the inserts before each rebuild, so
+    // the flush retains nothing in the overlay and the cell ends up clean.
+    db.wal_writer.wal_tracker_barrier();
+    db.force_rebuild_control_region().unwrap();
+    for i in 1000..1010u64 {
+        db.insert(ks, key(i), value(2)).unwrap();
+    }
+    db.wal_writer.wal_tracker_barrier();
+    db.force_rebuild_control_region().unwrap();
+    db.large_table.flusher.barrier();
+    // Flushes dispatched while the inserts ran sampled an older frontier and
+    // can leave a retained overlay tail (DirtyUnloaded). With nothing in
+    // flight any more, one more rebuild flushes at the current frontier and
+    // leaves the cell clean.
+    db.wal_writer.wal_tracker_barrier();
+    db.force_rebuild_control_region().unwrap();
+    db.large_table.flusher.barrier();
+
+    let cell = CellReference::first(&db, KeySpace::first()).expect("cell must exist");
+    let context = db.ks_context(cell.keyspace);
+    assert_eq!(
+        db.large_table.entry_state_for_test(context, &cell.cell_id),
+        "Unloaded",
+        "PRECONDITION: the flushed cell must be clean and unloaded"
+    );
+
+    // Load the (clean) cell: iterators load cells (point reads read through
+    // without loading); this folds only L0 into the in-memory overlay,
+    // leaving L1 reachable solely through the on-disk levels walk.
+    assert!(db.iterator(ks).next().is_some());
+    assert_eq!(
+        db.large_table.entry_state_for_test(context, &cell.cell_id),
+        "Loaded",
+        "PRECONDITION: cell must be clean and loaded"
+    );
+
+    // Pick a probe key that lives only below L0: absent from the loaded
+    // overlay but readable through the on-disk levels walk.
+    let below_l0_key = (0..300u64)
+        .find(|i| {
+            let reduced = context.ks_config.reduced_key_bytes(Bytes::from(key(*i)));
+            db.large_table
+                .with_entry_for_test(context, &cell.cell_id, |entry| {
+                    entry.get(&reduced).is_none()
+                })
+        })
+        .expect("setup must leave at least one key only reachable below L0");
+    assert_eq!(
+        db.get(ks, &key(below_l0_key)).unwrap(),
+        Some(value(1).into()),
+        "SANITY: probe key readable via the levels walk before relocation"
+    );
+
+    // Dispatch a force-relocate of the cell's blobs into a flusher whose
+    // receiver the test owns, capturing the command instead of racing a
+    // Pause the flusher between the flush work and its completion, so the
+    // racing write below deterministically lands while the force-relocate is
+    // in flight. The latch releases when its guard drops — including on a
+    // panicking assertion, so a failure cannot wedge the flusher thread.
+    let (completion_latch, completion_latch_guard) = Latch::new();
+    db.large_table.fp.0.write().fp_flush_before_completion = FailPoint::latch(completion_latch);
+
+    // Dispatch the force-relocate through the production flusher, exactly as
+    // the snapshot pass does for a clean cell in low-occupancy files.
+    let last_processed = db.last_processed_wal_position();
+    db.large_table
+        .with_entry_for_test(context, &cell.cell_id, |entry| {
+            let layout = db.config.wal_layout(WalKind::Index);
+            let files: HashSet<_> = entry
+                .levels()
+                .iter()
+                .filter_map(|p| p.valid())
+                .map(|p| layout.locate_file(p.offset()))
+                .collect();
+            let relocate_files = RelocateFiles::new(files, db.config.wal_layout(WalKind::Index));
+            entry.request_force_relocate(&db.large_table.flusher, last_processed, &relocate_files);
+        });
+
+    // The racing write: lands while the paused flusher holds the completion.
+    // The cell goes Loaded -> DirtyLoaded, routing the completion through the
+    // arm whose overlay no longer covers the relocated blob.
+    db.insert(ks, key(7777), value(3)).unwrap();
+    assert_eq!(
+        db.large_table.entry_state_for_test(context, &cell.cell_id),
+        "DirtyLoaded",
+        "PRECONDITION: the racing write must land before the completion"
+    );
+
+    // Unblock the flusher and wait for the completion to apply.
+    drop(completion_latch_guard);
+    db.large_table.flusher.barrier();
+
+    // The clean-cell branch must have dispatched a ForceRelocate — a dirty
+    // cell would dispatch a normal Flush, exercising a different completion
+    // path and leaving this test vacuous.
+    assert!(
+        metrics.unload.with_label_values(&["force_relocate"]).get() > 0,
+        "the ForceRelocate flusher path must have run"
+    );
+
+    // The completion demotes the cell so reads consult the relocated blob;
+    // the overlay keeps only the racing write.
+    assert_eq!(
+        db.large_table.entry_state_for_test(context, &cell.cell_id),
+        "DirtyUnloaded",
+        "completion on a dirtied loaded cell must demote it"
+    );
+
+    // The racing write and the L0-resident keys survive...
+    assert_eq!(db.get(ks, &key(7777)).unwrap(), Some(value(3).into()));
+    assert_eq!(db.get(ks, &key(1000)).unwrap(), Some(value(2).into()));
+    // ...and so must the key that lived below L0 (lost before the fix: the
+    // single-level cell had nothing below L0 to walk, and the kept overlay
+    // never had the key).
+    assert_eq!(
+        db.get(ks, &key(below_l0_key)).unwrap(),
+        Some(value(1).into()),
+        "key residing below L0 must survive a force-relocate completing on a dirtied cell"
+    );
+
+    // The loss must also not become permanent: the next normal flush writes
+    // the overlay as the cell's only level.
+    db.force_rebuild_control_region().unwrap();
+    db.large_table.flusher.barrier();
+    assert_eq!(
+        db.get(ks, &key(below_l0_key)).unwrap(),
+        Some(value(1).into()),
+        "key below L0 must survive the next normal flush after the relocation"
+    );
+}
+
 #[test]
 fn test_compute_target_position_from_ratio() {
     use crate::relocation::compute_target_position_from_ratio;
@@ -871,9 +1299,10 @@ fn test_compute_target_position_from_ratio() {
     let dir = tempdir::TempDir::new("test_compute_ratio").unwrap();
     let config = Arc::new(Config::small());
     let mut ksb = KeyShapeBuilder::new();
-    let ks = ksb.add_key_space("default", 8, 1, KeyType::uniform(1));
+    ksb.add_key_space("default", 8, 1, KeyType::uniform(1));
     let key_shape = ksb.build();
-    let db = Arc::new(Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap());
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.ks("default");
 
     // Initially should return None (empty WAL)
     assert_eq!(compute_target_position_from_ratio(&db, 0.5), None);
