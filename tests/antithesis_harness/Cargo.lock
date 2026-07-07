@@ -13,6 +13,7 @@ name = "antithesis_harness"
 version = "0.1.0"
 dependencies = [
  "antithesis_sdk",
+ "bincode",
  "rand 0.8.6",
  "tidehunter",
 ]

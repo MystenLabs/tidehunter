@@ -15,6 +15,7 @@ use tidehunter::{RelocationStrategy, compute_target_position_from_ratio};
 
 const VALUE_MAGIC: &[u8; 8] = b"THANT001";
 const CHECKPOINT_MAGIC: &[u8; 8] = b"THHWM001";
+const SNAPSHOT_WAL_POSITION_FILE: &str = "ptr";
 const RANDOM_SPACE_COUNT: usize = 2;
 const DURABLE_SPACE_INDEX: usize = 2;
 
@@ -224,8 +225,37 @@ impl Harness {
     }
 
     fn run(&mut self, rng: &mut HarnessRng) {
+        let trace = env::var_os("TIDEHUNTER_ANTITHESIS_TRACE").is_some();
+        // Classification aid: when set, disable the local-only restart ops (reopen +
+        // restore_snapshot) so we can tell whether a mismatch lives in the core
+        // CRUD/flush/relocation path or only in the reopen/snapshot path.
+        let local_restart_ops = !self.settings.in_antithesis
+            && env::var_os("TIDEHUNTER_ANTITHESIS_NO_RESTART").is_none();
+        let relocation_ops = env::var_os("TIDEHUNTER_ANTITHESIS_NO_RELOCATION").is_none();
+
         for op_idx in 0..self.settings.ops {
             let roll = rng.range_u32(100);
+            if trace {
+                let kind = match roll {
+                    0..=14 => "durable_insert",
+                    15..=33 => "insert",
+                    34..=45 => "remove",
+                    46..=60 => "get",
+                    61..=70 => "exists",
+                    71..=80 => "iterator",
+                    81..=88 => "batch",
+                    89..=91 => "rebuild",
+                    92..=93 if local_restart_ops => "reopen",
+                    92..=93 => "get",
+                    94..=95 if relocation_ops => "relocation",
+                    94..=95 => "get",
+                    96..=97 => "create_snapshot",
+                    98 if local_restart_ops => "restore_snapshot",
+                    98 => "rebuild",
+                    _ => "verify_all",
+                };
+                eprintln!("TRACE op={op_idx} kind={kind}");
+            }
             match roll {
                 0..=14 => self.op_durable_insert(op_idx, rng),
                 15..=33 => self.op_insert(op_idx, rng),
@@ -235,11 +265,12 @@ impl Harness {
                 71..=80 => self.op_iterator(op_idx, rng),
                 81..=88 => self.op_batch(op_idx, rng),
                 89..=91 => self.op_rebuild(op_idx, rng),
-                92..=93 if !self.settings.in_antithesis => self.op_reopen(op_idx),
+                92..=93 if local_restart_ops => self.op_reopen(op_idx),
                 92..=93 => self.op_get(op_idx, rng),
-                94..=95 => self.op_relocation(op_idx, rng),
+                94..=95 if relocation_ops => self.op_relocation(op_idx, rng),
+                94..=95 => self.op_get(op_idx, rng),
                 96..=97 => self.op_create_snapshot(op_idx),
-                98 if !self.settings.in_antithesis => self.op_restore_snapshot(op_idx, rng),
+                98 if local_restart_ops => self.op_restore_snapshot(op_idx, rng),
                 98 => self.op_rebuild(op_idx, rng),
                 _ => self.verify_all(op_idx),
             }
@@ -526,7 +557,12 @@ impl Harness {
 
         let checkpoint_version = self.max_durable_version();
         self.persist_checkpoint(checkpoint_version, op_idx);
-        let wal_position = self.metrics.wal_written_bytes.get() as u64;
+        let wal_position = read_snapshot_wal_position(&path).unwrap_or_else(|err| {
+            panic!(
+                "read state snapshot WAL position failed at op {op_idx} path={}: {err}",
+                path.display()
+            )
+        });
         self.snapshots.push(SavedSnapshot {
             path,
             model: self.model.clone(),
@@ -903,7 +939,7 @@ impl HarnessRng {
 
 fn harness_config() -> Config {
     let mut config = Config::small();
-    config.frag_size = env_u64("TIDEHUNTER_ANTITHESIS_FRAG_SIZE", 4 * 1024);
+    config.frag_size = env_u64("TIDEHUNTER_ANTITHESIS_FRAG_SIZE", 1024 * 1024);
     config.wal_file_size = env_u64("TIDEHUNTER_ANTITHESIS_WAL_FILE_SIZE", 64 * 1024 * 1024);
     config.max_maps = env_usize("TIDEHUNTER_ANTITHESIS_MAX_MAPS", 256);
     config.max_index_maps = Some(env_usize("TIDEHUNTER_ANTITHESIS_MAX_INDEX_MAPS", 256));
@@ -1060,6 +1096,12 @@ fn write_checkpoint(path: &Path, version: u64) -> io::Result<()> {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+fn read_snapshot_wal_position(snapshot_path: &Path) -> io::Result<u64> {
+    let bytes = fs::read(snapshot_path.join(SNAPSHOT_WAL_POSITION_FILE))?;
+    bincode::deserialize(&bytes)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
 
 fn checkpoint_checksum(version: u64) -> u64 {

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tidehunter = { path = "../../tidehunter", features = ["test-utils"] }
 rand = "0.8"
+bincode = "1.3"
 antithesis_sdk = { version = "=0.2.5", optional = true, features = ["full"] }
 
 [features]
