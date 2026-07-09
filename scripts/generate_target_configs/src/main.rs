@@ -1,10 +1,13 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use benchmark::configs::{
-    Backend, EpochFilterMode, KeyLayout, ReadMode, RelocationConfig, StressTestConfigs,
+    Backend, DEFAULT_DB_DIR, EpochFilterMode, KeyLayout, ReadMode, RelocationConfig,
+    StressTestConfigs,
 };
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -234,8 +237,73 @@ const FRAG_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
 const MAX_MAPS: usize = 64;
 const DEFAULT_MAX_DIRTY_KEYS: usize = 1024;
 
+/// The orchestrator settings file; its `working_dir` (the database directory
+/// on the benchmark machines) is baked into the emitted `path` / `db_path` /
+/// `reuse` fields.
+const SETTINGS_PATH: &str = "orchestrator/assets/settings.yml";
+
+static DB_DIR: OnceLock<String> = OnceLock::new();
+
+/// Database directory used in emitted configs. Set by `init_db_dir`.
+fn db_dir() -> &'static str {
+    DB_DIR.get().expect("init_db_dir runs first in main")
+}
+
+/// Resolve the database directory: `working_dir` from SETTINGS_PATH when the
+/// file exists, else DEFAULT_DB_DIR. A settings file that exists but cannot
+/// be parsed is an error (the orchestrator would reject it too). Error
+/// messages must never echo file contents: the file holds access tokens.
+fn init_db_dir() -> Result<()> {
+    let dir = match fs::read_to_string(SETTINGS_PATH) {
+        Ok(data) => match working_dir_from_settings(&data) {
+            Ok(Some(dir)) => {
+                eprintln!("Database directory for configs: {dir} (working_dir of {SETTINGS_PATH})");
+                dir
+            }
+            Ok(None) => {
+                eprintln!(
+                    "Database directory for configs: {DEFAULT_DB_DIR} (default; {SETTINGS_PATH} sets no working_dir)"
+                );
+                DEFAULT_DB_DIR.to_string()
+            }
+            Err(e) => bail!("failed to read working_dir from {SETTINGS_PATH}: {e}"),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "Database directory for configs: {DEFAULT_DB_DIR} (default; no {SETTINGS_PATH})"
+            );
+            DEFAULT_DB_DIR.to_string()
+        }
+        Err(e) => return Err(e).context(format!("failed to read {SETTINGS_PATH}")),
+    };
+    DB_DIR.set(dir).expect("init_db_dir called once");
+    Ok(())
+}
+
+/// Extract `working_dir` from settings YAML, resolving `${ENV}` references the
+/// same way the orchestrator's `Settings::load` does. Returns Ok(None) when
+/// the field is absent. The error never includes the YAML content.
+fn working_dir_from_settings(data: &str) -> Result<Option<String>> {
+    let mut data = data.to_string();
+    for (name, value) in std::env::vars() {
+        data = data.replace(&format!("${{{name}}}"), &value);
+    }
+    #[derive(Deserialize)]
+    struct PartialSettings {
+        working_dir: Option<String>,
+    }
+    let settings: PartialSettings =
+        serde_yaml::from_str(&data).map_err(|e| anyhow::anyhow!("invalid YAML: {e}"))?;
+    match settings.working_dir {
+        Some(dir) if dir.contains("${") => bail!("unresolved ${{ENV}} variable in working_dir"),
+        Some(dir) => Ok(Some(dir.trim_end_matches('/').to_string())),
+        None => Ok(None),
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    init_db_dir()?;
     match args.mode {
         Mode::MainBenchmark => generate_main_benchmark(),
         Mode::MainBenchmarkBaselines => generate_main_benchmark_baselines(),
@@ -311,7 +379,7 @@ fn generate_value_scaling() -> Result<()> {
     base_item.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base_item.stress_client_parameters.tldr = String::new();
     base_item.stress_client_parameters.preserve = false;
-    base_item.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base_item.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base_item.stress_client_parameters.key_len = KEY_LEN;
     base_item.stress_client_parameters.read_mode = ReadMode::Get;
     base_item.stress_client_parameters.read_percentage = 50;
@@ -383,7 +451,7 @@ fn generate_value_scaling_baselines() -> Result<()> {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.key_len = KEY_LEN;
     base.stress_client_parameters.read_mode = ReadMode::Get;
     base.stress_client_parameters.read_percentage = 50;
@@ -469,7 +537,7 @@ fn generate_main_benchmark_baselines() -> Result<()> {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.key_len = KEY_LEN;
     base.stress_client_parameters.relocation = None;
     base.stress_client_parameters.bloom_filter_rate = None;
@@ -541,7 +609,7 @@ fn generate_stability() -> Result<()> {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.read_mode = ReadMode::Get;
     base.stress_client_parameters.relocation = None;
     base.stress_client_parameters.bloom_filter_rate = None;
@@ -611,7 +679,7 @@ fn generate_app_workloads() -> Result<()> {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.read_mode = ReadMode::Get;
     base.stress_client_parameters.read_percentage = 50;
     base.stress_client_parameters.relocation = None;
@@ -688,7 +756,7 @@ fn generate_relocation() -> Result<()> {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.read_mode = ReadMode::Get;
     base.stress_client_parameters.read_percentage = 0;
     base.stress_client_parameters.overwrite_ratio = 0.0;
@@ -728,7 +796,7 @@ fn generate_recovery() -> Result<()> {
     // tab:recovery — recovery evaluation. Generates two phases:
     //
     //   Phase 1 (fill): write each target DB at a deterministic path under
-    //     /opt/sui/db/r6/<name>/. The path lives outside the orchestrator's
+    //     <DEFAULT_DB_DIR>/r6/<name>/. The path lives outside the orchestrator's
     //     `stress.*` cleanup pattern (orchestrator/src/protocol/target.rs),
     //     so the fills survive into Phase 2 batches. Each fill runs at the
     //     designated snapshot_written_bytes; mixed phase is skipped.
@@ -813,7 +881,7 @@ fn generate_recovery() -> Result<()> {
             );
             fill.stress_client_parameters.mixed_duration_secs = 0;
             fill.stress_client_parameters.pause_between_phases_secs = 0;
-            fill.stress_client_parameters.db_path = Some(format!("/opt/sui/db/r6/{name}"));
+            fill.stress_client_parameters.db_path = Some(format!("{}/r6/{name}", db_dir()));
             fill.stress_client_parameters.tldr = format!("r6-fill-{name}");
             items.push(fill);
         }
@@ -830,7 +898,7 @@ fn generate_recovery() -> Result<()> {
             measure.stress_client_parameters.clean_after_measure = true;
             measure.stress_client_parameters.mixed_duration_secs = 0;
             measure.stress_client_parameters.pause_between_phases_secs = 0;
-            measure.stress_client_parameters.reuse = Some(format!("/opt/sui/db/r6/{name}"));
+            measure.stress_client_parameters.reuse = Some(format!("{}/r6/{name}", db_dir()));
             measure.stress_client_parameters.tldr = format!("r6-measure-{name}");
             items.push(measure);
         }
@@ -883,7 +951,7 @@ fn generate_recovery() -> Result<()> {
         fill.stress_client_parameters.pause_between_phases_secs = 0;
         fill.stress_client_parameters.relocation = Some(RelocationConfig::Wal);
         fill.stress_client_parameters.crash_after_secs = Some(CRASH_AFTER_SECS);
-        fill.stress_client_parameters.db_path = Some(format!("/opt/sui/db/r6/{name}"));
+        fill.stress_client_parameters.db_path = Some(format!("{}/r6/{name}", db_dir()));
         fill.stress_client_parameters.tldr = format!("r6-crash-{replicate}");
         items.push(fill);
     }
@@ -897,7 +965,7 @@ fn generate_recovery() -> Result<()> {
         measure.stress_client_parameters.clean_after_measure = true;
         measure.stress_client_parameters.mixed_duration_secs = 0;
         measure.stress_client_parameters.pause_between_phases_secs = 0;
-        measure.stress_client_parameters.reuse = Some(format!("/opt/sui/db/r6/{name}"));
+        measure.stress_client_parameters.reuse = Some(format!("{}/r6/{name}", db_dir()));
         measure.stress_client_parameters.tldr = format!("r6-measure-crash-{replicate}");
         items.push(measure);
     }
@@ -922,7 +990,7 @@ fn generate_recovery_replicates() -> Result<()> {
     //
     // Same workload shape as `recovery`, including the 1,000-key first-read
     // sample on measures. The Series B paths
-    // (/opt/sui/db/r6/snap-{16,64,128,256}gb) are reused across rounds — the
+    // (<DEFAULT_DB_DIR>/r6/snap-{16,64,128,256}gb) are reused across rounds — the
     // measure entries set clean_after_measure=true, so each fill starts on a
     // clean slate. The round suffix (-r1/-r2) is only in `tldr`, which is
     // what we grep in the logs.
@@ -974,7 +1042,7 @@ fn generate_recovery_replicates() -> Result<()> {
             );
             fill.stress_client_parameters.mixed_duration_secs = 0;
             fill.stress_client_parameters.pause_between_phases_secs = 0;
-            fill.stress_client_parameters.db_path = Some(format!("/opt/sui/db/r6/{name}"));
+            fill.stress_client_parameters.db_path = Some(format!("{}/r6/{name}", db_dir()));
             fill.stress_client_parameters.tldr = format!("r6-fill-{name}-r{round}");
             items.push(fill);
         }
@@ -991,7 +1059,7 @@ fn generate_recovery_replicates() -> Result<()> {
             measure.stress_client_parameters.clean_after_measure = true;
             measure.stress_client_parameters.mixed_duration_secs = 0;
             measure.stress_client_parameters.pause_between_phases_secs = 0;
-            measure.stress_client_parameters.reuse = Some(format!("/opt/sui/db/r6/{name}"));
+            measure.stress_client_parameters.reuse = Some(format!("{}/r6/{name}", db_dir()));
             measure.stress_client_parameters.tldr = format!("r6-measure-{name}-r{round}");
             items.push(measure);
         }
@@ -1045,7 +1113,7 @@ fn generate_recovery_replicates() -> Result<()> {
             fill.stress_client_parameters.pause_between_phases_secs = 0;
             fill.stress_client_parameters.relocation = Some(RelocationConfig::Wal);
             fill.stress_client_parameters.crash_after_secs = Some(CRASH_AFTER_SECS);
-            fill.stress_client_parameters.db_path = Some(format!("/opt/sui/db/r6/{name}"));
+            fill.stress_client_parameters.db_path = Some(format!("{}/r6/{name}", db_dir()));
             fill.stress_client_parameters.tldr = format!("r6-crash-{replicate}");
             items.push(fill);
         }
@@ -1059,7 +1127,7 @@ fn generate_recovery_replicates() -> Result<()> {
             measure.stress_client_parameters.clean_after_measure = true;
             measure.stress_client_parameters.mixed_duration_secs = 0;
             measure.stress_client_parameters.pause_between_phases_secs = 0;
-            measure.stress_client_parameters.reuse = Some(format!("/opt/sui/db/r6/{name}"));
+            measure.stress_client_parameters.reuse = Some(format!("{}/r6/{name}", db_dir()));
             measure.stress_client_parameters.tldr = format!("r6-measure-crash-{replicate}");
             items.push(measure);
         }
@@ -1140,7 +1208,7 @@ fn generate_diagnostic_crash_single_thread_replay() -> Result<()> {
             fill.stress_client_parameters.pause_between_phases_secs = 0;
             fill.stress_client_parameters.relocation = Some(RelocationConfig::Wal);
             fill.stress_client_parameters.crash_after_secs = Some(CRASH_AFTER_SECS);
-            fill.stress_client_parameters.db_path = Some(format!("/opt/sui/db/r6/{name}"));
+            fill.stress_client_parameters.db_path = Some(format!("{}/r6/{name}", db_dir()));
             fill.stress_client_parameters.tldr = format!("r6-fill-{name}");
             items.push(fill);
         }
@@ -1154,7 +1222,7 @@ fn generate_diagnostic_crash_single_thread_replay() -> Result<()> {
             measure.stress_client_parameters.clean_after_measure = true;
             measure.stress_client_parameters.mixed_duration_secs = 0;
             measure.stress_client_parameters.pause_between_phases_secs = 0;
-            measure.stress_client_parameters.reuse = Some(format!("/opt/sui/db/r6/{name}"));
+            measure.stress_client_parameters.reuse = Some(format!("{}/r6/{name}", db_dir()));
             measure.stress_client_parameters.tldr = format!("r6-measure-{name}");
             items.push(measure);
         }
@@ -1230,7 +1298,7 @@ fn generate_diagnostic_crash_relocation_guard() -> Result<()> {
         fill.stress_client_parameters.pause_between_phases_secs = 0;
         fill.stress_client_parameters.relocation = Some(RelocationConfig::Wal);
         fill.stress_client_parameters.crash_after_secs = Some(CRASH_AFTER_SECS);
-        fill.stress_client_parameters.db_path = Some(format!("/opt/sui/db/r6/{name}"));
+        fill.stress_client_parameters.db_path = Some(format!("{}/r6/{name}", db_dir()));
         fill.stress_client_parameters.tldr = format!("r6-fill-{name}");
         items.push(fill);
     }
@@ -1244,7 +1312,7 @@ fn generate_diagnostic_crash_relocation_guard() -> Result<()> {
         measure.stress_client_parameters.clean_after_measure = true;
         measure.stress_client_parameters.mixed_duration_secs = 0;
         measure.stress_client_parameters.pause_between_phases_secs = 0;
-        measure.stress_client_parameters.reuse = Some(format!("/opt/sui/db/r6/{name}"));
+        measure.stress_client_parameters.reuse = Some(format!("{}/r6/{name}", db_dir()));
         measure.stress_client_parameters.tldr = format!("r6-measure-{name}");
         items.push(measure);
     }
@@ -1404,7 +1472,7 @@ fn generate_churn() -> Result<()> {
     base.stress_client_parameters.report = true;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.bloom_filter_rate = None;
     base.stress_client_parameters.bloom_filter_count = None;
     base.stress_client_parameters.mixed_duration_secs = MIXED_DURATION_SECS;
@@ -1481,7 +1549,7 @@ fn generate_churn_blobdb() -> Result<()> {
     base.stress_client_parameters.report = true;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.bloom_filter_rate = None;
     base.stress_client_parameters.bloom_filter_count = None;
     base.stress_client_parameters.relocation = None;
@@ -1567,7 +1635,7 @@ fn generate_epoch_gc() -> Result<()> {
     base.stress_client_parameters.report = true;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.relocation = Some(RelocationConfig::Wal);
     base.stress_client_parameters.bloom_filter_rate = None;
     base.stress_client_parameters.bloom_filter_count = None;
@@ -1635,7 +1703,7 @@ fn generate_sweep_bloom_fpr() -> Result<()> {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.key_len = KEY_LEN;
     base.stress_client_parameters.write_size = VALUE_SIZE;
     base.stress_client_parameters.read_mode = ReadMode::Get;
@@ -1687,7 +1755,7 @@ fn r3_sweep_base() -> StressTestConfigs {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.key_len = KEY_LEN;
     base.stress_client_parameters.write_size = VALUE_SIZE;
     base.stress_client_parameters.read_mode = ReadMode::Get;
@@ -1820,7 +1888,7 @@ fn generate_memory_instrumented() -> Result<()> {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.key_len = KEY_LEN;
     base.stress_client_parameters.write_size = VALUE_SIZE;
     base.stress_client_parameters.read_mode = ReadMode::Get;
@@ -1900,7 +1968,7 @@ fn generate_main_benchmark() -> Result<()> {
     base.stress_client_parameters.key_layout = KeyLayout::Uniform;
     base.stress_client_parameters.tldr = String::new();
     base.stress_client_parameters.preserve = false;
-    base.stress_client_parameters.path = Some("/opt/sui/db/".to_string());
+    base.stress_client_parameters.path = Some(format!("{}/", db_dir()));
     base.stress_client_parameters.key_len = KEY_LEN;
     base.stress_client_parameters.relocation = None;
     base.stress_client_parameters.bloom_filter_rate = None;
@@ -1936,4 +2004,49 @@ fn generate_main_benchmark() -> Result<()> {
     }
 
     write_configs(&items, "orchestrator/assets/target_configs.yml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn working_dir_parsed_from_settings() {
+        let yaml = "testbed_id: x\nworking_dir: /data/db\nmonitoring: false\n";
+        assert_eq!(
+            working_dir_from_settings(yaml).unwrap().as_deref(),
+            Some("/data/db")
+        );
+        // Trailing slash is normalized away.
+        let yaml = "working_dir: /data/db/\n";
+        assert_eq!(
+            working_dir_from_settings(yaml).unwrap().as_deref(),
+            Some("/data/db")
+        );
+    }
+
+    #[test]
+    fn working_dir_absent_yields_none() {
+        assert_eq!(working_dir_from_settings("testbed_id: x\n").unwrap(), None);
+    }
+
+    #[test]
+    fn working_dir_env_vars_resolved() {
+        // SAFETY: test-only; no other thread reads the environment here.
+        unsafe { std::env::set_var("GTC_TEST_DB_ROOT", "/mnt/fast") };
+        let yaml = "working_dir: ${GTC_TEST_DB_ROOT}/db\n";
+        assert_eq!(
+            working_dir_from_settings(yaml).unwrap().as_deref(),
+            Some("/mnt/fast/db")
+        );
+    }
+
+    #[test]
+    fn working_dir_unresolved_env_is_terse_error() {
+        let yaml = "working_dir: ${GTC_TEST_UNSET_VAR}/db\nsecret: token-abc\n";
+        let err = working_dir_from_settings(yaml).unwrap_err().to_string();
+        assert!(err.contains("unresolved"));
+        // Never echo file contents (the real file holds access tokens).
+        assert!(!err.contains("token-abc"));
+    }
 }

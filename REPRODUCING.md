@@ -67,9 +67,10 @@ Machine setup notes:
    * `ssh_private_key_file`: key for SSH access to the machines.
    * `repository.url` / `repository.commit`: the repo and branch/SHA the
      machines will `git fetch`, check out, and `cargo build --release`.
-   * `working_dir`: the database directory on the machines. The generated 
-    configs assume this same path; if your disk is
-     mounted elsewhere, update the `path:` fields in the configs too.
+   * `working_dir`: the database directory on the machines (put it on the
+     fast disk). The config generator reads it from this file and bakes it
+     into the generated configs, so regenerate the configs after changing
+     it. Without a `settings.yml` the generator defaults to `/opt/sui/db`.
    * `monitoring: false` so all machines are available for benchmarks. With
      `monitoring: true` the orchestrator reserves machine 0 for
      Prometheus/Grafana, which changes how configs map to machines.
@@ -137,7 +138,8 @@ works (everything runs on the same machine, fills before measures), but all
 fills of a batch are preserved on the same disk at once, so check disk
 space. With any other machine count, reorder the file so each measure sits
 exactly N positions after its fill. Remove leftover databases between
-reruns (`scripts/r6_cleanup.sh`).
+reruns (`scripts/r6_cleanup.sh`; pass `--db-dir` if your `working_dir` is
+not `/opt/sui/db`).
 
 ### Running a single cell by hand
 
