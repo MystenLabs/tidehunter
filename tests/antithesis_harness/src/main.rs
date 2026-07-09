@@ -20,15 +20,21 @@ const RANDOM_SPACE_COUNT: usize = 2;
 const DURABLE_SPACE_INDEX: usize = 2;
 
 macro_rules! th_assert_always {
-    ($condition:expr, $message:literal $(, $arg:expr)* $(,)?) => {{
+    ($condition:expr, $id:literal, $message:literal $(, $arg:expr)* $(,)?) => {{
         let ok = $condition;
         #[cfg(feature = "sdk")]
         {
-            let details = antithesis_sdk::serde_json::json!({
-                "condition": stringify!($condition),
-                "details": format!($message $(, $arg)*),
-            });
-            antithesis_sdk::assert_always!(ok, $message, &details);
+            let details = if ok {
+                antithesis_sdk::serde_json::json!({
+                    "condition": stringify!($condition),
+                })
+            } else {
+                antithesis_sdk::serde_json::json!({
+                    "condition": stringify!($condition),
+                    "failure": format!($message $(, $arg)*),
+                })
+            };
+            antithesis_sdk::assert_always_or_unreachable!(ok, $id, &details);
         }
         if !ok {
             panic!($message $(, $arg)*);
@@ -342,7 +348,7 @@ impl Harness {
 
         sdk::sometimes(
             self.recovered_existing_db && self.checkpoint_version > 0,
-            "recovery_scan_after_process_restart",
+            sdk::CoverageEvent::RecoveryScanAfterProcessRestart,
         );
     }
 
@@ -414,6 +420,7 @@ impl Harness {
             .unwrap_or_else(|err| panic!("exists failed at op {op_idx}: {err:?}"));
         th_assert_always!(
             actual == expected,
+            "exists_matches_model",
             "exists mismatch at op {op_idx} ks={} key={} actual={actual} expected={expected}",
             space.name,
             hex(&key)
@@ -493,10 +500,10 @@ impl Harness {
                 .unwrap_or_else(|err| panic!("rebuild failed at op {op_idx}: {err:?}"));
         }
         self.persist_checkpoint(self.max_durable_version(), op_idx);
-        sdk::sometimes(true, "checkpoint_completed");
+        sdk::sometimes(true, sdk::CoverageEvent::CheckpointCompleted);
         sdk::sometimes(
             self.recovered_existing_db && self.checkpoint_version > 0,
-            "checkpoint_after_process_restart",
+            sdk::CoverageEvent::CheckpointAfterProcessRestart,
         );
     }
 
@@ -533,7 +540,7 @@ impl Harness {
                     RelocationStrategy::IndexBased(target)
                 };
                 db.start_blocking_relocation_with_strategy(strategy);
-                sdk::sometimes(true, "relocation_completed");
+                sdk::sometimes(true, sdk::CoverageEvent::RelocationCompleted);
                 self.verify_all(op_idx);
             }
         }
@@ -637,6 +644,7 @@ impl Harness {
                 .unwrap_or_else(|err| panic!("durable get failed at op {op_idx}: {err:?}"));
             th_assert_always!(
                 value.is_some(),
+                "durable_committed_key_present",
                 "durable committed key missing at op {op_idx} key={} checkpoint_version={}",
                 hex(&key),
                 self.checkpoint_version
@@ -651,6 +659,7 @@ impl Harness {
                 });
             th_assert_always!(
                 decoded.version == version,
+                "durable_version_matches_checkpoint",
                 "durable version mismatch at op {op_idx} key={} actual={} expected={version}",
                 hex(&key),
                 decoded.version
@@ -677,6 +686,7 @@ impl Harness {
             });
             th_assert_always!(
                 decoded.space_idx == space_idx,
+                "decoded_value_space_matches_keyspace",
                 "decoded space mismatch at op {op_idx} ks={} key={}",
                 space.name,
                 hex(key)
@@ -685,6 +695,7 @@ impl Harness {
 
         th_assert_always!(
             actual == expected,
+            "get_matches_model",
             "get mismatch at op {op_idx} ks={} key={} actual={} expected={}",
             space.name,
             hex(key),
@@ -697,6 +708,7 @@ impl Harness {
             .unwrap_or_else(|err| panic!("exists failed at op {op_idx}: {err:?}"));
         th_assert_always!(
             exists == expected.is_some(),
+            "exists_matches_get",
             "exists/get mismatch at op {op_idx} ks={} key={}",
             space.name,
             hex(key)
@@ -779,6 +791,7 @@ impl Harness {
         };
         th_assert_always!(
             ordered,
+            "iterator_ordered",
             "iterator order violation at op {op_idx} ks={}",
             space.name
         );
@@ -799,6 +812,7 @@ impl Harness {
         let mismatch = first_mismatch(actual, expected);
         th_assert_always!(
             false,
+            "iterator_entries_match_model",
             "{label} mismatch at op {op_idx} ks={} actual_len={} expected_len={} first_mismatch={}",
             space.name,
             actual.len(),
@@ -1189,6 +1203,26 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 mod sdk {
+    #[derive(Clone, Copy)]
+    pub enum CoverageEvent {
+        RecoveryScanAfterProcessRestart,
+        CheckpointCompleted,
+        CheckpointAfterProcessRestart,
+        RelocationCompleted,
+    }
+
+    impl CoverageEvent {
+        #[cfg(feature = "sdk")]
+        fn name(self) -> &'static str {
+            match self {
+                Self::RecoveryScanAfterProcessRestart => "recovery_scan_after_process_restart",
+                Self::CheckpointCompleted => "checkpoint_completed",
+                Self::CheckpointAfterProcessRestart => "checkpoint_after_process_restart",
+                Self::RelocationCompleted => "relocation_completed",
+            }
+        }
+    }
+
     pub fn init() {
         #[cfg(feature = "sdk")]
         antithesis_sdk::antithesis_init();
@@ -1204,34 +1238,33 @@ mod sdk {
         }
     }
 
-    pub fn sometimes(condition: bool, name: &'static str) {
+    pub fn sometimes(condition: bool, event: CoverageEvent) {
         #[cfg(feature = "sdk")]
         {
-            let details = antithesis_sdk::serde_json::json!({ "name": name });
-            match name {
-                "recovery_scan_after_process_restart" => antithesis_sdk::assert_sometimes!(
-                    condition,
-                    "recovery_scan_after_process_restart",
-                    &details
-                ),
-                "checkpoint_completed" => {
+            let details = antithesis_sdk::serde_json::json!({ "event": event.name() });
+            match event {
+                CoverageEvent::RecoveryScanAfterProcessRestart => {
+                    antithesis_sdk::assert_sometimes!(
+                        condition,
+                        "recovery_scan_after_process_restart",
+                        &details
+                    )
+                }
+                CoverageEvent::CheckpointCompleted => {
                     antithesis_sdk::assert_sometimes!(condition, "checkpoint_completed", &details)
                 }
-                "checkpoint_after_process_restart" => antithesis_sdk::assert_sometimes!(
+                CoverageEvent::CheckpointAfterProcessRestart => antithesis_sdk::assert_sometimes!(
                     condition,
                     "checkpoint_after_process_restart",
                     &details
                 ),
-                "relocation_completed" => {
+                CoverageEvent::RelocationCompleted => {
                     antithesis_sdk::assert_sometimes!(condition, "relocation_completed", &details)
-                }
-                _ => {
-                    antithesis_sdk::assert_sometimes!(condition, "unknown_harness_event", &details)
                 }
             }
         }
         let _ = condition;
-        let _ = name;
+        let _ = event;
     }
 
     pub fn unreachable(message: &str) -> ! {
