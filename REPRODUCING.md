@@ -91,7 +91,7 @@ cell contains:
   threshold, etc.). Ignored at runtime by the RocksDB/BlobDB backends.
 * `stress_client_parameters`: the workload (backend, threads, number of
   writes, value size, read percentage, read mode, Zipf exponent,
-  overwrite/delete ratios, mixed-phase duration, relocation on/off, crash
+  overwrite/delete ratios, measurement-phase duration, relocation on/off, crash
   injection, recovery measurement flags, ...) plus a free-form `tldr:`
   string that names the run and is echoed into the log.
 
@@ -165,10 +165,10 @@ network) are not reproducible from this repository.
 
 | Paper element | Generator mode(s) |
 |---|---|
-| Value-size scaling figure (Figure 1) | `value-scaling`: 20 cells = 2 replicates x value size {64, 128, 256, 512, 1024} B x Zipf θ {0, 2}; 1 TiB pre-fill, 50/50 Get mix, 30-min mixed phase. These cells also provide the 50/50 Get points of the main benchmark figures. Baseline curves: `value-scaling-baselines` (20 cells: RocksDB and BlobDB over the same grid; 10-min mixed phase, as run for the paper). |
-| Main benchmark figures (Figures 5 and 6) | Tidehunter cells: `main-benchmark`: 36 cells = value size {1 KB, 64 B, 128 B} x Zipf θ {0, 2} x {write-only, 50/50 Exists, 50/50 Lt, 100% Get, 100% Exists, 100% Lt}; 1 TiB pre-fill, 30-min mixed phase after a 10-min pause. (The 128 B cells do not appear in the paper.) The remaining workload, 50/50 Get, comes from `value-scaling` (previous row). RocksDB/BlobDB cells: `main-benchmark-baselines` (84 cells: both backends over the full 7-workload grid; 10-min mixed phase, as run for the paper). |
-| Stability table (Table 1) | `stability`: 6 cells = the 1 KB config at read percentage {0, 50, 100} x Zipf θ {0, 2}, 30-min mixed phase, `max_maps: 128` and `metrics_enabled: true` exactly as the published runs. Throughput CV and per-interval percentiles come from the `bench_writes` / `bench_reads` counters on the client's metrics port, so these runs need a Prometheus scraping the client (`scripts/fetch_grafana_variance.py` shows the queries); the Large-Table lock-overhead column comes from the `large_table_contention` metric. |
-| Application-workload regimes figure (Figure 7) | `app-workloads`: 30 cells = key/value size combinations {24/10, 48/43, 20/44, 38/38, 76/50} bytes x Zipf θ {0, 2} x backend {Tidehunter, Rocksdb, Blobdb}; 500 GB of raw key+value bytes pre-fill, 30-min 50/50 mixed phase. |
+| Value-size scaling figure (Figure 1) | `value-scaling`: 20 cells = 2 replicates x value size {64, 128, 256, 512, 1024} B x Zipf θ {0, 2}; 1 TiB pre-fill, 50/50 Get mix. Baseline curves: `value-scaling-baselines` (20 cells: RocksDB and BlobDB over the same grid). |
+| Main benchmark figures (Figures 5 and 6) | Tidehunter cells: `main-benchmark`: 42 cells = value size {1 KB, 64 B, 128 B} x Zipf θ {0, 2} x {write-only, 50/50 Get, 50/50 Exists, 50/50 Lt, 100% Get, 100% Exists, 100% Lt}; 1 TiB pre-fill. RocksDB/BlobDB cells: `main-benchmark-baselines` (84 cells: both backends over the full 7-workload grid). |
+| Stability table (Table 1) | `stability`: 6 cells = the 1 KB config at read percentage {0, 50, 100} x Zipf θ {0, 2}, `max_maps: 128` and `metrics_enabled: true` exactly as the published runs. Throughput CV and per-interval percentiles come from the `bench_writes` / `bench_reads` counters on the client's metrics port, so these runs need a Prometheus scraping the client (`scripts/fetch_grafana_variance.py` shows the queries); the Large-Table lock-overhead column comes from the `large_table_contention` metric. |
+| Application-workload regimes figure (Figure 7) | `app-workloads`: 30 cells = key/value size combinations {24/10, 48/43, 20/44, 38/38, 76/50} bytes x Zipf θ {0, 2} x backend {Tidehunter, Rocksdb, Blobdb}; 500 GB of raw key+value bytes pre-fill, 50/50 measurement phase. |
 | Relocation on/off figure (Figure 8) | `relocation`: 4 cells = relocation {on, off} x Zipf θ {0, 2}; 1 TiB pre-fill of 1 KB values, then a 10-min delete-only phase (`delete_ratio: 1.0`). The on-cells use `relocation: Index (ratio 1.0)` with a 20% reclaim threshold, exactly as the archived figure runs (not the WalBased strategy the churn experiments compare). Storage from filesystem usage, throughput from logs. |
 | Churn tables (Tables 2 and 3) | `churn`: 13 cells = strategy {None, WalBased, IndexBased} x mix {100% overwrite, 50/50 overwrite+delete, 100% delete}, plus `relocation_max_reclaim_pct` {1, 10, 25, 50} on the WalBased 50/50 cell (the 5% point is that cell's default); 500 GB pre-fill, 60-min write-only churn phase. BlobDB rows: `churn-blobdb` (3 cells; relocation off since RocksDB compaction drives blob GC). |
 | Recovery table (Table 4) | `recovery`: 24 cells in fill/measure pairs. Series A: cold start at {100 GB, 500 GB, 1 TB (x2 replicates)} with 128 GiB snapshot cadence. Series B: `snapshot_written_bytes` {16, 64, 256 GiB, unlimited} at 1 TB (the 128 GiB point is Series A's 1 TB cell). Series C: crash during relocation: 200 GB fill, 20-min 50/50 Get phase with `relocation: Wal`, `crash_after_secs: 600` (exit code 137), then a measured re-open. Extra replicates: `recovery-replicates`. Measure cells use `measure_open: true`, `reuse:`, and `first_read_samples: 1000` (matching the paper's "first 1,000 reads") and emit the `RECOVERY:` / `FIRST_READ:` lines. |
@@ -206,9 +206,9 @@ as `logs/logs-<branch>/node-<timestamp>-<n>.log`. It contains, in order:
   millisecond epoch timestamps,
 * end-of-phase summary lines:
   * `Write test done ...: <N> ops/s` (fill phase),
-  * `Mixed test done ...: <N> ops/s` (measured phase),
+  * `Mixed test done ...: <N> ops/s` (measurement phase),
   * `Latency(mcs): p50/p99/p99.9` per phase,
-  * `App bytes written total: <N>` (cumulative over fill + mixed),
+  * `App bytes written total: <N>` (cumulative over fill + measurement),
   * `Storage used: <N>`,
 * for recovery runs: `RECOVERY:` (total ms, WAL replay ms, bytes replayed,
   per-phase breakdown) and `FIRST_READ:` (samples, hits, mismatches, and
@@ -220,15 +220,16 @@ Throughput and latency numbers in the paper come directly from these lines.
 
 ### Write amplification
 
-WA is disk bytes over application bytes for the measured (mixed) phase:
+WA is disk bytes over application bytes for the measurement phase (the
+logs call it the `Mixed` phase):
 
 1. Application bytes: `App bytes written total` is cumulative, so subtract
    the fill phase:
    `fill_bytes = writes x write_threads x (key_len + write_size)`.
 2. Disk bytes: sectors-written x 512 for the block device backing the
    database directory, read from `/proc/diskstats` on the benchmark machine
-   at the start of the mixed phase (the `Write test done` log line) and at
-   the end (`Mixed test done`), then diffed:
+   at the start of the measurement phase (the `Write test done` log line)
+   and at the end (`Mixed test done`), then diffed:
 
    ```bash
    # replace md1 with your block device
@@ -238,7 +239,7 @@ WA is disk bytes over application bytes for the measured (mixed) phase:
    Make sure the device hosts nothing else busy during the run. (On the
    cluster we recorded the same counter as node_exporter's
    `node_disk_written_bytes_total`, windowed between the log timestamps.)
-3. `WA = disk_bytes_mixed / app_bytes_mixed`.
+3. `WA = disk_bytes_measurement / app_bytes_measurement`.
 
 Sanity check: the same computation over the fill phase should give WA very
 close to 1.0 (append-only fill).

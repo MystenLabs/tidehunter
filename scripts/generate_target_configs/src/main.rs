@@ -37,14 +37,16 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Mode {
     /// Tidehunter cells of the main benchmark figures
-    /// (fig:benchmark-results-1k/-64b/-128b): 36 cells = 3 value sizes
-    /// {1 KB, 64 B, 128 B} × 2 skews × 6 workloads (write-only, 50/50 Exists,
-    /// 50/50 Lt, 100% Get, 100% Exists, 100% Lt), single replicate; 1 TiB
-    /// pre-fill, 30-min measured phase, max_maps=64. The 50/50 Get cells are
-    /// deliberately excluded — they come from `value-scaling`. (Historical:
-    /// `paper-redo64gb`, the redo of the figures at the 64 × 1 GB mmap
-    /// budget after the r3 cache sweep; relocation, app_workloads and the
-    /// stability table were excluded from that pass by design.)
+    /// (fig:benchmark-results-1k/-64b/-128b): 42 cells = 3 value sizes
+    /// {1 KB, 64 B, 128 B} × 2 skews × 7 workloads (write-only, 50/50
+    /// Get/Exists/Lt, 100% Get/Exists/Lt), single replicate; 1 TiB
+    /// pre-fill, 30-min measured phase, max_maps=64. The 50/50 Get cells
+    /// overlap with `value-scaling` (same parameters); they are emitted here
+    /// too so the mode is self-contained. (Historical: `paper-redo64gb`, the
+    /// redo of the figures at the 64 × 1 GB mmap budget after the r3 cache
+    /// sweep, which excluded the 50/50 Get cells as already covered;
+    /// relocation, app_workloads and the stability table were excluded from
+    /// that pass by design.)
     #[command(alias = "paper-redo64gb")]
     MainBenchmark,
     /// RocksDB and BlobDB cells of the main benchmark figures
@@ -57,12 +59,13 @@ enum Mode {
     /// The Tidehunter-only db_parameters (max_maps=128 etc.) match those
     /// logs byte-for-byte but are ignored by RocksStorage at runtime.
     MainBenchmarkBaselines,
-    /// Tidehunter curves of fig:value-scaling AND the 50/50 Get cells of the
-    /// main benchmark figures (fig:benchmark-results-1k/-64b/-128b): 20 cells
+    /// Tidehunter curves of fig:value-scaling: 20 cells
     /// = 5 value sizes {64..1024 B} × 2 skews × 2 replicates; 1 TiB pre-fill,
-    /// 30-min measured phase, max_maps=64. (Historical: the value-scaling
-    /// redo at the 64 × 1 GB mmap budget; earlier emissions had empty tldr
-    /// fields — cells now carry value-scaling-v{size}-z{zipf}-r{rep}.)
+    /// 30-min measured phase, max_maps=64. The {64, 128, 1024} B points use
+    /// the same parameters as `main-benchmark`'s 50/50 Get cells (the two
+    /// modes overlap but are each self-contained). (Historical: the
+    /// value-scaling redo at the 64 × 1 GB mmap budget; earlier emissions had
+    /// empty tldr fields — cells now carry value-scaling-v{size}-z{zipf}-r{rep}.)
     ValueScaling,
     /// RocksDB and BlobDB curves of fig:value-scaling: 20 cells = 2 backends
     /// × 5 value sizes {64, 128, 256, 512, 1024} × 2 skews, 50/50 Get,
@@ -427,9 +430,8 @@ fn generate_main_benchmark_baselines() -> Result<()> {
     //
     // Log-derived parameters: 1 TiB pre-fill, 10-min measurement
     // (mixed_duration_secs=600) with the default 600 s pause between phases,
-    // 36+36 threads, 32 B keys. Unlike `main-benchmark`, the 50/50 Get cells
-    // ARE emitted here: the baseline 50/50 Get numbers for the figures come
-    // from this grid (the Tidehunter ones come from `value-scaling`).
+    // 36+36 threads, 32 B keys. The baseline 50/50 Get numbers for the
+    // figures come from this grid.
     // db_parameters in those logs show max_maps=128 etc. — ignored by
     // RocksStorage at runtime, but reproduced so the YAML matches the
     // archived runs field-for-field. RocksDB/BlobDB tuning (LZ4/ZSTD, 16 KB
@@ -1852,23 +1854,24 @@ fn generate_main_benchmark() -> Result<()> {
     // Tidehunter cells of the main benchmark figures
     // (fig:benchmark-results-1k/-64b/-128b) at the 64 × 1 GB mmap budget.
     //
-    // Coverage already provided by `value-scaling` (skipped here):
-    //   * 50/50 Get × {θ=0, θ=2} at all three value sizes.
-    //
-    // Generated here (36 cells = 3 value sizes × 2 skews × 6 configs):
+    // Generated here (42 cells = 3 value sizes × 2 skews × 7 configs):
     //   1. write-only          (read_percentage=0,   read_mode=Get [ignored])
-    //   2. 50/50 Exists        (read_percentage=50,  read_mode=Exists)
-    //   3. 50/50 ReverseIter   (read_percentage=50,  read_mode=Lt(1))
-    //   4. 100% Get            (read_percentage=100, read_mode=Get)
-    //   5. 100% Exists         (read_percentage=100, read_mode=Exists)
-    //   6. 100% ReverseIter    (read_percentage=100, read_mode=Lt(1))
+    //   2. 50/50 Get           (read_percentage=50,  read_mode=Get)
+    //   3. 50/50 Exists        (read_percentage=50,  read_mode=Exists)
+    //   4. 50/50 ReverseIter   (read_percentage=50,  read_mode=Lt(1))
+    //   5. 100% Get            (read_percentage=100, read_mode=Get)
+    //   6. 100% Exists         (read_percentage=100, read_mode=Exists)
+    //   7. 100% ReverseIter    (read_percentage=100, read_mode=Lt(1))
     //
-    // Single replicate. The relocation figure, app_workloads, and stability
-    // table have their own modes (`relocation`, `app-workloads`,
+    // Single replicate. The 50/50 Get cells use the same parameters as
+    // `value-scaling`'s {64, 128, 1024} B points; the mode is self-contained
+    // despite the overlap. The relocation figure, app_workloads, and
+    // stability table have their own modes (`relocation`, `app-workloads`,
     // `stability`).
     //
     // Workload shape matches the paper's main benchmark figures: 1 TB pre-fill,
-    // 32 B keys, 30-min mixed phase, max_maps=64, frag_size=1 GB, no bloom.
+    // 32 B keys, 30-min measurement phase, max_maps=64, frag_size=1 GB,
+    // no bloom.
 
     const DB_SIZE_BYTES: usize = 1024 * 1024 * 1024 * 1024; // 1 TB
 
@@ -1876,8 +1879,9 @@ fn generate_main_benchmark() -> Result<()> {
     let zipf_exponents: [f64; 2] = [0.0, 2.0];
 
     // (label, read_percentage, read_mode)
-    let configs: [(&str, u8, ReadMode); 6] = [
+    let configs: [(&str, u8, ReadMode); 7] = [
         ("write", 0, ReadMode::Get),
+        ("mix50-get", 50, ReadMode::Get),
         ("mix50-exists", 50, ReadMode::Exists),
         ("mix50-lt", 50, ReadMode::Lt(1)),
         ("read-get", 100, ReadMode::Get),
