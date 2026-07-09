@@ -2,6 +2,8 @@
 
 A high-performance, embedded key-value storage engine written in Rust, designed for distributed systems with a focus on durability, performance, and flexibility.
 
+> **Reproducing the paper's experiments:** see [REPRODUCING.md](REPRODUCING.md) for step-by-step instructions to reproduce every experiment in *"Tidehunter: Large-Value Storage With Minimal Data Relocation"* (PVLDB).
+
 Tidehunter at its current stage requires some amount of manual configuration to work optimally.
 
 Tidehunter provides a number of useful metrics (see below) that can be used to fine-tune configuration for best performance.
