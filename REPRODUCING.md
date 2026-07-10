@@ -1,14 +1,11 @@
 # Reproducing the experiments in the Tidehunter paper
 
 This document explains how to reproduce the experiments in *"Tidehunter:
-Large-Value Storage With Minimal Data Relocation"* (PVLDB). It covers the
-hardware we used, the benchmarking pipeline, per-figure/table instructions,
-and how to extract the reported metrics from the output.
-
-All experiment tooling lives in this repository. The experiment
-configurations used for the paper are on the
+Large-Value Storage With Minimal Data Relocation"* (PVLDB). All experiment
+tooling lives in this repository; the configurations used for the paper are
+on the
 [`paper-experiments`](https://github.com/MystenLabs/tidehunter/tree/paper-experiments)
-branch; check it out before following the steps below.
+branch, so check it out before following the steps below.
 
 Experiments are driven by the `orchestrator` crate: you list your benchmark
 machine(s) in a settings file, generate the experiment configurations, and
@@ -34,9 +31,9 @@ cargo run --bin orchestrator -- benchmark
 ```
 
 The workload driver is the `benchmarks/benchmark` stress client (in this
-repo). It supports three backends: `Tidehunter`, `Rocksdb`, and `Blobdb`
-(RocksDB with integrated BlobDB), so all cross-system comparisons use the
-same driver, key generation, and measurement code.
+repo). It supports three backends (`Tidehunter`, `Rocksdb`, and `Blobdb`,
+i.e. RocksDB with integrated BlobDB), so all cross-system comparisons use
+the same driver, key generation, and measurement code.
 
 ## Hardware and software setup
 
@@ -49,31 +46,27 @@ with:
   mounted at `/opt/sui/db` (the database directory used by all experiments)
 * Ubuntu Linux
 
-Machine setup notes:
-
-* **CPU governor:** set to `performance` on every benchmark machine
-  (`echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`).
-  This setting does not survive reboots.
+Set the CPU governor to `performance` on every benchmark machine
+(`echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`);
+this does not survive reboots.
 
 ## Setting up the orchestrator
 
-1. Copy `orchestrator/assets/settings-template.yml` to
-   `orchestrator/assets/settings.yml` and fill it in. The `Settings` struct
-   in `orchestrator/src/settings.rs` documents every field. The important
-   ones:
-   * `custom_machines`: the benchmark machine(s), one `host:` entry each.
-     A single machine works (cells run one after another); more machines
-     run that many cells in parallel.
-   * `ssh_private_key_file`: key for SSH access to the machines.
-   * `repository.url` / `repository.commit`: the repo and branch/SHA the
-     machines will `git fetch`, check out, and `cargo build --release`.
-   * `working_dir`: the database directory on the machines (put it on the
-     fast disk). The config generator reads it from this file and bakes it
-     into the generated configs, so regenerate the configs after changing
-     it. Without a `settings.yml` the generator defaults to `/opt/sui/db`.
-   * `monitoring: false` so all machines are available for benchmarks. With
-     `monitoring: true` the orchestrator reserves machine 0 for
-     Prometheus/Grafana, which changes how configs map to machines.
+Copy `orchestrator/assets/settings-template.yml` to
+`orchestrator/assets/settings.yml` and fill it in. The `Settings` struct in
+`orchestrator/src/settings.rs` documents every field; the important ones:
+
+* `custom_machines`: the benchmark machine(s), one `host:` entry each.
+* `ssh_private_key_file`: key for SSH access to the machines.
+* `repository.url` / `repository.commit`: the repo and branch/SHA the
+  machines will check out and `cargo build --release`.
+* `working_dir`: the database directory on the machines (put it on the
+  fast disk). The config generator bakes it into the generated configs, so
+  regenerate them after changing it. Without a `settings.yml` the generator
+  defaults to `/opt/sui/db`.
+* `monitoring: false`, so all machines are available for benchmarks
+  (`true` reserves machine 0 for Prometheus/Grafana, which changes how
+  configs map to machines).
 
 The orchestrator can also provision cloud machines (Vultr/AWS); see
 `orchestrator/readme.md`. Only the stability and runtime-memory experiments
@@ -84,23 +77,22 @@ on each machine (`orchestrator/assets/install_node_exporter.sh`) with
 
 ## Experiment configurations
 
-`orchestrator/assets/target_configs.yml` is a list of experiment cells. Each
-cell contains:
+`orchestrator/assets/target_configs.yml` is a list of experiment cells.
+Each cell contains:
 
 * `db_parameters`: the Tidehunter `Config` (fragment size, `max_maps`,
-  `max_dirty_keys`, flusher threads, snapshot cadence, relocation reclaim
-  threshold, etc.). Ignored at runtime by the RocksDB/BlobDB backends.
+  snapshot cadence, relocation reclaim threshold, etc.). Ignored at
+  runtime by the RocksDB/BlobDB backends.
 * `stress_client_parameters`: the workload (backend, threads, number of
-  writes, value size, read percentage, read mode, Zipf exponent,
-  overwrite/delete ratios, measurement-phase duration, relocation on/off, crash
-  injection, recovery measurement flags, ...) plus a free-form `tldr:`
-  string that names the run and is echoed into the log.
+  writes, value size, read percentage and mode, Zipf exponent,
+  overwrite/delete ratios, measurement duration, relocation, crash
+  injection, ...) plus a free-form `tldr:` string that names the run and
+  is echoed into the log.
 
-The file is regenerated by `scripts/generate_target_configs`
-(`cargo run -p generate_target_configs -- <mode>`); run it with
-`--help` to see all modes with detailed doc comments. You can also edit the
-YAML by hand for one-off runs; note the parser silently ignores unknown
-keys, so double-check spelling against the structs in
+Generate the file with `cargo run -p generate_target_configs -- <mode>`
+(see the mapping table below). You can also edit the YAML by hand for
+one-off runs; note the parser silently ignores unknown keys, so
+double-check spelling against the structs in
 `benchmarks/benchmark/src/configs.rs` and `tidehunter/src/config.rs` (a
 typo means the default value is used, with no error).
 
@@ -123,23 +115,19 @@ typo means the default value is used, with no error).
 The orchestrator runs the configs in `target_configs.yml` in order, in
 batches of N = number of machines: config `i` of a batch runs on machine
 `i`, one process per machine, and the next batch starts when all machines
-finish. With one machine (N = 1) this is simply sequential execution. With N > 1:
+finish.
 
-* A config can reuse the on-disk database left by an earlier config via the
-  `reuse:` field, but only if both land on the **same machine**, i.e. their
-  positions in the file must be exactly N apart.
-
-The recovery experiments rely on this fill-then-measure pairing: a
-fill cell creates the database (using `db_path:` plus `preserve: true`, or
-a scheduled crash, so the database survives), and its measure cell re-opens
-it via `reuse:`. The generator emits these configs laid out for a
-4-machine testbed (pairs 4 positions apart). On 1 machine the pairing still
-works (everything runs on the same machine, fills before measures), but all
-fills of a batch are preserved on the same disk at once, so check disk
-space. With any other machine count, reorder the file so each measure sits
-exactly N positions after its fill. Remove leftover databases between
-reruns (`scripts/r6_cleanup.sh`; pass `--db-dir` if your `working_dir` is
-not `/opt/sui/db`).
+The recovery experiments rely on this: a fill cell creates a database that
+survives its run (`db_path:` plus `preserve: true`, or a scheduled crash),
+and its measure cell re-opens it via `reuse:`, which only works if both
+land on the **same machine**, i.e. their positions in the file are exactly
+N apart. The generator emits these pairs laid out for a 4-machine testbed.
+On 1 machine the pairing still works (fills run before measures on the same
+disk), but all fills of a batch are preserved at once, so check disk space.
+With any other machine count, reorder the file so each measure sits exactly
+N positions after its fill. Remove leftover databases between reruns
+(`scripts/r6_cleanup.sh`; pass `--db-dir` if your `working_dir` is not
+`/opt/sui/db`).
 
 ### Running a single cell by hand
 
@@ -151,48 +139,40 @@ by two spaces), set `path:` to a directory on your fast disk, and run
 cargo run --release -p benchmark -- --parameters-path my_cell.yml | tee my_cell.log
 ```
 
-Stdout is the same run log the orchestrator downloads. Any field can also
-be overridden on the command line (`--help` lists the flags), which is
-convenient for quick parameter sweeps without editing YAML. Run cells one
-at a time (the client binds port 9092 for its Prometheus metrics endpoint,
-and the experiments assume exclusive use of the disk and CPU anyway).
+Stdout is the same run log the orchestrator downloads, and any field can be
+overridden on the command line (`--help` lists the flags). Run cells one at
+a time (the client binds port 9092 for its metrics endpoint, and the
+experiments assume exclusive use of the disk and CPU anyway).
 
 ## Mapping paper figures and tables to runs
 
 Every experimental figure and table in the paper has a generator mode (or
-two: Tidehunter cells and baseline cells were run separately), named after
-the experiment it reproduces. Figures not listed below (the design
-diagrams and the production case study, which was measured on the live Sui
-network) are not reproducible from this repository.
+two: Tidehunter cells and baseline cells were run separately). Figures not
+listed below (the design diagrams and the production case study) are not
+reproducible from this repository. The exact cell list and parameters of
+every mode are in the doc comments shown by
+`cargo run -p generate_target_configs -- --help`.
 
 | Paper element | Generator mode(s) |
 |---|---|
-| Value-size scaling figure (Figure 1) | `value-scaling`: 20 cells = 2 replicates x value size {64, 128, 256, 512, 1024} B x Zipf θ {0, 2}; 1 TiB pre-fill, 50/50 Get mix. Baseline curves: `value-scaling-baselines` (20 cells: RocksDB and BlobDB over the same grid). |
-| Main benchmark figures (Figures 5 and 6) | Tidehunter cells: `main-benchmark`: 42 cells = value size {1 KB, 64 B, 128 B} x Zipf θ {0, 2} x {write-only, 50/50 Get, 50/50 Exists, 50/50 Lt, 100% Get, 100% Exists, 100% Lt}; 1 TiB pre-fill. RocksDB/BlobDB cells: `main-benchmark-baselines` (84 cells: both backends over the full 7-workload grid). |
-| Stability table (Table 1) | `stability`: 6 cells = the 1 KB config at read percentage {0, 50, 100} x Zipf θ {0, 2}, `max_maps: 128` and `metrics_enabled: true` exactly as the published runs. Throughput CV and per-interval percentiles come from the `bench_writes` / `bench_reads` counters on the client's metrics port, so these runs need a Prometheus scraping the client (`scripts/fetch_grafana_variance.py` shows the queries); the Large-Table lock-overhead column comes from the `large_table_contention` metric. |
-| Application-workload regimes figure (Figure 7) | `app-workloads`: 30 cells = key/value size combinations {24/10, 48/43, 20/44, 38/38, 76/50} bytes x Zipf θ {0, 2} x backend {Tidehunter, Rocksdb, Blobdb}; 500 GB of raw key+value bytes pre-fill, 50/50 measurement phase. |
-| Relocation on/off figure (Figure 8) | `relocation`: 4 cells = relocation {on, off} x Zipf θ {0, 2}; 1 TiB pre-fill of 1 KB values, then a delete-only phase (`delete_ratio: 1.0`). The on-cells use `relocation: Index (ratio 1.0)` with a 20% reclaim threshold, exactly as the archived figure runs (not the WalBased strategy the churn experiments compare). Storage from filesystem usage, throughput from logs. |
-| Churn tables (Tables 2 and 3) | `churn`: 13 cells = strategy {None, WalBased, IndexBased} x mix {100% overwrite, 50/50 overwrite+delete, 100% delete}, plus `relocation_max_reclaim_pct` {1, 10, 25, 50} on the WalBased 50/50 cell (the 5% point is that cell's default); 500 GB pre-fill, write-only churn phase. BlobDB rows: `churn-blobdb` (3 cells; relocation off since RocksDB compaction drives blob GC). |
-| Recovery table (Table 4) | `recovery`: 24 cells in fill/measure pairs. Series A: cold start at {100 GB, 500 GB, 1 TB (x2 replicates)} with 128 GiB snapshot cadence. Series B: `snapshot_written_bytes` {16, 64, 256 GiB, unlimited} at 1 TB (the 128 GiB point is Series A's 1 TB cell). Series C: crash during relocation: 200 GB fill, 50/50 Get phase with `relocation: Wal`, `crash_after_secs: 600` (exit code 137), then a measured re-open. Extra replicates: `recovery-replicates`. Measure cells use `measure_open: true`, `reuse:`, and `first_read_samples: 1000` (matching the paper's "first 1,000 reads") and emit the `RECOVERY:` / `FIRST_READ:` lines. |
-| Runtime memory table (Table 5) | `memory-instrumented`: 4 identical cells of the headline 50/50 Get 1 KB θ=0 config with `metrics_enabled: true`. Per-keyspace gauges (`loaded_key_bytes`, `lookup_result{source}`, `flush_update`, `unload`, ...) are exposed on the client's metrics port; `scripts/fetch_r3_instrumented.py` aggregates them from a Prometheus that scrapes it. |
-| Memory-sensitivity sweeps table (Table 6) | Four sweeps over the headline config, one mode per table block: `sweep-bloom-fpr` (8 cells = 2 replicates x FPR {0.001, 0.01, 0.05, 0.10}; 100% Get reads, 1 TiB pre-fill), `sweep-mmap-window` (16 cells = 4 replicates x `max_maps` {16, 32, 64, 128}, i.e. {32, 64, 128, 256} GiB total mapped), `sweep-cell-count` (5 cells: `num_mutexes` {2^14, 2^16, 2^17, 2^19, 2^20}), `sweep-dirty-keys` (5 cells: `max_dirty_keys` {64, 256, 1024, 4096, 16384}). |
+| Value-size scaling figure (Figure 1) | `value-scaling`: value size {64, 128, 256, 512, 1024} B x Zipf θ {0, 2}, 50/50 Get, 1 TiB pre-fill. Baselines: `value-scaling-baselines` (RocksDB and BlobDB over the same grid). |
+| Main benchmark figures (Figures 5 and 6) | `main-benchmark`: value size {1 KB, 64 B, 128 B} x Zipf θ {0, 2} x {write-only, 50/50 Get, 50/50 Exists, 50/50 Lt, 100% Get, 100% Exists, 100% Lt}, 1 TiB pre-fill. Baselines: `main-benchmark-baselines`. |
+| Stability table (Table 1) | `stability`: read percentage {0, 50, 100} x Zipf θ {0, 2} on the 1 KB config. Needs a Prometheus scraping the client: throughput CV and per-interval percentiles come from the `bench_writes` / `bench_reads` counters (`scripts/fetch_grafana_variance.py` shows the queries), the lock-overhead column from the `large_table_contention` metric. |
+| Application-workload regimes figure (Figure 7) | `app-workloads`: key/value sizes {24/10, 48/43, 20/44, 38/38, 76/50} B x Zipf θ {0, 2} x backend {Tidehunter, Rocksdb, Blobdb}, 50/50 Get, 500 GiB pre-fill. |
+| Relocation on/off figure (Figure 8) | `relocation`: relocation {on, off} x Zipf θ {0, 2}; 1 TiB pre-fill of 1 KB values, then a delete-only phase. Storage from filesystem usage, throughput from logs. |
+| Churn tables (Tables 2 and 3) | `churn`: strategy {None, WalBased, IndexBased} x mix {100% overwrite, 50/50 overwrite+delete, 100% delete}, plus reclaim threshold {1, 10, 25, 50}% on the WalBased 50/50 cell; 500 GiB pre-fill, write-only churn phase. BlobDB rows: `churn-blobdb`. |
+| Recovery table (Table 4) | `recovery`, in fill/measure pairs. Series A: cold start at {100 GiB, 500 GiB, 1 TiB (x2 replicates)}. Series B: snapshot interval {16, 64, 256 GiB, unlimited} at 1 TiB. Series C: crash during relocation (`crash_after_secs: 600`; exit code 137 is expected), then a measured re-open. Extra replicates: `recovery-replicates`. Measure cells emit the `RECOVERY:` / `FIRST_READ:` lines. |
+| Runtime memory table (Table 5) | `memory-instrumented`: 4 replicates of the headline 50/50 Get 1 KB θ=0 config with metrics enabled. Needs a Prometheus scraping the client; `scripts/fetch_r3_instrumented.py` aggregates the per-keyspace gauges. |
+| Memory-sensitivity sweeps table (Table 6) | One mode per table block: `sweep-bloom-fpr` (FPR {0.001, 0.01, 0.05, 0.10}, 100% Get), `sweep-mmap-window` (`max_maps` {16, 32, 64, 128}), `sweep-cell-count` (`num_mutexes` {2^14, 2^16, 2^17, 2^19, 2^20}), `sweep-dirty-keys` (`max_dirty_keys` {64, 256, 1024, 4096, 16384}). |
 
 The index microbenchmark numbers quoted inline in the evaluation come from
 a benchmark that runs locally without the stress client:
-`scripts/generate.sh` builds ~1 TB of index files per format (header and
-uniform; at the default 1M entries/index that is 25,000 indexes of ~40 B
-entries); `scripts/run.sh` sweeps lookup window {100, 200, 400, 800, 1600,
-3200} x threads x direct I/O on/off using `benchmarks/index_benchmark`,
-writing to `results-local/`; `scripts/benchmark_all.sh` repeats the cycle
-for {10k, 100k, 1M} entries/index. The quoted numbers used 10M lookups and
-threads {1, 16, 48}; adjust `NUM_LOOKUPS` and `THREAD_COUNTS` in `run.sh`
-to match (defaults are 1M lookups and threads up to 16).
-
-The exact cell list for every mode, including sample sizes and why each
-cell exists, is documented in the doc comments shown by
-`cargo run -p generate_target_configs -- --help`. Modes that
-existed under older names (e.g. `r6-recovery`, `paper-redo64gb`) still
-accept those names as hidden aliases.
+`scripts/generate.sh` builds the index files, `scripts/run.sh` sweeps
+lookup window x threads x direct I/O using `benchmarks/index_benchmark`
+(writing to `results-local/`), and `scripts/benchmark_all.sh` repeats the
+cycle for {10k, 100k, 1M} entries/index. The quoted numbers used 10M
+lookups and threads {1, 16, 48}; adjust `NUM_LOOKUPS` and `THREAD_COUNTS`
+in `run.sh` to match.
 
 ## Extracting results
 
@@ -202,8 +182,8 @@ The run log is the stress client's stdout, downloaded by the orchestrator
 as `logs/logs-<branch>/node-<timestamp>-<n>.log`. It contains, in order:
 
 * a dump of the full effective configuration (all `db_parameters` and
-  `stress_client_parameters`, including the `tldr:` run name). Use this to
-  verify the run did what you intended, and to find runs later.
+  `stress_client_parameters`, including the `tldr:` run name); use it to
+  verify the run did what you intended,
 * `BENCHMARK_START` / phase-boundary / `BENCHMARK_END` markers with
   millisecond epoch timestamps,
 * end-of-phase summary lines:
@@ -250,12 +230,11 @@ close to 1.0 (append-only fill).
 
 The stress client exposes `bench_writes` / `bench_reads` counters on port
 9092 and, when `metrics_enabled: true`, all Tidehunter-internal metrics
-(see the Metrics section of the main README). The stability table and the
-runtime-memory table need this time-series data, so those two experiments
+(see the Metrics section of the main README). The stability and
+runtime-memory tables need this time-series data, so those two experiments
 require a Prometheus scraping the client; everything else is parsed from
-logs and
-`/proc/diskstats`. Most paper runs used `metrics_enabled: false` to avoid
-any measurement overhead.
+logs and `/proc/diskstats`. Most paper runs used `metrics_enabled: false`
+to avoid measurement overhead.
 
 ## Pitfall checklist
 
