@@ -9,6 +9,14 @@ use tidehunter::RelocationStrategy;
 /// Port for Prometheus metrics
 pub const METRICS_PORT: u16 = 9092;
 
+/// Database directory the config generator emits in `path`, `db_path`, and
+/// `reuse` when `orchestrator/assets/settings.yml` is absent; otherwise the
+/// generator uses that file's `working_dir`.
+// dead_code: only the lib consumer (generate_target_configs) uses this; the
+// benchmark bin re-declares this module privately.
+#[allow(dead_code)]
+pub const DEFAULT_DB_DIR: &str = "/opt/sui/db";
+
 /// Benchmark-level relocation configuration that stores user intent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RelocationConfig {
