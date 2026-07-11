@@ -1,0 +1,47 @@
+---
+# Orchestrator settings for running benchmarks on your local machine.
+#
+# This file works as-is for any user: ${USER} and ${HOME} are resolved from the
+# environment when the settings are loaded. Run `scripts/setup_local.sh` once to
+# install dependencies and create the ssh key this file points to, then run:
+#
+#   cargo run --release -p orchestrator -- \
+#       --settings-path orchestrator/assets/settings-local.yml benchmark
+#
+# Note: even for the local machine, the orchestrator drives everything over ssh,
+# so an ssh server must be running on this machine (setup_local.sh checks this).
+
+testbed_id: "${USER}-local"
+cloud_provider: custom
+
+# Not used by the custom provider, but the field is required.
+token_file: "/dev/null"
+
+# Dedicated key created by scripts/setup_local.sh; its public half is added to
+# ~/.ssh/authorized_keys so this machine can ssh into itself.
+ssh_private_key_file: "${HOME}/.ssh/tidehunter_local"
+
+# The orchestrator connects to the machines below as this user.
+ssh_username: "${USER}"
+
+specs: local
+
+repository:
+  url: https://github.com/MystenLabs/tidehunter.git
+  commit: main
+
+target_configs_path: "./orchestrator/assets/target_configs.yml"
+
+# Where the orchestrator clones the repo and stores benchmark data on the target
+# machine (i.e., this machine).
+working_dir: "${HOME}/tidehunter-local-testbed"
+
+log_processing: true
+
+# Monitoring (Grafana/Prometheus) requires a second, dedicated machine, so it is
+# disabled for the single-machine local setup.
+monitoring: false
+
+# A single target machine: this machine.
+custom_machines:
+  - host: 127.0.0.1

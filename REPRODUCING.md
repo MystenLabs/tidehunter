@@ -75,6 +75,38 @@ ran a Prometheus [node_exporter](https://github.com/prometheus/node_exporter)
 on each machine (`orchestrator/assets/install_node_exporter.sh`) with
 `orchestrator/assets/grafana-dashboard.json` as the dashboard.
 
+### Quick start: your local machine as the testbed
+
+To run experiments on the machine you are sitting at (no separate benchmark
+machines), one-time setup:
+
+```bash
+./scripts/setup_local.sh
+```
+
+This installs build dependencies (Ubuntu/Debian), the Rust toolchain, and
+configures ssh so the orchestrator can drive your machine as a single-node
+testbed (it creates a dedicated key in `~/.ssh/tidehunter_local`; the
+orchestrator operates over ssh even locally). Then launch with:
+
+```bash
+cargo run --release -p orchestrator -- \
+    --settings-path orchestrator/assets/settings-local.yml benchmark
+```
+
+`orchestrator/assets/settings-local.yml` works for any user without edits
+(it resolves `${USER}` and `${HOME}` at load time) and replaces the
+settings.yml setup described above. One caveat: the config generator always
+reads `working_dir` from `orchestrator/assets/settings.yml`, not from the
+file passed via `--settings-path`, so when generating configs for the local
+setup, set the same `working_dir` in your `settings.yml` (or edit the
+`path:` fields in the generated `target_configs.yml`); check the config
+dump at the top of the run log to confirm the database landed on the
+intended disk.
+Also mind the single-machine notes in "Batching semantics" and the RAM/disk
+sizing pitfalls below: the paper's configs assume a large fast disk and
+pre-fills several times RAM.
+
 ## Experiment configurations
 
 `orchestrator/assets/target_configs.yml` is a list of experiment cells.

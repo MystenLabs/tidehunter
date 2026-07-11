@@ -131,6 +131,10 @@ pub struct Settings {
     /// List of custom machines (only used when cloud_provider is Custom).
     #[serde(default)]
     pub custom_machines: Vec<crate::client::custom::CustomMachine>,
+    /// The ssh username used to connect to the instances (only used when cloud_provider is
+    /// Custom; AWS and Vultr use fixed usernames). Defaults to "ubuntu".
+    #[serde(default)]
+    pub ssh_username: Option<String>,
 }
 
 mod defaults {

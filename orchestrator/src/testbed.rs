@@ -41,8 +41,8 @@ impl<C: ServerProviderClient> Testbed<C> {
     }
 
     /// Return the username to connect to the instances through ssh.
-    pub fn username(&self) -> &'static str {
-        C::USERNAME
+    pub fn username(&self) -> &str {
+        self.client.username()
     }
 
     /// Return the list of instances of the testbed.
@@ -96,7 +96,7 @@ impl<C: ServerProviderClient> Testbed<C> {
                     table.add_row(row![]);
                 }
                 let private_key_file = self.settings.ssh_private_key_file.display();
-                let username = C::USERNAME;
+                let username = self.client.username();
                 let ip = instance.main_ip;
                 let connect = format!("ssh -i {private_key_file} {username}@{ip}");
                 if !instance.is_terminated() {
@@ -241,7 +241,11 @@ impl<C: ServerProviderClient> Testbed<C> {
                 .filter(|x| instances_ids.contains(&x.id))
                 .map(|instance| {
                     let private_key_file = self.settings.ssh_private_key_file.clone();
-                    SshConnection::new(instance.ssh_address(), C::USERNAME, private_key_file)
+                    SshConnection::new(
+                        instance.ssh_address(),
+                        self.client.username(),
+                        private_key_file,
+                    )
                 });
             if try_join_all(futures).await.is_ok() {
                 break;

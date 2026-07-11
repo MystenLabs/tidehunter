@@ -70,6 +70,7 @@ impl CustomMachine {
 pub struct CustomClient {
     settings: Settings,
     machines: Vec<CustomMachine>,
+    username: String,
     ssh_manager: SshConnectionManager,
 }
 
@@ -82,16 +83,19 @@ impl Display for CustomClient {
 impl CustomClient {
     /// Create a new custom client.
     pub fn new(settings: Settings, machines: Vec<CustomMachine>) -> Self {
-        let ssh_manager = SshConnectionManager::new(
-            Self::USERNAME.to_string(),
-            settings.ssh_private_key_file.clone(),
-        )
-        .with_timeout(settings.ssh_timeout)
-        .with_retries(settings.ssh_retries);
+        let username = settings
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| Self::USERNAME.to_string());
+        let ssh_manager =
+            SshConnectionManager::new(username.clone(), settings.ssh_private_key_file.clone())
+                .with_timeout(settings.ssh_timeout)
+                .with_retries(settings.ssh_retries);
 
         Self {
             settings,
             machines,
+            username,
             ssh_manager,
         }
     }
@@ -154,6 +158,10 @@ impl CustomClient {
 
 impl ServerProviderClient for CustomClient {
     const USERNAME: &'static str = "ubuntu";
+
+    fn username(&self) -> &str {
+        &self.username
+    }
 
     async fn list_instances(&self) -> CloudProviderResult<Vec<Instance>> {
         let mut instances = Vec::new();

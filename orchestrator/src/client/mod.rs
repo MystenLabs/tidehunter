@@ -69,8 +69,14 @@ impl Instance {
 }
 
 pub trait ServerProviderClient: Display {
-    /// The username used to connect to the instances.
+    /// The default username used to connect to the instances.
     const USERNAME: &'static str;
+
+    /// The username used to connect to the instances. Clients may override this to make the
+    /// username configurable (e.g., from the settings file).
+    fn username(&self) -> &str {
+        Self::USERNAME
+    }
 
     /// List all existing instances (regardless of their status).
     async fn list_instances(&self) -> CloudProviderResult<Vec<Instance>>;
