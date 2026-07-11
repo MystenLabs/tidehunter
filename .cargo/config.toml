@@ -1,2 +1,5 @@
 [profile.release]
 panic = "abort"
+
+[resolver]
+incompatible-rust-versions = "fallback"
