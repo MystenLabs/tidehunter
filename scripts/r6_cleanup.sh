@@ -2,9 +2,11 @@
 # Print (or optionally execute) the commands needed to wipe R6 experiment DBs
 # on benchmark hosts.
 #
-# The R6 generator places fills under /opt/sui/db/r6/<name>/, deliberately
-# outside the orchestrator's <working_dir>/stress.* cleanup pattern so fills
-# survive between batches. The downside: the orchestrator never cleans them.
+# The R6 generator places fills under <db-dir>/r6/<name>/ (db-dir defaults
+# to /opt/sui/db; the orchestrator remaps it to its working_dir setting),
+# deliberately outside the orchestrator's <working_dir>/stress.* cleanup
+# pattern so fills survive between batches. The downside: the orchestrator
+# never cleans them.
 # Measure entries with --clean-after-measure delete their own DB after
 # measurement, but aborted/incomplete runs leave residue.
 #
@@ -16,6 +18,7 @@
 #   ./scripts/r6_cleanup.sh --hosts host1,host2              # custom host list
 #   ./scripts/r6_cleanup.sh --hosts ... --execute            # actually run
 #   ./scripts/r6_cleanup.sh --hosts ... --ssh-key ~/.ssh/foo --ssh-user bar --execute
+#   ./scripts/r6_cleanup.sh --hosts ... --db-dir /data/db --execute   # non-default working_dir
 
 set -euo pipefail
 
@@ -23,6 +26,7 @@ HOSTS=""
 EXECUTE=0
 SSH_USER="ubuntu"
 SSH_KEY="$HOME/.ssh/mysten_baremetal_shared"
+DB_DIR="/opt/sui/db"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -30,8 +34,9 @@ while [[ $# -gt 0 ]]; do
         --execute) EXECUTE=1; shift ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
         --ssh-key) SSH_KEY="$2"; shift 2 ;;
+        --db-dir) DB_DIR="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,21p' "$0"
+            sed -n '2,24p' "$0"
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -53,8 +58,10 @@ fi
 
 IFS=',' read -ra HOST_ARR <<< "$HOSTS"
 
+R6_DIR=$(printf '%q' "${DB_DIR%/}/r6")
+
 for h in "${HOST_ARR[@]}"; do
-    cmd=(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${h}" 'rm -rf /opt/sui/db/r6')
+    cmd=(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${h}" "rm -rf ${R6_DIR}")
     if [ "$EXECUTE" -eq 1 ]; then
         echo "+ ${cmd[*]}"
         "${cmd[@]}"

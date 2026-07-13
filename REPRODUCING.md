@@ -7,19 +7,47 @@ on the
 [`paper-experiments`](https://github.com/MystenLabs/tidehunter/tree/paper-experiments)
 branch, so check it out before following the steps below.
 
-Experiments are driven by the `orchestrator` crate: you list your benchmark
-machine(s) in a settings file, generate the experiment configurations, and
-launch. The orchestrator SSHes into each machine, builds the code, runs one
-experiment cell per machine at a time, and downloads the logs. Every
-experiment is single-node, so **one machine is enough**; with several
-machines the cells run in parallel (we used four).
+Experiments are driven by the `orchestrator` crate: you generate the
+experiment configurations and launch; the orchestrator SSHes into the
+benchmark machine (even when it is the machine you are sitting at), builds
+the code, runs the experiment cells one at a time, and downloads the logs.
+Every experiment is single-node, so **one machine is enough**. This document
+describes that basic single-machine setup; running on several machines in
+parallel, cloud machines, and monitoring are covered in
+"Advanced setups" at the end.
+
+## Requirements
+
+* A Linux machine with sudo access. We tested on Ubuntu; other
+  distributions should work, but the setup script will need small
+  adaptations.
+* At least 2.5 TB of fast SSD storage, ideally NVMe.
+* A bare-metal machine is recommended over a cloud instance.
+
+## First-time setup
+
+1. Clone this repository and check out the `paper-experiments` branch.
+2. Run the setup script: `./scripts/setup_local.sh`. It installs the build
+   dependencies and the Rust toolchain, and configures ssh so the
+   orchestrator can drive your machine (it creates a dedicated key in
+   `~/.ssh/tidehunter_local`). The script is written for Ubuntu/Debian; on
+   other distributions, install the packages it lists by hand.
+3. Load the environment changes the script made:
+   `source ~/.bashrc && source ~/.cargo/env`.
+4. Copy `orchestrator/assets/settings-local.yml` to
+   `orchestrator/assets/settings.yml` and set `working_dir` to a directory
+   on your fast disk. This is where the orchestrator clones the repo and
+   stores the database files during experiments. The rest of the file works
+   as-is for any user.
+5. (Optional but recommended) Set the CPU governor to `performance`:
+   `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`.
+   This does not survive reboots.
+
+Now you are ready to run experiments!
 
 ## Pipeline at a glance
 
 ```bash
-# One-time: configure machines and repo in orchestrator/assets/settings.yml
-# (see "Setting up the orchestrator")
-
 # Generate the experiment configurations (writes orchestrator/assets/target_configs.yml)
 cargo run -p generate_target_configs -- <mode>
 
@@ -34,78 +62,6 @@ The workload driver is the `benchmarks/benchmark` stress client (in this
 repo). It supports three backends (`Tidehunter`, `Rocksdb`, and `Blobdb`,
 i.e. RocksDB with integrated BlobDB), so all cross-system comparisons use
 the same driver, key generation, and measurement code.
-
-## Hardware and software setup
-
-The paper's numbers come from bare-metal machines (OpenMetal "Medium v4")
-with:
-
-* 2x Intel Xeon Silver 4510 (24 cores / 48 threads total, 2.4-4.1 GHz)
-* 256 GB DDR5-4400 RAM
-* 2x 3.2 TB NVMe (Micron 9400 PRO) in software RAID0 (`md1`), ext4,
-  mounted at `/opt/sui/db` (the database directory used by all experiments)
-* Ubuntu Linux
-
-Set the CPU governor to `performance` on every benchmark machine
-(`echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`);
-this does not survive reboots.
-
-## Setting up the orchestrator
-
-Copy `orchestrator/assets/settings-template.yml` to
-`orchestrator/assets/settings.yml` and fill it in. The `Settings` struct in
-`orchestrator/src/settings.rs` documents every field; the important ones:
-
-* `custom_machines`: the benchmark machine(s), one `host:` entry each.
-* `ssh_private_key_file`: key for SSH access to the machines.
-* `repository.url` / `repository.commit`: the repo and branch/SHA the
-  machines will check out and `cargo build --release`.
-* `working_dir`: the database directory on the machines (put it on the
-  fast disk). The config generator bakes it into the generated configs, so
-  regenerate them after changing it. Without a `settings.yml` the generator
-  defaults to `/opt/sui/db`.
-* `monitoring: false`, so all machines are available for benchmarks
-  (`true` reserves machine 0 for Prometheus/Grafana, which changes how
-  configs map to machines).
-
-The orchestrator can also provision cloud machines (Vultr/AWS); see
-`orchestrator/readme.md`. Only the stability and runtime-memory experiments
-need a Prometheus scraping the client (see "Prometheus-based metrics"); we
-ran a Prometheus [node_exporter](https://github.com/prometheus/node_exporter)
-on each machine (`orchestrator/assets/install_node_exporter.sh`) with
-`orchestrator/assets/grafana-dashboard.json` as the dashboard.
-
-### Quick start: your local machine as the testbed
-
-To run experiments on the machine you are sitting at (no separate benchmark
-machines), one-time setup:
-
-```bash
-./scripts/setup_local.sh
-```
-
-This installs build dependencies (Ubuntu/Debian), the Rust toolchain, and
-configures ssh so the orchestrator can drive your machine as a single-node
-testbed (it creates a dedicated key in `~/.ssh/tidehunter_local`; the
-orchestrator operates over ssh even locally). Then launch with:
-
-```bash
-cargo run --release -p orchestrator -- \
-    --settings-path orchestrator/assets/settings-local.yml benchmark
-```
-
-`orchestrator/assets/settings-local.yml` works for any user without edits
-(it resolves `${USER}` and `${HOME}` at load time) and replaces the
-settings.yml setup described above. One caveat: the config generator always
-reads `working_dir` from `orchestrator/assets/settings.yml`, not from the
-file passed via `--settings-path`, so when generating configs for the local
-setup, set the same `working_dir` in your `settings.yml` (or edit the
-`path:` fields in the generated `target_configs.yml`); check the config
-dump at the top of the run log to confirm the database landed on the
-intended disk.
-Also mind the single-machine notes in "Batching semantics" and the RAM/disk
-sizing pitfalls below: the paper's configs assume a large fast disk and
-pre-fills several times RAM.
 
 ## Experiment configurations
 
@@ -142,24 +98,20 @@ typo means the default value is used, with no error).
 3. Logs land in `logs/logs-<branch>/node-<timestamp>-<node_index>.log`, one
    per cell; see "Extracting results".
 
-### Batching semantics
+### Cell ordering and the recovery experiments
 
-The orchestrator runs the configs in `target_configs.yml` in order, in
-batches of N = number of machines: config `i` of a batch runs on machine
-`i`, one process per machine, and the next batch starts when all machines
-finish.
+The orchestrator runs the cells in `target_configs.yml` in order. Most
+cells are independent, but the recovery experiments come in pairs: a fill
+cell creates a database that survives its run (`db_path:` plus
+`preserve: true`, or a scheduled crash), and a later measure cell re-opens
+it via `reuse:`. On a single machine the pairing works out of the box,
+since everything runs on the same disk. Two things to watch:
 
-The recovery experiments rely on this: a fill cell creates a database that
-survives its run (`db_path:` plus `preserve: true`, or a scheduled crash),
-and its measure cell re-opens it via `reuse:`, which only works if both
-land on the **same machine**, i.e. their positions in the file are exactly
-N apart. The generator emits these pairs laid out for a 4-machine testbed.
-On 1 machine the pairing still works (fills run before measures on the same
-disk), but all fills of a batch are preserved at once, so check disk space.
-With any other machine count, reorder the file so each measure sits exactly
-N positions after its fill. Remove leftover databases between reruns
-(`scripts/r6_cleanup.sh`; pass `--db-dir` if your `working_dir` is not
-`/opt/sui/db`).
+* The generator lays the recovery cells out for a four-machine testbed
+  (see "Advanced setups"), so on one machine up to four preserved fill
+  databases exist at once; check your disk space.
+* Remove leftover databases between reruns (`scripts/r6_cleanup.sh`; pass
+  `--db-dir` if your `working_dir` is not `/opt/sui/db`).
 
 ### Running a single cell by hand
 
@@ -265,24 +217,91 @@ The stress client exposes `bench_writes` / `bench_reads` counters on port
 (see the Metrics section of the main README). The stability and
 runtime-memory tables need this time-series data, so those two experiments
 require a Prometheus scraping the client; everything else is parsed from
-logs and `/proc/diskstats`. Most paper runs used `metrics_enabled: false`
-to avoid measurement overhead.
+logs and `/proc/diskstats`. See "Monitoring with Prometheus and Grafana"
+in the advanced section for how we set this up. Most paper runs used
+`metrics_enabled: false` to avoid measurement overhead.
 
 ## Pitfall checklist
 
 * Check the config dump at the top of each log: unknown YAML keys are
   silently dropped, so a typo means a default value is silently used.
-* `monitoring: false`, or machine 0 is repurposed and recovery fill/measure
-  pairs stop landing on the same machine.
 * Relocation is controlled by `stress_client_parameters.relocation`
   (`Wal`, `Index`, or absent = off). The `relocation_strategy` field inside
   `db_parameters` is ignored by the stress client; editing it does nothing.
 * `max_maps` is per WAL kind; total mapped memory is twice that.
-* CPU governor resets to `ondemand` on reboot; set it on **all** machines.
+* CPU governor resets to `ondemand` on reboot; set it again after
+  rebooting.
 * Pre-fill must be several times larger than RAM, or reads are served from
   the page cache and read results are meaningless.
-* Recovery reruns: remove leftover databases first on **all** machines
+* Recovery reruns: remove leftover databases first
   (`scripts/r6_cleanup.sh`).
-* If a machine's process dies before its metrics endpoint is up, the
-  orchestrator can hang waiting on it; check the machines with
+* If the benchmark process dies before its metrics endpoint is up, the
+  orchestrator can hang waiting on it; check the machine with
   `testbed status` and the node logs.
+
+## Advanced setups
+
+Everything above assumes the basic case: a single machine that is both the
+orchestrator and the testbed. This section covers everything else.
+
+### Multiple benchmark machines
+
+With several machines the cells run in parallel, one cell per machine at a
+time (we used four machines for the paper). Copy
+`orchestrator/assets/settings-template.yml` to
+`orchestrator/assets/settings.yml` and fill it in. The `Settings` struct in
+`orchestrator/src/settings.rs` documents every field; the important ones:
+
+* `custom_machines`: the benchmark machines, one `host:` entry each.
+* `ssh_private_key_file`: key for SSH access to the machines.
+* `repository.url` / `repository.commit`: the repo and branch/SHA the
+  machines will check out and `cargo build --release`.
+* `working_dir`: the database directory on the machines (put it on the
+  fast disk). The config generator bakes it into the generated configs, so
+  regenerate them after changing it.
+* `monitoring: false`, so all machines are available for benchmarks
+  (`true` reserves machine 0 for Prometheus/Grafana, which changes how
+  configs map to machines).
+
+The orchestrator runs the configs in `target_configs.yml` in batches of
+N = number of machines: config `i` of a batch runs on machine `i`, one
+process per machine, and the next batch starts when all machines finish.
+The recovery experiments rely on this: a fill/measure pair only works if
+both cells land on the **same machine**, i.e. their positions in the file
+are exactly N apart. The generator emits these pairs laid out for a
+4-machine testbed; with any other machine count, reorder the file so each
+measure sits exactly N positions after its fill.
+
+Multi-machine versions of the single-machine pitfalls: set the CPU
+governor on **all** machines, and remove leftover recovery databases on
+**all** machines between reruns.
+
+### Cloud machines
+
+The orchestrator can also provision cloud machines (Vultr/AWS); see
+`orchestrator/readme.md`. Keep in mind that we recommend bare metal over
+cloud instances for reproducing the paper's numbers.
+
+### Monitoring with Prometheus and Grafana
+
+Only the stability and runtime-memory experiments need a Prometheus
+scraping the stress client's metrics endpoint (port 9092); see
+"Prometheus-based metrics" above. On our cluster we additionally ran a
+Prometheus
+[node_exporter](https://github.com/prometheus/node_exporter) on each
+machine (`orchestrator/assets/install_node_exporter.sh`) and used
+`orchestrator/assets/grafana-dashboard.json` as the dashboard;
+node_exporter's disk counters are also a convenient alternative to
+`/proc/diskstats` for the write-amplification computation.
+
+### Hardware used for the paper
+
+The paper's numbers come from bare-metal machines (OpenMetal "Medium v4")
+with:
+
+* 2x Intel Xeon Silver 4510 (24 cores / 48 threads total, 2.4-4.1 GHz)
+* 256 GB DDR5-4400 RAM
+* 2x 3.2 TB NVMe (Micron 9400 PRO) in software RAID0 (`md1`), ext4,
+  mounted at `/opt/sui/db` (the database directory used by all
+  experiments)
+* Ubuntu Linux

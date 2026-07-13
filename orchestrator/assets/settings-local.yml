@@ -28,7 +28,7 @@ specs: local
 
 repository:
   url: https://github.com/MystenLabs/tidehunter.git
-  commit: main
+  commit: paper-experiments
 
 target_configs_path: "./orchestrator/assets/target_configs.yml"
 
