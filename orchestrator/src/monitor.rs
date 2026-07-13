@@ -172,13 +172,21 @@ impl Grafana {
     /// The commands to install grafana.
     pub fn install_commands() -> Vec<&'static str> {
         vec![
-            "sudo apt-get install -y apt-transport-https software-properties-common wget",
-            "sudo wget -q -O /etc/apt/keyrings/grafana.key https://apt.grafana.com/gpg.key",
-            "(sudo rm /etc/apt/sources.list.d/grafana.list || true)",
+            "sudo apt-get install -y apt-transport-https software-properties-common wget gnupg",
+            "sudo mkdir -p /etc/apt/keyrings",
+            // apt only accepts keyrings whose extension matches their format (.gpg for
+            // binary, .asc for armored); grafana serves an armored key, so de-armor it
+            // into a .gpg file. Downloading and de-armoring as separate steps (instead of
+            // a pipeline) makes a failed download abort the install instead of silently
+            // writing a corrupt keyring.
+            "wget -q -O /tmp/grafana.gpg.key https://apt.grafana.com/gpg.key",
+            "sudo gpg --yes --dearmor -o /etc/apt/keyrings/grafana.gpg /tmp/grafana.gpg.key",
+            // Remove the unusable keyring installed by previous versions of this command.
+            "sudo rm -f /etc/apt/keyrings/grafana.key",
             "echo \
-                \"deb [signed-by=/etc/apt/keyrings/grafana.key] \
+                \"deb [signed-by=/etc/apt/keyrings/grafana.gpg] \
                 https://apt.grafana.com stable main\" \
-                | sudo tee -a /etc/apt/sources.list.d/grafana.list",
+                | sudo tee /etc/apt/sources.list.d/grafana.list",
             "sudo apt-get update",
             "sudo apt-get install -y grafana",
             "sudo chmod 777 -R /etc/grafana/",
@@ -314,17 +322,10 @@ impl NodeExporter {
             Self::RELEASE
         );
 
-        [
-            "(sudo systemctl status node_exporter && exit 0)",
+        let install = [
             &format!("curl -LO {source}"),
-            &format!(
-                "tar -xvf node_exporter-{}.linux-amd64.tar.gz",
-                Self::RELEASE
-            ),
-            &format!(
-                "sudo mv node_exporter-{}.linux-amd64/node_exporter /usr/local/bin/",
-                Self::RELEASE
-            ),
+            &format!("tar -xvf {build}.tar.gz"),
+            &format!("sudo mv {build}/node_exporter /usr/local/bin/"),
             "sudo useradd -rs /bin/false node_exporter || true",
             "sudo chmod 777 -R /etc/systemd/system/",
             &format!(
@@ -336,8 +337,14 @@ impl NodeExporter {
             "sudo systemctl start node_exporter",
             "sudo systemctl enable node_exporter",
         ]
-        .map(|x| x.to_string())
-        .to_vec()
+        .join(" && ");
+
+        // Skip the installation when node exporter is already running. The whole
+        // expression must succeed either way since it is joined with `&&` into the
+        // global install command.
+        vec![format!(
+            "(sudo systemctl is-active node_exporter || ({install}))"
+        )]
     }
 
     fn service_config() -> String {
