@@ -116,4 +116,9 @@ fi
 echo "===================================================="
 echo "Setup complete!"
 echo "===================================================="
+echo "Please run"
+echo ""
+echo "    source ~/.bashrc"
+echo "    source ~/.cargo/env"
+echo ""
 
