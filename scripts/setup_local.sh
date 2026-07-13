@@ -48,6 +48,7 @@ echo "3. Applying permanent CXXFLAGS fix for RocksDB"
 echo "===================================================="
 if ! grep -q "include cstdint" "$HOME/.bashrc" 2>/dev/null; then
     echo 'export CXXFLAGS="$CXXFLAGS -include cstdint"' >> "$HOME/.bashrc"
+    source ~/.bashrc
     echo "RocksDB compilation fix appended to ~/.bashrc"
 else
     echo "RocksDB compilation fix already exists in ~/.bashrc"
@@ -115,12 +116,4 @@ fi
 echo "===================================================="
 echo "Setup complete!"
 echo "===================================================="
-echo "If Rust or the CXXFLAGS fix were just installed, first run:"
-echo ""
-echo "    source ~/.bashrc"
-echo ""
-echo "Then run a local benchmark with:"
-echo ""
-echo "    cargo run --release -p orchestrator -- \\"
-echo "        --settings-path orchestrator/assets/settings-local.yml benchmark"
-echo ""
+
