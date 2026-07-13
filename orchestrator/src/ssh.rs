@@ -81,7 +81,7 @@ impl CommandContext {
     pub fn apply<S: Into<String>>(&self, base_command: S) -> String {
         let mut str = base_command.into();
         if let Some(log_file) = &self.log_file {
-            str = format!("{str} |& tee {}", log_file.as_path().display());
+            str = format!("({str}) |& tee {}", log_file.as_path().display());
         }
         if let Some(id) = &self.background {
             str = format!("tmux new -d -s \"{id}\" \"{str}\"");
