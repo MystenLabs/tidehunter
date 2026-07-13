@@ -21,7 +21,10 @@ parallel, cloud machines, and monitoring are covered in
 * A Linux machine with sudo access. We tested on Ubuntu; other
   distributions should work, but the setup script will need small
   adaptations.
-* At least 2.5 TB of fast SSD storage, ideally NVMe.
+* At least 3.5 TB of fast SSD storage, ideally NVMe, and at least 256 GB
+  of RAM. If your machine has less, you will need to adjust the
+  experiment parameters (e.g. reduce the total number of writes) so that
+  the benchmark database fits on your machine.
 * A bare-metal machine is recommended over a cloud instance.
 
 ## First-time setup
@@ -97,6 +100,11 @@ typo means the default value is used, with no error).
    (`testbed status` and friends inspect and manage the machines.)
 3. Logs land in `logs/logs-<branch>/node-<timestamp>-<node_index>.log`, one
    per cell; see "Extracting results".
+
+**IMPORTANT:** Do not run the orchestrator from inside `tmux`. As part of
+its pre-run cleanup, the orchestrator kills all `tmux` sessions on the
+benchmark machines — and since your machine is the benchmark machine here,
+it would kill itself. We used `screen` instead.
 
 ### Cell ordering and the recovery experiments
 
