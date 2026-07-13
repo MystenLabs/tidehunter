@@ -100,6 +100,9 @@ pub enum TestbedError {
     #[error("Not enough instances: missing {0} instances")]
     InsufficientCapacity(usize),
 
+    #[error("Failed to boot nodes: {0}")]
+    NodeBootError(String),
+
     #[error(transparent)]
     MonitorError(#[from] MonitorError),
 }

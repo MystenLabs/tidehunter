@@ -231,17 +231,21 @@ impl Settings {
         Ok(s)
     }
 
-    /// Get the name of the repository (from its url).
+    /// Get the name of the directory where the orchestrator clones the repository on the
+    /// instances (derived from the repository url). The suffix keeps the orchestrator's
+    /// clone separate from any development checkout of the same repository, so the
+    /// orchestrator never touches work in progress.
     pub fn repository_name(&self) -> String {
-        self.repository
+        let name = self
+            .repository
             .url
             .path_segments()
             .expect("Url should already be checked when loading settings")
             .collect::<Vec<_>>()[1]
             .split('.')
             .next()
-            .unwrap()
-            .to_string()
+            .unwrap();
+        format!("{name}-experiments")
     }
 
     /// Load the secret token to authenticate with the cloud provider.
@@ -321,7 +325,7 @@ mod test {
     fn repository_name() {
         let mut settings = Settings::new_for_test();
         settings.repository.url = Url::parse("https://example.com/author/name").unwrap();
-        assert_eq!(settings.repository_name(), "name");
+        assert_eq!(settings.repository_name(), "name-experiments");
     }
 
     #[test]

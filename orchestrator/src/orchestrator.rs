@@ -4,6 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chrono::Utc;
 use tokio::time::{self, Instant};
@@ -18,6 +19,12 @@ use crate::protocol::{ProtocolCommands, ProtocolMetrics};
 use crate::settings::Settings;
 use crate::ssh::{CommandContext, CommandStatus, SshConnectionManager};
 use crate::{display, ensure};
+
+/// Maximum time for the foreground installation commands (apt-get, rustup, git clone)
+/// to complete on all instances.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Maximum time to wait for the nodes' metrics endpoints to become reachable after boot.
+const NODE_BOOT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// An orchestrator to deploy nodes and run benchmarks on a testbed.
 pub struct Orchestrator<P> {
@@ -153,9 +160,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             &format!("mkdir -p {working_dir}"),
             // Ensure proper ownership of the working directory
             &format!("sudo chown -R $USER:$USER {working_dir}"),
-            // Clone the repo
-            &format!("[ -d {repo_name} ] && rm -rf {repo_name}"),
-            &format!("(git clone {url} || true)"),
+            // Clone the repo if not already present.
+            &format!("[ -d {repo_name} ] || git clone {url} {repo_name}"),
         ];
 
         let command = [
@@ -176,7 +182,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         let active = self.instances.iter().filter(|x| x.is_active()).cloned();
         let context = CommandContext::default();
-        self.ssh_manager.execute(active, command, context).await?;
+        // These commands run in the foreground and may take much longer than the regular
+        // ssh timeout; a short timeout would abort the read and re-execute the whole chain
+        // while the previous attempt is still running on the instance.
+        let ssh_manager = self.ssh_manager.clone().with_timeout(INSTALL_TIMEOUT);
+        ssh_manager.execute(active, command, context).await?;
 
         display::done();
         Ok(())
@@ -191,6 +201,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // many ssh connections for too long.
         let commit = &self.settings.repository.commit;
         let command = [
+            // The sentinel file allows checking the success of the whole command, since
+            // the termination of the background tmux session says nothing about it.
+            "rm -f ~/.update_done",
             &format!("git fetch origin {commit}"),
             "git reset --hard HEAD",
             "git clean -fd",
@@ -199,10 +212,16 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             ),
             "source $HOME/.cargo/env",
             "RUSTFLAGS=-Ctarget-cpu=native cargo build --release",
+            "touch ~/.update_done",
         ]
         .join(" && ");
 
-        let active = self.instances.iter().filter(|x| x.is_active()).cloned();
+        let active: Vec<_> = self
+            .instances
+            .iter()
+            .filter(|x| x.is_active())
+            .cloned()
+            .collect();
 
         let id = "update";
         let repo_name = self.settings.repository_name();
@@ -216,7 +235,15 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         // Wait until the command finished running.
         self.ssh_manager
-            .wait_for_command(active, id, CommandStatus::Terminated)
+            .wait_for_command(active.clone(), id, CommandStatus::Terminated)
+            .await?;
+
+        // Check that the update completed successfully on all instances.
+        let verify = format!(
+            "test -f ~/.update_done || (echo 'testbed update failed, check ~/{id}.log' >&2; exit 1)"
+        );
+        self.ssh_manager
+            .execute(active, verify, CommandContext::default())
             .await?;
 
         display::done();
@@ -329,15 +356,32 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .execute_per_instance(targets.clone(), context)
             .await?;
 
-        // Wait until all nodes are reachable.
-        let running_instances = targets.iter().map(|(instance, _)| instance.clone());
+        // Wait until all nodes are reachable, but fail fast if the node processes
+        // terminate before their metrics endpoints come up (e.g., missing binary or bad
+        // config), and give up after a timeout instead of polling forever.
+        let running_instances: Vec<_> = targets
+            .iter()
+            .map(|(instance, _)| instance.clone())
+            .collect();
 
         let commands = self
             .protocol_commands
-            .nodes_metrics_command(running_instances, parameters);
-        self.ssh_manager.wait_for_success(commands).await;
-
-        Ok(())
+            .nodes_metrics_command(running_instances.clone(), parameters);
+        tokio::select! {
+            _ = self.ssh_manager.wait_for_success(commands) => Ok(()),
+            result = self.ssh_manager.wait_for_command(
+                running_instances, "node", CommandStatus::Terminated
+            ) => {
+                result?;
+                Err(TestbedError::NodeBootError(
+                    "node processes exited before becoming reachable, check ~/node.log on the instances".into(),
+                ))
+            },
+            _ = time::sleep(NODE_BOOT_TIMEOUT) => Err(TestbedError::NodeBootError(format!(
+                "nodes still unreachable after {}s",
+                NODE_BOOT_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     /// Deploy the nodes.
