@@ -21,10 +21,10 @@ parallel, cloud machines, and monitoring are covered in
 * A Linux machine with sudo access. We tested on Ubuntu; other
   distributions should work, but the setup script will need small
   adaptations.
-* At least 3.5 TB of fast SSD storage, ideally NVMe, and at least 256 GB
+* At least 5 TB of fast SSD storage, ideally NVMe, and at least 256 GB
   of RAM. If your machine has less, you will need to adjust the
-  experiment parameters (e.g. reduce the total number of writes) so that
-  the benchmark database fits on your machine.
+  experiment parameters (e.g. reduce the total number of writes, reduce `max_maps`) 
+  so that the benchmark database fits on your machine.
 * A bare-metal machine is recommended over a cloud instance.
 
 ## First-time setup
