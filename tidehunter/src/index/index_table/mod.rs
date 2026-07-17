@@ -1439,6 +1439,58 @@ impl IndexTable {
     #[cfg(test)]
     const PROMOTE_THRESHOLD: usize = 0;
 
+    /// A cell with few unique keys never crosses `PROMOTE_THRESHOLD`, yet its
+    /// per-key position lists still grow by one entry per write until a
+    /// promote or flush drains them — and `unmerge_flushed` cost grows
+    /// quadratically with that backlog (see
+    /// `repro_unmerge_flushed_quadratic`). Promote whenever the positions a
+    /// promote would drain cross this bound, so the overlay stays small
+    /// regardless of key cardinality.
+    const PROMOTE_POSITIONS_THRESHOLD: usize = 1024;
+
+    /// Whether [`Self::promote_to_flat`] would drain this table. Lets
+    /// `promote_flat_job` skip the deep clone of tables a promote would leave
+    /// unchanged.
+    pub fn should_promote_to_flat(&self, last_processed: LastProcessed) -> bool {
+        self.should_promote(Self::PROMOTE_THRESHOLD, last_processed)
+    }
+
+    /// The promote trigger: unique-key count above `key_threshold`, or a
+    /// drainable position backlog above `PROMOTE_POSITIONS_THRESHOLD`.
+    ///
+    /// Re-inserting the same key does not inflate the key trigger (one map
+    /// entry per key); the backlog such a hot key builds up is what the
+    /// position trigger catches. The backlog scan only runs under the key
+    /// threshold, so it stays short.
+    fn should_promote(&self, key_threshold: usize, last_processed: LastProcessed) -> bool {
+        if self.data_unique_key_count() > key_threshold {
+            return true;
+        }
+        self.drainable_position_count(last_processed) > Self::PROMOTE_POSITIONS_THRESHOLD
+    }
+
+    /// Positions a promote would drain from `data`: a key with an in-flight
+    /// latest position contributes 0, and one with a processed latest
+    /// contributes its whole (ascending, hence fully processed) list.
+    ///
+    /// Must stay in lockstep with the drain itself, which is all-or-nothing
+    /// per key on the latest position in both of its halves: `merge_walk`'s
+    /// data-side filter (`data_latest_per_key(..)` + `is_processed` in
+    /// flat.rs) decides what enters flat, and `drop_data_keys` in
+    /// `promote_to_flat_inner` drops keys by the same latest-position test.
+    /// Counting anything else (e.g. per-position) would fire promotes that
+    /// drain less than counted.
+    fn drainable_position_count(&self, last_processed: LastProcessed) -> usize {
+        self.data
+            .values()
+            .filter(|positions| {
+                let latest = positions.last().expect("data positions are never empty");
+                last_processed.is_processed(latest)
+            })
+            .map(|positions| positions.len())
+            .sum()
+    }
+
     /// Returns `true` if the flat buffer was updated, `false` if nothing changed.
     ///
     /// Folds only processed overlay positions (offset `< last_processed`) into
@@ -1462,18 +1514,23 @@ impl IndexTable {
     }
 
     fn promote_to_flat_inner(&mut self, threshold: usize, last_processed: LastProcessed) -> bool {
-        // O(1) cap on entry: if the whole data set is under the threshold there
-        // is nothing meaningful to drain. If it isn't but every key's latest
-        // entry happens to be unprocessed, the merge below is a no-op (rare;
-        // not worth a separate scan to detect).
-        //
-        // `self.data.len()` is the unique-key count (one map entry per key), so
-        // re-inserting the same key does not inflate the trigger — a hot counter
-        // trips the threshold on distinct keys, matching the intended cadence.
-        if self.data.len() <= threshold {
+        // Cheap cap on entry (see `should_promote` for the two triggers). When
+        // the key trigger fires but every key's latest entry happens to be
+        // unprocessed, the merge below is a no-op (rare; not worth a separate
+        // scan to detect).
+        if !self.should_promote(threshold, last_processed) {
             return false;
         }
+        self.promote_to_flat_unconditionally(last_processed);
+        true
+    }
 
+    /// The drain half of a promote, without re-evaluating the trigger. For
+    /// callers that already checked [`Self::should_promote_to_flat`] on the
+    /// same content and `last_processed` (`promote_flat_job` gates before its
+    /// deep clone); calling it when nothing is drainable is sound but
+    /// rebuilds `flat` for no gain.
+    pub fn promote_to_flat_unconditionally(&mut self, last_processed: LastProcessed) {
         let (new_flat, flat_dirty) =
             merge_into_flat(&self.flat, self.key_size, &self.data, last_processed);
         self.flat = new_flat;
@@ -1488,7 +1545,6 @@ impl IndexTable {
         let (data_key_bytes, data_dirty) = self.recount_data_stats();
         self.key_bytes = data_key_bytes;
         self.dirty_count = flat_dirty + data_dirty;
-        true
     }
 
     // ---------------------------------------------------------------------------
@@ -2056,6 +2112,127 @@ mod tests {
                 (vec![6].into(), WalPosition::test_value(4)) // This one wasn't unmerged because offset > 3
             ]
         );
+    }
+
+    /// Repro for the epoch-boundary stall on hot few-key cells (e.g. a
+    /// ~5-key `disable_unload` watermarks cell): the overlay accumulates one
+    /// position per write, and `unmerge_flushed` then removes the flushed
+    /// snapshot's positions one at a time from the front of each key's list
+    /// (`SmallVec::remove(0)` in `data_remove_matching`) — O(m²) total
+    /// memmove for a per-key backlog of m.
+    ///
+    /// Prints timings for doubling backlogs; the time grows ~4x per doubling.
+    /// Run with:
+    /// `cargo test -p tidehunter repro_unmerge_flushed_quadratic -- --ignored --nocapture`
+    /// Production value of `PROMOTE_THRESHOLD`, which cfg(test) rebinds to 0;
+    /// the trigger tests pass it explicitly to exercise the production gate.
+    const PROD_KEY_THRESHOLD: usize = 128;
+
+    /// Insert one position per key at consecutive offsets, advancing `offset`.
+    fn insert_round(table: &mut IndexTable, keys: &[Bytes], offset: &mut u64) {
+        for key in keys {
+            table.insert(key.clone(), WalPosition::test_value(*offset));
+            *offset += 1;
+        }
+    }
+
+    #[test]
+    #[ignore = "manual timing repro of the quadratic unmerge backlog"]
+    fn repro_unmerge_flushed_quadratic() {
+        const KEYS: u32 = 5;
+        let keys: Vec<Bytes> = (0..KEYS).map(|i| i.to_be_bytes().to_vec().into()).collect();
+        for backlog_per_key in [25_000u64, 50_000, 100_000] {
+            let mut live = IndexTable::default();
+            let mut offset = 1u64;
+            for _ in 0..backlog_per_key {
+                insert_round(&mut live, &keys, &mut offset);
+            }
+            // The flusher snapshots the overlay here (`FlushKind::Flush { dirty }`).
+            let flushed = live.clone();
+            let frontier = LastProcessed::new_test(offset);
+            // Writes that land while the flush is in flight force the
+            // `unmerge_flushed` completion path over the whole backlog.
+            insert_round(&mut live, &keys, &mut offset);
+            let start = std::time::Instant::now();
+            live.unmerge_flushed(&flushed, frontier);
+            let elapsed = start.elapsed();
+            // Only the in-flight write survives for each key.
+            assert_eq!(live.len(), KEYS as usize);
+            assert!(live.data.values().all(|p| p.len() == 1));
+            println!(
+                "backlog {backlog_per_key} positions x {KEYS} keys: unmerge_flushed took {elapsed:?}"
+            );
+        }
+    }
+
+    /// Regression test for the position-backlog promote trigger: a hot cell
+    /// with a handful of unique keys (far below `PROD_KEY_THRESHOLD`) must
+    /// still promote once its drainable positions cross
+    /// `PROMOTE_POSITIONS_THRESHOLD`, or the backlog grows one entry per
+    /// write until a flush — and `unmerge_flushed` is quadratic in it.
+    #[test]
+    fn test_should_promote_on_position_backlog() {
+        let keys: Vec<Bytes> = (0..3u32).map(|i| i.to_be_bytes().to_vec().into()).collect();
+        let mut table = IndexTable::default();
+        let mut offset = 1u64;
+        // One position per key: neither trigger fires under the production
+        // key threshold.
+        insert_round(&mut table, &keys, &mut offset);
+        assert!(!table.should_promote(PROD_KEY_THRESHOLD, LastProcessed::new_test(offset)));
+
+        // Grow the backlog past PROMOTE_POSITIONS_THRESHOLD total positions,
+        // tallying inserts directly rather than via the function under test.
+        while (offset - 1) as usize <= IndexTable::PROMOTE_POSITIONS_THRESHOLD {
+            insert_round(&mut table, &keys, &mut offset);
+        }
+        let frontier = LastProcessed::new_test(offset);
+        // Every inserted position is below the frontier, so the count must
+        // match the ground-truth insert tally.
+        assert_eq!(
+            table.drainable_position_count(frontier),
+            (offset - 1) as usize
+        );
+        // Nothing is drainable while every position is unprocessed.
+        assert!(!table.should_promote(PROD_KEY_THRESHOLD, LastProcessed::new_test(1)));
+        // Past the frontier, the position trigger fires despite 3 unique keys.
+        assert!(table.should_promote(PROD_KEY_THRESHOLD, frontier));
+
+        // The promote drains the backlog to one flat entry per key, and the
+        // trigger disarms.
+        assert!(table.promote_to_flat_inner(PROD_KEY_THRESHOLD, frontier));
+        assert!(table.data.is_empty());
+        assert_eq!(table.flat_len(), keys.len());
+        assert!(!table.should_promote(PROD_KEY_THRESHOLD, frontier));
+    }
+
+    /// A key whose latest position is at/above the frontier is not drainable
+    /// (`merge_into_flat` skips it whole), so it neither counts toward the
+    /// position trigger nor loses positions when another key's backlog
+    /// promotes.
+    #[test]
+    fn test_should_promote_skips_undrainable_keys() {
+        let hot: Bytes = vec![1].into();
+        let inflight: Bytes = vec![2].into();
+        let mut table = IndexTable::default();
+        let mut offset = 1u64;
+        for _ in 0..=IndexTable::PROMOTE_POSITIONS_THRESHOLD {
+            table.insert(hot.clone(), WalPosition::test_value(offset));
+            offset += 1;
+        }
+        let frontier = LastProcessed::new_test(offset);
+        table.insert(inflight.clone(), WalPosition::test_value(offset));
+        // `inflight`'s only position sits at the frontier — undrainable; the
+        // `hot` backlog alone trips the position trigger.
+        assert_eq!(
+            table.drainable_position_count(frontier),
+            IndexTable::PROMOTE_POSITIONS_THRESHOLD + 1
+        );
+        assert!(table.should_promote(PROD_KEY_THRESHOLD, frontier));
+        assert!(table.promote_to_flat_inner(PROD_KEY_THRESHOLD, frontier));
+        // `hot` drained to a single flat entry; `inflight` stays in data.
+        assert_eq!(table.flat_len(), 1);
+        assert_eq!(table.data_unique_key_count(), 1);
+        assert!(table.data.contains_key(&inflight));
     }
 
     #[test]

@@ -795,12 +795,15 @@ impl LargeTable {
                 let promoted: Vec<(CellId, Arc<IndexTable>, IndexTable)> = snapshots
                     .iter()
                     .filter_map(|(cell, arc, threshold)| {
+                        // Single decision point for this cell: cells that
+                        // fail the gate skip the deep clone below, and cells
+                        // that pass drain without re-evaluating the trigger.
+                        if !arc.should_promote_to_flat(*threshold) {
+                            return None;
+                        }
                         let mut table = (**arc).clone();
-                        table.promote_to_flat(*threshold).then_some((
-                            cell.clone(),
-                            arc.clone(),
-                            table,
-                        ))
+                        table.promote_to_flat_unconditionally(*threshold);
+                        Some((cell.clone(), arc.clone(), table))
                     })
                     .collect();
 

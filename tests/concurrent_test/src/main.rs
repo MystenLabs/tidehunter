@@ -314,10 +314,12 @@ fn main() {
 
                 // 0.1% chance to force the flat-promotion pass with the threshold
                 // bypassed. Normally promote_to_flat runs on a 10-second timer and
-                // only fires when a cell's write buffer has more than 128 entries;
-                // with only 25 test keys spread across cells neither condition is
-                // met, so the insert → promote → remove → FlushLoaded window
-                // essentially never opens. Forcing it here interleaves
+                // fires when a cell's write buffer has more than 128 unique keys
+                // or more than 1024 drainable positions; with only 25 test keys
+                // spread across cells the key trigger never fires, and the
+                // position trigger requires a between-drain backlog the workload
+                // rarely sustains, so the insert → promote → remove → FlushLoaded
+                // window seldom opens on its own. Forcing it here interleaves
                 // promote_to_flat with writes from other threads and exposes the
                 // `clean_self` stale-record bug where a Removed tombstone in
                 // `data` shadows a Modified entry in `flat`.
