@@ -139,25 +139,30 @@ experiments assume exclusive use of the disk and CPU anyway).
 ## Mapping paper figures and tables to runs
 
 Every experimental figure and table in the paper has a generator mode (or
-two: Tidehunter cells and baseline cells were run separately). Figures not
-listed below (the design diagrams and the production case study) are not
-reproducible from this repository. The exact cell list and parameters of
-every mode are in the doc comments shown by
+two: Tidehunter cells and baseline cells were run separately). The first
+column names each element by its kind plus the opening words of its
+caption; elements marked "full version only" appear only in the extended
+(arXiv) version of the paper. Figures not listed below (the design
+diagrams and the production case study) are not reproducible from this
+repository. The exact cell list and parameters of every mode are in the
+doc comments shown by
 `cargo run -p generate_target_configs -- --help`.
 
 | Paper element | Generator mode(s) |
 |---|---|
-| Value-size scaling figure (Figure 1) | `value-scaling`: value size {64, 128, 256, 512, 1024} B x Zipf θ {0, 2}, 50/50 Get, 1 TiB pre-fill. Baselines: `value-scaling-baselines` (RocksDB and BlobDB over the same grid). |
-| Main benchmark figures (Figures 5 and 6) | `main-benchmark`: value size {1 KB, 64 B, 128 B} x Zipf θ {0, 2} x {write-only, 50/50 Get, 50/50 Exists, 50/50 Lt, 100% Get, 100% Exists, 100% Lt}, 1 TiB pre-fill. Baselines: `main-benchmark-baselines`. |
-| Stability table (Table 1) | `stability`: read percentage {0, 50, 100} x Zipf θ {0, 2} on the 1 KB config. Needs a Prometheus scraping the client: throughput CV and per-interval percentiles come from the `bench_writes` / `bench_reads` counters (`scripts/fetch_grafana_variance.py` shows the queries), the lock-overhead column from the `large_table_contention` metric. |
-| Application-workload regimes figure (Figure 7) | `app-workloads`: key/value sizes {24/10, 48/43, 20/44, 38/38, 76/50} B x Zipf θ {0, 2} x backend {Tidehunter, Rocksdb, Blobdb}, 50/50 Get, 500 GiB pre-fill. |
-| Relocation on/off figure (Figure 8) | `relocation`: relocation {on, off} x Zipf θ {0, 2}; 1 TiB pre-fill of 1 KB values, then a delete-only phase. Storage from filesystem usage, throughput from logs. |
-| Churn tables (Tables 2 and 3) | `churn`: strategy {None, WalBased, IndexBased} x mix {100% overwrite, 50/50 overwrite+delete, 100% delete}, plus reclaim threshold {1, 10, 25, 50}% on the WalBased 50/50 cell; 500 GiB pre-fill, write-only churn phase. BlobDB rows: `churn-blobdb`. |
-| Recovery table (Table 4) | `recovery`, in fill/measure pairs. Series A: cold start at {100 GiB, 500 GiB, 1 TiB (x2 replicates)}. Series B: snapshot interval {16, 64, 256 GiB, unlimited} at 1 TiB. Series C: crash during relocation (`crash_after_secs: 600`; exit code 137 is expected), then a measured re-open. Extra replicates: `recovery-replicates`. Measure cells emit the `RECOVERY:` / `FIRST_READ:` lines. |
-| Runtime memory table (Table 5) | `memory-instrumented`: 4 replicates of the headline 50/50 Get 1 KB θ=0 config with metrics enabled. Needs a Prometheus scraping the client; `scripts/fetch_r3_instrumented.py` aggregates the per-keyspace gauges. |
-| Memory-sensitivity sweeps table (Table 6) | One mode per table block: `sweep-bloom-fpr` (FPR {0.001, 0.01, 0.05, 0.10}, 100% Get), `sweep-mmap-window` (`max_maps` {16, 32, 64, 128}), `sweep-cell-count` (`num_mutexes` {2^14, 2^16, 2^17, 2^19, 2^20}), `sweep-dirty-keys` (`max_dirty_keys` {64, 256, 1024, 4096, 16384}). |
+| Value-scaling figure, "Mixed workload throughput (50% reads/writes) vs. value size..." | `value-scaling`: value size {64, 128, 256, 512, 1024} B x Zipf θ {0, 2}, 50/50 Get, 1 TiB pre-fill. Baselines: `value-scaling-baselines` (RocksDB and BlobDB over the same grid). |
+| Main benchmark figures, "Throughput comparison across workloads..." (1 KB), "Throughput comparison for small values (64 bytes)...", and "Throughput comparison for small values (128 bytes)..." (128 B figure: full version only) | `main-benchmark`: value size {1 KB, 64 B, 128 B} x Zipf θ {0, 2} x {write-only, 50/50 Get, 50/50 Exists, 50/50 Lt, 100% Get, 100% Exists, 100% Lt}, 1 TiB pre-fill. Baselines: `main-benchmark-baselines`. |
+| Stability table, "Stability across 6 workload configurations on 1 KB values..." | `stability`: read percentage {0, 50, 100} x Zipf θ {0, 2} on the 1 KB config. Needs a Prometheus scraping the client: throughput CV and per-interval percentiles come from the `bench_writes` / `bench_reads` counters (`scripts/fetch_grafana_variance.py` shows the queries), the lock-overhead column from the `large_table_contention` metric. |
+| Application-workloads figure, "Throughput on five small-record application workloads..." | `app-workloads`: key/value sizes {24/10, 48/43, 20/44, 38/38, 76/50} B x Zipf θ {0, 2} x backend {Tidehunter, Rocksdb, Blobdb}, 50/50 Get, 500 GiB pre-fill. |
+| Relocation figure, "Effect of relocation on storage usage and throughput..." (full version only; the short version reports the same numbers in prose) | `relocation`: relocation {on, off} x Zipf θ {0, 2}; 1 TiB pre-fill of 1 KB values, then a delete-only phase. Storage from filesystem usage, throughput from logs. |
+| Churn tables, "Foreground behavior under sustained measurement-phase churn..." and "Threshold sweep on WalBased + 50/50 mixed workload..." (threshold-sweep table: full version only) | `churn`: strategy {None, WalBased, IndexBased} x mix {100% overwrite, 50/50 overwrite+delete, 100% delete}, plus reclaim threshold {1, 10, 25, 50}% on the WalBased 50/50 cell; 500 GiB pre-fill, write-only churn phase. BlobDB rows: `churn-blobdb`. |
+| Recovery table, "Recovery measurements..." | `recovery`, in fill/measure pairs. Series A: cold start at {100 GiB, 500 GiB, 1 TiB (x2 replicates)}. Series B: snapshot interval {16, 64, 256 GiB, unlimited} at 1 TiB. Series C: crash during relocation (`crash_after_secs: 600`; exit code 137 is expected), then a measured re-open. Extra replicates: `recovery-replicates`. Measure cells emit the `RECOVERY:` / `FIRST_READ:` lines. |
+| Runtime memory table, "Runtime instrumentation of the standard 50/50 / 1 KB..." | `memory-instrumented`: 4 replicates of the headline 50/50 Get 1 KB θ=0 config with metrics enabled. Needs a Prometheus scraping the client; `scripts/fetch_r3_instrumented.py` aggregates the per-keyspace gauges. |
+| Memory-sweeps table, "Memory-sensitivity sweeps." | One mode per table block: `sweep-bloom-fpr` (FPR {0.001, 0.01, 0.05, 0.10}, 100% Get), `sweep-mmap-window` (`max_maps` {16, 32, 64, 128}), `sweep-cell-count` (`num_mutexes` {2^14, 2^16, 2^17, 2^19, 2^20}), `sweep-dirty-keys` (`max_dirty_keys` {64, 256, 1024, 4096, 16384}). |
+| Index microbenchmark figure, "Index lookup throughput vs. window size..." (full version only; the short version quotes the headline numbers inline) | No generator mode; a local microbenchmark, see the paragraph below. |
 
-The index microbenchmark numbers quoted inline in the evaluation come from
+The index microbenchmark (the window-size figure and the numbers quoted
+inline in the evaluation) comes from
 a benchmark that runs locally without the stress client:
 `scripts/generate.sh` builds the index files, `scripts/run.sh` sweeps
 lookup window x threads x direct I/O using `benchmarks/index_benchmark`
