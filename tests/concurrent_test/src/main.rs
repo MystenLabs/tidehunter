@@ -1,23 +1,53 @@
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use parking_lot::{Mutex, RwLock};
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Instant;
 use tidehunter::config::Config;
 use tidehunter::db::Db;
 use tidehunter::key_shape::{KeyShape, KeyShapeBuilder, KeyType};
 use tidehunter::metrics::Metrics;
-use tidehunter::minibytes::Bytes;
 
 /// Type alias for the key-specific mutex
 type KeyMutex = Arc<Mutex<()>>;
 
 /// Type alias for the locks map
 type LocksMap = Arc<Mutex<HashMap<Vec<u8>, KeyMutex>>>;
+
+macro_rules! th_assert_always {
+    ($condition:expr, $id:literal, $message:literal $(, $arg:expr)* $(,)?) => {{
+        let ok = $condition;
+        let failure = if ok {
+            None
+        } else {
+            Some(format!($message $(, $arg)*))
+        };
+        #[cfg(feature = "sdk")]
+        {
+            let details = if ok {
+                antithesis_sdk::serde_json::json!({
+                    "condition": stringify!($condition),
+                })
+            } else {
+                antithesis_sdk::serde_json::json!({
+                    "condition": stringify!($condition),
+                    "failure": failure.as_ref().expect("failure is set when assertion fails"),
+                })
+            };
+            antithesis_sdk::assert_always_or_unreachable!(ok, $id, &details);
+        }
+        if let Some(failure) = failure {
+            panic!("{failure}");
+        }
+    }};
+}
 
 /// Manages per-key locks to ensure atomic operations on individual keys.
 ///
@@ -79,6 +109,51 @@ impl InMemoryState {
     }
 }
 
+enum ConcurrentRng {
+    Local(Box<StdRng>),
+    #[cfg(feature = "sdk")]
+    Antithesis(antithesis_sdk::random::AntithesisRng),
+}
+
+impl ConcurrentRng {
+    fn new(thread_id: usize, in_antithesis: bool) -> Self {
+        if in_antithesis {
+            #[cfg(feature = "sdk")]
+            {
+                return Self::Antithesis(antithesis_sdk::random::AntithesisRng);
+            }
+        }
+        Self::Local(Box::new(StdRng::seed_from_u64(thread_id as u64)))
+    }
+}
+
+impl RngCore for ConcurrentRng {
+    fn next_u32(&mut self) -> u32 {
+        self.next_u64() as u32
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        match self {
+            Self::Local(rng) => rng.next_u64(),
+            #[cfg(feature = "sdk")]
+            Self::Antithesis(rng) => rng.next_u64(),
+        }
+    }
+
+    fn fill_bytes(&mut self, dst: &mut [u8]) {
+        match self {
+            Self::Local(rng) => rng.fill_bytes(dst),
+            #[cfg(feature = "sdk")]
+            Self::Antithesis(rng) => rng.fill_bytes(dst),
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), rand::Error> {
+        self.fill_bytes(dst);
+        Ok(())
+    }
+}
+
 /// Count open file descriptors for a given directory using lsof.
 /// Returns the number of open file descriptors.
 fn count_open_file_descriptors(db_path: &Path) -> usize {
@@ -91,6 +166,46 @@ fn count_open_file_descriptors(db_path: &Path) -> usize {
         .lines()
         .skip(1) // Skip header line
         .count()
+}
+
+fn clean_startup_db_path(db_path: &Path) {
+    assert!(
+        db_path != Path::new("/"),
+        "refusing to clean filesystem root"
+    );
+    if db_path.exists() {
+        assert!(
+            !is_mount_point(db_path),
+            "refusing to clean mount point {}; set CONCURRENT_TEST_ROOT to a subdirectory",
+            db_path.display()
+        );
+        fs::remove_dir_all(db_path).expect("clean concurrent test root directory");
+    }
+    fs::create_dir_all(db_path).expect("create concurrent test root directory");
+}
+
+#[cfg(unix)]
+fn is_mount_point(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return true;
+    };
+    if parent == path {
+        return true;
+    }
+    let Ok(parent_metadata) = fs::metadata(parent) else {
+        return false;
+    };
+    metadata.dev() != parent_metadata.dev() || metadata.ino() == parent_metadata.ino()
+}
+
+#[cfg(not(unix))]
+fn is_mount_point(_path: &Path) -> bool {
+    false
 }
 
 /// Opens a database with the given configuration and starts periodic snapshots.
@@ -124,7 +239,30 @@ fn open_db_with_snapshots(
 /// - Iterator consistency with concurrent modifications
 /// - Memory consistency across threads
 fn main() {
-    let temp_dir = tempdir::TempDir::new("test_concurrent").unwrap();
+    sdk::init();
+
+    let in_antithesis = env::var_os("ANTITHESIS_OUTPUT_DIR").is_some();
+    if in_antithesis {
+        assert!(
+            cfg!(feature = "sdk"),
+            "Antithesis runs require building concurrent_test with --features sdk"
+        );
+    }
+
+    let configured_root = env::var_os("CONCURRENT_TEST_ROOT").map(PathBuf::from);
+    let temp_dir = if configured_root.is_none() {
+        Some(tempdir::TempDir::new("test_concurrent").unwrap())
+    } else {
+        None
+    };
+    let db_path = configured_root.unwrap_or_else(|| {
+        temp_dir
+            .as_ref()
+            .expect("tempdir exists when CONCURRENT_TEST_ROOT is unset")
+            .path()
+            .to_path_buf()
+    });
+    clean_startup_db_path(&db_path);
 
     // Use a custom config with very small values to trigger more frequent flushes and snapshots
     let mut config = Config::small();
@@ -146,7 +284,7 @@ fn main() {
     // same-shape reopens below), then wrap the db in RwLock<Option<_>> to
     // allow safe restarts.
     let initial_db = open_db_with_snapshots(
-        temp_dir.path(),
+        &db_path,
         key_shape.clone(),
         config.clone(),
         shared_metrics.clone(),
@@ -164,9 +302,6 @@ fn main() {
         Arc::new(Mutex::new(BTreeMap::new()));
     let next_secondary_key = Arc::new(AtomicU64::new(0));
 
-    // Path for database restarts
-    let db_path = temp_dir.path().to_path_buf();
-
     // Key-level locking ensures atomic operations on individual keys while
     // allowing parallelism across different keys
     let key_lock_manager = KeyLockManager::new();
@@ -178,12 +313,12 @@ fn main() {
     // Using a fixed set of keys ensures high contention
     let keys: Vec<Vec<u8>> = (0u8..25).map(|i| vec![i + b'a']).collect();
 
-    let num_threads = 8;
-    let operations_per_thread = 64 * 5000;
+    let num_threads = env_usize("CONCURRENT_TEST_THREADS", 8).max(1);
+    let operations_per_thread = env_usize("CONCURRENT_TEST_OPS_PER_THREAD", 64 * 5000);
     let total_operations = num_threads * operations_per_thread;
 
     // Check if progress bars should be disabled
-    let no_progress = std::env::var("NO_PROGRESS").is_ok();
+    let no_progress = env::var_os("NO_PROGRESS").is_some();
 
     // Create progress tracking (completely hidden if NO_PROGRESS is set)
     let multi_progress = if no_progress {
@@ -204,7 +339,8 @@ fn main() {
     }
 
     let mut handles = vec![];
-    let _start_time = Instant::now();
+
+    sdk::setup_complete();
 
     for thread_id in 0..num_threads {
         let db = db.clone();
@@ -237,8 +373,8 @@ fn main() {
         let overall_pb = overall_pb.clone();
 
         let handle = thread::spawn(move || {
-            use rand::{Rng, SeedableRng};
-            let mut rng = rand::rngs::StdRng::seed_from_u64(thread_id as u64);
+            use rand::Rng;
+            let mut rng = ConcurrentRng::new(thread_id, in_antithesis);
 
             for op_num in 0..operations_per_thread {
                 // Update progress bars
@@ -264,32 +400,28 @@ fn main() {
                     // Take the current database out of the Option
                     if let Some(old_db) = db_write.take() {
                         // Only check file descriptors 0.2% of the time to reduce overhead
-                        let should_check_fds = rng.gen_range(0..500) < 1;
+                        let should_check_fds = !in_antithesis && rng.gen_range(0..500) < 1;
 
                         if should_check_fds {
                             // Check file descriptors before stopping
                             let fd_count = count_open_file_descriptors(&db_path);
-                            if fd_count == 0 {
-                                eprintln!(
-                                    "ERROR: Expected at least 1 open file descriptors before stopping database, but got 0"
-                                );
-                                std::process::exit(1);
-                            }
+                            assert!(
+                                fd_count > 0,
+                                "Expected at least 1 open file descriptors before stopping database, but got 0"
+                            );
                         }
 
                         // Wait for all background threads to finish while holding the lock
                         old_db.wait_for_background_threads_to_finish();
+                        sdk::sometimes(true, sdk::CoverageEvent::BackgroundThreadsJoined);
 
                         if should_check_fds {
                             // Verify all file descriptors are released after background threads finish
                             let fd_count = count_open_file_descriptors(&db_path);
-                            if fd_count != 0 {
-                                eprintln!(
-                                    "ERROR: Expected 0 open file descriptors after stopping database, but got {}",
-                                    fd_count
-                                );
-                                std::process::exit(1);
-                            }
+                            assert_eq!(
+                                fd_count, 0,
+                                "Expected 0 open file descriptors after stopping database"
+                            );
                         }
 
                         // Create new database while still holding the write lock.
@@ -302,6 +434,7 @@ fn main() {
                         ));
 
                         restart_count.fetch_add(1, Ordering::Relaxed);
+                        sdk::sometimes(true, sdk::CoverageEvent::RestartHappened);
                     }
                     // Lock is automatically released when db_write goes out of scope
                 }
@@ -310,6 +443,7 @@ fn main() {
                     let db_read = db.read();
                     let db_instance = db_read.as_ref().unwrap();
                     db_instance.start_relocation().unwrap();
+                    sdk::sometimes(true, sdk::CoverageEvent::RelocationRan);
                 }
 
                 // 0.1% chance to force the flat-promotion pass with the threshold
@@ -327,6 +461,7 @@ fn main() {
                     let db_read = db.read();
                     let db_instance = db_read.as_ref().unwrap();
                     db_instance.test_promote_flat_force();
+                    sdk::sometimes(true, sdk::CoverageEvent::PromoteFlatForced);
                 }
 
                 // 1% chance to operate on secondary key space
@@ -367,6 +502,7 @@ fn main() {
                             .unwrap();
                         state.insert(key, value);
                     }
+                    sdk::sometimes(true, sdk::CoverageEvent::SecondaryExercised);
                 }
 
                 // Pick a random key from our fixed set to ensure overlapping access
@@ -417,9 +553,9 @@ fn main() {
                             match db_instance.get(key_space, &key) {
                                 Ok(value) => value,
                                 Err(e) => {
-                                    println!("ERROR: db.get() failed for key {key:?}: {e:?}");
-                                    println!("Exiting test due to error");
-                                    std::process::exit(1);
+                                    sdk::unreachable(&format!(
+                                        "db.get() failed for key {key:?}: {e:?}"
+                                    ));
                                 }
                             }
                         };
@@ -427,38 +563,16 @@ fn main() {
                         // Verify database state matches our shadow state
                         // This catches any consistency issues immediately
                         let in_memory_data = in_memory_state.data.lock();
-                        let in_memory_value = in_memory_data.get(&key);
-                        let key = Bytes::from(key);
-                        match (db_value, in_memory_value) {
-                            (Some(db_val), Some(mem_val)) => {
-                                if db_val.as_ref() != mem_val.as_slice() {
-                                    eprintln!(
-                                        "ERROR: Value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
-                                        key,
-                                        db_val.as_ref(),
-                                        mem_val.as_slice()
-                                    );
-                                    std::process::exit(1);
-                                }
-                            }
-                            (None, None) => {} // Both agree key doesn't exist
-                            (Some(db_val), None) => {
-                                eprintln!(
-                                    "ERROR: Key {:?} exists in database with value {:?}, but not in in-memory state",
-                                    key,
-                                    db_val.as_ref()
-                                );
-                                std::process::exit(1);
-                            }
-                            (None, Some(mem_val)) => {
-                                eprintln!(
-                                    "ERROR: Key {:?} exists in in-memory state with value {:?}, but not in database",
-                                    key,
-                                    mem_val.as_slice()
-                                );
-                                std::process::exit(1);
-                            }
-                        }
+                        let expected = in_memory_data.get(&key).cloned();
+                        let actual = db_value.map(|value| value.as_ref().to_vec());
+                        th_assert_always!(
+                            actual == expected,
+                            "concurrent_get_matches_model",
+                            "read mismatch for key {:?}: database has {:?}, in-memory has {:?}",
+                            key,
+                            actual,
+                            expected
+                        );
                     }
                     2 => {
                         // Delete operation
@@ -514,21 +628,21 @@ fn main() {
         };
         match db_value {
             Some(actual_value) => {
-                if actual_value.as_ref() != expected_value.as_slice() {
-                    eprintln!(
-                        "ERROR: Final verification: Value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
-                        key,
-                        actual_value.as_ref(),
-                        expected_value.as_slice()
-                    );
-                    std::process::exit(1);
-                }
+                th_assert_always!(
+                    actual_value.as_ref() == expected_value.as_slice(),
+                    "concurrent_final_value_matches",
+                    "Final verification: value mismatch for key {:?}: database has {:?}, in-memory has {:?}",
+                    key,
+                    actual_value.as_ref(),
+                    expected_value.as_slice()
+                );
             }
             None => {
-                eprintln!(
-                    "ERROR: Key {key:?} exists in in-memory state with value {expected_value:?}, but not in database"
+                th_assert_always!(
+                    false,
+                    "concurrent_final_key_present",
+                    "Key {key:?} exists in in-memory state with value {expected_value:?}, but not in database"
                 );
-                std::process::exit(1);
             }
         }
     }
@@ -550,12 +664,13 @@ fn main() {
             let db_read = db.read();
             let db_instance = db_read.as_ref().unwrap();
             let db_value = db_instance.get(key_space, db_key).unwrap();
-            eprintln!(
-                "ERROR: Key {:?} exists in database with value {:?}, but not in in-memory state",
+            th_assert_always!(
+                false,
+                "concurrent_final_no_extra_keys",
+                "Key {:?} exists in database with value {:?}, but not in in-memory state",
                 db_key,
                 db_value.map(|v| v.as_ref().to_vec())
             );
-            std::process::exit(1);
         }
     }
 
@@ -572,21 +687,21 @@ fn main() {
         };
         match db_value {
             Some(actual_value) => {
-                if actual_value.as_ref() != expected_value.as_slice() {
-                    eprintln!(
-                        "ERROR: Secondary KS: Value mismatch for key {:?}: database has {:?}, expected {:?}",
-                        key,
-                        actual_value.as_ref(),
-                        expected_value.as_slice()
-                    );
-                    std::process::exit(1);
-                }
+                th_assert_always!(
+                    actual_value.as_ref() == expected_value.as_slice(),
+                    "concurrent_secondary_value_matches",
+                    "Secondary KS: value mismatch for key {:?}: database has {:?}, expected {:?}",
+                    key,
+                    actual_value.as_ref(),
+                    expected_value.as_slice()
+                );
             }
             None => {
-                eprintln!(
-                    "ERROR: Secondary KS: Key {key:?} exists in expected state but not in database"
+                th_assert_always!(
+                    false,
+                    "concurrent_secondary_key_present",
+                    "Secondary KS: key {key:?} exists in expected state but not in database"
                 );
-                std::process::exit(1);
             }
         }
     }
@@ -603,11 +718,12 @@ fn main() {
     }
     for db_key in &db_ks2_keys {
         if !secondary_data.contains_key(db_key) {
-            eprintln!(
-                "ERROR: Secondary KS: Key {:?} exists in database but not in expected state",
+            th_assert_always!(
+                false,
+                "concurrent_secondary_no_extra_keys",
+                "Secondary KS: key {:?} exists in database but not in expected state",
                 db_key
             );
-            std::process::exit(1);
         }
     }
     println!("✓ Secondary key space state matches perfectly!");
@@ -720,5 +836,96 @@ fn human_readable_bytes(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+mod sdk {
+    #[derive(Clone, Copy)]
+    pub enum CoverageEvent {
+        RestartHappened,
+        RelocationRan,
+        PromoteFlatForced,
+        SecondaryExercised,
+        BackgroundThreadsJoined,
+    }
+
+    impl CoverageEvent {
+        #[cfg(feature = "sdk")]
+        fn name(self) -> &'static str {
+            match self {
+                Self::RestartHappened => "concurrent_restart_happened",
+                Self::RelocationRan => "concurrent_relocation_ran",
+                Self::PromoteFlatForced => "concurrent_promote_flat_forced",
+                Self::SecondaryExercised => "concurrent_secondary_exercised",
+                Self::BackgroundThreadsJoined => "concurrent_background_threads_joined",
+            }
+        }
+    }
+
+    pub fn init() {
+        #[cfg(feature = "sdk")]
+        antithesis_sdk::antithesis_init();
+    }
+
+    pub fn setup_complete() {
+        #[cfg(feature = "sdk")]
+        {
+            let details = antithesis_sdk::serde_json::json!({
+                "component": "tidehunter_concurrent_test",
+            });
+            antithesis_sdk::lifecycle::setup_complete(&details);
+        }
+    }
+
+    pub fn sometimes(condition: bool, event: CoverageEvent) {
+        #[cfg(feature = "sdk")]
+        {
+            let details = antithesis_sdk::serde_json::json!({ "event": event.name() });
+            match event {
+                CoverageEvent::RestartHappened => antithesis_sdk::assert_sometimes!(
+                    condition,
+                    "concurrent_restart_happened",
+                    &details
+                ),
+                CoverageEvent::RelocationRan => antithesis_sdk::assert_sometimes!(
+                    condition,
+                    "concurrent_relocation_ran",
+                    &details
+                ),
+                CoverageEvent::PromoteFlatForced => antithesis_sdk::assert_sometimes!(
+                    condition,
+                    "concurrent_promote_flat_forced",
+                    &details
+                ),
+                CoverageEvent::SecondaryExercised => antithesis_sdk::assert_sometimes!(
+                    condition,
+                    "concurrent_secondary_exercised",
+                    &details
+                ),
+                CoverageEvent::BackgroundThreadsJoined => antithesis_sdk::assert_sometimes!(
+                    condition,
+                    "concurrent_background_threads_joined",
+                    &details
+                ),
+            }
+        }
+        let _ = condition;
+        let _ = event;
+    }
+
+    pub fn unreachable(message: &str) -> ! {
+        #[cfg(feature = "sdk")]
+        {
+            let details = antithesis_sdk::serde_json::json!({ "message": message });
+            antithesis_sdk::assert_unreachable!("concurrent test unreachable state", &details);
+        }
+        panic!("{message}");
     }
 }
