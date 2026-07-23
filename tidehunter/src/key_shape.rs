@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) const CELL_PREFIX_LENGTH: usize = 4; // in bytes
 pub(crate) const MAX_U32_PLUS_ONE: u64 = u32::MAX as u64 + 1;
@@ -47,6 +48,15 @@ pub struct KeySpaceDescInner {
     mutexes: usize,
     key_type: KeyType,
     config: KeySpaceConfig,
+    /// Tombstone flag set by `Db::destroy_key_space` and persisted in the
+    /// registry. A destroyed key space holds its canonical id slot forever
+    /// (ids are positional) but has no data: it initializes empty on open,
+    /// WAL replay skips its frames, and it never matches a declared name —
+    /// re-declaring the name creates a fresh key space under a new id.
+    /// Atomic so a runtime destroy is visible through the `Arc`-shared
+    /// descriptor without rebuilding contexts.
+    #[serde(default)]
+    destroyed: AtomicBool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -211,6 +221,7 @@ impl KeyShapeBuilder {
             mutexes,
             key_type,
             config,
+            destroyed: AtomicBool::new(false),
         };
         let key_space = KeySpaceDesc {
             inner: Arc::new(key_space),
@@ -272,6 +283,26 @@ impl KeySpaceDesc {
         );
     }
 
+    /// True if this key space was destroyed by [`crate::db::Db::destroy_key_space`].
+    /// A destroyed key space is a registry tombstone: it holds its canonical
+    /// id but has no data and is never exposed or written again.
+    pub fn destroyed(&self) -> bool {
+        self.inner.destroyed.load(Ordering::Relaxed)
+    }
+
+    /// Flips the tombstone flag, returning whether it was already set. The
+    /// flag is shared through the `Arc`'d descriptor, so contexts holding a
+    /// clone of this descriptor observe the destroy immediately.
+    pub(crate) fn mark_destroyed(&self) -> bool {
+        self.inner.destroyed.swap(true, Ordering::SeqCst)
+    }
+
+    /// Rolls back [`Self::mark_destroyed`] when persisting the registry
+    /// tombstone failed — the destroy did not happen.
+    pub(crate) fn unmark_destroyed(&self) {
+        self.inner.destroyed.store(false, Ordering::SeqCst);
+    }
+
     /// Returns a copy of this descriptor with the given id.
     /// Used when reordering a declared `KeyShape` into canonical order.
     pub(crate) fn with_id(&self, id: KeySpace) -> KeySpaceDesc {
@@ -285,6 +316,7 @@ impl KeySpaceDesc {
             mutexes: self.mutexes,
             key_type: self.key_type,
             config: self.config.clone(),
+            destroyed: AtomicBool::new(self.destroyed()),
         };
         KeySpaceDesc {
             inner: Arc::new(inner),
@@ -703,6 +735,7 @@ impl KeyShape {
             mutexes,
             key_type,
             config,
+            destroyed: AtomicBool::new(false),
         };
         let key_space = KeySpaceDesc {
             inner: Arc::new(key_space),
@@ -729,6 +762,11 @@ impl KeyShape {
     /// id with its data intact. This mirrors RocksDB, which never drops a
     /// column family implicitly. Declared keyspaces new to the registry are
     /// appended after it.
+    ///
+    /// A **destroyed** registry keyspace (see `Db::destroy_key_space`) is a
+    /// tombstone: it keeps its canonical id slot (ids are positional) but
+    /// never matches a declared name, so re-declaring the name appends a
+    /// fresh keyspace under a new id — with any layout.
     ///
     /// Returns the canonical-ordered shape (the full set of keyspaces ever
     /// created, used for everything internal: WAL bytes, index, control
@@ -766,6 +804,13 @@ impl KeyShape {
         // not exposed.
         for reg in registry.into_iter().flat_map(KeyShape::iter_ks) {
             let id = next_id(&ordered);
+            // A destroyed keyspace is carried as a tombstone and never
+            // matches a declared name; a same-named declared keyspace is
+            // appended as a fresh keyspace below.
+            if reg.destroyed() {
+                ordered.push(reg.with_id(id));
+                continue;
+            }
             match take_declared(&mut remaining, reg.name()) {
                 Some(desc) => {
                     // The declared config overrides the registry's, but its

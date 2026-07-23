@@ -24,7 +24,11 @@
 //!   - overlay -> flat: `IndexTable::promote_to_flat` (via `merge_into_flat`,
 //!     which folds only processed positions);
 //!   - overlay -> disk: the flusher calls `IndexTable::retain_processed` on the
-//!     blob before writing it.
+//!     blob before writing it. The filter is per-position, so every merge that
+//!     feeds it (`IndexTable::merge_dirty`) must fold the overlay's full
+//!     position lists — a latest-per-key collapse ahead of the filter would
+//!     hand it only a post-frontier position and revert the key to its stale
+//!     base entry in the blob.
 //!
 //! Relocation is the deliberate exception: a relocated copy sits at a WAL-tail
 //! offset (`>= L`) yet holds the as-of-frontier *value*, so an unfiltered read
@@ -177,7 +181,7 @@ mod tests {
     use minibytes::Bytes;
     use std::sync::Arc;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_checkpoint_snapshot_read() {
@@ -316,6 +320,157 @@ mod tests {
             snapshot,
             collect(checkpoint.iterator(ks)),
             "checkpoint iterator must stay stable after waiting"
+        );
+    }
+
+    /// A pre-checkpoint tombstone (or overwrite) must stay visible to a held
+    /// checkpoint when a post-checkpoint write to the same key exists and the
+    /// cell is flushed while the latch is held. Covers the `clear_after_flush`
+    /// completion path (no write races the flush, so the flushed snapshot is
+    /// still shared with the live overlay).
+    #[test]
+    fn test_checkpoint_survives_flush_with_post_checkpoint_write() {
+        let dir = tempdir::TempDir::new("test-checkpoint-flush").unwrap();
+        let mut config = Config::small();
+        config.snapshot_unload_threshold = 0;
+        let config = Arc::new(config);
+        let key_shape = KeyShape::new_single(8, 16, KeyType::uniform(16));
+        let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+        let ks = db.single_ks();
+
+        let key_del = 42u64.to_be_bytes().to_vec();
+        let key_ovw = 43u64.to_be_bytes().to_vec();
+        let v1: Bytes = vec![1u8].into();
+        let v1b: Bytes = vec![11u8].into();
+        let v2: Bytes = vec![2u8].into();
+
+        // Seed both keys and flush them to a disk L0 (cells unload).
+        db.insert(ks, key_del.clone(), v1.clone()).unwrap();
+        db.insert(ks, key_ovw.clone(), v1.clone()).unwrap();
+        db.force_rebuild_control_region().unwrap();
+
+        // Freshest pre-checkpoint state: key_del deleted, key_ovw overwritten.
+        db.remove(ks, key_del.clone()).unwrap();
+        db.insert(ks, key_ovw.clone(), v1b.clone()).unwrap();
+        let checkpoint = db.checkpoint();
+
+        // Sanity: the checkpoint sees the pre-checkpoint state.
+        assert_eq!(None, checkpoint.get(ks, &key_del).unwrap());
+        assert_eq!(Some(v1b.clone()), checkpoint.get(ks, &key_ovw).unwrap());
+
+        // Post-checkpoint overwrites, then a flush while the latch is held.
+        db.insert(ks, key_del.clone(), v2.clone()).unwrap();
+        db.insert(ks, key_ovw.clone(), v2.clone()).unwrap();
+        db.rebuild_control_region().unwrap();
+
+        // Live reads see the latest values.
+        assert_eq!(Some(v2.clone()), db.get(ks, &key_del).unwrap());
+        assert_eq!(Some(v2.clone()), db.get(ks, &key_ovw).unwrap());
+        // The checkpoint view must be unchanged by the flush.
+        assert_eq!(
+            None,
+            checkpoint.get(ks, &key_del).unwrap(),
+            "checkpoint must still see the pre-checkpoint deletion after a flush"
+        );
+        assert_eq!(
+            Some(v1b),
+            checkpoint.get(ks, &key_ovw).unwrap(),
+            "checkpoint must still see the freshest pre-checkpoint value after a flush"
+        );
+    }
+
+    /// Same as above, but a racing write lands while the flush is in flight,
+    /// so completion goes through `unmerge_flushed` (per-position removal of
+    /// the flushed snapshot from the live overlay). The flushed blob must
+    /// contain the as-of-frontier state the unmerge removes — otherwise the
+    /// checkpoint read falls through to a stale on-disk value (issue #123).
+    #[test]
+    fn test_checkpoint_survives_flush_racing_write() {
+        use crate::failpoints::FailPoint;
+        use crate::latch::Latch;
+
+        let dir = tempdir::TempDir::new("test-checkpoint-flush-race").unwrap();
+        let mut config = Config::small();
+        config.snapshot_unload_threshold = 0;
+        let config = Arc::new(config);
+        let key_shape = KeyShape::new_single(8, 16, KeyType::uniform(16));
+        let metrics = Metrics::new();
+        let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+        let ks = db.single_ks();
+
+        let key_del = 42u64.to_be_bytes().to_vec();
+        let key_ovw = 43u64.to_be_bytes().to_vec();
+        let key_racer = 44u64.to_be_bytes().to_vec();
+        let v1: Bytes = vec![1u8].into();
+        let v1b: Bytes = vec![11u8].into();
+        let v2: Bytes = vec![2u8].into();
+
+        // Seed both keys and flush them to a disk L0 (cells unload).
+        db.insert(ks, key_del.clone(), v1.clone()).unwrap();
+        db.insert(ks, key_ovw.clone(), v1.clone()).unwrap();
+        db.force_rebuild_control_region().unwrap();
+
+        // Freshest pre-checkpoint state: key_del deleted, key_ovw overwritten.
+        db.remove(ks, key_del.clone()).unwrap();
+        db.insert(ks, key_ovw.clone(), v1b.clone()).unwrap();
+        let checkpoint = db.checkpoint();
+        assert_eq!(None, checkpoint.get(ks, &key_del).unwrap());
+        assert_eq!(Some(v1b.clone()), checkpoint.get(ks, &key_ovw).unwrap());
+
+        // Post-checkpoint overwrites.
+        db.insert(ks, key_del.clone(), v2.clone()).unwrap();
+        db.insert(ks, key_ovw.clone(), v2.clone()).unwrap();
+
+        // Pause the flusher between the flush work and its completion so the
+        // racing write deterministically lands inside the in-flight window.
+        // The latch releases when its guard drops — including on a panicking
+        // assertion, so a failure cannot wedge the flusher thread.
+        let (completion_latch, completion_latch_guard) = Latch::new();
+        db.large_table.fp.0.write().fp_flush_before_completion = FailPoint::latch(completion_latch);
+
+        let db2 = db.clone();
+        let rebuild = thread::spawn(move || db2.rebuild_control_region().unwrap());
+
+        // Wait until the flusher has picked up the merge flush (the metric
+        // increments before the failpoint), then land the racing write. The
+        // wait is bounded: on a hung or reclassified flush the assert fails
+        // and drops the latch guard, instead of spinning forever with the
+        // flusher latched.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while metrics.unload.with_label_values(&["merge_flush"]).get() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "flusher did not reach the merge flush before the deadline"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        db.insert(ks, key_racer.clone(), v2.clone()).unwrap();
+        drop(completion_latch_guard);
+        let _: u64 = rebuild.join().unwrap();
+
+        // Prove the racing write forced the unmerge completion path — the path
+        // under test. This depends on key_racer sharing a cell with the other
+        // keys (all three u64-BE keys have zero high bytes); if the key layout
+        // ever changes, this assert fails instead of the test silently passing
+        // through the same_shared path.
+        assert!(
+            metrics.flush_update.with_label_values(&["unmerge"]).get() >= 1,
+            "racing write did not force the unmerge_flushed completion path"
+        );
+
+        // Live reads see the latest values.
+        assert_eq!(Some(v2.clone()), db.get(ks, &key_del).unwrap());
+        assert_eq!(Some(v2.clone()), db.get(ks, &key_ovw).unwrap());
+        // The checkpoint view must be unchanged by the flush.
+        assert_eq!(
+            None,
+            checkpoint.get(ks, &key_del).unwrap(),
+            "checkpoint must still see the pre-checkpoint deletion after a racing flush"
+        );
+        assert_eq!(
+            Some(v1b),
+            checkpoint.get(ks, &key_ovw).unwrap(),
+            "checkpoint must still see the freshest pre-checkpoint value after a racing flush"
         );
     }
 

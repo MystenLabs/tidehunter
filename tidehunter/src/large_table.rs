@@ -223,6 +223,19 @@ impl LargeTable {
             .into_par_iter()
             .map(
                 |(ks, ks_cells): (_, &BTreeMap<CellId, SnapshotEntryData>)| {
+                    // A destroyed keyspace ignores its snapshot slot: it
+                    // initializes as an empty stub (no cells, no bloom
+                    // filters loaded), so stale control-region data left by
+                    // a destroy that crashed before the next snapshot is
+                    // never loaded. Nothing routes keys into a destroyed
+                    // keyspace, so its uniform cell array staying empty is
+                    // fine (any access would panic loudly).
+                    let empty_cells = BTreeMap::new();
+                    let ks_cells = if ks.destroyed() {
+                        &empty_cells
+                    } else {
+                        ks_cells
+                    };
                     let context = KsContext::new(config.clone(), ks.clone(), metrics.clone());
                     let bloom_filter_start = Instant::now();
                     let num_mutexes = ks.num_mutexes();
@@ -795,9 +808,8 @@ impl LargeTable {
                 let promoted: Vec<(CellId, Arc<IndexTable>, IndexTable)> = snapshots
                     .iter()
                     .filter_map(|(cell, arc, threshold)| {
-                        // Single decision point for this cell: cells that
-                        // fail the gate skip the deep clone below, and cells
-                        // that pass drain without re-evaluating the trigger.
+                        // Single decision point: failing cells skip the deep
+                        // clone; passing cells drain without re-checking.
                         if !arc.should_promote_to_flat(*threshold) {
                             return None;
                         }
@@ -926,13 +938,13 @@ impl LargeTable {
     /// reclaims the original WAL file.
     ///
     /// Correctness hinge: the overlay is filtered (`retain_processed`) on its
-    /// *uncollapsed* positions, BEFORE the latest-per-key collapse that
-    /// `maybe_load`/`merge_dirty` perform. A key with a below-frontier write
-    /// shadowed by a post-frontier overwrite holds both positions in the overlay;
-    /// collapsing first keeps only the latest (post-frontier) one, which the
-    /// filter then drops — losing the as-of value entirely and stranding its WAL
-    /// file for GC. We therefore build the view here without `maybe_load` (which
-    /// would also destructively collapse the live cell's overlay). `retain_processed`
+    /// full position lists BEFORE any latest-per-key collapse downstream (the
+    /// relocation consumer serializes latest-per-key). A key with a
+    /// below-frontier write shadowed by a post-frontier overwrite holds both
+    /// positions in the overlay; filtering first leaves the below-frontier
+    /// position as the key's latest, so the collapse yields the as-of value.
+    /// The view is built on a clone, without `maybe_load`, so the live cell
+    /// stays unloaded and its overlay untouched. `retain_processed`
     /// touches only `data`; disk-derived levels are merged unfiltered (they are
     /// as-of-safe by the unprocessed-write retention invariant — see `crate::checkpoint`).
     pub fn get_index_for_cell<L: Loader>(
@@ -1429,6 +1441,35 @@ impl LargeTable {
                 break;
             }
         }
+    }
+
+    /// Clears every cell of a keyspace. Used by `Db::destroy_key_space`
+    /// after the registry tombstone is durable. The keyspace is retained
+    /// (no user handle exists), so only internal machinery can touch it
+    /// concurrently; any pending async flush per row is waited out before
+    /// clearing, mirroring `drop_cells_in_range`.
+    pub(crate) fn drop_all_cells(&self, context: &KsContext) {
+        let ks_table = self.ks_table(&context.ks_config);
+        for mutex in ks_table.rows.mutexes() {
+            loop {
+                let mut row = mutex.lock();
+                if row
+                    .entries
+                    .iter()
+                    .any(|entry| entry.pending_last_processed.is_some())
+                {
+                    drop(row);
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                row.entries.clear_all();
+                break;
+            }
+        }
+        // Stale cells in the per-ks cell index are tolerated by iteration,
+        // but a destroyed keyspace is never iterated again — release the
+        // memory.
+        ks_table.cell_index.write().clear();
     }
 
     pub fn report_entries_state(&self) {
@@ -2124,6 +2165,15 @@ impl LargeTableEntry {
         self.data.next_entry(prev_key, reverse)
     }
 
+    /// Loads an unloaded cell's L0 blob and folds the dirty overlay on top.
+    ///
+    /// The fold (`merge_dirty_no_clean`) preserves the overlay's full per-key
+    /// position lists, including processed below-frontier positions: they are
+    /// not yet durable in any blob, and a held checkpoint reads them via
+    /// `get_at`. Collapsing to latest-per-key here would drop the
+    /// as-of-frontier position for a key overwritten across the frontier and
+    /// serve the stale flat/L0 entry to checkpoint reads. The backlog drains
+    /// through the usual `promote_to_flat`/flush paths once processed.
     pub fn maybe_load<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
         let Some(unloaded) = self.as_unloaded_state() else {
             return Ok(());
@@ -2777,6 +2827,21 @@ impl Entries {
                     entry.clear();
                 }
             }
+        }
+    }
+
+    /// Clears every entry: array entries are cleared in place, tree entries
+    /// are removed. Caller must ensure no entry has a pending async flush.
+    pub fn clear_all(&mut self) {
+        for entry in self.iter_mut() {
+            assert!(
+                entry.pending_last_processed.is_none(),
+                "clear_all on cell while async flush is pending"
+            );
+            entry.clear();
+        }
+        if let Entries::Tree(tree) = self {
+            tree.clear();
         }
     }
 

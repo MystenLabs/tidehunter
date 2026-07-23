@@ -15,7 +15,7 @@ use std::sync::{Arc, Weak, mpsc};
 use std::thread::JoinHandle;
 
 mod cell_reference;
-mod watermark;
+pub(crate) mod watermark;
 
 #[cfg(test)]
 mod relocation_tests;
@@ -232,6 +232,16 @@ impl RelocationDriver {
         } else {
             watermarks.data.next_to_process.clone()
         };
+        // A saved watermark may point into a keyspace destroyed since it was
+        // written; its cells no longer exist, so re-anchor to the next live
+        // keyspace.
+        if let Some(cell_ref) = &current_cell_ref
+            && db.key_shape.ks(cell_ref.keyspace).destroyed()
+        {
+            let mut next_keyspace = cell_ref.keyspace;
+            next_keyspace.increment();
+            current_cell_ref = CellReference::first(&db, next_keyspace);
+        }
 
         let mut cells_processed = 0;
         let mut highest_wal_position = 0u64;

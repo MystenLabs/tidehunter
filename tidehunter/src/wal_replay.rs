@@ -68,8 +68,8 @@ pub(crate) fn replay_wal(
             match entry {
                 WalEntry::Record(ks, k, _v, relocated) => {
                     metrics.replayed_wal_records.inc();
-                    if !relocated {
-                        let context = contexts.ks_context(ks);
+                    let context = contexts.ks_context(ks);
+                    if !relocated && !context.destroyed() {
                         let reduced_key = context.ks_config.reduced_key_bytes(k);
                         let cell = context.ks_config.cell_id(&reduced_key);
                         buffer.insert(ks, cell, reduced_key, position);
@@ -78,9 +78,11 @@ pub(crate) fn replay_wal(
                 WalEntry::Remove(ks, k) => {
                     metrics.replayed_wal_records.inc();
                     let context = contexts.ks_context(ks);
-                    let reduced_key = context.ks_config.reduced_key_bytes(k);
-                    let cell = context.ks_config.cell_id(&reduced_key);
-                    buffer.remove(ks, cell, reduced_key, position);
+                    if !context.destroyed() {
+                        let reduced_key = context.ks_config.reduced_key_bytes(k);
+                        let cell = context.ks_config.cell_id(&reduced_key);
+                        buffer.remove(ks, cell, reduced_key, position);
+                    }
                 }
                 other => panic!(
                     "encountered entry {other:?} at position {position:?} during replay, while expected record or tombstone"
@@ -101,6 +103,9 @@ pub(crate) fn replay_wal(
                     continue;
                 }
                 let context = contexts.ks_context(ks);
+                if context.destroyed() {
+                    continue;
+                }
                 let reduced_key = context.ks_config.reduced_key_bytes(k);
                 let cell = context.ks_config.cell_id(&reduced_key);
                 buffer.insert(ks, cell, reduced_key, position);
@@ -111,6 +116,9 @@ pub(crate) fn replay_wal(
             WalEntry::Remove(ks, k) => {
                 metrics.replayed_wal_records.inc();
                 let context = contexts.ks_context(ks);
+                if context.destroyed() {
+                    continue;
+                }
                 let reduced_key = context.ks_config.reduced_key_bytes(k);
                 let cell = context.ks_config.cell_id(&reduced_key);
                 buffer.remove(ks, cell, reduced_key, position);
@@ -138,6 +146,9 @@ pub(crate) fn replay_wal(
             WalEntry::DropCells(ks, from_cell, to_cell) => {
                 metrics.replayed_wal_records.inc();
                 let context = contexts.ks_context(ks);
+                if context.destroyed() {
+                    continue;
+                }
                 // Drop on both sides: the buffer (so pre-drop writes don't
                 // resurrect at apply time) and `large_table` (in case the
                 // cells exist as Unloaded entries from a CR snapshot loaded
@@ -156,12 +167,18 @@ pub(crate) fn replay_wal(
                     match inner {
                         WalEntry::Record(ks, key, _value, _relocated) => {
                             let context = contexts.ks_context(ks);
+                            if context.destroyed() {
+                                continue;
+                            }
                             let reduced_key = context.ks_config.reduced_key_bytes(key);
                             let cell = context.ks_config.cell_id(&reduced_key);
                             buffer.insert(ks, cell, reduced_key, position);
                         }
                         WalEntry::Remove(ks, key) => {
                             let context = contexts.ks_context(ks);
+                            if context.destroyed() {
+                                continue;
+                            }
                             let reduced_key = context.ks_config.reduced_key_bytes(key);
                             let cell = context.ks_config.cell_id(&reduced_key);
                             buffer.remove(ks, cell, reduced_key, position);

@@ -236,6 +236,12 @@ impl KsContext {
         self.ks_config.id()
     }
 
+    /// True if this key space is a destroyed tombstone — its WAL frames are
+    /// skipped on replay and it holds no data.
+    pub fn destroyed(&self) -> bool {
+        self.ks_config.destroyed()
+    }
+
     pub fn max_dirty_keys(&self) -> usize {
         self.ks_config
             .max_dirty_keys()

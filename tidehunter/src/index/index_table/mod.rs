@@ -240,20 +240,34 @@ impl IndexTable {
         // offset-based filters (`retain_processed`, `retain_unprocessed`,
         // `promote_to_flat`) ever act on. `_and_clean` demotes Modified→Clean
         // because they are about to become clean on disk.
-        for (k, v) in dirty.data_iter_latest() {
-            #[cfg(any(debug_assertions, feature = "test_methods"))]
-            if promote_to_clean
-                && let Some(found) = self.data_get_latest(k)
-                && found.offset > v.offset
-            {
-                panic!("found.offset {} > v.offset {}", found.offset, v.offset);
+        //
+        // Every position is folded, not just each key's latest. A key
+        // overwritten across the WAL frontier holds both a processed and an
+        // unprocessed position; the flush path runs its per-position
+        // `retain_processed` on the merged table, so the merge must hand it
+        // the processed position too. Collapsing to latest-per-key here would
+        // leave only the post-frontier position, which the filter then drops —
+        // reverting the key to its stale base entry in the blob while
+        // `unmerge_flushed` removes the as-of-frontier position from the live
+        // overlay (checkpoint reads then serve the stale value). Blob
+        // serialization collapses to latest-per-key at write time
+        // (`iter_with_tombstones`), after the frontier filter has run.
+        for (k, positions) in dirty.data.iter() {
+            for v in positions {
+                #[cfg(any(debug_assertions, feature = "test_methods"))]
+                if promote_to_clean
+                    && let Some(found) = self.data_get_latest(k)
+                    && found.offset > v.offset
+                {
+                    panic!("found.offset {} > v.offset {}", found.offset, v.offset);
+                }
+                let incoming = if promote_to_clean && !v.is_removed() {
+                    v.as_clean_modified()
+                } else {
+                    *v
+                };
+                self.data_insert_sorted(k.clone(), incoming);
             }
-            let incoming = if promote_to_clean && !v.is_removed() {
-                v.as_clean_modified()
-            } else {
-                *v
-            };
-            self.data_insert_sorted(k.clone(), incoming);
         }
 
         // ---- flat side: dirty's disk-derived `flat` folds into self.flat ----
@@ -414,30 +428,77 @@ impl IndexTable {
     /// post-snapshot writes. `last_processed` gates the `data` overlay (keep
     /// unprocessed in-flight writes); `flat` unmerges on position match alone,
     /// since every flat entry is covered by the post-flush fall-through read.
+    ///
+    /// Runs under the cell's row mutex at flush completion: one linear pass
+    /// over the overlay plus, if a promote raced the flush, one `flat` rebuild.
     pub fn unmerge_flushed(&mut self, original: &Self, last_processed: LastProcessed) {
-        // Walk original.data; remove matching entries from self.data. If promote_flat_job
-        // ran between snapshot capture and now, an entry present in original.data may now
-        // live in self.flat — record those for the flat-rebuild pass below.
+        // Walk original.data; remove matching entries from self.data. Entries
+        // that promote_flat_job moved into self.flat since the snapshot are
+        // recorded for the flat-rebuild pass below.
         let mut pending_flat: HashMap<Bytes, IndexWalPosition> = HashMap::new();
-        for (k, positions) in original.data.iter() {
-            for v in positions {
-                if !last_processed.is_processed(v) {
-                    // Do not unmerge entries that might have in-flight operations
-                    continue;
+        for (k, orig_positions) in original.data.iter() {
+            // Per-key offsets must ascend strictly (unique): the
+            // `processed_prefix` partition boundary and the cursor walk below
+            // both rely on it — a same-offset pair with differing lengths
+            // would wedge the cursor and leave a stale flushed position in
+            // the overlay. Producers enforce it (`checked_insert` asserts on
+            // append; `merge_dirty`/`rebase_on_as_of` fold already-unique
+            // lists into bases holding no data-side positions for the key);
+            // pin it on both sides of the diff, under the same gate as
+            // `checked_insert`'s ordering assert.
+            #[cfg(any(debug_assertions, feature = "test_methods"))]
+            assert!(
+                Self::offsets_strictly_ascending(orig_positions),
+                "original per-key positions must ascend strictly by offset"
+            );
+            // Entries at/above the frontier may have in-flight operations and
+            // are not unmerged.
+            let processed = Self::processed_prefix(orig_positions, last_processed);
+            if processed.is_empty() {
+                continue;
+            }
+            let Some(live) = self.data.get_mut(k) else {
+                // The whole key left `data` (promoted into self.flat); the flat
+                // rebuild below drops it by key + position match.
+                pending_flat.insert(k.clone(), *processed.last().unwrap());
+                continue;
+            };
+            #[cfg(any(debug_assertions, feature = "test_methods"))]
+            assert!(
+                Self::offsets_strictly_ascending(live),
+                "live per-key positions must ascend strictly by offset"
+            );
+            // Single-pass diff, both sides ascending by offset: drop from
+            // `live` every position matching a flushed original on
+            // update_position (kind may differ, but offset+len must match —
+            // into_wal_position would collapse all Removed entries to INVALID
+            // and wrongly identify distinct tombstones). Originals with no
+            // live match were promoted into flat; route the newest of them to
+            // the flat rebuild (flat holds one entry per key).
+            let mut last_unmatched: Option<IndexWalPosition> = None;
+            let mut oi = 0;
+            live.retain(|sv| {
+                while oi < processed.len() && processed[oi].offset < sv.offset {
+                    last_unmatched = Some(processed[oi]);
+                    oi += 1;
                 }
-                // Remove the position in self.data with matching key + update_position
-                // (kind may differ, but offset+len must match). Use into_update_position:
-                // into_wal_position collapses all Removed entries to INVALID, which would
-                // incorrectly match two different Removed tombstones at distinct WAL offsets.
-                let v_update_position = v.into_update_position();
-                let removed_from_data = self
-                    .data_remove_matching(k, |sv| sv.into_update_position() == v_update_position);
-                if !removed_from_data {
-                    // Either no matching position in self.data (likely promoted
-                    // into self.flat) or only newer positions exist for the key.
-                    // Let the flat rebuild below drop it by key+position match.
-                    pending_flat.insert(k.clone(), *v);
+                if oi < processed.len()
+                    && processed[oi].into_update_position() == sv.into_update_position()
+                {
+                    oi += 1;
+                    false
+                } else {
+                    true
                 }
+            });
+            if oi < processed.len() {
+                last_unmatched = Some(*processed.last().unwrap());
+            }
+            if let Some(v) = last_unmatched {
+                pending_flat.insert(k.clone(), v);
+            }
+            if live.is_empty() {
+                self.data.remove(k);
             }
         }
         // Rebuild self.flat, dropping entries matched by either:
@@ -1440,12 +1501,14 @@ impl IndexTable {
     const PROMOTE_THRESHOLD: usize = 0;
 
     /// A cell with few unique keys never crosses `PROMOTE_THRESHOLD`, yet its
-    /// per-key position lists still grow by one entry per write until a
-    /// promote or flush drains them — and `unmerge_flushed` cost grows
-    /// quadratically with that backlog (see
-    /// `repro_unmerge_flushed_quadratic`). Promote whenever the positions a
-    /// promote would drain cross this bound, so the overlay stays small
-    /// regardless of key cardinality.
+    /// per-key position lists grow by one entry per write until a promote or
+    /// flush drains them. Promote once the drainable positions cross this
+    /// bound, keeping the overlay small regardless of key cardinality.
+    ///
+    /// Best-effort: a pinned frontier (checkpoint latch, in-flight flush)
+    /// makes new positions undrainable, so the overlay can outgrow the bound
+    /// until the pin releases; the paths that then traverse the backlog
+    /// (`unmerge_flushed`, flush snapshot/clone) are linear in it.
     const PROMOTE_POSITIONS_THRESHOLD: usize = 1024;
 
     /// Whether [`Self::promote_to_flat`] would drain this table. Lets
@@ -1456,12 +1519,8 @@ impl IndexTable {
     }
 
     /// The promote trigger: unique-key count above `key_threshold`, or a
-    /// drainable position backlog above `PROMOTE_POSITIONS_THRESHOLD`.
-    ///
-    /// Re-inserting the same key does not inflate the key trigger (one map
-    /// entry per key); the backlog such a hot key builds up is what the
-    /// position trigger catches. The backlog scan only runs under the key
-    /// threshold, so it stays short.
+    /// drainable position backlog above `PROMOTE_POSITIONS_THRESHOLD`. The
+    /// backlog scan only runs under the key threshold, so it stays short.
     fn should_promote(&self, key_threshold: usize, last_processed: LastProcessed) -> bool {
         if self.data_unique_key_count() > key_threshold {
             return true;
@@ -1470,16 +1529,13 @@ impl IndexTable {
     }
 
     /// Positions a promote would drain from `data`: a key with an in-flight
-    /// latest position contributes 0, and one with a processed latest
-    /// contributes its whole (ascending, hence fully processed) list.
+    /// latest contributes 0; one with a processed latest contributes its
+    /// whole (ascending, hence fully processed) list.
     ///
-    /// Must stay in lockstep with the drain itself, which is all-or-nothing
-    /// per key on the latest position in both of its halves: `merge_walk`'s
-    /// data-side filter (`data_latest_per_key(..)` + `is_processed` in
-    /// flat.rs) decides what enters flat, and `drop_data_keys` in
-    /// `promote_to_flat_inner` drops keys by the same latest-position test.
-    /// Counting anything else (e.g. per-position) would fire promotes that
-    /// drain less than counted.
+    /// Must mirror the drain, which is all-or-nothing per key on the latest
+    /// position on both sides (`merge_walk`'s data filter in flat.rs,
+    /// `drop_data_keys` in `promote_to_flat_unconditionally`); counting
+    /// per-position would fire promotes that drain less than counted.
     fn drainable_position_count(&self, last_processed: LastProcessed) -> usize {
         self.data
             .values()
@@ -1514,10 +1570,9 @@ impl IndexTable {
     }
 
     fn promote_to_flat_inner(&mut self, threshold: usize, last_processed: LastProcessed) -> bool {
-        // Cheap cap on entry (see `should_promote` for the two triggers). When
-        // the key trigger fires but every key's latest entry happens to be
-        // unprocessed, the merge below is a no-op (rare; not worth a separate
-        // scan to detect).
+        // Cheap cap (see `should_promote`). When the key trigger fires but
+        // every latest entry is unprocessed, the drain is a no-op (rare; not
+        // worth a separate scan).
         if !self.should_promote(threshold, last_processed) {
             return false;
         }
@@ -1525,11 +1580,10 @@ impl IndexTable {
         true
     }
 
-    /// The drain half of a promote, without re-evaluating the trigger. For
-    /// callers that already checked [`Self::should_promote_to_flat`] on the
-    /// same content and `last_processed` (`promote_flat_job` gates before its
-    /// deep clone); calling it when nothing is drainable is sound but
-    /// rebuilds `flat` for no gain.
+    /// The drain half of a promote, for callers that already checked
+    /// [`Self::should_promote_to_flat`] on the same content and frontier.
+    /// Calling it when nothing is drainable is sound but rebuilds `flat` for
+    /// no gain.
     pub fn promote_to_flat_unconditionally(&mut self, last_processed: LastProcessed) {
         let (new_flat, flat_dirty) =
             merge_into_flat(&self.flat, self.key_size, &self.data, last_processed);
@@ -1577,44 +1631,37 @@ impl IndexTable {
         }
     }
 
-    /// Remove the first position for `key` (lowest IWP) matching `pred`, dropping
-    /// the key entirely if that empties its list. Returns whether a position was
-    /// removed.
-    fn data_remove_matching(
-        &mut self,
-        key: &[u8],
-        pred: impl Fn(&IndexWalPosition) -> bool,
-    ) -> bool {
-        let Some(positions) = self.data.get_mut(key) else {
-            return false;
-        };
-        let Some(idx) = positions.iter().position(pred) else {
-            return false;
-        };
-        positions.remove(idx);
-        if positions.is_empty() {
-            self.data.remove(key);
-        }
-        true
+    /// The leading slice of `positions` processed relative to
+    /// `last_processed`: positions ascend by `(offset, ..)` and
+    /// `is_processed` depends only on `offset`, so processed positions
+    /// always form a prefix.
+    fn processed_prefix(
+        positions: &[IndexWalPosition],
+        last_processed: LastProcessed,
+    ) -> &[IndexWalPosition] {
+        &positions[..positions.partition_point(|v| last_processed.is_processed(v))]
+    }
+
+    /// Whether `positions` ascend strictly by offset (per-key offsets are
+    /// unique). Holds by construction at every producer of the `data`
+    /// overlay; `unmerge_flushed` asserts it where a violation would
+    /// silently corrupt its walk.
+    #[cfg(any(debug_assertions, feature = "test_methods"))]
+    fn offsets_strictly_ascending(positions: &[IndexWalPosition]) -> bool {
+        positions.windows(2).all(|w| w[0].offset < w[1].offset)
     }
 
     /// Latest `IndexWalPosition` recorded in `data` for `key` that is processed
     /// relative to `last_processed` (offset < `last_processed`), or `None` if
     /// the key has no processed position there.
-    ///
-    /// Positions ascend by `(offset, ..)` and `LastProcessed::is_processed`
-    /// depends only on `offset`, so scanning from the back yields the latest
-    /// processed position first.
     fn data_get_latest_processed(
         &self,
         key: &[u8],
         last_processed: LastProcessed,
     ) -> Option<IndexWalPosition> {
         self.data.get(key).and_then(|positions| {
-            positions
-                .iter()
-                .rev()
-                .find(|v| last_processed.is_processed(*v))
+            Self::processed_prefix(positions, last_processed)
+                .last()
                 .copied()
         })
     }
@@ -2114,16 +2161,43 @@ mod tests {
         );
     }
 
-    /// Repro for the epoch-boundary stall on hot few-key cells (e.g. a
-    /// ~5-key `disable_unload` watermarks cell): the overlay accumulates one
-    /// position per write, and `unmerge_flushed` then removes the flushed
-    /// snapshot's positions one at a time from the front of each key's list
-    /// (`SmallVec::remove(0)` in `data_remove_matching`) — O(m²) total
-    /// memmove for a per-key backlog of m.
-    ///
-    /// Prints timings for doubling backlogs; the time grows ~4x per doubling.
-    /// Run with:
-    /// `cargo test -p tidehunter repro_unmerge_flushed_quadratic -- --ignored --nocapture`
+    /// Multi-position keys through `unmerge_flushed`'s per-key diff: matched
+    /// flushed positions leave `data`, the in-flight remainder and
+    /// post-snapshot writes stay, a fully-flushed key drops out entirely, and
+    /// keys absent from the snapshot are untouched.
+    #[test]
+    fn test_unmerge_flushed_multi_position_backlog() {
+        let mut original = IndexTable::default();
+        // Key [1]: backlog of three flushed positions plus one in-flight write.
+        original.insert(vec![1].into(), WalPosition::test_value(1));
+        original.insert(vec![1].into(), WalPosition::test_value(2));
+        original.insert(vec![1].into(), WalPosition::test_value(3));
+        original.insert(vec![1].into(), WalPosition::test_value(6));
+        // Key [2]: fully flushed.
+        original.insert(vec![2].into(), WalPosition::test_value(4));
+        original.insert(vec![2].into(), WalPosition::test_value(5));
+        let mut live = original.clone();
+        // Writes landing while the flush is in flight.
+        live.insert(vec![1].into(), WalPosition::test_value(7));
+        live.insert(vec![3].into(), WalPosition::test_value(8));
+
+        // Frontier 6: offsets 1-5 are flushed; 6, 7, 8 are in flight.
+        live.unmerge_flushed(&original, LastProcessed::new_test(6));
+
+        let offsets = |t: &IndexTable, k: &[u8]| {
+            t.data
+                .get(k)
+                .map(|p| p.iter().map(|v| v.offset).collect::<Vec<_>>())
+        };
+        // Key [1] keeps its in-flight original (6) and the post-snapshot write (7).
+        assert_eq!(offsets(&live, &[1]), Some(vec![6, 7]));
+        // Key [2] was fully flushed and leaves `data` entirely.
+        assert_eq!(offsets(&live, &[2]), None);
+        // Key [3] holds only a post-snapshot write and is untouched.
+        assert_eq!(offsets(&live, &[3]), Some(vec![8]));
+        assert_eq!(live.len(), 2);
+    }
+
     /// Production value of `PROMOTE_THRESHOLD`, which cfg(test) rebinds to 0;
     /// the trigger tests pass it explicitly to exercise the production gate.
     const PROD_KEY_THRESHOLD: usize = 128;
@@ -2136,8 +2210,25 @@ mod tests {
         }
     }
 
+    /// Demote `key`'s latest data position to Clean in place. Offset/len are
+    /// unchanged so list order holds; stats stay stale until the next recount.
+    fn demote_latest_to_clean(table: &mut IndexTable, key: &[u8]) {
+        let positions = table.data.get_mut(key).expect("key not present in data");
+        let latest = positions
+            .last_mut()
+            .expect("data positions are never empty");
+        *latest = latest.as_clean_modified();
+    }
+
+    /// Timing canary for `unmerge_flushed` on a hot few-key backlog (a ~5-key
+    /// `disable_unload` cell accumulating one overlay position per write).
+    /// Must stay linear: expect ~2x per doubling; ~4x means a quadratic
+    /// regression that stalls flush completions under the row mutex.
+    ///
+    /// Run with:
+    /// `cargo test -p tidehunter repro_unmerge_flushed_quadratic -- --ignored --nocapture`
     #[test]
-    #[ignore = "manual timing repro of the quadratic unmerge backlog"]
+    #[ignore = "manual timing canary for the unmerge backlog cost"]
     fn repro_unmerge_flushed_quadratic() {
         const KEYS: u32 = 5;
         let keys: Vec<Bytes> = (0..KEYS).map(|i| i.to_be_bytes().to_vec().into()).collect();
@@ -2165,11 +2256,10 @@ mod tests {
         }
     }
 
-    /// Regression test for the position-backlog promote trigger: a hot cell
-    /// with a handful of unique keys (far below `PROD_KEY_THRESHOLD`) must
-    /// still promote once its drainable positions cross
-    /// `PROMOTE_POSITIONS_THRESHOLD`, or the backlog grows one entry per
-    /// write until a flush — and `unmerge_flushed` is quadratic in it.
+    /// A hot cell with a handful of unique keys (far below
+    /// `PROD_KEY_THRESHOLD`) must still promote once its drainable positions
+    /// cross `PROMOTE_POSITIONS_THRESHOLD`, or the overlay grows one entry
+    /// per write until a flush.
     #[test]
     fn test_should_promote_on_position_backlog() {
         let keys: Vec<Bytes> = (0..3u32).map(|i| i.to_be_bytes().to_vec().into()).collect();
@@ -2766,9 +2856,7 @@ mod tests {
         table.insert(vec![3].into(), WalPosition::test_value(3));
         // Make [1] and [3] clean; leave [2] modified.
         for k in [&[1u8][..], &[3u8][..]] {
-            let prev = table.data_get_latest(k).unwrap();
-            table.data_remove_matching(k, |v| *v == prev);
-            table.data_insert_sorted(Bytes::from(k.to_vec()), prev.as_clean_modified());
+            demote_latest_to_clean(&mut table, k);
         }
 
         table.promote_to_flat(LastProcessed::new(u64::MAX));
@@ -3584,9 +3672,7 @@ mod tests {
         // coexists with the prior Modified@3 position in the key's list, and
         // since `Removed > Modified` under the derived IWP ordering, the
         // Removed entry wins as the latest for [3].
-        let prev_1 = table.data_get_latest(&[1]).unwrap();
-        table.data_remove_matching(&[1], |v| *v == prev_1);
-        table.data_insert_sorted(Bytes::from(vec![1]), prev_1.as_clean_modified());
+        demote_latest_to_clean(&mut table, &[1]);
         table.data_insert_sorted(Bytes::from(vec![3]), iwp_removed(3));
         table.promote_to_flat(LastProcessed::new(u64::MAX));
         // flat now: [1]=Clean, [2]=Modified, [3]=Removed.
@@ -3854,9 +3940,13 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_dirty_uses_latest_per_key_from_dirty() {
-        // dirty.data has multi-position state for [1]; merge_dirty must only
-        // project the latest (per the user's contract).
+    fn test_merge_dirty_folds_every_position_per_key() {
+        // dirty.data has multi-position state for [1]; merge_dirty must fold
+        // every position, not just the latest — the flush path runs its
+        // per-position `retain_processed` frontier filter on the merged table,
+        // and a latest-per-key collapse here would hide below-frontier
+        // positions from it (checkpoint staleness, issue #123). `get` still
+        // resolves to the latest position.
         let mut self_table = IndexTable::default();
         self_table.insert(vec![1].into(), WalPosition::test_value(5));
         self_table.demote_data_modified_to_clean();
@@ -3868,6 +3958,9 @@ mod tests {
         self_table.merge_dirty_and_clean(&dirty);
 
         assert_eq!(self_table.get(&[1]), Some(WalPosition::test_value(20)));
+        // All three positions coexist for [1]: the base @5 plus both dirty
+        // positions — the below-latest @10 must survive the merge.
+        assert_eq!(self_table.data.get([1].as_ref()).map(|p| p.len()), Some(3));
     }
 
     #[test]

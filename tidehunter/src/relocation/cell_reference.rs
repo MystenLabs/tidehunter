@@ -10,8 +10,13 @@ pub struct CellReference {
 }
 
 impl CellReference {
-    /// Get the first cell reference for a given keyspace
+    /// Get the first cell reference for a given keyspace, skipping destroyed
+    /// keyspaces (they have no cells).
     pub fn first(db: &Db, keyspace: KeySpace) -> Option<Self> {
+        let mut keyspace = keyspace;
+        while keyspace.as_usize() < db.key_shape.num_ks() && db.key_shape.ks(keyspace).destroyed() {
+            keyspace.increment();
+        }
         if keyspace.as_usize() >= db.key_shape.num_ks() {
             return None;
         }
@@ -28,7 +33,11 @@ impl CellReference {
 
     /// Get the next cell reference, handling keyspace boundaries
     pub fn next(&self, db: &Db) -> Option<Self> {
-        if let Some(cell) = self.next_in_ks(db) {
+        // The keyspace may have been destroyed since this reference was
+        // created; its remaining cells are gone, so move on.
+        if !db.key_shape.ks(self.keyspace).destroyed()
+            && let Some(cell) = self.next_in_ks(db)
+        {
             return Some(cell);
         }
         // No more cells in current keyspace, move to next keyspace

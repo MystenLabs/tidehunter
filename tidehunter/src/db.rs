@@ -38,6 +38,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub struct Db {
+    /// Canonicalized database directory; used to rewrite the keyspace
+    /// registry when a keyspace is destroyed.
+    path: PathBuf,
     pub(crate) large_table: LargeTable,
     pub(crate) wal: Arc<Wal>,
     pub(crate) indexes: Arc<Wal>,
@@ -134,6 +137,7 @@ impl Db {
             .collect::<Box<[_]>>();
 
         let this = Self {
+            path: path.clone(),
             large_table,
             wal_writer,
             index_writer,
@@ -188,9 +192,10 @@ impl Db {
 
     /// Path of the canonical keyspace registry: the shape in canonical id
     /// order, written during `Db::open` — before any WAL write can happen —
-    /// at creation and whenever a keyspace is added or removed. The entry
-    /// order in this file defines the keyspace ids used in WAL bytes and
-    /// the control region.
+    /// at creation and whenever a keyspace is added or removed, and by
+    /// `Db::destroy_key_space` to persist a tombstone. The entry order in
+    /// this file defines the keyspace ids used in WAL bytes and the control
+    /// region.
     pub(crate) fn shape_v2_file_path(path: &Path) -> PathBuf {
         path.join("shape_v2.yaml")
     }
@@ -210,9 +215,12 @@ impl Db {
     /// list the registry's keyspaces — matched by name — in any order; new
     /// keyspaces are appended. A keyspace in the registry but absent from the
     /// declared shape is **retained** as a live keyspace internally (data
-    /// preserved, never destroyed) but is simply not exposed — re-declaring
-    /// its name later reconnects to the same id with its data intact (this
-    /// mirrors RocksDB, which never drops a column family implicitly).
+    /// preserved, never destroyed implicitly) but is simply not exposed —
+    /// re-declaring its name later reconnects to the same id with its data
+    /// intact (this mirrors RocksDB, which never drops a column family
+    /// implicitly). Explicit deletion of a retained keyspace is
+    /// [`Db::destroy_key_space`]; its registry tombstone keeps the id slot
+    /// but no longer matches the name.
     ///
     /// Returns the canonical-ordered shape (the full set of keyspaces, used
     /// for everything internal: WAL bytes, index, control region), the
@@ -518,6 +526,13 @@ impl Db {
     ///
     /// - **Uniform key type** (Array-based storage): Entries are cleared but remain in the fixed-size array
     /// - **PrefixedUniform key type** (Tree-based storage): Entries are completely removed from the large table
+    ///
+    /// # Checkpoints
+    ///
+    /// Dropped data is not preserved for held checkpoints: a checkpoint read
+    /// of a dropped cell returns `None`, and once GC reclaims the underlying
+    /// WAL space the read may fail. Do not hold a checkpoint across a drop
+    /// of a range it still needs.
     pub fn drop_cells_in_range(
         &self,
         ks: KeySpace,
@@ -541,6 +556,80 @@ impl Db {
         self.large_table
             .drop_cells_in_range(context, &from_cell, &to_cell);
 
+        Ok(())
+    }
+
+    /// Destroys a retained keyspace: irreversibly deletes its data and frees
+    /// its name for reuse.
+    ///
+    /// The keyspace must have been removed from the declared [`KeyShape`]
+    /// first (making it *retained*: preserved internally but not exposed), so
+    /// no handle to it can exist. Panics if `name` is still declared or was
+    /// never created; destroying an already-destroyed keyspace is a no-op.
+    ///
+    /// The commit point is the registry write (`shape_v2.yaml`): once this
+    /// returns, the destroy survives a crash — on reopen the keyspace
+    /// initializes empty, WAL replay skips its frames, and its control-region
+    /// slot is written empty by the next snapshot. The canonical id is
+    /// tombstoned forever (ids are positional and never reused; the 255-id
+    /// limit includes tombstones). Re-declaring the same name later creates a
+    /// fresh, empty keyspace under a new id, with any layout.
+    ///
+    /// This method only persists the tombstone and clears the keyspace's
+    /// in-memory cells; disk space returns lazily through the existing GC
+    /// cadences — the next control-region snapshot writes the keyspace's
+    /// slots empty (unreferencing its index blobs and unpinning
+    /// `replay_from`), and the next relocation pass recycles the dead WAL
+    /// frames. Like [`Db::drop_cells_in_range`], this intentionally does
+    /// not preserve data for held checkpoints.
+    pub fn destroy_key_space(&self, name: &str) -> DbResult<()> {
+        let Some(ks) = self.tombstone_key_space(name)? else {
+            return Ok(());
+        };
+        self.large_table.drop_all_cells(self.ks_context(ks));
+        Ok(())
+    }
+
+    /// Registry-tombstone step of [`Db::destroy_key_space`]: validates the
+    /// keyspace and persists the tombstone — the destroy's commit point.
+    /// Returns the destroyed keyspace's id, or `None` if it was already
+    /// destroyed.
+    fn tombstone_key_space(&self, name: &str) -> DbResult<Option<KeySpace>> {
+        assert!(
+            self.keyspaces.try_ks(name).is_none(),
+            "Cannot destroy key space '{name}': it is declared in the current shape. \
+             Remove it from the declared KeyShape (making it retained) first."
+        );
+        let Some(ksd) = self
+            .key_shape
+            .iter_ks()
+            .find(|ks| ks.name() == name && !ks.destroyed())
+        else {
+            let tombstone_exists = self.key_shape.iter_ks().any(|ks| ks.name() == name);
+            assert!(tombstone_exists, "Unknown key space '{name}'");
+            return Ok(None);
+        };
+        // The registry write is the durability point. The shared in-memory
+        // flag is flipped first so the tombstone serializes (and internal
+        // machinery starts skipping the keyspace), and rolled back if the
+        // write fails. A concurrent destroy of the same name loses the swap
+        // and returns early.
+        if ksd.mark_destroyed() {
+            return Ok(None);
+        }
+        if let Err(e) = Self::write_shape_file(&self.path, &self.key_shape) {
+            ksd.unmark_destroyed();
+            return Err(e);
+        }
+        Ok(Some(ksd.id()))
+    }
+
+    /// Persists the destroy tombstone without dropping data or rebuilding
+    /// the control region — simulates a crash immediately after the commit
+    /// point, so tests can verify that reopen alone converges.
+    #[cfg(test)]
+    pub(crate) fn destroy_key_space_commit_only(&self, name: &str) -> DbResult<()> {
+        let _: Option<KeySpace> = self.tombstone_key_space(name)?;
         Ok(())
     }
 
