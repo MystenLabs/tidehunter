@@ -1,7 +1,9 @@
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use parking_lot::{Mutex, RwLock};
+#[cfg(not(feature = "antithesis_sdk"))]
+use rand::SeedableRng;
+#[cfg(not(feature = "antithesis_sdk"))]
 use rand::rngs::StdRng;
-use rand::{RngCore, SeedableRng};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
@@ -29,7 +31,7 @@ macro_rules! th_assert_always {
         } else {
             Some(format!($message $(, $arg)*))
         };
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         {
             let details = if ok {
                 antithesis_sdk::serde_json::json!({
@@ -109,49 +111,22 @@ impl InMemoryState {
     }
 }
 
-enum ConcurrentRng {
-    Local(Box<StdRng>),
-    #[cfg(feature = "sdk")]
-    Antithesis(antithesis_sdk::random::AntithesisRng),
+#[cfg(not(feature = "antithesis_sdk"))]
+type ConcurrentRng = StdRng;
+#[cfg(feature = "antithesis_sdk")]
+type ConcurrentRng = antithesis_sdk::random::AntithesisRng;
+
+#[cfg(not(feature = "antithesis_sdk"))]
+fn concurrent_rng(thread_id: usize) -> ConcurrentRng {
+    StdRng::seed_from_u64(thread_id as u64)
 }
 
-impl ConcurrentRng {
-    fn new(thread_id: usize, in_antithesis: bool) -> Self {
-        if in_antithesis {
-            #[cfg(feature = "sdk")]
-            {
-                return Self::Antithesis(antithesis_sdk::random::AntithesisRng);
-            }
-        }
-        Self::Local(Box::new(StdRng::seed_from_u64(thread_id as u64)))
-    }
-}
-
-impl RngCore for ConcurrentRng {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        match self {
-            Self::Local(rng) => rng.next_u64(),
-            #[cfg(feature = "sdk")]
-            Self::Antithesis(rng) => rng.next_u64(),
-        }
-    }
-
-    fn fill_bytes(&mut self, dst: &mut [u8]) {
-        match self {
-            Self::Local(rng) => rng.fill_bytes(dst),
-            #[cfg(feature = "sdk")]
-            Self::Antithesis(rng) => rng.fill_bytes(dst),
-        }
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dst);
-        Ok(())
-    }
+// The sdk build always draws randomness through the SDK so Antithesis can steer
+// exploration; outside an Antithesis runtime the SDK falls back to its own
+// source, so per-thread seeded determinism only applies to non-sdk builds.
+#[cfg(feature = "antithesis_sdk")]
+fn concurrent_rng(_thread_id: usize) -> ConcurrentRng {
+    antithesis_sdk::random::AntithesisRng
 }
 
 /// Count open file descriptors for a given directory using lsof.
@@ -244,8 +219,8 @@ fn main() {
     let in_antithesis = env::var_os("ANTITHESIS_OUTPUT_DIR").is_some();
     if in_antithesis {
         assert!(
-            cfg!(feature = "sdk"),
-            "Antithesis runs require building concurrent_test with --features sdk"
+            cfg!(feature = "antithesis_sdk"),
+            "Antithesis runs require building concurrent_test with --features antithesis_sdk"
         );
     }
 
@@ -374,7 +349,7 @@ fn main() {
 
         let handle = thread::spawn(move || {
             use rand::Rng;
-            let mut rng = ConcurrentRng::new(thread_id, in_antithesis);
+            let mut rng = concurrent_rng(thread_id);
 
             for op_num in 0..operations_per_thread {
                 // Update progress bars
@@ -857,7 +832,7 @@ mod sdk {
     }
 
     impl CoverageEvent {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         fn name(self) -> &'static str {
             match self {
                 Self::RestartHappened => "concurrent_restart_happened",
@@ -870,12 +845,12 @@ mod sdk {
     }
 
     pub fn init() {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         antithesis_sdk::antithesis_init();
     }
 
     pub fn setup_complete() {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         {
             let details = antithesis_sdk::serde_json::json!({
                 "component": "tidehunter_concurrent_test",
@@ -885,7 +860,7 @@ mod sdk {
     }
 
     pub fn sometimes(condition: bool, event: CoverageEvent) {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         {
             let details = antithesis_sdk::serde_json::json!({ "event": event.name() });
             match event {
@@ -921,7 +896,7 @@ mod sdk {
     }
 
     pub fn unreachable(message: &str) -> ! {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         {
             let details = antithesis_sdk::serde_json::json!({ "message": message });
             antithesis_sdk::assert_unreachable!("concurrent test unreachable state", &details);

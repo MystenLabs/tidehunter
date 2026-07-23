@@ -19,11 +19,12 @@ CONCURRENT_TEST_OPS_PER_THREAD=2000 NO_PROGRESS=1 cargo run -p concurrent_test -
 
 ## Antithesis SDK build
 
-The `sdk` feature wires the workload to Antithesis assertions, lifecycle events, and
+The `antithesis_sdk` feature (the implicit feature of the optional `antithesis_sdk`
+dependency) wires the workload to Antithesis assertions, lifecycle events, and
 randomness:
 
 ```bash
-cargo build -p concurrent_test --release --features concurrent_test/sdk
+cargo build -p concurrent_test --release --features concurrent_test/antithesis_sdk
 ```
 
 In an Antithesis runtime, set `ANTITHESIS_OUTPUT_DIR`; the workload then uses
