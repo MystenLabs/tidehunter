@@ -20,7 +20,7 @@ SEMANTICS_TEST_OPS=1000 cargo run --release
 Build with Antithesis SDK instrumentation:
 
 ```sh
-cargo build --release --features sdk
+cargo build --release --features antithesis_sdk
 ```
 
 ## Environment
@@ -38,7 +38,9 @@ cargo build --release --features sdk
   files; if these relocation knobs are set too small, the workload skips that
   assertion instead of reporting a false failure.
 
-When `ANTITHESIS_OUTPUT_DIR` is present the binary requires `--features sdk`.
+When `ANTITHESIS_OUTPUT_DIR` is present the binary requires
+`--features antithesis_sdk` (the implicit feature of the optional
+`antithesis_sdk` dependency).
 
 ## Antithesis assertions
 
@@ -54,11 +56,16 @@ Relocation pruning is verified with point reads across the finite key domain.
 Iterator correctness is covered by the dedicated iterator keyspace before
 relocation.
 
-Known checkpoint issue: `semantics_checkpoint_iterator_stable` currently catches
-a Tidehunter `DbCheckpoint` stale-read bug under background flushing. The
-checkpoint can return an older flushed value instead of the latest
-pre-checkpoint overwrite. Keep this assertion strict; hold or expect-fail the
-semantics Antithesis campaign until Tidehunter fixes the checkpoint read path.
+`semantics_relocation_prunes_old_keys` is asserted only when the workload can
+prove the relocation cut covered the whole strict-prune prefix (the filter
+reached the watermark boundary and the target position passed the first WAL
+file). Under fault injection the cut can legitimately stop short; in that case
+old keys may still be readable and the workload only checks their values are
+intact. `semantics_pruning_verified` reports how often the strict path runs.
+
+History: `semantics_checkpoint_iterator_stable` caught a real Tidehunter
+`DbCheckpoint` stale-read bug under background flushing
+(MystenLabs/tidehunter#123), fixed in `8630bf6`. The assertion stays strict.
 
 Sometimes assertions:
 

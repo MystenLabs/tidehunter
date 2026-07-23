@@ -1,11 +1,14 @@
+use rand::Rng;
+#[cfg(not(feature = "antithesis_sdk"))]
+use rand::SeedableRng;
+#[cfg(not(feature = "antithesis_sdk"))]
 use rand::rngs::StdRng;
-use rand::{Rng, RngCore, SeedableRng};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tempdir::TempDir;
 use tidehunter::config::Config;
 use tidehunter::db::{Db, DbResult};
@@ -25,7 +28,7 @@ macro_rules! th_assert_always {
         } else {
             Some(format!($message $(, $arg)*))
         };
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         {
             let details = if ok {
                 antithesis_sdk::serde_json::json!({
@@ -85,10 +88,22 @@ enum BatchMutation {
     },
 }
 
-enum SemanticsRng {
-    Local(Box<StdRng>),
-    #[cfg(feature = "sdk")]
-    Antithesis(antithesis_sdk::random::AntithesisRng),
+#[cfg(not(feature = "antithesis_sdk"))]
+type SemanticsRng = StdRng;
+#[cfg(feature = "antithesis_sdk")]
+type SemanticsRng = antithesis_sdk::random::AntithesisRng;
+
+#[cfg(not(feature = "antithesis_sdk"))]
+fn semantics_rng(settings: &Settings) -> SemanticsRng {
+    StdRng::seed_from_u64(settings.seed)
+}
+
+// The sdk build always draws randomness through the SDK so Antithesis can steer
+// exploration; outside an Antithesis runtime the SDK falls back to its own
+// source, so seeded determinism only applies to non-sdk builds.
+#[cfg(feature = "antithesis_sdk")]
+fn semantics_rng(_settings: &Settings) -> SemanticsRng {
+    antithesis_sdk::random::AntithesisRng
 }
 
 fn main() {
@@ -97,8 +112,8 @@ fn main() {
     let settings = Settings::from_env();
     if settings.in_antithesis {
         assert!(
-            cfg!(feature = "sdk"),
-            "Antithesis runs require building antithesis_semantics with --features sdk"
+            cfg!(feature = "antithesis_sdk"),
+            "Antithesis runs require building antithesis_semantics with --features antithesis_sdk"
         );
     }
 
@@ -114,7 +129,7 @@ fn main() {
         settings.in_antithesis
     );
 
-    let mut rng = SemanticsRng::new(&settings);
+    let mut rng = semantics_rng(&settings);
     let mut harness = Harness::new(settings);
     sdk::setup_complete();
     harness.run(&mut rng);
@@ -471,7 +486,9 @@ impl Harness {
         let db_path = self.settings.root.join("relocation_pruning_db");
         fs::create_dir_all(&db_path).expect("create relocation pruning db root");
         let relocation_watermark = Arc::new(AtomicU64::new(0));
-        let key_shape = relocation_key_shape(relocation_watermark.clone());
+        let scan_reached_boundary = Arc::new(AtomicBool::new(false));
+        let key_shape =
+            relocation_key_shape(relocation_watermark.clone(), scan_reached_boundary.clone());
         let config = semantics_config();
         let metrics = Metrics::new();
         let mut prune_model = BTreeMap::new();
@@ -508,6 +525,9 @@ impl Harness {
         }
 
         relocation_watermark.store(watermark, Ordering::Relaxed);
+        scan_reached_boundary.store(false, Ordering::Relaxed);
+        let cut_completed;
+        let cut_target;
         {
             let db = Db::open(&db_path, key_shape.clone(), config.clone(), metrics.clone())
                 .expect("open relocation pruning db for relocation");
@@ -516,6 +536,16 @@ impl Harness {
                 "rebuild control region before relocation",
             );
             db.start_blocking_relocation_with_strategy(RelocationStrategy::WalBased);
+            // Strict pruning is only provable when this relocation both scanned past
+            // the last strict-prune record (the filter returned StopRelocation, so
+            // the terminal position covers the whole strict prefix) and actually cut
+            // (target position past the first WAL file; tidehunter returns early
+            // below that). Under fault injection the scan can legitimately stop
+            // short when `last_processed` lags the written WAL, leaving old epochs
+            // readable, so prune progress is coverage, not a safety property.
+            cut_target = metrics.relocation_target_position.get().max(0) as u64;
+            cut_completed =
+                scan_reached_boundary.load(Ordering::Relaxed) && cut_target >= config.wal_file_size;
             sdk::sometimes(true, sdk::CoverageEvent::RelocationRan);
             expect_db(
                 db.rebuild_control_region(),
@@ -534,12 +564,20 @@ impl Harness {
                 db.rebuild_control_region(),
                 "rebuild control region before relocation verification",
             );
+            if !cut_completed {
+                println!(
+                    "relocation cut incomplete (scan_reached_boundary={}, target_position={}): \
+                     downgrading strict prune checks to value-integrity checks",
+                    scan_reached_boundary.load(Ordering::Relaxed),
+                    cut_target
+                );
+            }
             for epoch in 0..self.settings.relocation_epochs {
                 for id in 0..self.settings.relocation_keys_per_epoch {
                     let key = relocation_key(epoch, id);
                     let actual = expect_db(db.get(prune_ks, &key), "read relocation key")
                         .map(|value| value.to_vec());
-                    if epoch < strict_prune_watermark {
+                    if cut_completed && epoch < strict_prune_watermark {
                         th_assert_always!(
                             actual.is_none(),
                             "semantics_relocation_prunes_old_keys",
@@ -611,45 +649,6 @@ impl Harness {
     }
 }
 
-impl SemanticsRng {
-    fn new(settings: &Settings) -> Self {
-        if settings.in_antithesis {
-            #[cfg(feature = "sdk")]
-            {
-                return Self::Antithesis(antithesis_sdk::random::AntithesisRng);
-            }
-        }
-        Self::Local(Box::new(StdRng::seed_from_u64(settings.seed)))
-    }
-}
-
-impl RngCore for SemanticsRng {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        match self {
-            Self::Local(rng) => rng.next_u64(),
-            #[cfg(feature = "sdk")]
-            Self::Antithesis(rng) => rng.next_u64(),
-        }
-    }
-
-    fn fill_bytes(&mut self, dst: &mut [u8]) {
-        match self {
-            Self::Local(rng) => rng.fill_bytes(dst),
-            #[cfg(feature = "sdk")]
-            Self::Antithesis(rng) => rng.fill_bytes(dst),
-        }
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dst);
-        Ok(())
-    }
-}
-
 fn semantics_config() -> Arc<Config> {
     let mut config = Config::small();
     config.frag_size = 256 * 1024;
@@ -661,13 +660,19 @@ fn semantics_config() -> Arc<Config> {
     Arc::new(config)
 }
 
-fn relocation_key_shape(relocation_watermark: Arc<AtomicU64>) -> KeyShape {
+fn relocation_key_shape(
+    relocation_watermark: Arc<AtomicU64>,
+    scan_reached_boundary: Arc<AtomicBool>,
+) -> KeyShape {
     let filter_watermark = relocation_watermark.clone();
     let prune_config = KeySpaceConfig::new().with_relocation_filter(move |key, _value| {
         let epoch = relocation_epoch_from_key(key);
         if epoch < filter_watermark.load(Ordering::Relaxed) {
             Decision::Remove
         } else {
+            // Reaching a key at or past the watermark means the relocation scan
+            // consulted the filter beyond every strict-prune record.
+            scan_reached_boundary.store(true, Ordering::Relaxed);
             Decision::StopRelocation
         }
     });
@@ -736,8 +741,8 @@ fn entries_from_model(
     let mut entries = model
         .iter()
         .filter(|(key, _value)| {
-            let lower_ok = lower.map_or(true, |bound| key.as_slice() >= bound.as_slice());
-            let upper_ok = upper.map_or(true, |bound| key.as_slice() < bound.as_slice());
+            let lower_ok = lower.is_none_or(|bound| key.as_slice() >= bound.as_slice());
+            let upper_ok = upper.is_none_or(|bound| key.as_slice() < bound.as_slice());
             lower_ok && upper_ok
         })
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -828,7 +833,7 @@ mod sdk {
     }
 
     impl CoverageEvent {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         fn name(self) -> &'static str {
             match self {
                 Self::BatchCommitted => "semantics_batch_committed",
@@ -844,12 +849,12 @@ mod sdk {
     }
 
     pub fn init() {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         antithesis_sdk::antithesis_init();
     }
 
     pub fn setup_complete() {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         {
             let details = antithesis_sdk::serde_json::json!({
                 "component": "tidehunter_antithesis_semantics",
@@ -859,7 +864,7 @@ mod sdk {
     }
 
     pub fn sometimes(condition: bool, event: CoverageEvent) {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         {
             let details = antithesis_sdk::serde_json::json!({ "event": event.name() });
             match event {
@@ -910,7 +915,7 @@ mod sdk {
     }
 
     pub fn unreachable(message: &str) -> ! {
-        #[cfg(feature = "sdk")]
+        #[cfg(feature = "antithesis_sdk")]
         {
             let details = antithesis_sdk::serde_json::json!({ "message": message });
             antithesis_sdk::assert_unreachable!("semantics workload unreachable state", &details);

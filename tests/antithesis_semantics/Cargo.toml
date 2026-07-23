@@ -9,8 +9,4 @@ rand = "0.8"
 tempdir = "0.3"
 antithesis_sdk = { version = "=0.2.5", optional = true, features = ["full"] }
 
-[features]
-default = []
-sdk = ["dep:antithesis_sdk"]
-
 [workspace]
