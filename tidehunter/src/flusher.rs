@@ -365,17 +365,19 @@ impl IndexFlusherThread {
             relocation_updates.apply(&mut merged_l0);
         }
 
-        match relocation_cutoff {
-            Some(cutoff) => {
-                let length = merged_l0.len();
-                merged_l0.retain_above_position(cutoff);
-                if merged_l0.len() == length {
-                    return None;
-                }
-            }
-            // TODO: Used only if relocation doesn't call sync flush. Remove if no such implementation is needed anymore
-            None => merged_l0.retain_above_position(loader.min_wal_position()),
+        if let Some(cutoff) = relocation_cutoff {
+            return Self::prune_for_relocation_cutoff(
+                loader,
+                ctx,
+                command.ks,
+                original_index,
+                current_levels,
+                merged_l0,
+                cutoff,
+            );
         }
+        // TODO: Used only if relocation doesn't call sync flush. Remove if no such implementation is needed anymore
+        merged_l0.retain_above_position(loader.min_wal_position());
 
         // Decide: write as a new L0 on top of the existing L1, or promote by
         // merging L0 into L1. `ForceRelocate` keeps single-level semantics.
@@ -473,6 +475,60 @@ impl IndexFlusherThread {
                 .load(&ctx.ks_config, pos)
                 .expect("Failed to load L1 index in flusher thread"),
             None => IndexTable::default(),
+        }
+    }
+
+    /// Rewrites a relocation-filter cell after WAL-based relocation has chosen
+    /// a terminal cutoff. The cutoff removes keys whose latest indexed position
+    /// is below the terminal position. This must operate on the full on-disk
+    /// view, not just the in-memory/L0 overlay: preserving an old L1 below a
+    /// freshly-written L0 would let point reads fall through and resurrect
+    /// keys that the relocation filter removed.
+    fn prune_for_relocation_cutoff<L: Loader>(
+        loader: &L,
+        ctx: &KsContext,
+        ks: KeySpace,
+        original_index: Arc<IndexTable>,
+        current_levels: IndexLevels,
+        mut merged_l0: IndexTable,
+        cutoff: u64,
+    ) -> Option<(Arc<IndexTable>, IndexLevels)> {
+        let mut pruned = Self::load_lower_levels_or_default(loader, ctx, &current_levels);
+        pruned.merge_dirty_and_clean(&merged_l0);
+        merged_l0 = pruned;
+
+        let before = merged_l0.len();
+        merged_l0.retain_above_position(cutoff);
+        if merged_l0.len() == before {
+            return None;
+        }
+
+        if merged_l0.is_empty() {
+            return Some((original_index, IndexLevels::new()));
+        }
+
+        Self::run_compactor(ctx, &mut merged_l0);
+        merged_l0.clean_self();
+        let new_levels = Self::write_promoted_l1(loader, ctx, ks, merged_l0);
+        Some((original_index, new_levels))
+    }
+
+    fn load_lower_levels_or_default<L: Loader>(
+        loader: &L,
+        ctx: &KsContext,
+        levels: &IndexLevels,
+    ) -> IndexTable {
+        if levels.is_sharded() {
+            let mut combined = IndexTable::default();
+            for shard in levels.shards().values() {
+                let shard_table = loader
+                    .load(&ctx.ks_config, shard.position)
+                    .expect("Failed to load L1 shard index in flusher thread");
+                combined.merge_dirty_and_clean(&shard_table);
+            }
+            combined
+        } else {
+            Self::load_l1_or_default(loader, ctx, levels.l1())
         }
     }
 
@@ -1170,6 +1226,16 @@ mod tests {
             .collect()
     }
 
+    fn index_entries(loader: &RecordingLoader, pos: WalPosition) -> Vec<(u64, u64)> {
+        let blob = loader.blobs.lock().get(&pos.offset()).cloned().unwrap();
+        blob.iter()
+            .map(|(k, position)| {
+                let bytes: [u8; 8] = k.as_ref().try_into().unwrap();
+                (u64::from_be_bytes(bytes), position.offset())
+            })
+            .collect()
+    }
+
     #[test]
     fn case_b_untouched_shards_keep_their_position() {
         // Two shards. Dirty L0 hits only the first shard's range.
@@ -1547,6 +1613,80 @@ mod tests {
         assert!(new_levels.l0().is_some(), "fresh L0 written");
         let new_l1 = new_levels.l1().expect("L1 carried over");
         assert_ne!(new_l1, l1_pos, "stale L1 reflushed by post-pass");
+    }
+
+    #[test]
+    fn relocation_cutoff_prunes_promoted_l1_with_empty_overlay() {
+        // WAL-based relocation-filter cleanup can run on a clean post-promote
+        // cell: no overlay/L0 entries, only [INVALID, L1]. The cutoff must
+        // still rewrite L1; returning None would leave below-cutoff index
+        // entries in place and let point reads resurrect pruned keys.
+        let ctx = make_ctx(false, 1024 * 1024);
+        let loader = RecordingLoader::new();
+        let l1_pos = WalPosition::new(7_000, 64);
+        let l1 = build_dirty(&[(1, Some(100)), (2, Some(150)), (3, Some(250))]);
+        loader.seed(l1_pos, l1);
+        let current_levels = IndexLevels::promoted(l1_pos);
+        let cmd = flush_command(ctx.id(), IndexTable::default(), current_levels);
+
+        let (_orig, new_levels) =
+            IndexFlusherThread::handle_command(&loader, &cmd, &ctx, None, Some(200)).unwrap();
+
+        assert_eq!(new_levels.l0(), None);
+        let new_l1 = new_levels.l1().expect("retained key written as L1");
+        assert_ne!(
+            new_l1, l1_pos,
+            "relocation cutoff must not preserve stale L1"
+        );
+        assert_eq!(index_entries(&loader, new_l1), vec![(3, 250)]);
+        assert_eq!(loader.flush_count(), 1);
+    }
+
+    #[test]
+    fn relocation_cutoff_clears_promoted_l1_when_every_entry_is_pruned() {
+        let ctx = make_ctx(false, 1024 * 1024);
+        let loader = RecordingLoader::new();
+        let l1_pos = WalPosition::new(7_000, 64);
+        let l1 = build_dirty(&[(1, Some(100)), (2, Some(150))]);
+        loader.seed(l1_pos, l1);
+        let current_levels = IndexLevels::promoted(l1_pos);
+        let cmd = flush_command(ctx.id(), IndexTable::default(), current_levels);
+
+        let (_orig, new_levels) =
+            IndexFlusherThread::handle_command(&loader, &cmd, &ctx, None, Some(200)).unwrap();
+
+        assert!(
+            new_levels.is_empty(),
+            "all below-cutoff entries should clear the cell levels"
+        );
+        assert_eq!(
+            loader.flush_count(),
+            0,
+            "empty post-prune cells do not need a replacement blob"
+        );
+    }
+
+    #[test]
+    fn relocation_cutoff_leaves_promoted_l1_untouched_when_nothing_is_pruned() {
+        let ctx = make_ctx(false, 1024 * 1024);
+        let loader = RecordingLoader::new();
+        let l1_pos = WalPosition::new(7_000, 64);
+        let l1 = build_dirty(&[(1, Some(250)), (2, Some(300))]);
+        loader.seed(l1_pos, l1);
+        let current_levels = IndexLevels::promoted(l1_pos);
+        let cmd = flush_command(ctx.id(), IndexTable::default(), current_levels);
+
+        let result = IndexFlusherThread::handle_command(&loader, &cmd, &ctx, None, Some(200));
+
+        assert!(
+            result.is_none(),
+            "no below-cutoff entries should leave the cell unchanged"
+        );
+        assert_eq!(
+            loader.flush_count(),
+            0,
+            "no-op relocation cutoff cleanup must not rewrite L1"
+        );
     }
 
     #[test]
