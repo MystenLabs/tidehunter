@@ -10,7 +10,3 @@ tempdir = "0.3"
 rand = "0.8"
 indicatif = "0.17"
 antithesis_sdk = { version = "=0.2.5", optional = true, features = ["full"] }
-
-[features]
-default = []
-sdk = ["dep:antithesis_sdk"]
