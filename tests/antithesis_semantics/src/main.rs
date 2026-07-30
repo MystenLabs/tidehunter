@@ -8,7 +8,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempdir::TempDir;
 use tidehunter::config::Config;
 use tidehunter::db::{Db, DbResult};
@@ -486,9 +486,7 @@ impl Harness {
         let db_path = self.settings.root.join("relocation_pruning_db");
         fs::create_dir_all(&db_path).expect("create relocation pruning db root");
         let relocation_watermark = Arc::new(AtomicU64::new(0));
-        let scan_reached_boundary = Arc::new(AtomicBool::new(false));
-        let key_shape =
-            relocation_key_shape(relocation_watermark.clone(), scan_reached_boundary.clone());
+        let key_shape = relocation_key_shape(relocation_watermark.clone());
         let config = semantics_config();
         let metrics = Metrics::new();
         let mut prune_model = BTreeMap::new();
@@ -497,7 +495,7 @@ impl Harness {
 
         if !self.relocation_payload_spans_reclaimable_prefix(&config, strict_prune_watermark) {
             println!(
-                "skipping relocation pruning strict assertion: payload is too small to span a reclaimable WAL prefix"
+                "skipping relocation pruning checks: payload is too small to span a reclaimable WAL prefix"
             );
             return;
         }
@@ -525,9 +523,6 @@ impl Harness {
         }
 
         relocation_watermark.store(watermark, Ordering::Relaxed);
-        scan_reached_boundary.store(false, Ordering::Relaxed);
-        let cut_completed;
-        let cut_target;
         {
             let db = Db::open(&db_path, key_shape.clone(), config.clone(), metrics.clone())
                 .expect("open relocation pruning db for relocation");
@@ -536,16 +531,16 @@ impl Harness {
                 "rebuild control region before relocation",
             );
             db.start_blocking_relocation_with_strategy(RelocationStrategy::WalBased);
-            // Strict pruning is only provable when this relocation both scanned past
-            // the last strict-prune record (the filter returned StopRelocation, so
-            // the terminal position covers the whole strict prefix) and actually cut
-            // (target position past the first WAL file; tidehunter returns early
-            // below that). Under fault injection the scan can legitimately stop
-            // short when `last_processed` lags the written WAL, leaving old epochs
-            // readable, so prune progress is coverage, not a safety property.
-            cut_target = metrics.relocation_target_position.get().max(0) as u64;
-            cut_completed =
-                scan_reached_boundary.load(Ordering::Relaxed) && cut_target >= config.wal_file_size;
+            // The relocation-filter contract is eventual: a Remove-decided key
+            // must eventually disappear, but may stay readable after this call
+            // returns (index cleanup and WAL file deletion are deferred). The
+            // gauges are logged to make Antithesis reports easier to debug;
+            // nothing is asserted on them.
+            println!(
+                "relocation positions: terminal={} target={}",
+                metrics.relocation_terminal_position.get(),
+                metrics.relocation_target_position.get(),
+            );
             sdk::sometimes(true, sdk::CoverageEvent::RelocationRan);
             expect_db(
                 db.rebuild_control_region(),
@@ -554,7 +549,8 @@ impl Harness {
             db.wait_for_background_threads_to_finish();
         }
 
-        let mut removed_checked = 0_u64;
+        let mut pruned_seen = 0_u64;
+        let mut old_readable = 0_u64;
         let mut live_checked = 0_u64;
         {
             let db = Db::open(&db_path, key_shape, config, metrics)
@@ -564,44 +560,29 @@ impl Harness {
                 db.rebuild_control_region(),
                 "rebuild control region before relocation verification",
             );
-            if !cut_completed {
-                println!(
-                    "relocation cut incomplete (scan_reached_boundary={}, target_position={}): \
-                     downgrading strict prune checks to value-integrity checks",
-                    scan_reached_boundary.load(Ordering::Relaxed),
-                    cut_target
-                );
-            }
             for epoch in 0..self.settings.relocation_epochs {
                 for id in 0..self.settings.relocation_keys_per_epoch {
                     let key = relocation_key(epoch, id);
                     let actual = expect_db(db.get(prune_ks, &key), "read relocation key")
                         .map(|value| value.to_vec());
-                    if cut_completed && epoch < strict_prune_watermark {
-                        th_assert_always!(
-                            actual.is_none(),
-                            "semantics_relocation_prunes_old_keys",
-                            "relocation failed to prune key: epoch={} id={} actual_len={:?}",
-                            epoch,
-                            id,
-                            actual.as_ref().map(Vec::len)
-                        );
-                        prune_model.remove(&key);
-                        removed_checked += 1;
-                    } else if epoch < watermark {
-                        if actual.is_none() {
-                            prune_model.remove(&key);
-                        } else {
-                            let expected = prune_model.get(&key).cloned();
-                            th_assert_always!(
-                                actual == expected,
-                                "semantics_relocation_keeps_live_keys",
-                                "relocation changed boundary key: epoch={} id={} expected_len={:?} actual_len={:?}",
-                                epoch,
-                                id,
-                                expected.as_ref().map(Vec::len),
-                                actual.as_ref().map(Vec::len)
-                            );
+                    if epoch < watermark {
+                        // Old key: gone is fine, still readable is fine, but a
+                        // readable old key must hold its exact old value.
+                        match actual {
+                            None => pruned_seen += 1,
+                            Some(value) => {
+                                let expected = prune_model.get(&key);
+                                th_assert_always!(
+                                    expected == Some(&value),
+                                    "semantics_relocation_old_key_value_intact",
+                                    "old key readable with wrong value: epoch={} id={} expected_len={:?} actual_len={}",
+                                    epoch,
+                                    id,
+                                    expected.map(Vec::len),
+                                    value.len()
+                                );
+                                old_readable += 1;
+                            }
                         }
                     } else {
                         let expected = prune_model.get(&key).cloned();
@@ -619,12 +600,126 @@ impl Harness {
                 }
             }
 
+            self.verify_relocation_iterators(&db, prune_ks, &prune_model, watermark);
+
             db.wait_for_background_threads_to_finish();
         }
+        println!(
+            "relocation pruning: pruned_seen={pruned_seen} old_readable={old_readable} live_checked={live_checked}"
+        );
         sdk::sometimes(
-            removed_checked > 0 && live_checked > 0,
+            pruned_seen > 0 && live_checked > 0,
             sdk::CoverageEvent::PruningVerified,
         );
+    }
+
+    // After a filtered relocation, stale index entries for removed keys can
+    // legitimately exist (eventual cleanup) and sort in front of the live
+    // keys. Iteration must skip entries whose WAL position was already
+    // reclaimed and still expose every live key; ending the iteration early
+    // instead would silently hide live data.
+    fn verify_relocation_iterators(
+        &self,
+        db: &Arc<Db>,
+        prune_ks: KeySpace,
+        prune_model: &BTreeMap<Vec<u8>, Vec<u8>>,
+        watermark: u64,
+    ) {
+        let live_floor = relocation_key(watermark, 0);
+
+        let forward = collect_db_iterator_entries(db, prune_ks, false, None, None);
+        Self::check_iterated_entries(&forward, prune_model, "forward");
+        Self::check_iteration_order(&forward, false, "forward");
+        let forward_keys: BTreeSet<&[u8]> = forward.iter().map(|(key, _)| key.as_slice()).collect();
+        for key in prune_model.range(live_floor.clone()..).map(|(key, _)| key) {
+            th_assert_always!(
+                forward_keys.contains(key.as_slice()),
+                "semantics_relocation_iter_forward_covers_live",
+                "forward iteration missed live key: epoch={} id={}",
+                relocation_epoch_from_key(key),
+                relocation_id_from_key(key)
+            );
+        }
+
+        let reverse = collect_db_iterator_entries(db, prune_ks, true, None, None);
+        Self::check_iterated_entries(&reverse, prune_model, "reverse");
+        Self::check_iteration_order(&reverse, true, "reverse");
+        let reverse_keys: BTreeSet<&[u8]> = reverse.iter().map(|(key, _)| key.as_slice()).collect();
+        for key in prune_model.range(live_floor.clone()..).map(|(key, _)| key) {
+            th_assert_always!(
+                reverse_keys.contains(key.as_slice()),
+                "semantics_relocation_iter_reverse_covers_live",
+                "reverse iteration missed live key: epoch={} id={}",
+                relocation_epoch_from_key(key),
+                relocation_id_from_key(key)
+            );
+        }
+
+        // Start inside the removed key range so the iterator has to begin
+        // directly on potentially-stale entries.
+        let bounded_lower = relocation_key(1, 0);
+        let bounded = collect_db_iterator_entries(db, prune_ks, false, Some(&bounded_lower), None);
+        Self::check_iterated_entries(&bounded, prune_model, "bounded");
+        Self::check_iteration_order(&bounded, false, "bounded");
+        for (key, _) in &bounded {
+            th_assert_always!(
+                key.as_slice() >= bounded_lower.as_slice(),
+                "semantics_relocation_iter_respects_lower_bound",
+                "bounded iteration returned key below lower bound: epoch={} id={}",
+                relocation_epoch_from_key(key),
+                relocation_id_from_key(key)
+            );
+        }
+        let bounded_keys: BTreeSet<&[u8]> = bounded.iter().map(|(key, _)| key.as_slice()).collect();
+        for key in prune_model.range(live_floor.clone()..).map(|(key, _)| key) {
+            th_assert_always!(
+                bounded_keys.contains(key.as_slice()),
+                "semantics_relocation_iter_bounded_covers_live",
+                "bounded iteration missed live key: epoch={} id={}",
+                relocation_epoch_from_key(key),
+                relocation_id_from_key(key)
+            );
+        }
+    }
+
+    fn check_iterated_entries(
+        entries: &[(Vec<u8>, Vec<u8>)],
+        prune_model: &BTreeMap<Vec<u8>, Vec<u8>>,
+        direction: &str,
+    ) {
+        for (key, value) in entries {
+            let expected = prune_model.get(key);
+            th_assert_always!(
+                expected == Some(value),
+                "semantics_relocation_iter_entry_matches_model",
+                "{} iteration returned unexpected entry: epoch={} id={} known_key={} value_len={}",
+                direction,
+                relocation_epoch_from_key(key),
+                relocation_id_from_key(key),
+                expected.is_some(),
+                value.len()
+            );
+        }
+    }
+
+    fn check_iteration_order(entries: &[(Vec<u8>, Vec<u8>)], reverse: bool, direction: &str) {
+        for pair in entries.windows(2) {
+            let ordered = if reverse {
+                pair[0].0 > pair[1].0
+            } else {
+                pair[0].0 < pair[1].0
+            };
+            th_assert_always!(
+                ordered,
+                "semantics_relocation_iter_ordered",
+                "{} iteration returned keys out of order: epoch={} id={} then epoch={} id={}",
+                direction,
+                relocation_epoch_from_key(&pair[0].0),
+                relocation_id_from_key(&pair[0].0),
+                relocation_epoch_from_key(&pair[1].0),
+                relocation_id_from_key(&pair[1].0)
+            );
+        }
     }
 
     fn relocation_payload_spans_reclaimable_prefix(
@@ -660,19 +755,13 @@ fn semantics_config() -> Arc<Config> {
     Arc::new(config)
 }
 
-fn relocation_key_shape(
-    relocation_watermark: Arc<AtomicU64>,
-    scan_reached_boundary: Arc<AtomicBool>,
-) -> KeyShape {
+fn relocation_key_shape(relocation_watermark: Arc<AtomicU64>) -> KeyShape {
     let filter_watermark = relocation_watermark.clone();
     let prune_config = KeySpaceConfig::new().with_relocation_filter(move |key, _value| {
         let epoch = relocation_epoch_from_key(key);
         if epoch < filter_watermark.load(Ordering::Relaxed) {
             Decision::Remove
         } else {
-            // Reaching a key at or past the watermark means the relocation scan
-            // consulted the filter beyond every strict-prune record.
-            scan_reached_boundary.store(true, Ordering::Relaxed);
             Decision::StopRelocation
         }
     });
@@ -777,6 +866,11 @@ fn relocation_key(epoch: u64, id: usize) -> Vec<u8> {
 fn relocation_epoch_from_key(key: &[u8]) -> u64 {
     let bytes: [u8; 8] = key.try_into().expect("relocation keys are fixed 8 bytes");
     u64::from_be_bytes(bytes) >> 32
+}
+
+fn relocation_id_from_key(key: &[u8]) -> u64 {
+    let bytes: [u8; 8] = key.try_into().expect("relocation keys are fixed 8 bytes");
+    u64::from_be_bytes(bytes) & 0xffff_ffff
 }
 
 fn relocation_value(epoch: u64, id: usize, value_bytes: usize) -> Vec<u8> {

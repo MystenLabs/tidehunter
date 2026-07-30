@@ -49,23 +49,29 @@ Always assertions:
 - `semantics_batch_key_matches_model`
 - `semantics_iterator_matches_model`
 - `semantics_checkpoint_iterator_stable`
-- `semantics_relocation_prunes_old_keys`
 - `semantics_relocation_keeps_live_keys`
+- `semantics_relocation_old_key_value_intact`
+- `semantics_relocation_iter_forward_covers_live`
+- `semantics_relocation_iter_reverse_covers_live`
+- `semantics_relocation_iter_bounded_covers_live`
+- `semantics_relocation_iter_respects_lower_bound`
+- `semantics_relocation_iter_entry_matches_model`
+- `semantics_relocation_iter_ordered`
 
-Relocation pruning is verified with point reads across the finite key domain.
-Iterator correctness is covered by the dedicated iterator keyspace before
-relocation.
-
-`semantics_relocation_prunes_old_keys` is asserted only when the workload can
-prove the relocation cut covered the whole strict-prune prefix (the filter
-reached the watermark boundary and the target position passed the first WAL
-file). Under fault injection the cut can legitimately stop short; in that case
-old keys may still be readable and the workload only checks their values are
-intact. `semantics_pruning_verified` reports how often the strict path runs.
+Relocation pruning follows the eventual-cleanup contract (clarified in
+MystenLabs/tidehunter#124): after a filtered relocation an old key may be gone
+or may still return its exact old value — never a wrong value. Live keys must
+always read exactly. Iteration over the relocated keyspace must expose every
+live key even when stale entries for removed keys sort in front of them
+(checked forward, reverse, and bounded starting inside the removed range),
+must stay in key order, and may only return entries that match the model.
+`semantics_pruning_verified` reports how often verification observed both
+pruned old keys and intact live keys.
 
 History: `semantics_checkpoint_iterator_stable` caught a real Tidehunter
 `DbCheckpoint` stale-read bug under background flushing
-(MystenLabs/tidehunter#123), fixed in `8630bf6`. The assertion stays strict.
+(MystenLabs/tidehunter#123), fixed in `8630bf6`. The relocation checks found
+the index-cleanup gap tracked in MystenLabs/tidehunter#124.
 
 Sometimes assertions:
 
