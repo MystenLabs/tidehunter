@@ -410,19 +410,7 @@ impl IndexFlusherThread {
                 // by treating it as the "dirty" overlay.
                 let mut new_l1 = Self::load_l1_or_default(loader, ctx, existing_l1);
                 new_l1.merge_dirty_and_clean(&merged_l0);
-                // Reclaim index space for entries whose WAL data is already
-                // gone — e.g. records a relocation filter decided to remove,
-                // whose positions fall below the WAL floor once relocation
-                // reclaims the prefix. Such entries can never be read again,
-                // so a promote (which rewrites the whole blob anyway) is the
-                // cheap, natural place to drop them. Without this they stay in
-                // L1 forever, because the relocation cutoff pass only sees the
-                // in-memory/L0 overlay.
-                new_l1.retain_above_position(loader.min_wal_position());
-                Self::run_compactor(ctx, &mut new_l1);
-                // L1 is the deepest level — nothing below to shadow, so drop
-                // tombstones (and the keys they shadow) before writing.
-                new_l1.clean_self();
+                Self::process_l1_blob(loader, ctx, &mut new_l1);
                 Self::write_promoted_l1(loader, ctx, command.ks, new_l1)
             }
         } else {
@@ -483,6 +471,22 @@ impl IndexFlusherThread {
                 .expect("Failed to load L1 index in flusher thread"),
             None => IndexTable::default(),
         }
+    }
+
+    /// Prepares a table that is about to be written as the deepest level for
+    /// its key range (a promoted L1, or one shard of a sharded promote).
+    ///
+    /// Entries below the WAL floor are dropped first: their data was already
+    /// reclaimed, e.g. records a relocation filter removed, so they can never
+    /// be read again. A promote rewrites the whole blob anyway, which makes it
+    /// the cheap place to reclaim that index space - the relocation cutoff pass
+    /// only sees the in-memory/L0 overlay, so without this the entries stay
+    /// forever. Tombstones are stripped last because nothing below this level
+    /// remains to be shadowed.
+    fn process_l1_blob<L: Loader>(loader: &L, ctx: &KsContext, table: &mut IndexTable) {
+        table.retain_above_position(loader.min_wal_position());
+        Self::run_compactor(ctx, table);
+        table.clean_self();
     }
 
     // todo - result of compactor is not applied to in-memory index for DirtyLoaded
@@ -638,14 +642,10 @@ impl IndexFlusherThread {
                 .load(&ctx.ks_config, shard.position)
                 .expect("Failed to load shard for sharded promote");
             shard_table.merge_dirty_and_clean(&dirty_subset);
-            // Same reclaim as the non-sharded promote below: this shard is
-            // being rewritten anyway, so drop entries whose WAL data is gone.
-            // Untouched shards keep their blobs and are reclaimed by a later
-            // promote that does touch them.
-            shard_table.retain_above_position(loader.min_wal_position());
-            Self::run_compactor(ctx, &mut shard_table);
-            // Shard is the deepest level for its key range; strip tombstones.
-            shard_table.clean_self();
+            // This shard is being rewritten anyway, so it is reclaimed here.
+            // Untouched shards keep their blobs until a later promote touches
+            // them.
+            Self::process_l1_blob(loader, ctx, &mut shard_table);
 
             if shard_table.is_empty() {
                 // All entries in this shard's range were tombstoned out.
