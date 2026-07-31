@@ -129,8 +129,8 @@ impl DbCheckpoint {
     pub(crate) fn next_entry(
         &self,
         ks: KeySpace,
-        cell: CellId,
-        prev_key: Option<Bytes>,
+        mut cell: CellId,
+        mut prev_key: Option<Bytes>,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
         cache: &mut IndexIterCaches,
@@ -139,36 +139,45 @@ impl DbCheckpoint {
         let context = db.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::NextEntry);
         let last_processed = self.latch.position();
-        let Some(result) = db.large_table.next_entry(
-            context,
-            cell,
-            prev_key,
-            db,
-            end_cell_exclusive,
-            reverse,
-            cache,
-            Some(last_processed),
-        )?
-        else {
-            return Ok(None);
-        };
-        let (key, value) = match result.value {
-            // No LRU is consulted on the checkpoint path, so `Value` is never
-            // produced; handle it for completeness.
-            GetResult::Value(ref full_key, ref v) => (full_key.clone(), v.clone()),
-            GetResult::WalPosition(w) => {
-                let Some((k, v)) =
-                    db.read_record_for_indexed_key(context, w, result.key.as_ref())?
-                else {
-                    return Ok(None);
-                };
-                // Deliberately no `update_lru`: a checkpoint read must not
-                // mutate the live database's value cache.
-                (k, v)
-            }
-            GetResult::NotFound => unreachable!(),
-        };
-        Ok(Some(result.with_key_value(key, value)))
+        loop {
+            let Some(result) = db.large_table.next_entry(
+                context,
+                cell,
+                prev_key,
+                db,
+                end_cell_exclusive,
+                reverse,
+                cache,
+                Some(last_processed),
+            )?
+            else {
+                return Ok(None);
+            };
+            let (key, value) = match result.value {
+                // No LRU is consulted on the checkpoint path, so `Value` is never
+                // produced; handle it for completeness.
+                GetResult::Value(ref full_key, ref v) => (full_key.clone(), v.clone()),
+                GetResult::WalPosition(w) => {
+                    match db.read_record_for_indexed_key(context, w, result.key.as_ref())? {
+                        // Deliberately no `update_lru`: a checkpoint read must
+                        // not mutate the live database's value cache.
+                        Some((k, v)) => (k, v),
+                        // Same as `Db::next_entry`: a stale index entry must be
+                        // skipped, not treated as the end of the key space.
+                        None => {
+                            let Some(next_cell) = result.cell.clone() else {
+                                return Ok(None);
+                            };
+                            cell = next_cell;
+                            prev_key = Some(result.key.clone());
+                            continue;
+                        }
+                    }
+                }
+                GetResult::NotFound => unreachable!(),
+            };
+            return Ok(Some(result.with_key_value(key, value)));
+        }
     }
 }
 
