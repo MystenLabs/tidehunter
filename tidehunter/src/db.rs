@@ -971,42 +971,63 @@ impl Db {
     pub(crate) fn next_entry(
         &self,
         ks: KeySpace,
-        cell: CellId,
-        prev_key: Option<Bytes>,
+        mut cell: CellId,
+        mut prev_key: Option<Bytes>,
         end_cell_exclusive: &Option<CellId>,
         reverse: bool,
         cache: &mut IndexIterCaches,
     ) -> DbResult<Option<IteratorResult<Bytes>>> {
         let context = self.ks_context(ks);
         let _timer = context.db_op_timer(DbOpKind::NextEntry);
-        let Some(result) = self.large_table.next_entry(
-            context,
-            cell,
-            prev_key,
-            self,
-            end_cell_exclusive,
-            reverse,
-            cache,
-            None,
-        )?
-        else {
-            return Ok(None);
-        };
-        let (key, value) = match result.value {
-            GetResult::Value(ref full_key, ref v) => (full_key.clone(), v.clone()),
-            GetResult::WalPosition(w) => {
-                let Some((k, v)) =
-                    self.read_record_for_indexed_key(context, w, result.key.as_ref())?
-                else {
-                    return Ok(None);
-                };
-                self.large_table
-                    .update_lru(context, result.key.clone(), k.clone(), v.clone());
-                (k, v)
-            }
-            GetResult::NotFound => unreachable!(),
-        };
-        Ok(Some(result.with_key_value(key, value)))
+        loop {
+            let Some(result) = self.large_table.next_entry(
+                context,
+                cell,
+                prev_key,
+                self,
+                end_cell_exclusive,
+                reverse,
+                cache,
+                None,
+            )?
+            else {
+                return Ok(None);
+            };
+            let (key, value) = match result.value {
+                GetResult::Value(ref full_key, ref v) => (full_key.clone(), v.clone()),
+                GetResult::WalPosition(w) => {
+                    match self.read_record_for_indexed_key(context, w, result.key.as_ref())? {
+                        Some((k, v)) => {
+                            self.large_table.update_lru(
+                                context,
+                                result.key.clone(),
+                                k.clone(),
+                                v.clone(),
+                            );
+                            (k, v)
+                        }
+                        None => {
+                            // This index entry is unreadable: its WAL frame was
+                            // reclaimed, or the batch it points at no longer
+                            // holds the key. That means a stale entry, not the
+                            // end of the key space - relocation-filter cleanup
+                            // is eventual, so such entries survive until a
+                            // promote rewrites the index. Advance past it
+                            // instead of ending the iteration, otherwise every
+                            // live key after it becomes invisible.
+                            let Some(next_cell) = result.cell.clone() else {
+                                return Ok(None);
+                            };
+                            cell = next_cell;
+                            prev_key = Some(result.key.clone());
+                            continue;
+                        }
+                    }
+                }
+                GetResult::NotFound => unreachable!(),
+            };
+            return Ok(Some(result.with_key_value(key, value)));
+        }
     }
 
     /// Returns the next cell in the large table

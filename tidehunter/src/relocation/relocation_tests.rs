@@ -319,6 +319,89 @@ fn test_wal_relocation_basic_flow() {
     );
 }
 
+#[test]
+fn test_iterator_skips_reclaimed_positions() {
+    // A relocation filter removes the first half of the key space. Index
+    // cleanup is eventual, so entries pointing into the reclaimed WAL prefix
+    // can still be present afterwards. Iteration must skip them and still
+    // return every live key: stopping at the first unreadable entry hides the
+    // whole live half, because the removed keys sort in front of it.
+    let dir = tempdir::TempDir::new("test_iterator_skips_reclaimed_positions").unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    let config = Arc::new(config);
+    let mut ksb = KeyShapeBuilder::new();
+    let ksc = KeySpaceConfig::new().with_relocation_filter(|key, _| {
+        let value = u32::from_be_bytes(key.try_into().unwrap());
+        if value >= 1_000 {
+            Decision::StopRelocation
+        } else {
+            Decision::Remove
+        }
+    });
+    ksb.add_key_space_config("k", 4, 1, KeyType::uniform(1), ksc);
+    let key_shape = ksb.build();
+    let insert_count = 2000_u32;
+    let value = vec![3; 12 * 1000];
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            force_unload_config(&config),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        for i in 0..insert_count {
+            db.insert(ks, i.to_be_bytes().to_vec(), value.clone())
+                .unwrap();
+        }
+        db.wait_for_background_threads_to_finish();
+    }
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            force_unload_config(&config),
+            Metrics::new(),
+        )
+        .unwrap();
+        db.rebuild_control_region().unwrap();
+        db.start_blocking_relocation();
+        db.rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+
+    let db = Db::open(
+        dir.path(),
+        key_shape,
+        force_unload_config(&config),
+        Metrics::new(),
+    )
+    .unwrap();
+    let ks = db.ks("k");
+    let mut seen = Vec::new();
+    for entry in db.iterator(ks) {
+        let (key, v) = entry.unwrap();
+        assert_eq!(v.len(), value.len(), "iterator returned a truncated value");
+        seen.push(u32::from_be_bytes(key.as_ref().try_into().unwrap()));
+    }
+    assert!(
+        seen.windows(2).all(|w| w[0] < w[1]),
+        "iteration returned keys out of order"
+    );
+    let live: HashSet<u32> = seen.iter().copied().filter(|k| *k >= 1_000).collect();
+    for expected in 1_000..insert_count {
+        assert!(
+            live.contains(&expected),
+            "iteration missed live key {expected} (returned {} entries, first {:?})",
+            seen.len(),
+            seen.first(),
+        );
+    }
+    db.wait_for_background_threads_to_finish();
+}
+
 // Index-based relocation tests
 #[test]
 fn test_index_based_relocation_point_deletes() {
