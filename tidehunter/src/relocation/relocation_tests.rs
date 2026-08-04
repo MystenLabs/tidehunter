@@ -12,7 +12,7 @@ use crate::wal::layout::WalKind;
 use crate::{
     RelocationStrategy,
     config::Config,
-    db::Db,
+    db::{Db, DbResult},
     key_shape::{KeyShapeBuilder, KeyType},
     relocation::RelocationWatermarks,
 };
@@ -380,25 +380,50 @@ fn test_iterator_skips_reclaimed_positions() {
     )
     .unwrap();
     let ks = db.ks("k");
-    let mut seen = Vec::new();
-    for entry in db.iterator(ks) {
-        let (key, v) = entry.unwrap();
-        assert_eq!(v.len(), value.len(), "iterator returned a truncated value");
-        seen.push(u32::from_be_bytes(key.as_ref().try_into().unwrap()));
+
+    fn collect_keys(
+        iter: impl Iterator<Item = DbResult<(Bytes, Bytes)>>,
+        value_len: usize,
+        label: &str,
+    ) -> Vec<u32> {
+        iter.map(|entry| {
+            let (key, v) = entry.unwrap();
+            assert_eq!(
+                v.len(),
+                value_len,
+                "{label} iterator returned a truncated value"
+            );
+            u32::from_be_bytes(key.as_ref().try_into().unwrap())
+        })
+        .collect()
     }
-    assert!(
-        seen.windows(2).all(|w| w[0] < w[1]),
-        "iteration returned keys out of order"
-    );
-    let live: HashSet<u32> = seen.iter().copied().filter(|k| *k >= 1_000).collect();
-    for expected in 1_000..insert_count {
+
+    fn assert_live_keys_visible(seen: &[u32], insert_count: u32, label: &str) {
         assert!(
-            live.contains(&expected),
-            "iteration missed live key {expected} (returned {} entries, first {:?})",
-            seen.len(),
-            seen.first(),
+            seen.windows(2).all(|w| w[0] < w[1]),
+            "{label} iteration returned keys out of order"
         );
+        let live: HashSet<u32> = seen.iter().copied().filter(|k| *k >= 1_000).collect();
+        for expected in 1_000..insert_count {
+            assert!(
+                live.contains(&expected),
+                "{label} iteration missed live key {expected} \
+                 (returned {} entries, first {:?})",
+                seen.len(),
+                seen.first(),
+            );
+        }
     }
+
+    // Both read paths walk the same index, so both have to skip the stale
+    // entries: `Db::next_entry` for the live iterator and
+    // `DbCheckpoint::next_entry` for the checkpoint one.
+    let live_seen = collect_keys(db.iterator(ks), value.len(), "live");
+    assert_live_keys_visible(&live_seen, insert_count, "live");
+
+    let checkpoint_seen = collect_keys(db.checkpoint().iterator(ks), value.len(), "checkpoint");
+    assert_live_keys_visible(&checkpoint_seen, insert_count, "checkpoint");
+
     db.wait_for_background_threads_to_finish();
 }
 
