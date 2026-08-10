@@ -484,7 +484,12 @@ impl IndexFlusherThread {
     /// forever. Tombstones are stripped last because nothing below this level
     /// remains to be shadowed.
     fn process_l1_blob<L: Loader>(loader: &L, ctx: &KsContext, table: &mut IndexTable) {
-        table.retain_above_position(loader.min_wal_position());
+        // DIAGNOSTIC BRANCH, DO NOT MERGE: the promote-time reclaim added in
+        // #125 is disabled here so an Antithesis campaign can tell whether it
+        // is what makes a live key read as None, or whether another part of
+        // #125 (the process_l1_blob restructure, or the iterator skip in
+        // Db/DbCheckpoint::next_entry) is responsible.
+        let _ = loader.min_wal_position();
         Self::run_compactor(ctx, table);
         table.clean_self();
     }
