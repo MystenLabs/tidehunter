@@ -1,0 +1,14 @@
+/Users/julio/Projects/tidehunter-sem/tests/antithesis_semantics/target/release/deps/thiserror-11c8bfa0110ebb8c.d: /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/julio/Projects/tidehunter-sem/tests/antithesis_semantics/target/release/build/thiserror-bcd68a1f50aeb298/out/private.rs
+
+/Users/julio/Projects/tidehunter-sem/tests/antithesis_semantics/target/release/deps/libthiserror-11c8bfa0110ebb8c.rlib: /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/julio/Projects/tidehunter-sem/tests/antithesis_semantics/target/release/build/thiserror-bcd68a1f50aeb298/out/private.rs
+
+/Users/julio/Projects/tidehunter-sem/tests/antithesis_semantics/target/release/deps/libthiserror-11c8bfa0110ebb8c.rmeta: /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/julio/Projects/tidehunter-sem/tests/antithesis_semantics/target/release/build/thiserror-bcd68a1f50aeb298/out/private.rs
+
+/Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/Users/julio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/Users/julio/Projects/tidehunter-sem/tests/antithesis_semantics/target/release/build/thiserror-bcd68a1f50aeb298/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/julio/Projects/tidehunter-sem/tests/antithesis_semantics/target/release/build/thiserror-bcd68a1f50aeb298/out
