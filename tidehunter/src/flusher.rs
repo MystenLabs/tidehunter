@@ -476,15 +476,23 @@ impl IndexFlusherThread {
     /// Prepares a table that is about to be written as the deepest level for
     /// its key range (a promoted L1, or one shard of a sharded promote).
     ///
-    /// Entries below the WAL floor are dropped first: their data was already
-    /// reclaimed, e.g. records a relocation filter removed, so they can never
-    /// be read again. A promote rewrites the whole blob anyway, which makes it
-    /// the cheap place to reclaim that index space - the relocation cutoff pass
-    /// only sees the in-memory/L0 overlay, so without this the entries stay
-    /// forever. Tombstones are stripped last because nothing below this level
-    /// remains to be shadowed.
+    /// In a keyspace with a relocation filter, entries below the WAL floor are
+    /// dropped first: a filter removes records outright, so their data was
+    /// already reclaimed and they can never be read again. A promote rewrites
+    /// the whole blob anyway, which makes it the cheap place to reclaim that
+    /// index space - the relocation cutoff pass only sees the in-memory/L0
+    /// overlay, so without this the entries stay forever. Tombstones are
+    /// stripped last because nothing below this level remains to be shadowed.
     fn process_l1_blob<L: Loader>(loader: &L, ctx: &KsContext, table: &mut IndexTable) {
-        table.retain_above_position(loader.min_wal_position());
+        // Without a filter records are *relocated* rather than removed: WAL
+        // relocation rewrites them at new positions and re-points the index
+        // through `RelocationUpdates`. A promote landing between the floor
+        // advancing and that re-point being applied would drop the entry of a
+        // key that is still live, and the key then reads as `None` until a
+        // restart replays the WAL and rebuilds the index.
+        if ctx.ks_config.relocation_filter().is_some() {
+            table.retain_above_position(loader.min_wal_position());
+        }
         Self::run_compactor(ctx, table);
         table.clean_self();
     }
@@ -964,14 +972,25 @@ mod tests {
     }
 
     fn make_ctx(auto_sharding: bool, frag_size: u64) -> KsContext {
+        make_ctx_with(auto_sharding, frag_size, KeySpaceConfig::default())
+    }
+
+    /// Keyspace whose records a relocation filter removes outright, so
+    /// positions below the WAL floor are dead and reclaimable on promote.
+    fn make_filtered_ctx(auto_sharding: bool, frag_size: u64) -> KsContext {
+        let ks_config = KeySpaceConfig::new()
+            .with_relocation_filter(|_key, _value| crate::relocation::Decision::Remove);
+        make_ctx_with(auto_sharding, frag_size, ks_config)
+    }
+
+    fn make_ctx_with(auto_sharding: bool, frag_size: u64, ks_config: KeySpaceConfig) -> KsContext {
         let mut config = Config::small();
         config.frag_size = frag_size;
         config.l0_max_entries = Some(64);
         if auto_sharding {
             config.with_index_auto_sharding();
         }
-        let shape =
-            KeyShape::new_single_config(8, 1, KeyType::uniform(8), KeySpaceConfig::default());
+        let shape = KeyShape::new_single_config(8, 1, KeyType::uniform(8), ks_config);
         let ks_id = KeySpace::first();
         let ks = shape.ks(ks_id).clone();
         KsContext::new(Arc::new(config), ks, Metrics::new())
@@ -1587,7 +1606,7 @@ mod tests {
         // after the WAL prefix holding their data is reclaimed. A promote
         // rewrites the whole blob, so it must drop everything below the WAL
         // floor; otherwise that index space is never reclaimed.
-        let ctx = make_ctx(false, 1024 * 1024);
+        let ctx = make_filtered_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
         let l1_pos = WalPosition::new(7_000, 64);
         loader.seed(
@@ -1632,11 +1651,53 @@ mod tests {
     }
 
     #[test]
+    fn promote_keeps_below_floor_entries_without_a_relocation_filter() {
+        // A keyspace with no relocation filter has its records *relocated*, not
+        // removed: relocation rewrites them and re-points the index through
+        // RelocationUpdates. Between the WAL floor advancing and that re-point
+        // being applied, an index entry can sit below the floor while its key
+        // is still live, so a promote must not drop it - otherwise the key
+        // reads as None until a restart rebuilds the index from the WAL.
+        let ctx = make_ctx(false, 1024 * 1024);
+        assert!(
+            ctx.ks_config.relocation_filter().is_none(),
+            "this test is about the filter-less keyspace"
+        );
+        let loader = RecordingLoader::new();
+        let l1_pos = WalPosition::new(7_000, 64);
+        loader.seed(
+            l1_pos,
+            build_dirty(&[(1, Some(100)), (2, Some(150)), (3, Some(9_000))]),
+        );
+        loader.set_min_wal_position(200);
+
+        let dirty: Vec<(u64, Option<u64>)> =
+            (100..=200u64).map(|k| (k, Some(k + 10_000))).collect();
+        let cmd = flush_command(ctx.id(), build_dirty(&dirty), IndexLevels::promoted(l1_pos));
+
+        let (_orig, new_levels) =
+            IndexFlusherThread::handle_command(&loader, &cmd, &ctx, None, None).unwrap();
+
+        let new_l1 = new_levels.l1().expect("promote writes a new L1");
+        let keys: Vec<u64> = index_entries(&loader, new_l1)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        for kept in [1u64, 2, 3] {
+            assert!(
+                keys.contains(&kept),
+                "key {kept} is relocated, not removed, and must survive the promote: {keys:?}"
+            );
+        }
+        assert_eq!(keys.len(), 3 + dirty.len(), "nothing is dropped");
+    }
+
+    #[test]
     fn sharded_promote_reclaims_entries_below_min_wal_position() {
         // Same reclaim for the sharded promote, limited to the shards that are
         // rewritten anyway. Untouched shards keep their blob until a later
         // promote touches them.
-        let ctx = make_ctx(true, 1024 * 1024);
+        let ctx = make_filtered_ctx(true, 1024 * 1024);
         let loader = RecordingLoader::new();
         let (current_levels, positions) = seed_sharded_cell(&loader, &[(1, 100), (200, 300)]);
         // Seeded entries carry position == key, so keys below 80 in shard A
