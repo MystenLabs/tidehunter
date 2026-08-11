@@ -374,7 +374,17 @@ impl IndexFlusherThread {
                 }
             }
             // TODO: Used only if relocation doesn't call sync flush. Remove if no such implementation is needed anymore
-            None => merged_l0.retain_above_position(loader.min_wal_position()),
+            //
+            // Same soundness rule as `process_l1_blob`: a position below the
+            // WAL floor is only certainly dead when a relocation filter removed
+            // the record. Without a filter the record is relocated instead -
+            // rewritten at a new position with the index re-pointed through
+            // `RelocationUpdates` - so dropping the entry here loses a key that
+            // is still live.
+            None if ctx.ks_config.relocation_filter().is_some() => {
+                merged_l0.retain_above_position(loader.min_wal_position())
+            }
+            None => {}
         }
 
         // Decide: write as a new L0 on top of the existing L1, or promote by
@@ -1690,6 +1700,65 @@ mod tests {
             );
         }
         assert_eq!(keys.len(), 3 + dirty.len(), "nothing is dropped");
+    }
+
+    #[test]
+    fn flush_keeps_below_floor_entries_without_a_relocation_filter() {
+        // Every production flush takes the `relocation_cutoff: None` arm, so
+        // the L0 overlay is subject to the same rule as `process_l1_blob`:
+        // without a filter a below-floor entry belongs to a key relocation
+        // rewrites and re-points, not to one that was removed, so dropping it
+        // here loses a live key.
+        let ctx = make_ctx(false, 1024 * 1024);
+        assert!(
+            ctx.ks_config.relocation_filter().is_none(),
+            "this test is about the filter-less keyspace"
+        );
+        let loader = RecordingLoader::new();
+        loader.set_min_wal_position(200);
+
+        let cmd = flush_command(
+            ctx.id(),
+            build_dirty(&[(1, Some(100)), (2, Some(150)), (3, Some(9_000))]),
+            IndexLevels::new(),
+        );
+        let (_orig, new_levels) =
+            IndexFlusherThread::handle_command(&loader, &cmd, &ctx, None, None).unwrap();
+
+        let l0 = new_levels.l0().expect("flush writes an L0");
+        let keys: Vec<u64> = index_entries(&loader, l0)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![1, 2, 3],
+            "relocated keys must survive an ordinary flush"
+        );
+    }
+
+    #[test]
+    fn flush_reclaims_below_floor_entries_under_a_relocation_filter() {
+        // The filtered keyspace keeps today's behaviour: a filter removes the
+        // record outright, so a below-floor position is dead and reclaimable.
+        let ctx = make_filtered_ctx(false, 1024 * 1024);
+        let loader = RecordingLoader::new();
+        loader.set_min_wal_position(200);
+
+        let cmd = flush_command(
+            ctx.id(),
+            build_dirty(&[(1, Some(100)), (2, Some(150)), (3, Some(9_000))]),
+            IndexLevels::new(),
+        );
+        let (_orig, new_levels) =
+            IndexFlusherThread::handle_command(&loader, &cmd, &ctx, None, None).unwrap();
+
+        let l0 = new_levels.l0().expect("flush writes an L0");
+        let keys: Vec<u64> = index_entries(&loader, l0)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(keys, vec![3], "only the above-floor entry is kept");
     }
 
     #[test]
