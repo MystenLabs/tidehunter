@@ -548,6 +548,27 @@ fn main() {
                             actual,
                             expected
                         );
+
+                        // Neither keyspace here has a relocation filter, so a
+                        // promote should never see a live index entry below
+                        // the WAL floor: relocation rewrites those records and
+                        // re-points the index before the floor advances. This
+                        // fires at the moment that invariant breaks, which is
+                        // upstream of the read mismatch above.
+                        let below_floor = shared_metrics
+                            .index_entries_below_floor_no_filter
+                            .with_label_values(&["main"])
+                            .get()
+                            + shared_metrics
+                                .index_entries_below_floor_no_filter
+                                .with_label_values(&["secondary"])
+                                .get();
+                        th_assert_always!(
+                            below_floor == 0,
+                            "concurrent_no_live_entry_below_wal_floor",
+                            "promote saw {} live index entries below min_wal_position on a keyspace with no relocation filter",
+                            below_floor
+                        );
                     }
                     2 => {
                         // Delete operation

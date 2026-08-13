@@ -241,6 +241,13 @@ pub struct Metrics {
     pub relocation_kept: MetricIntCounterVec,
     pub relocation_removed: MetricIntCounterVec,
 
+    /// Live index entries found below `min_wal_position` on a keyspace with no
+    /// relocation filter, counted at promote time. Relocation rewrites those
+    /// records and re-points the index before the floor advances, so this is
+    /// expected to stay at zero. A non-zero value means that invariant was
+    /// violated and the entries were reachable for deletion.
+    pub index_entries_below_floor_no_filter: MetricIntCounterVec,
+
     // Index-based relocation metrics
     pub relocation_cells_processed: MetricIntCounterVec,
     pub relocation_current_keyspace: MetricIntGauge,
@@ -505,6 +512,12 @@ impl Metrics {
             gc_position: gauge_vec!("gc_position", &["kind"], registry, enabled),
             relocation_kept: counter_vec!("relocation_kept", &["ks"], registry, enabled),
             relocation_removed: counter_vec!("relocation_removed", &["ks"], registry, enabled),
+            index_entries_below_floor_no_filter: counter_vec!(
+                "index_entries_below_floor_no_filter",
+                &["ks"],
+                registry,
+                enabled
+            ),
 
             // Index-based relocation metrics
             relocation_cells_processed: counter_vec!(

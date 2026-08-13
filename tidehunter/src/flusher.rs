@@ -484,7 +484,23 @@ impl IndexFlusherThread {
     /// forever. Tombstones are stripped last because nothing below this level
     /// remains to be shadowed.
     fn process_l1_blob<L: Loader>(loader: &L, ctx: &KsContext, table: &mut IndexTable) {
-        table.retain_above_position(loader.min_wal_position());
+        let floor = loader.min_wal_position();
+        // Detector only - behaviour below is unchanged. On a keyspace with no
+        // relocation filter, relocation rewrites the records and re-points the
+        // index before the floor advances, so a live entry below the floor
+        // should be impossible here. Count them before the reclaim removes
+        // them, so a campaign catches the moment that invariant breaks rather
+        // than the read that fails later because of it.
+        if ctx.ks_config.relocation_filter().is_none() {
+            let below = table.iter().filter(|(_, pos)| pos.offset() < floor).count();
+            if below > 0 {
+                ctx.metrics
+                    .index_entries_below_floor_no_filter
+                    .with_label_values(&[ctx.ks_config.name()])
+                    .inc_by(below as u64);
+            }
+        }
+        table.retain_above_position(floor);
         Self::run_compactor(ctx, table);
         table.clean_self();
     }
