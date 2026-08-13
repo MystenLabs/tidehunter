@@ -8,3 +8,6 @@
 /results/measurements*
 CLAUDE.md
 /.claude
+# Nested crate build dirs (e.g. tests/antithesis_semantics), which the
+# root-anchored /target rule above does not match.
+target/
