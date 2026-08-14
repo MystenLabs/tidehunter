@@ -492,12 +492,41 @@ impl IndexFlusherThread {
         // them, so a campaign catches the moment that invariant breaks rather
         // than the read that fails later because of it.
         if ctx.ks_config.relocation_filter().is_none() {
-            let below = table.iter().filter(|(_, pos)| pos.offset() < floor).count();
-            if below > 0 {
+            let below: Vec<(Vec<u8>, u64)> = table
+                .iter()
+                .filter(|(_, pos)| pos.offset() < floor)
+                .map(|(key, pos)| (key.as_ref().to_vec(), pos.offset()))
+                .collect();
+            if !below.is_empty() {
                 ctx.metrics
                     .index_entries_below_floor_no_filter
                     .with_label_values(&[ctx.ks_config.name()])
-                    .inc_by(below as u64);
+                    .inc_by(below.len() as u64);
+                // DIAGNOSTIC BRANCH, DO NOT MERGE: panic here, on the thread
+                // that actually saw the bad state, so RUST_BACKTRACE shows
+                // which path reached the promote - an ordinary flush on the
+                // flusher thread, or `sync_flush_for_relocation` carrying
+                // RelocationUpdates. The workload assertion fires later, on a
+                // read, where the stack says nothing about how we got here.
+                //
+                // Not under cfg(test): the reclaim unit tests construct this
+                // state deliberately, so panicking there would just break them
+                // without telling us anything.
+                #[cfg(not(test))]
+                {
+                    let sample: Vec<(Vec<u8>, u64, u64)> = below
+                        .iter()
+                        .take(8)
+                        .map(|(key, pos)| (key.clone(), *pos, floor.saturating_sub(*pos)))
+                        .collect();
+                    panic!(
+                        "DIAGNOSTIC: {} live index entries below the WAL floor on ks={} \
+                     with no relocation filter. floor={floor}, \
+                     sample of (key, position, floor - position)={sample:?}",
+                        below.len(),
+                        ctx.ks_config.name(),
+                    );
+                }
             }
         }
         table.retain_above_position(floor);
