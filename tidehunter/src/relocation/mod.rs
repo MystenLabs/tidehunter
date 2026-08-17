@@ -437,10 +437,106 @@ impl RelocationDriver {
             }
         }
         db.rebuild_control_region_from(target_position)?;
-        db.wal_writer.gc(std::cmp::min(
+        let gc_watermark = std::cmp::min(
             target_position,
             db.control_region_store.lock().last_position(),
-        ))?;
+        );
+        Self::assert_no_visible_position_below(&db, gc_watermark)?;
+        db.wal_writer.gc(gc_watermark)?;
+        Ok(())
+    }
+
+    /// DIAGNOSTIC BRANCH, DO NOT MERGE.
+    ///
+    /// Checked immediately before GC is asked to reclaim a WAL prefix.
+    /// Relocation has just rewritten every live record below the cut to a new
+    /// position above it and re-pointed the index, so at this instant no
+    /// unfiltered keyspace should still have a logically visible index entry
+    /// inside that prefix.
+    ///
+    /// A hit means exactly this, and no more:
+    ///
+    ///   relocation reached its pre-GC phase while a logically visible
+    ///   unfiltered index entry remained inside the requested reclaim prefix
+    ///
+    /// That is strong evidence of a relocation / index-installation race. It
+    /// does not identify the writer, and it does not prove this particular GC
+    /// call physically deletes the record: `delete_files` skips files whose
+    /// map is still resident, so the boundary computed here is what relocation
+    /// *asked* to reclaim, not necessarily the floor that ends up established.
+    ///
+    /// Filtered keyspaces are skipped: there a record can legitimately be
+    /// dropped outright, so an entry inside the prefix is expected.
+    ///
+    /// This is a diagnostic, not a production guard, and the fork it offers is
+    /// asymmetric. A hit is informative. A clean pass is *not* proof that any
+    /// later corruption arose after GC - the scan walks cells one at a time
+    /// and is not atomic with concurrent writes, so an in-flight flush can
+    /// install a bad entry into a cell that was already scanned.
+    fn assert_no_visible_position_below(db: &Arc<Db>, gc_watermark: u64) -> DbResult<()> {
+        // Align down to a file boundary. GC deletes a file only when its whole
+        // range ends at or below the watermark, and `gc_watermark` can be
+        // unaligned because it is capped by the control region's last
+        // position. A position between the boundary and the watermark stays
+        // readable in the retained file, so comparing against the watermark
+        // itself would flag records GC is not going to reclaim.
+        //
+        // This is the prefix relocation *requested*, not a guaranteed outcome:
+        // `delete_files` skips any file whose map is still resident, so the
+        // floor that actually ends up established can be lower.
+        let wal_file_size = db.wal.wal_file_size();
+        let requested_reclaim_boundary = gc_watermark - gc_watermark % wal_file_size;
+        // Take the current floor too, so anything already below it is caught:
+        // those files are gone, so that is broken regardless of this GC run.
+        // Both are reported on a hit, so the two cases stay distinguishable:
+        // an entry below `current_floor` was already broken before this run,
+        // one only below `requested_reclaim_boundary` is about to become so.
+        let current_floor = db.wal.min_wal_position();
+        let boundary = requested_reclaim_boundary.max(current_floor);
+        let last_processed = db.wal_writer.last_processed();
+        let mut current_cell = CellReference::first(db, KeySpace::first());
+        while let Some(cell) = current_cell.take() {
+            current_cell = cell.next(db);
+            let ks = db.key_shape.ks(cell.keyspace);
+            if ks.relocation_filter().is_some() {
+                continue;
+            }
+            let context = db.ks_context(cell.keyspace);
+            let Some(index) = db.large_table.get_index_for_cell(
+                context,
+                &cell.cell_id,
+                db.as_ref(),
+                last_processed,
+            )?
+            else {
+                continue;
+            };
+            // `iter()` skips tombstones, so these are the logically visible
+            // index entries. It does not read the WAL, so this says nothing
+            // about whether the record itself is still resolvable.
+            let offenders: Vec<(Vec<u8>, u64)> = index
+                .iter()
+                .filter(|(_, pos)| pos.offset() < boundary)
+                .map(|(key, pos)| (key.as_ref().to_vec(), pos.offset()))
+                .take(8)
+                .collect();
+            if !offenders.is_empty() {
+                panic!(
+                    "DIAGNOSTIC pre-GC: keyspace {} cell {:?} still has logically visible \
+                     index entries below boundary={boundary}. \
+                     requested_reclaim_boundary={requested_reclaim_boundary}, \
+                     current_floor={current_floor}, gc_watermark={gc_watermark}, \
+                     wal_file_size={wal_file_size}, \
+                     (key, position, boundary - position)={:?}",
+                    ks.name(),
+                    cell.cell_id,
+                    offenders
+                        .iter()
+                        .map(|(key, pos)| (key, *pos, boundary.saturating_sub(*pos)))
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
         Ok(())
     }
 
