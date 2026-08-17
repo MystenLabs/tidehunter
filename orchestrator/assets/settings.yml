@@ -5,20 +5,14 @@ token_file: "${HOME}/.aws/credentials"
 ssh_private_key_file: "${HOME}/.ssh/mysten_baremetal_shared"
 specs: default
 repository:
-  url: https://@github.com/mystenlabs/tidehunter.git
-  commit: orchestrator-raw
+  url: https://github.com/mystenlabs/tidehunter.git
+  commit: paper-experiments
 target_configs_path: "./orchestrator/assets/target_configs.yml"
 log_processing: true
 working_dir: "/opt/sui/db"
+monitoring: false
 
 # Custom machines configuration
 custom_machines:
-  - host: benchmark-00.testing.sui.io
-  
-  - host: benchmark-01.testing.sui.io
-  
-  - host: benchmark-02.testing.sui.io
-  
-  - host: benchmark-03.testing.sui.io
+  - host: 127.0.0.1
 
-  - host: benchmark-04.testing.sui.io

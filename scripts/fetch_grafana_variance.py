@@ -148,13 +148,22 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
     duration = end - start
     host_filter = f'{{host="{host}"}}' if host else ""
 
+    # Shift the query window forward by one rate window so that every rate(..[1m])
+    # sample is fully inside the phase. Without this, the first sample at t=start
+    # looks back into the inter-phase pause and yields 0, which artificially inflates
+    # the coefficient of variation (e.g. 0.07 -> 0.20 for write-heavy mixed phases).
+    RATE_WINDOW_S = 60
+    q_start = start + RATE_WINDOW_S
+    q_end = end
+
     print(f"\n{'=' * 60}")
     print(f"Phase: {phase_name.upper()} ({duration:.0f}s)")
     if "summary" in phase_info:
         print(f"Summary: {phase_info['summary']}")
     if "description" in phase_info:
         print(f"Description: {phase_info['description']}")
-    print(f"Time window: {start:.0f} -> {end:.0f}")
+    print(f"Time window: {start:.0f} -> {end:.0f}  "
+          f"(queries: {q_start:.0f} -> {q_end:.0f})")
     if host:
         print(f"Host: {host}")
     print(f"{'=' * 60}")
@@ -165,7 +174,7 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
         result = query_prometheus(
             grafana_url, datasource_id, token,
             f"rate({metric}_count{host_filter}[1m])",
-            start, end, step=60
+            q_start, q_end, step=60
         )
         values = extract_values(result)
         if values:
@@ -188,7 +197,7 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
             result = query_prometheus(
                 grafana_url, datasource_id, token,
                 f'histogram_quantile({pct}, rate({metric}_bucket{host_filter}[1m]))',
-                start, end, step=60
+                q_start, q_end, step=60
             )
             values = extract_values(result)
             if values:
@@ -210,7 +219,7 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
         result = query_prometheus(
             grafana_url, datasource_id, token,
             f"rate({metric}_sum{host_filter}[1m]) / rate({metric}_count{host_filter}[1m])",
-            start, end, step=60
+            q_start, q_end, step=60
         )
         values = extract_values(result)
         if values:
@@ -229,11 +238,31 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
         ("snapshot_lock_time_mcs", "Snapshot lock hold time"),
     ]
     for metric, description in contention_metrics:
-        # Per-interval mean contention
+        # Aggregate wait accumulation, summed across all threads and keyspaces, in microseconds
+        # per wall-clock second. Divided by (threads * 1e6) this gives the fraction of foreground
+        # thread time spent waiting on this lock.
+        agg_result = query_prometheus(
+            grafana_url, datasource_id, token,
+            f"sum(rate({metric}_sum{host_filter}[1m]))",
+            q_start, q_end, step=60
+        )
+        agg_values = extract_values(agg_result)
+        if agg_values:
+            agg_stats = compute_stats(agg_values)
+            print(f"  {description} ({metric}) aggregate wait rate:")
+            print(f"    Mean: {agg_stats['mean']:.1f}us/s, Median: {agg_stats['median']:.1f}us/s, "
+                  f"Max: {agg_stats['max']:.1f}us/s")
+            # Mixed-phase thread count is 36; adjust if needed.
+            frac_pct = agg_stats["mean"] / 36_000_000 * 100
+            print(f"    Fraction of 36-thread-time: {frac_pct:.6f}%")
+        else:
+            print(f"  {description} ({metric}) aggregate wait rate: no data")
+
+        # Per-interval mean contention (wait per contended acquisition)
         result = query_prometheus(
             grafana_url, datasource_id, token,
             f"rate({metric}_sum{host_filter}[1m]) / rate({metric}_count{host_filter}[1m])",
-            start, end, step=60
+            q_start, q_end, step=60
         )
         values = extract_values(result)
         if not values:
@@ -254,7 +283,7 @@ def analyze_phase(phase_name, phase_info, grafana_url, datasource_id, token, hos
             result = query_prometheus(
                 grafana_url, datasource_id, token,
                 f"histogram_quantile({pct}, rate({metric}_bucket{host_filter}[1m]))",
-                start, end, step=60
+                q_start, q_end, step=60
             )
             pct_values = extract_values(result)
             if pct_values:
