@@ -414,21 +414,25 @@ fn main() {
                         // This is the split that matters: without it, a restart
                         // is only the last boundary we happened to observe, not
                         // the demonstrated point of loss.
+                        // Every key in the fixed set, compared as Options, so
+                        // a deleted key resurrecting as Some is caught as well
+                        // as an expected value going missing.
                         {
                             let expected = in_memory_state.data.lock().clone();
-                            for (key, value) in expected.iter() {
+                            for key in keys.iter() {
                                 let actual = old_db
                                     .get(key_space, key)
                                     .unwrap()
                                     .map(|v| v.as_ref().to_vec());
+                                let want = expected.get(key).cloned();
                                 th_assert_always!(
-                                    actual.as_ref() == Some(value),
+                                    actual == want,
                                     "concurrent_pre_close_matches_model",
                                     "before shutdown: key {:?} has {:?}, model has {:?} \
                                      [epoch={}]",
                                     key,
                                     actual,
-                                    Some(value),
+                                    want,
                                     restart_epoch.load(Ordering::SeqCst),
                                 );
                             }
@@ -458,26 +462,30 @@ fn main() {
                         restart_epoch.fetch_add(1, Ordering::SeqCst);
 
                         // Same check immediately after reopen, still under the
-                        // write lock. Pre-close passing and post-open failing
-                        // isolates the loss to shutdown / replay / control
-                        // region; both failing means the state was already bad
-                        // while the database was live.
+                        // write lock. Only two outcomes are observable, because
+                        // a pre-close failure panics before we get here:
+                        //   pre-close fails            -> already bad while live
+                        //   pre-close ok, post-open fails
+                        //                              -> drain / shutdown /
+                        //                                 reopen / replay /
+                        //                                 control region
                         {
                             let reopened = db_write.as_ref().unwrap();
                             let expected = in_memory_state.data.lock().clone();
-                            for (key, value) in expected.iter() {
+                            for key in keys.iter() {
                                 let actual = reopened
                                     .get(key_space, key)
                                     .unwrap()
                                     .map(|v| v.as_ref().to_vec());
+                                let want = expected.get(key).cloned();
                                 th_assert_always!(
-                                    actual.as_ref() == Some(value),
+                                    actual == want,
                                     "concurrent_post_open_matches_model",
                                     "after reopen: key {:?} has {:?}, model has {:?} \
                                      [epoch={} write_epoch={:?}]",
                                     key,
                                     actual,
-                                    Some(value),
+                                    want,
                                     restart_epoch.load(Ordering::SeqCst),
                                     in_memory_state.epoch_of(key),
                                 );

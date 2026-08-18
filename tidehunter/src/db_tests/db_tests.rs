@@ -4605,21 +4605,25 @@ fn acknowledged_writes_survive_restart_under_concurrency() {
             let acked = acked.clone();
             let stop = stop.clone();
             handles.push(std::thread::spawn(move || {
+                // Disjoint key range per thread. Holding a shared map lock
+                // across the insert would serialise every foreground write and
+                // defeat the point of the test; disjoint keys make the last
+                // acknowledged value per key unambiguous without one.
+                let mut mine: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
                 let mut op = 0u32;
                 while !stop.load(Ordering::Relaxed) {
-                    let key = ((op % 25) as u64).to_be_bytes().to_vec();
+                    let key = ((tid as u64) * 25 + (op % 25) as u64)
+                        .to_be_bytes()
+                        .to_vec();
                     let mut value = vec![0u8; 16];
                     value[0..4].copy_from_slice(&tid.to_be_bytes());
                     value[4..8].copy_from_slice(&op.to_be_bytes());
                     value[8..16].copy_from_slice(b"TESTDATA");
-                    // Hold the map lock across the write so the recorded value
-                    // is the last one acknowledged for this key.
-                    let mut acked = acked.lock();
                     db.insert(ks, key.clone(), value.clone()).unwrap();
-                    acked.insert(key, value);
-                    drop(acked);
+                    mine.insert(key, value);
                     op += 1;
                 }
+                acked.lock().extend(mine);
             }));
         }
 
@@ -4685,19 +4689,23 @@ fn acknowledged_writes_survive_rebuild_then_restart() {
             let acked = acked.clone();
             let stop = stop.clone();
             handles.push(std::thread::spawn(move || {
+                // Disjoint keys per writer so the foreground inserts genuinely
+                // overlap the rebuild instead of queueing on a shared lock.
+                let mut mine: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
                 let mut op = 0u32;
                 while !stop.load(Ordering::Relaxed) {
-                    let key = ((op % 25) as u64).to_be_bytes().to_vec();
+                    let key = ((tid as u64) * 25 + (op % 25) as u64)
+                        .to_be_bytes()
+                        .to_vec();
                     let mut value = vec![0u8; 16];
                     value[0..4].copy_from_slice(&tid.to_be_bytes());
                     value[4..8].copy_from_slice(&op.to_be_bytes());
                     value[8..16].copy_from_slice(b"TESTDATA");
-                    let mut acked = acked.lock();
                     db.insert(ks, key.clone(), value.clone()).unwrap();
-                    acked.insert(key, value);
-                    drop(acked);
+                    mine.insert(key, value);
                     op += 1;
                 }
+                acked.lock().extend(mine);
             }));
         }
 
@@ -4861,19 +4869,25 @@ fn acknowledged_writes_survive_forced_promote_then_restart() {
                     let acked = acked.clone();
                     let stop = stop.clone();
                     writers.push(std::thread::spawn(move || {
-                        let mut op = 100 + tid * 1000;
+                        // Disjoint keys per writer (offset past the 0..8 the
+                        // main thread uses) so the inserts genuinely run in
+                        // parallel with each other and with the promotion,
+                        // rather than queueing on a shared map lock.
+                        let mut mine: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+                        let mut op = 0u32;
                         while !stop.load(Ordering::Relaxed) {
-                            let key = ((op % 25) as u64).to_be_bytes().to_vec();
+                            let key = (100 + (tid as u64) * 25 + (op % 25) as u64)
+                                .to_be_bytes()
+                                .to_vec();
                             let mut value = vec![0u8; 16];
                             value[0..4].copy_from_slice(&round.to_be_bytes());
                             value[4..8].copy_from_slice(&op.to_be_bytes());
                             value[8..16].copy_from_slice(b"TESTDATA");
-                            let mut acked = acked.lock();
                             db.insert(ks, key.clone(), value.clone()).unwrap();
-                            acked.insert(key, value);
-                            drop(acked);
+                            mine.insert(key, value);
                             op += 1;
                         }
+                        acked.lock().extend(mine);
                     }));
                 }
             }
