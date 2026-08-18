@@ -87,23 +87,34 @@ impl KeyLockManager {
 #[derive(Clone)]
 struct InMemoryState {
     data: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+    /// Restart epoch at which each key's current value was acknowledged by
+    /// `insert`. On a mismatch this says whether the expected value was
+    /// written in the DB generation that is being read, or an earlier one.
+    write_epoch: Arc<Mutex<HashMap<Vec<u8>, u64>>>,
 }
 
 impl InMemoryState {
     fn new() -> Self {
         Self {
             data: Arc::new(Mutex::new(HashMap::new())),
+            write_epoch: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn insert(&self, key: Vec<u8>, value: Vec<u8>) {
+    fn insert(&self, key: Vec<u8>, value: Vec<u8>, epoch: u64) {
         let mut data = self.data.lock();
+        self.write_epoch.lock().insert(key.clone(), epoch);
         data.insert(key, value);
     }
 
     fn remove(&self, key: &[u8]) {
         let mut data = self.data.lock();
+        self.write_epoch.lock().remove(key);
         data.remove(key);
+    }
+
+    fn epoch_of(&self, key: &[u8]) -> Option<u64> {
+        self.write_epoch.lock().get(key).copied()
     }
 
     fn get_all(&self) -> HashMap<Vec<u8>, Vec<u8>> {
@@ -283,6 +294,12 @@ fn main() {
 
     // Shadow state tracks expected database contents for verification
     let in_memory_state = InMemoryState::new();
+    // Restart epoch: bumped to odd immediately before the DB is taken out, and
+    // to even once the reopened DB is installed. So an odd value means "a
+    // restart is in flight", and epoch / 2 is the DB generation. Recorded on
+    // both sides of a checked read so a mismatch says whether the comparison
+    // crossed a restart or failed inside one generation.
+    let restart_epoch = Arc::new(AtomicU64::new(0));
 
     // Define a set of keys that will be accessed by multiple threads
     // Using a fixed set of keys ensures high contention
@@ -330,6 +347,7 @@ fn main() {
         let shared_metrics = shared_metrics.clone();
         let secondary_state = secondary_state.clone();
         let next_secondary_key = next_secondary_key.clone();
+        let restart_epoch = restart_epoch.clone();
 
         // Create progress bar for this thread
         let thread_pb = multi_progress.add(ProgressBar::new(operations_per_thread as u64));
@@ -373,6 +391,7 @@ fn main() {
                     let mut db_write = db.write();
 
                     // Take the current database out of the Option
+                    restart_epoch.fetch_add(1, Ordering::SeqCst);
                     if let Some(old_db) = db_write.take() {
                         // Only check file descriptors 0.2% of the time to reduce overhead
                         let should_check_fds = !in_antithesis && rng.gen_range(0..500) < 1;
@@ -407,9 +426,14 @@ fn main() {
                             config.clone(),
                             shared_metrics.clone(),
                         ));
+                        restart_epoch.fetch_add(1, Ordering::SeqCst);
 
                         restart_count.fetch_add(1, Ordering::Relaxed);
                         sdk::sometimes(true, sdk::CoverageEvent::RestartHappened);
+                    } else {
+                        // Nothing was there to restart. Restore evenness so the
+                        // epoch never gets stuck reading "restart in flight".
+                        restart_epoch.fetch_add(1, Ordering::SeqCst);
                     }
                     // Lock is automatically released when db_write goes out of scope
                 }
@@ -518,10 +542,16 @@ fn main() {
                                 batch.commit().unwrap();
                             }
                         }
-                        in_memory_state.insert(key.clone(), value);
+                        // Epoch read after the db guard is dropped, so it is the
+                        // generation the write is attributed to even if a restart
+                        // lands in this window - which is exactly the case of
+                        // interest.
+                        let ack_epoch = restart_epoch.load(Ordering::SeqCst);
+                        in_memory_state.insert(key.clone(), value, ack_epoch);
                     }
                     1 => {
                         // Read operation with immediate consistency check
+                        let epoch_before = restart_epoch.load(Ordering::SeqCst);
                         let db_read = db.read();
                         let db_instance = db_read.as_ref().unwrap();
                         let db_value = {
@@ -540,13 +570,22 @@ fn main() {
                         let in_memory_data = in_memory_state.data.lock();
                         let expected = in_memory_data.get(&key).cloned();
                         let actual = db_value.map(|value| value.as_ref().to_vec());
+                        let epoch_after = restart_epoch.load(Ordering::SeqCst);
+                        let write_epoch = in_memory_state.epoch_of(&key);
                         th_assert_always!(
                             actual == expected,
                             "concurrent_get_matches_model",
-                            "read mismatch for key {:?}: database has {:?}, in-memory has {:?}",
+                            "read mismatch for key {:?}: database has {:?}, in-memory has {:?} \
+                             [epoch_before={} epoch_after={} write_epoch={:?} \
+                             crossed_restart={} restart_in_flight={}]",
                             key,
                             actual,
-                            expected
+                            expected,
+                            epoch_before,
+                            epoch_after,
+                            write_epoch,
+                            epoch_before != epoch_after,
+                            epoch_before % 2 == 1 || epoch_after % 2 == 1
                         );
 
                         // Neither keyspace here has a relocation filter, so a

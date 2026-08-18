@@ -4503,3 +4503,232 @@ fn test_auto_sharding_concurrent() {
         "expected re-sharding (incremental sharded promote) to fire"
     );
 }
+
+/// DIAGNOSTIC: does an acknowledged insert survive a clean close/reopen?
+///
+/// The concurrent workload writes under a per-key lock, releases the db read
+/// guard, and only then updates its model. A restart can land in that window.
+/// That is only a harmless model race if tidehunter is allowed to lose an
+/// insert that already returned `Ok` across a clean shutdown and reopen. This
+/// checks that directly, at the tightest possible spacing.
+#[test]
+fn insert_survives_immediate_clean_reopen() {
+    let dir = tempdir::TempDir::new("insert-survives-reopen").unwrap();
+    let config = Arc::new(Config::small());
+    let key_shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+
+    // Mirrors the workload: a small fixed key set, values tagged so a mismatch
+    // identifies the round that wrote them.
+    for round in 0..200u32 {
+        let key = ((round % 25) as u64).to_be_bytes().to_vec();
+        let mut value = vec![0u8; 16];
+        value[0..4].copy_from_slice(&round.to_be_bytes());
+        value[8..16].copy_from_slice(b"TESTDATA");
+
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("root");
+
+        // Insert returns Ok - from here on the write is acknowledged.
+        db.insert(ks, key.clone(), value.clone()).unwrap();
+
+        // Read it back before the restart, so a failure below cannot be
+        // blamed on the write never having landed.
+        assert_eq!(
+            db.get(ks, &key).unwrap().map(|v| v.as_ref().to_vec()),
+            Some(value.clone()),
+            "round {round}: value must be visible before the restart"
+        );
+
+        // Clean shutdown, exactly as the workload does it.
+        db.wait_for_background_threads_to_finish();
+
+        // Reopen immediately and re-check.
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("root");
+        assert_eq!(
+            db.get(ks, &key).unwrap().map(|v| v.as_ref().to_vec()),
+            Some(value.clone()),
+            "round {round}: acknowledged insert lost across a clean close/reopen"
+        );
+        db.wait_for_background_threads_to_finish();
+    }
+}
+
+/// DIAGNOSTIC: same question under concurrency and in-flight flush activity.
+///
+/// Writers hammer a small key set while the main thread performs the
+/// workload's exact restart sequence (`wait_for_background_threads_to_finish`
+/// then reopen). Every write that returned `Ok` before the restart must still
+/// be readable after it.
+#[test]
+fn acknowledged_writes_survive_restart_under_concurrency() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = tempdir::TempDir::new("acked-writes-survive-restart").unwrap();
+    let mut config = Config::small();
+    // Match the workload: tiny thresholds so flushes and promotes are in
+    // flight when the restart lands.
+    config.max_dirty_keys = 4;
+    config.l0_max_entries = Some(6);
+    config.snapshot_unload_threshold = 1024;
+    let config = Arc::new(config);
+    let key_shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+
+    for round in 0..40u32 {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("root");
+
+        // Acknowledged writes, recorded only after insert returns Ok.
+        let acked: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = vec![];
+        for tid in 0..4u32 {
+            let db = db.clone();
+            let acked = acked.clone();
+            let stop = stop.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut op = 0u32;
+                while !stop.load(Ordering::Relaxed) {
+                    let key = ((op % 25) as u64).to_be_bytes().to_vec();
+                    let mut value = vec![0u8; 16];
+                    value[0..4].copy_from_slice(&tid.to_be_bytes());
+                    value[4..8].copy_from_slice(&op.to_be_bytes());
+                    value[8..16].copy_from_slice(b"TESTDATA");
+                    // Hold the map lock across the write so the recorded value
+                    // is the last one acknowledged for this key.
+                    let mut acked = acked.lock();
+                    db.insert(ks, key.clone(), value.clone()).unwrap();
+                    acked.insert(key, value);
+                    drop(acked);
+                    op += 1;
+                }
+            }));
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let expected = acked.lock().clone();
+        db.wait_for_background_threads_to_finish();
+
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("root");
+        for (key, value) in &expected {
+            assert_eq!(
+                db.get(ks, key).unwrap().map(|v| v.as_ref().to_vec()),
+                Some(value.clone()),
+                "round {round}: acknowledged write for key {key:?} lost across restart"
+            );
+        }
+        db.wait_for_background_threads_to_finish();
+    }
+}
+
+/// DIAGNOSTIC: same durability question with `rebuild_control_region()` landing
+/// immediately before the clean restart, which the workload does on a third of
+/// its restarts. Rebuild and ordinary operations both run under shared
+/// `db.read()` guards there, so they can overlap.
+#[test]
+fn acknowledged_writes_survive_rebuild_then_restart() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = tempdir::TempDir::new("acked-writes-rebuild-restart").unwrap();
+    let mut config = Config::small();
+    config.max_dirty_keys = 4;
+    config.l0_max_entries = Some(6);
+    config.snapshot_unload_threshold = 1024;
+    let config = Arc::new(config);
+    let key_shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+
+    for round in 0..40u32 {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("root");
+
+        let acked: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = vec![];
+        for tid in 0..4u32 {
+            let db = db.clone();
+            let acked = acked.clone();
+            let stop = stop.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut op = 0u32;
+                while !stop.load(Ordering::Relaxed) {
+                    let key = ((op % 25) as u64).to_be_bytes().to_vec();
+                    let mut value = vec![0u8; 16];
+                    value[0..4].copy_from_slice(&tid.to_be_bytes());
+                    value[4..8].copy_from_slice(&op.to_be_bytes());
+                    value[8..16].copy_from_slice(b"TESTDATA");
+                    let mut acked = acked.lock();
+                    db.insert(ks, key.clone(), value.clone()).unwrap();
+                    acked.insert(key, value);
+                    drop(acked);
+                    op += 1;
+                }
+            }));
+        }
+
+        // Rebuild while writers are still running, exactly as the workload does
+        // it: outside the restart's exclusive section, overlapping ordinary ops.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        db.rebuild_control_region().unwrap();
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let expected = acked.lock().clone();
+        db.wait_for_background_threads_to_finish();
+
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("root");
+        for (key, value) in &expected {
+            assert_eq!(
+                db.get(ks, key).unwrap().map(|v| v.as_ref().to_vec()),
+                Some(value.clone()),
+                "round {round}: write acknowledged before rebuild+restart was lost"
+            );
+        }
+        db.wait_for_background_threads_to_finish();
+    }
+}
