@@ -405,6 +405,35 @@ fn main() {
                             );
                         }
 
+                        // Verify the whole model against the live database
+                        // immediately before shutdown. The db write lock is
+                        // held and writers hold their guard across the model
+                        // update, so nothing can be mid-operation here and a
+                        // mismatch cannot be model lag.
+                        //
+                        // This is the split that matters: without it, a restart
+                        // is only the last boundary we happened to observe, not
+                        // the demonstrated point of loss.
+                        {
+                            let expected = in_memory_state.data.lock().clone();
+                            for (key, value) in expected.iter() {
+                                let actual = old_db
+                                    .get(key_space, key)
+                                    .unwrap()
+                                    .map(|v| v.as_ref().to_vec());
+                                th_assert_always!(
+                                    actual.as_ref() == Some(value),
+                                    "concurrent_pre_close_matches_model",
+                                    "before shutdown: key {:?} has {:?}, model has {:?} \
+                                     [epoch={}]",
+                                    key,
+                                    actual,
+                                    Some(value),
+                                    restart_epoch.load(Ordering::SeqCst),
+                                );
+                            }
+                        }
+
                         // Wait for all background threads to finish while holding the lock
                         old_db.wait_for_background_threads_to_finish();
                         sdk::sometimes(true, sdk::CoverageEvent::BackgroundThreadsJoined);
@@ -427,6 +456,33 @@ fn main() {
                             shared_metrics.clone(),
                         ));
                         restart_epoch.fetch_add(1, Ordering::SeqCst);
+
+                        // Same check immediately after reopen, still under the
+                        // write lock. Pre-close passing and post-open failing
+                        // isolates the loss to shutdown / replay / control
+                        // region; both failing means the state was already bad
+                        // while the database was live.
+                        {
+                            let reopened = db_write.as_ref().unwrap();
+                            let expected = in_memory_state.data.lock().clone();
+                            for (key, value) in expected.iter() {
+                                let actual = reopened
+                                    .get(key_space, key)
+                                    .unwrap()
+                                    .map(|v| v.as_ref().to_vec());
+                                th_assert_always!(
+                                    actual.as_ref() == Some(value),
+                                    "concurrent_post_open_matches_model",
+                                    "after reopen: key {:?} has {:?}, model has {:?} \
+                                     [epoch={} write_epoch={:?}]",
+                                    key,
+                                    actual,
+                                    Some(value),
+                                    restart_epoch.load(Ordering::SeqCst),
+                                    in_memory_state.epoch_of(key),
+                                );
+                            }
+                        }
 
                         restart_count.fetch_add(1, Ordering::Relaxed);
                         sdk::sometimes(true, sdk::CoverageEvent::RestartHappened);
@@ -527,27 +583,26 @@ fn main() {
                         value[4..8].copy_from_slice(&(op_num as u32).to_be_bytes());
                         value[8..16].copy_from_slice(b"TESTDATA");
 
-                        // Update both database and shadow state atomically
-                        {
-                            let db_read = db.read();
-                            let db_instance = db_read.as_ref().unwrap();
-                            if rng.r#gen() {
-                                db_instance
-                                    .insert(key_space, key.clone(), value.clone())
-                                    .unwrap();
-                            } else {
-                                // Some of the writes are done via batch
-                                let mut batch = db_instance.write_batch();
-                                batch.write(key_space, key.clone(), value.clone());
-                                batch.commit().unwrap();
-                            }
+                        // The db guard is held across the model update, so a
+                        // restart cannot land between the acknowledged write and
+                        // the model recording it. Without this the restart-time
+                        // checks below would see a model that legitimately lags
+                        // the database and report spurious mismatches.
+                        let db_read = db.read();
+                        let db_instance = db_read.as_ref().unwrap();
+                        if rng.r#gen() {
+                            db_instance
+                                .insert(key_space, key.clone(), value.clone())
+                                .unwrap();
+                        } else {
+                            // Some of the writes are done via batch
+                            let mut batch = db_instance.write_batch();
+                            batch.write(key_space, key.clone(), value.clone());
+                            batch.commit().unwrap();
                         }
-                        // Epoch read after the db guard is dropped, so it is the
-                        // generation the write is attributed to even if a restart
-                        // lands in this window - which is exactly the case of
-                        // interest.
                         let ack_epoch = restart_epoch.load(Ordering::SeqCst);
                         in_memory_state.insert(key.clone(), value, ack_epoch);
+                        drop(db_read);
                     }
                     1 => {
                         // Read operation with immediate consistency check
@@ -611,20 +666,20 @@ fn main() {
                     }
                     2 => {
                         // Delete operation
-                        // Remove from both database and shadow state atomically
-                        {
-                            let db_read = db.read();
-                            let db_instance = db_read.as_ref().unwrap();
-                            if rng.r#gen() {
-                                db_instance.remove(key_space, key.clone()).unwrap();
-                            } else {
-                                // Some of the deletes are done via batch
-                                let mut batch = db_instance.write_batch();
-                                batch.delete(key_space, key.clone());
-                                batch.commit().unwrap();
-                            }
+                        // Guard held across the model update, same reason as
+                        // the insert arm.
+                        let db_read = db.read();
+                        let db_instance = db_read.as_ref().unwrap();
+                        if rng.r#gen() {
+                            db_instance.remove(key_space, key.clone()).unwrap();
+                        } else {
+                            // Some of the deletes are done via batch
+                            let mut batch = db_instance.write_batch();
+                            batch.delete(key_space, key.clone());
+                            batch.commit().unwrap();
                         }
                         in_memory_state.remove(&key);
+                        drop(db_read);
                     }
                     _ => unreachable!(),
                 }

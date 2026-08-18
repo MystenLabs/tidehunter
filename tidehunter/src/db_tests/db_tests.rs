@@ -4732,3 +4732,180 @@ fn acknowledged_writes_survive_rebuild_then_restart() {
         db.wait_for_background_threads_to_finish();
     }
 }
+
+/// DIAGNOSTIC: the failing Antithesis case restarted a *brand new* database.
+///
+/// The other restart tests let the database accumulate state before
+/// restarting. The observed failure did not: the workload wipes its DB path at
+/// process start, and the mismatch landed ~150 ms later, on thread 0's very
+/// first operation, with the value acknowledged in generation 0 and missing in
+/// generation 1. So restart while the database is still young, after as few as
+/// one acknowledged write, from a genuinely empty directory each round.
+#[test]
+fn acknowledged_writes_survive_restart_on_a_young_db() {
+    let mut config = Config::small();
+    config.max_dirty_keys = 4;
+    config.l0_max_entries = Some(6);
+    config.snapshot_unload_threshold = 1024;
+    let config = Arc::new(config);
+    let key_shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+
+    // Sweep how many acknowledged writes exist before the restart, so the
+    // one-write and two-write cases are covered explicitly rather than by luck.
+    for writes_before_restart in 1..=6usize {
+        for round in 0..25u32 {
+            // Fresh directory: the database is brand new, as after the
+            // workload's startup wipe.
+            let dir = tempdir::TempDir::new("acked-young-db-restart").unwrap();
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
+            let ks = db.ks("root");
+
+            let mut acked: Vec<(Vec<u8>, Vec<u8>)> = vec![];
+            for op in 0..writes_before_restart {
+                let key = (op as u64).to_be_bytes().to_vec();
+                let mut value = vec![0u8; 16];
+                value[0..4].copy_from_slice(&round.to_be_bytes());
+                value[4..8].copy_from_slice(&(op as u32).to_be_bytes());
+                value[8..16].copy_from_slice(b"TESTDATA");
+                db.insert(ks, key.clone(), value.clone()).unwrap();
+                acked.push((key, value));
+            }
+
+            // No sleep, no extra work: restart as soon as the writes return.
+            db.wait_for_background_threads_to_finish();
+
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
+            let ks = db.ks("root");
+            for (key, value) in &acked {
+                assert_eq!(
+                    db.get(ks, key).unwrap().map(|v| v.as_ref().to_vec()),
+                    Some(value.clone()),
+                    "writes_before_restart={writes_before_restart} round={round}: \
+                     acknowledged write for key {key:?} lost across a restart of a young db"
+                );
+            }
+            db.wait_for_background_threads_to_finish();
+        }
+    }
+}
+
+/// DIAGNOSTIC: young database + forced flat promote + restart.
+///
+/// In the failing Antithesis case, generation 0 lasted 158 ms and contained a
+/// forced flat promote (`concurrent_promote_flat_forced` fired 25 ms after
+/// process start) before the restart.
+///
+/// Weak by construction, and kept only as a negative result:
+/// `test_promote_flat_force` performs the in-memory compaction step and
+/// explicitly does *not* call `promote_pending_and_check_flush` or trigger a
+/// flush, so this never enters the asynchronous flush-completion window. It
+/// passing does not clear that window - see the failpoint tests for that.
+#[test]
+fn acknowledged_writes_survive_forced_promote_then_restart() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut config = Config::small();
+    config.max_dirty_keys = 4;
+    config.l0_max_entries = Some(6);
+    config.snapshot_unload_threshold = 1024;
+    let config = Arc::new(config);
+    let key_shape = KeyShape::new_single(8, 1, KeyType::uniform(1));
+
+    // `concurrent` mirrors the workload comment on test_promote_flat_force:
+    // the promote is meant to interleave with writes from other threads.
+    for concurrent in [false, true] {
+        for round in 0..30u32 {
+            let dir = tempdir::TempDir::new("acked-forced-promote-restart").unwrap();
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
+            let ks = db.ks("root");
+
+            let acked: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+            let put = |op: u32, db: &Arc<Db>, acked: &Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>| {
+                let key = ((op % 25) as u64).to_be_bytes().to_vec();
+                let mut value = vec![0u8; 16];
+                value[0..4].copy_from_slice(&round.to_be_bytes());
+                value[4..8].copy_from_slice(&op.to_be_bytes());
+                value[8..16].copy_from_slice(b"TESTDATA");
+                let mut acked = acked.lock();
+                db.insert(ks, key.clone(), value.clone()).unwrap();
+                acked.insert(key, value);
+            };
+
+            for op in 0..8u32 {
+                put(op, &db, &acked);
+            }
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut writers = vec![];
+            if concurrent {
+                for tid in 0..3u32 {
+                    let db = db.clone();
+                    let acked = acked.clone();
+                    let stop = stop.clone();
+                    writers.push(std::thread::spawn(move || {
+                        let mut op = 100 + tid * 1000;
+                        while !stop.load(Ordering::Relaxed) {
+                            let key = ((op % 25) as u64).to_be_bytes().to_vec();
+                            let mut value = vec![0u8; 16];
+                            value[0..4].copy_from_slice(&round.to_be_bytes());
+                            value[4..8].copy_from_slice(&op.to_be_bytes());
+                            value[8..16].copy_from_slice(b"TESTDATA");
+                            let mut acked = acked.lock();
+                            db.insert(ks, key.clone(), value.clone()).unwrap();
+                            acked.insert(key, value);
+                            drop(acked);
+                            op += 1;
+                        }
+                    }));
+                }
+            }
+
+            // The ingredient the other tests lack.
+            db.large_table.test_promote_flat_force(&*db);
+
+            stop.store(true, Ordering::Relaxed);
+            for w in writers {
+                w.join().unwrap();
+            }
+
+            let expected = acked.lock().clone();
+            db.wait_for_background_threads_to_finish();
+
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
+            let ks = db.ks("root");
+            for (key, value) in &expected {
+                assert_eq!(
+                    db.get(ks, key).unwrap().map(|v| v.as_ref().to_vec()),
+                    Some(value.clone()),
+                    "concurrent={concurrent} round={round}: acknowledged write for key \
+                     {key:?} lost across forced-promote + restart"
+                );
+            }
+            db.wait_for_background_threads_to_finish();
+        }
+    }
+}
