@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::context::{DbOpKind, KsContext, KsContextVec, ReadType, WalEntryKind};
 use crate::control::{ControlRegion, ControlRegionStore, RelocateFiles};
 use crate::crc::IntoBytesFixed;
+use crate::decompress_cache::{CacheOutcome, DecompressCache};
 use crate::flusher::IndexFlusher;
 use crate::index::index_format::{IndexFormat, IndexIterCaches};
 use crate::index::index_table::IndexTable;
@@ -54,6 +55,9 @@ pub struct Db {
     /// resolved via [`Db::ks`] / [`Db::try_ks`] / [`Db::single_ks`].
     keyspaces: KeySpaces,
     relocator: Relocator,
+    /// Present when `Config::compressed_batch_cache_bytes` is set; serves
+    /// decompressed `CompressedBatch` bodies on the read paths.
+    decompress_cache: Option<DecompressCache>,
     commit_pool: Option<rayon::ThreadPool>,
     /// One handle per pending-promotion shard, for waking threads after batch commits.
     /// Index `i` owns mutex shards where `mutex_idx % len == i`.
@@ -136,6 +140,15 @@ impl Db {
             .map(|_| OnceLock::new())
             .collect::<Box<[_]>>();
 
+        let decompress_cache = config.compressed_batch_cache_bytes.map(|max_bytes| {
+            let reachable_wal = wal.clone();
+            DecompressCache::new(
+                max_bytes,
+                Box::new(move |position| reachable_wal.is_reachable(position)),
+                &metrics,
+            )
+        });
+
         let this = Self {
             path: path.clone(),
             large_table,
@@ -149,6 +162,7 @@ impl Db {
             key_shape,
             keyspaces,
             relocator,
+            decompress_cache,
             commit_pool,
             pending_promotion_threads,
             _lock: Mutex::new(Some(lock)),
@@ -1064,25 +1078,16 @@ impl Db {
                 return Ok(Some(Bytes::new()));
             }
         }
-        let Some(entry) = self.read_report_entry(&self.wal, position)? else {
-            return Ok(None);
-        };
-        match entry {
-            WalEntry::Record(_, wal_key, v, _) => {
+        match self.resolve_record_frame(context, position)? {
+            None => Ok(None),
+            Some(RecordFrame::Record(wal_key, v)) => {
                 if wal_key.as_ref() != k {
                     Ok(None)
                 } else {
                     Ok(Some(v))
                 }
             }
-            entry @ WalEntry::CompressedBatch(..) => {
-                let _timer = context.read_decompress_mcs.clone().mcs_timer();
-                let decompressed = decompress_wal_entry(entry).expect("matched above");
-                let result = find_record(&decompressed, context.ks_config.id(), k);
-                context.read_decompress_count.inc();
-                Ok(result)
-            }
-            other => panic!("Unexpected wal entry where expected record/batch: {other:?}"),
+            Some(RecordFrame::Batch(body)) => Ok(find_record(&body, context.ks_config.id(), k)),
         }
     }
 
@@ -1100,21 +1105,115 @@ impl Db {
         position: WalPosition,
         indexed_key: &[u8],
     ) -> DbResult<Option<(Bytes, Bytes)>> {
+        match self.resolve_record_frame(context, position)? {
+            None => Ok(None),
+            Some(RecordFrame::Record(k, v)) => Ok(Some((k, v))),
+            Some(RecordFrame::Batch(body)) => {
+                Ok(find_record_by(&body, context.ks_config.id(), |full_key| {
+                    context.ks_config.reduce_key(full_key).as_ref() == indexed_key
+                }))
+            }
+        }
+    }
+
+    /// Resolves the frame at `position` to a [`RecordFrame`], consulting the
+    /// decompressed-batch cache before reading the WAL — a cache hit skips
+    /// the frame I/O, CRC pass and copy, not just the decompression.
+    /// Returns `None` when the position is unreachable (its WAL file was
+    /// garbage-collected); callers rely on that to treat stale index entries
+    /// as gone.
+    fn resolve_record_frame(
+        &self,
+        context: &KsContext,
+        position: WalPosition,
+    ) -> DbResult<Option<RecordFrame>> {
+        if let Some(body) = self.cached_batch_body(context, position) {
+            return Ok(Some(RecordFrame::Batch(body)));
+        }
         let Some(entry) = self.read_report_entry(&self.wal, position)? else {
             return Ok(None);
         };
         match entry {
-            WalEntry::Record(KeySpace(_), k, v, _relocated) => Ok(Some((k, v))),
-            entry @ WalEntry::CompressedBatch(..) => {
-                let _timer = context.read_decompress_mcs.clone().mcs_timer();
-                let decompressed = decompress_wal_entry(entry).expect("matched above");
-                let result = find_record_by(&decompressed, context.ks_config.id(), |full_key| {
-                    context.ks_config.reduce_key(full_key).as_ref() == indexed_key
-                });
-                context.read_decompress_count.inc();
-                Ok(result)
-            }
+            WalEntry::Record(_, key, value, _) => Ok(Some(RecordFrame::Record(key, value))),
+            entry @ WalEntry::CompressedBatch(..) => Ok(self
+                .decompressed_batch_body(context, position, entry)?
+                .map(RecordFrame::Batch)),
             other => panic!("Unexpected wal entry where expected record/batch: {other:?}"),
+        }
+    }
+
+    /// Pre-I/O probe of the decompressed-batch cache. A hit counts toward
+    /// `read_decompress_cache_hits`; the cache itself refuses to serve
+    /// bodies whose frame is no longer reachable (a WAL read of a reclaimed
+    /// position returns `Ok(None)`, which is load-bearing deletion
+    /// semantics for stale index entries — see `resolve_record_frame`). The
+    /// probe is skipped entirely while the cache holds nothing (no bodies
+    /// and no in-flight fills), so databases that never read compressed
+    /// frames pay no shard lock here.
+    fn cached_batch_body(&self, context: &KsContext, position: WalPosition) -> Option<Bytes> {
+        let cache = self.decompress_cache.as_ref()?;
+        if cache.is_empty() {
+            return None;
+        }
+        let body = cache.get(position)?;
+        context.read_decompress_cache_hits.inc();
+        Some(body)
+    }
+
+    /// Returns the decompressed body of the `CompressedBatch` frame read at
+    /// `position`, or `None` if the frame became unreachable during a
+    /// retry. `resolve_record_frame` checks the cache *before* reading the
+    /// frame; this handles the miss path, where the cache single-flights
+    /// the decompression across concurrent readers of the same frame. A
+    /// waiter releases its frame copy while blocking, so a failed leader
+    /// (`CacheOutcome::RetryRead`) requires re-reading the frame here.
+    /// Decompression metrics are attributed to the requesting keyspace;
+    /// reads that skip decompression (cached, or waited on another reader's
+    /// fill) count under `read_decompress_cache_hits` instead of
+    /// `read_decompress_count`.
+    fn decompressed_batch_body(
+        &self,
+        context: &KsContext,
+        position: WalPosition,
+        entry: WalEntry,
+    ) -> DbResult<Option<Bytes>> {
+        let Some(cache) = &self.decompress_cache else {
+            let body = {
+                let _timer = context.read_decompress_mcs.clone().mcs_timer();
+                decompress_wal_entry(entry).expect("caller matched WalEntry::CompressedBatch")
+            };
+            context.read_decompress_count.inc();
+            return Ok(Some(body));
+        };
+        let mut entry = Some(entry);
+        loop {
+            let batch_entry = match entry.take() {
+                Some(batch_entry) => batch_entry,
+                None => match self.read_report_entry(&self.wal, position)? {
+                    Some(batch_entry @ WalEntry::CompressedBatch(..)) => batch_entry,
+                    Some(other) => {
+                        panic!("Unexpected wal entry where expected record/batch: {other:?}")
+                    }
+                    None => return Ok(None),
+                },
+            };
+            let decompress = || {
+                let _timer = context.read_decompress_mcs.clone().mcs_timer();
+                decompress_wal_entry(batch_entry).expect("caller matched WalEntry::CompressedBatch")
+            };
+            match cache.get_or_decompress(position, decompress) {
+                CacheOutcome::Hit(body) => {
+                    context.read_decompress_cache_hits.inc();
+                    return Ok(Some(body));
+                }
+                CacheOutcome::Decompressed(body) => {
+                    context.read_decompress_count.inc();
+                    return Ok(Some(body));
+                }
+                // The leader we waited on failed after we released our frame
+                // copy: re-read the frame and try again.
+                CacheOutcome::RetryRead => {}
+            }
         }
     }
 
@@ -1649,6 +1748,14 @@ impl Loader for Db {
     fn min_wal_position(&self) -> u64 {
         self.wal.min_wal_position()
     }
+}
+
+/// A WAL frame resolved on the record read path: either a plain record's
+/// key and value, or the decompressed body of a `CompressedBatch` for the
+/// caller to scan. See `Db::resolve_record_frame`.
+enum RecordFrame {
+    Record(Bytes, Bytes),
+    Batch(Bytes),
 }
 
 #[doc(hidden)] // Used by tools/tideconsole for WAL inspection

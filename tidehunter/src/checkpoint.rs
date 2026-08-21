@@ -163,7 +163,10 @@ impl DbCheckpoint {
                     return Ok(None);
                 };
                 // Deliberately no `update_lru`: a checkpoint read must not
-                // mutate the live database's value cache.
+                // seed the live value LRU with as-of values that may be
+                // stale for live reads. (Sharing the decompressed-batch
+                // cache is sound: it is keyed by WAL position and holds
+                // immutable frame bodies, not per-key values.)
                 (k, v)
             }
             GetResult::NotFound => unreachable!(),

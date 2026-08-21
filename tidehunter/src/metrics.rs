@@ -173,13 +173,38 @@ pub struct Metrics {
     pub lookup_io_mcs: MetricIntCounter,
     pub lookup_io_bytes: MetricIntCounter,
 
-    /// Per-ks count of point reads that hit a `CompressedBatch` frame and had
-    /// to decompress its body to locate the record. Attributed to the
-    /// requesting keyspace, not the keyspaces of inner entries.
+    /// Per-ks count of batch-body decompressions performed on the read
+    /// path. With the decompressed-batch cache enabled this counts only
+    /// cache misses; hit rate is
+    /// `read_decompress_cache_hits / (read_decompress_cache_hits + read_decompress_count)`.
+    /// Attributed to the requesting keyspace, not the keyspaces of inner
+    /// entries.
     pub read_decompress_count: MetricIntCounterVec,
-    /// Per-ks cumulative microseconds spent in batch decompression on the
-    /// read path. Attribution matches `read_decompress_count`.
+    /// Per-ks cumulative microseconds spent decompressing batch bodies on
+    /// the read path. Covers the decompression only — the record scan over
+    /// the decompressed body is not included (whole-read latency lives in
+    /// `db_op_mcs`). Attribution matches `read_decompress_count`.
     pub read_decompress_mcs: MetricIntCounterVec,
+    /// Per-ks count of batch reads that did not pay a decompression: served
+    /// from a cached body, or by waiting on a concurrent reader's in-flight
+    /// decompression of the same frame. Attribution matches
+    /// `read_decompress_count`.
+    pub read_decompress_cache_hits: MetricIntCounterVec,
+    /// Total decompressed bytes currently retained by the decompressed-batch
+    /// cache, across all shards. Stays 0 when the cache is disabled.
+    pub decompress_cache_bytes: MetricIntGauge,
+    /// Decompressed bodies returned to a reader but not cached because they
+    /// exceed `Config::compressed_batch_cache_bytes`. A non-zero rate means
+    /// the budget is smaller than the workload's batch bodies and the cache
+    /// is not retaining them.
+    pub decompress_cache_rejected: MetricIntCounter,
+    /// Cumulative microseconds readers spent blocked on another thread's
+    /// in-flight decompression of the same frame (single-flight waits).
+    pub decompress_cache_wait_mcs: MetricIntCounter,
+    /// Time to acquire a contended decompressed-batch-cache shard lock —
+    /// the counterpart of `large_table_contention` for the cache's shards.
+    /// Uncontended acquisitions are not recorded.
+    pub decompress_cache_contention: MetricHistogram,
 
     pub large_table_contention: MetricHistogramVec,
     pub wal_write_wait: MetricIntCounter,
@@ -401,6 +426,21 @@ impl Metrics {
                 enabled
             ),
             read_decompress_mcs: counter_vec!("read_decompress_mcs", &["ks"], registry, enabled),
+            read_decompress_cache_hits: counter_vec!(
+                "read_decompress_cache_hits",
+                &["ks"],
+                registry,
+                enabled
+            ),
+            decompress_cache_bytes: gauge!("decompress_cache_bytes", registry, enabled),
+            decompress_cache_rejected: counter!("decompress_cache_rejected", registry, enabled),
+            decompress_cache_wait_mcs: counter!("decompress_cache_wait_mcs", registry, enabled),
+            decompress_cache_contention: histogram!(
+                "decompress_cache_contention",
+                lock_buckets.clone(),
+                registry,
+                enabled
+            ),
             large_table_contention: histogram_vec!(
                 "large_table_contention",
                 &["ks"],

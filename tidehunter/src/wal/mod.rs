@@ -225,6 +225,15 @@ impl WalWriter {
     }
 }
 
+/// Where the bytes for a frame live right now: the mmap covering its
+/// fragment (with the frame's offset within that map), or the WAL file for
+/// a syscall read. Produced by `Wal::frame_source`; `None` there means the
+/// file was garbage-collected.
+enum FrameSource {
+    Mapped(Map, u64),
+    File(Arc<File>),
+}
+
 impl Wal {
     #[doc(hidden)] // Used by tools/tideconsole to open WAL files directly
     pub fn open(
@@ -274,44 +283,47 @@ impl Wal {
     ///
     /// This method returns what type of read was used along with bytes read.
     pub fn read(&self, pos: WalPosition) -> Result<(ReadType, Option<Bytes>), WalError> {
-        assert_ne!(
-            pos,
-            WalPosition::INVALID,
-            "Trying to read invalid wal position"
-        );
-        let (map, offset) = self.layout.locate(pos.offset);
-        if let Some(map) = self.get_map(map) {
-            // using CrcFrame::read_from_slice to avoid holding the larger byte array
-            Ok((
-                ReadType::Mapped,
-                Some(
-                    CrcFrame::read_from_slice(&map.data, offset as usize)?
-                        .to_vec()
-                        .into(),
-                ),
-            ))
-        } else {
-            let buffer_size = if self.layout.direct_io {
-                self.layout.align(pos.frame_len() as u64) as usize
-            } else {
-                pos.frame_len()
-            };
-            let mut buf = FileReader::io_buffer_bytes(buffer_size, self.layout.direct_io);
-            let files = self.files.load();
-            let Some(file) = files.get_checked(self.layout.locate_file(pos.offset)) else {
-                return Ok((ReadType::Syscall, None));
-            };
-            file.read_exact_at(&mut buf, self.layout.offset_in_wal_file(pos.offset))?;
-            let mut bytes = Bytes::from(bytes::Bytes::from(buf));
-            if self.layout.direct_io && bytes.len() > pos.frame_len() {
-                // Direct IO buffer can be larger then needed
-                bytes = bytes.slice(..pos.frame_len());
+        match self.frame_source(pos) {
+            Some(FrameSource::Mapped(map, offset)) => {
+                // using CrcFrame::read_from_slice to avoid holding the larger byte array
+                Ok((
+                    ReadType::Mapped,
+                    Some(
+                        CrcFrame::read_from_slice(&map.data, offset as usize)?
+                            .to_vec()
+                            .into(),
+                    ),
+                ))
             }
-            Ok((
-                ReadType::Syscall,
-                Some(CrcFrame::read_from_bytes(&bytes, 0)?),
-            ))
+            Some(FrameSource::File(file)) => {
+                let buffer_size = if self.layout.direct_io {
+                    self.layout.align(pos.frame_len() as u64) as usize
+                } else {
+                    pos.frame_len()
+                };
+                let mut buf = FileReader::io_buffer_bytes(buffer_size, self.layout.direct_io);
+                file.read_exact_at(&mut buf, self.layout.offset_in_wal_file(pos.offset))?;
+                let mut bytes = Bytes::from(bytes::Bytes::from(buf));
+                if self.layout.direct_io && bytes.len() > pos.frame_len() {
+                    // Direct IO buffer can be larger then needed
+                    bytes = bytes.slice(..pos.frame_len());
+                }
+                Ok((
+                    ReadType::Syscall,
+                    Some(CrcFrame::read_from_bytes(&bytes, 0)?),
+                ))
+            }
+            None => Ok((ReadType::Syscall, None)),
         }
+    }
+
+    /// Returns whether the frame at `pos` is still readable: its fragment
+    /// is mapped, or its WAL file has not been garbage-collected. `false`
+    /// corresponds exactly to the `Ok(None)` that [`Self::read`] returns
+    /// for reclaimed positions (both go through [`Self::frame_source`]).
+    /// Pure lookup — no I/O and no map creation.
+    pub(crate) fn is_reachable(&self, pos: WalPosition) -> bool {
+        self.frame_source(pos).is_some()
     }
 
     pub fn random_reader_at(
@@ -319,6 +331,39 @@ impl Wal {
         pos: WalPosition,
         inner_offset: usize,
     ) -> Result<WalRandomRead, WalError> {
+        match self.frame_source(pos) {
+            Some(FrameSource::Mapped(map, offset)) => {
+                let offset = offset as usize;
+                let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
+                let data = map.data.slice(
+                    header_end + inner_offset
+                        ..header_end + pos.frame_len() - CrcFrame::CRC_HEADER_LENGTH,
+                );
+                Ok(WalRandomRead::Mapped(data))
+            }
+            Some(FrameSource::File(file)) => {
+                let offset = self.layout.offset_in_wal_file(pos.offset);
+                let header_end = offset + CrcFrame::CRC_HEADER_LENGTH as u64;
+                let range = (header_end + inner_offset as u64)..(offset + pos.frame_len() as u64);
+                Ok(WalRandomRead::File(FileRange::new(
+                    FileReader::new(file, self.layout.direct_io),
+                    range,
+                )))
+            }
+            None => panic!(
+                "attempt to access non existing file {:?}",
+                self.layout.locate_file(pos.offset)
+            ),
+        }
+    }
+
+    /// Resolves where the bytes for the frame at `pos` come from: the mmap
+    /// covering its fragment, the WAL file (syscall read), or nowhere
+    /// because the file was garbage-collected. Single source of truth for
+    /// position resolution — `read`, `random_reader_at` and `is_reachable`
+    /// must agree on when a position is gone, so any new resolution
+    /// dimension belongs here, not in a caller.
+    fn frame_source(&self, pos: WalPosition) -> Option<FrameSource> {
         assert_ne!(
             pos,
             WalPosition::INVALID,
@@ -326,24 +371,12 @@ impl Wal {
         );
         let (map, offset) = self.layout.locate(pos.offset);
         if let Some(map) = self.get_map(map) {
-            let offset = offset as usize;
-            let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
-            let data = map.data.slice(
-                header_end + inner_offset
-                    ..header_end + pos.frame_len() - CrcFrame::CRC_HEADER_LENGTH,
-            );
-            Ok(WalRandomRead::Mapped(data))
-        } else {
-            let files = self.files.load();
-            let file = files.get(self.layout.locate_file(pos.offset));
-            let offset = self.layout.offset_in_wal_file(pos.offset);
-            let header_end = offset + CrcFrame::CRC_HEADER_LENGTH as u64;
-            let range = (header_end + inner_offset as u64)..(offset + pos.frame_len() as u64);
-            Ok(WalRandomRead::File(FileRange::new(
-                FileReader::new(file.clone(), self.layout.direct_io),
-                range,
-            )))
+            return Some(FrameSource::Mapped(map, offset));
         }
+        self.files
+            .load()
+            .get_checked(self.layout.locate_file(pos.offset))
+            .map(|file| FrameSource::File(file.clone()))
     }
 
     fn get_map(&self, id: MapId) -> Option<Map> {

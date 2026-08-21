@@ -461,6 +461,139 @@ fn test_compressed_batch_dedups_duplicate_keys() {
     assert_eq!(Some(vec![99].into()), db.get(ks, &[9, 9, 9, 9]).unwrap());
 }
 
+/// With the decompressed-batch cache enabled, reading N keys that share one
+/// `CompressedBatch` frame decompresses the body once; the remaining reads
+/// are served from the cache. Also verifies reads still work (and count as
+/// decompressions again) across reopen, where replay repopulates nothing —
+/// the cache starts cold.
+#[test]
+fn test_compressed_batch_decompress_cache() {
+    let dir = tempdir::TempDir::new("test_decompress_cache").unwrap();
+    let mut config = Config::small();
+    config.batch_codec = Some(BatchCodec::Lz4);
+    config.compressed_batch_cache_bytes = Some(8 * 1024 * 1024);
+    let config = Arc::new(config);
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let decompressions = |metrics: &Metrics| {
+        metrics
+            .read_decompress_count
+            .with_label_values(&["root"])
+            .get()
+    };
+    let cache_hits = |metrics: &Metrics| {
+        metrics
+            .read_decompress_cache_hits
+            .with_label_values(&["root"])
+            .get()
+    };
+
+    let metrics = Metrics::new();
+    {
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.single_ks();
+        let mut batch = db.write_batch();
+        for i in 0..8u8 {
+            batch.write(ks, vec![i, 1, 2, 3], vec![i; 100]);
+        }
+        batch.commit().unwrap();
+
+        for i in 0..8u8 {
+            assert_eq!(
+                Some(vec![i; 100].into()),
+                db.get(ks, &[i, 1, 2, 3]).unwrap()
+            );
+        }
+        assert_eq!(1, decompressions(&metrics));
+        assert_eq!(7, cache_hits(&metrics));
+        assert!(metrics.decompress_cache_bytes.get() > 0);
+    }
+
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.single_ks();
+    for i in 0..8u8 {
+        assert_eq!(
+            Some(vec![i; 100].into()),
+            db.get(ks, &[i, 1, 2, 3]).unwrap()
+        );
+    }
+    assert_eq!(1, decompressions(&metrics));
+    assert_eq!(7, cache_hits(&metrics));
+}
+
+/// A cached batch body must not out-live its WAL file: reading a GC'd
+/// position returns `None`, which is deletion semantics for stale index
+/// entries, and a warm decompressed-batch cache must honor it instead of
+/// resurrecting the value (`Db::cached_batch_body` re-checks
+/// `Wal::is_reachable` before serving a hit).
+#[test]
+fn test_decompress_cache_does_not_resurrect_gcd_frames() {
+    let dir = tempdir::TempDir::new("test_decompress_cache_gc").unwrap();
+    let mut config = Config::small();
+    config.batch_codec = Some(BatchCodec::Lz4);
+    config.compressed_batch_cache_bytes = Some(8 * 1024 * 1024);
+    // One fragment per file and a minimal map LRU, so fragment 0's map is
+    // evicted after a few fragment advances and file 0 becomes GC-eligible.
+    config.wal_file_size = config.frag_size;
+    config.max_maps = 3;
+    let config = Arc::new(config);
+    let key_shape = KeyShape::new_single(4, 16, KeyType::uniform(16));
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
+    let ks = db.single_ks();
+
+    let mut batch = db.write_batch();
+    batch.write(ks, vec![1, 2, 3, 4], vec![42; 64]);
+    batch.commit().unwrap();
+
+    // Warm the cache: the first read decompresses, the second must hit.
+    assert_eq!(
+        Some(vec![42; 64].into()),
+        db.get(ks, &[1, 2, 3, 4]).unwrap()
+    );
+    assert_eq!(
+        Some(vec![42; 64].into()),
+        db.get(ks, &[1, 2, 3, 4]).unwrap()
+    );
+    assert!(
+        metrics
+            .read_decompress_cache_hits
+            .with_label_values(&["root"])
+            .get()
+            >= 1,
+        "cache must be warm before the GC"
+    );
+
+    // Advance the WAL past several files so fragment 0's map is evicted,
+    // then GC everything below the current position. The mapper thread
+    // deletes files asynchronously; poll until file 0 is gone.
+    for i in 0..8u8 {
+        db.insert(ks, vec![10 + i, 0, 0, 0], vec![0; 700 * 1024])
+            .unwrap();
+    }
+    db.wal_writer.gc(db.wal_writer.position()).unwrap();
+    for _ in 0..500 {
+        if db.wal.min_wal_position() > 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        db.wal.min_wal_position() > 0,
+        "wal file 0 was not reclaimed"
+    );
+
+    // The index still points at the reclaimed frame; the warm cache must
+    // report the key as gone, not resurrect the old body.
+    assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
+}
+
 /// Reproduce the production crash window where a writer wrote a skip
 /// marker that terminates fragment M but the process died before
 /// fragment M+1's file was created. The relevant code window is in

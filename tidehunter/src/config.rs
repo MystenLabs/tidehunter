@@ -98,8 +98,23 @@ pub struct Config {
     /// `WalEntry::CompressedBatch` per commit and gives every key in the
     /// batch the same `WalPosition`. Point reads decompress and linear-scan
     /// the batch; tombstones inside a batch are visited only during replay.
+    ///
+    /// Once a database has committed compressed batches, do not reopen it
+    /// with `batch_codec: None` while those frames are still live: the
+    /// empty-value read optimization in `Db::read_record_check_key` is
+    /// gated on this being `None` and can misread a compressed frame whose
+    /// payload length collides with an empty record's.
     #[serde(default)]
     pub batch_codec: Option<BatchCodec>,
+    /// Opt-in cache of decompressed `CompressedBatch` bodies, keyed by the
+    /// WAL position of the batch frame. `Some(bytes)` bounds the total
+    /// decompressed bytes retained (must be non-zero; a body larger than
+    /// the whole budget is never cached — `decompress_cache_rejected`
+    /// counts those). `None` (default) disables the cache and every batch
+    /// read decompresses the frame anew. Enable together with
+    /// `batch_codec`.
+    #[serde(default)]
+    pub compressed_batch_cache_bytes: Option<usize>,
 }
 
 fn default_open_lock_retry_timeout() -> Duration {
@@ -147,6 +162,7 @@ impl Default for Config {
             open_lock_retry_timeout: default_open_lock_retry_timeout(),
             index_auto_shard_threshold: None,
             batch_codec: None,
+            compressed_batch_cache_bytes: None,
         }
     }
 }
@@ -176,6 +192,7 @@ impl Config {
             open_lock_retry_timeout: default_open_lock_retry_timeout(),
             index_auto_shard_threshold: None,
             batch_codec: None,
+            compressed_batch_cache_bytes: None,
         }
     }
 
@@ -204,6 +221,18 @@ impl Config {
     /// invariant. Called by the builders (early feedback) and by
     /// `Db::open` (catches struct-literal / deserialize bypasses).
     pub(crate) fn validate(&self) {
+        if let Some(cache_bytes) = self.compressed_batch_cache_bytes {
+            assert!(
+                cache_bytes > 0,
+                "compressed_batch_cache_bytes must be non-zero; use None to disable the cache"
+            );
+            assert!(
+                self.batch_codec.is_some(),
+                "compressed_batch_cache_bytes requires batch_codec: the cache only holds \
+                 decompressed CompressedBatch bodies, and running with the codec off while \
+                 compressed frames are live is unsafe (see batch_codec docs)"
+            );
+        }
         let Some(threshold) = self.index_auto_shard_threshold else {
             return;
         };
@@ -263,5 +292,27 @@ impl Config {
 
     pub fn metrics_enabled(&self) -> bool {
         self.metrics_enabled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "compressed_batch_cache_bytes must be non-zero")]
+    fn validate_rejects_zero_cache_budget() {
+        let mut config = Config::small();
+        config.batch_codec = Some(BatchCodec::Lz4);
+        config.compressed_batch_cache_bytes = Some(0);
+        config.validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "compressed_batch_cache_bytes requires batch_codec")]
+    fn validate_rejects_cache_without_codec() {
+        let mut config = Config::small();
+        config.compressed_batch_cache_bytes = Some(1024);
+        config.validate();
     }
 }

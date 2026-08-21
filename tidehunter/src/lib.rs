@@ -12,6 +12,7 @@ pub mod control;
 #[doc(hidden)] // Used by benchmarks and tools for WAL writes
 pub mod crc;
 pub mod db;
+mod decompress_cache;
 #[cfg(test)]
 mod failpoints;
 pub mod file_reader;
