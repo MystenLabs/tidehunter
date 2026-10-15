@@ -7,6 +7,7 @@ use crate::flusher::{
     FlushKind, IndexFlushCommand, IndexFlusher, IndexFlusherThread, RelocationFlush,
 };
 use crate::index::index_format::{Direction, IndexFormat, IndexIterCaches};
+use crate::index::index_ref::IndexRef;
 use crate::index::index_table::IndexTable;
 use crate::index::levels::{INLINE_LEVELS, IndexLevels};
 use crate::index::pending_table::{CommittedChange, PendingTable, Transaction};
@@ -124,7 +125,7 @@ struct Row {
 /// copy-on-write rather than mutating this `Arc`'s contents.
 struct WalkPlan {
     data: Arc<IndexTable>,
-    level_positions: SmallVec<[WalPosition; INLINE_LEVELS]>,
+    level_refs: SmallVec<[IndexRef; INLINE_LEVELS]>,
     readers: SmallVec<[WalRandomRead; INLINE_LEVELS]>,
     /// `true` iff the cell was sharded when this plan was built. Sharded
     /// cells have to bubble `SkipDeleted` out so `prepare_walk` can re-pick
@@ -612,8 +613,8 @@ impl LargeTable {
         // Build the reader list while holding the mutex — otherwise a concurrent
         // relocation could delete the backing blob before we open it. The
         // key-aware form keeps a sharded cell to a single shard reader.
-        let level_positions = entry.disk_levels_to_walk_for_key(k);
-        if level_positions.is_empty() {
+        let level_refs = entry.disk_levels_to_walk_for_key(k);
+        if level_refs.is_empty() {
             // No on-disk levels left to consult (e.g., Loaded cell with just
             // `[L0]` — entry.data is authoritative and already missed).
             return Ok(context.report_lookup_result(None, LookupSource::Cache));
@@ -622,7 +623,7 @@ impl LargeTable {
         // that we can read from the index even if a relocation is concurrently
         // deleting the underlying blobs. See also test_concurrent_index_reclaim.
         let mut index_readers: SmallVec<[_; INLINE_LEVELS]> = SmallVec::new();
-        for pos in &level_positions {
+        for pos in &level_refs {
             index_readers.push(loader.index_reader(*pos)?);
         }
         // drop row to avoid holding mutex during IO
@@ -651,7 +652,7 @@ impl LargeTable {
         // todo - consider only doing block_in_place for the syscall random reader
         // TODO: handle entries that may be removed by relocation but are still referenced in the index
         let (result, read_type, terminal_level) = runtime::block_in_place(|| {
-            // `readers` is non-empty (guarded by callers' `level_positions.is_empty()`
+            // `readers` is non-empty (guarded by callers' `level_refs.is_empty()`
             // check), and the loop reassigns `last_read_type` on every iteration
             // before the early-return branches can fire — so the init is just a seed.
             // The read type is taken *after* the level is read: a `CachedFill`
@@ -748,12 +749,12 @@ impl LargeTable {
             }
             return Ok(context.report_lookup_result(Some(as_of), LookupSource::Cache));
         }
-        let level_positions = entry.disk_levels_to_walk_for_key(k);
-        if level_positions.is_empty() {
+        let level_refs = entry.disk_levels_to_walk_for_key(k);
+        if level_refs.is_empty() {
             return Ok(context.report_lookup_result(None, LookupSource::Cache));
         }
         let mut index_readers: SmallVec<[_; INLINE_LEVELS]> = SmallVec::new();
-        for pos in &level_positions {
+        for pos in &level_refs {
             index_readers.push(loader.index_reader(*pos)?);
         }
         // drop row to avoid holding mutex during IO
@@ -1305,8 +1306,8 @@ impl LargeTable {
             caches.clear();
             return Ok(None);
         }
-        let level_positions = entry.disk_levels_to_walk_for_iter(prev_key, reverse);
-        if level_positions.is_empty() && entry.state == LargeTableEntryState::Unloaded {
+        let level_refs = entry.disk_levels_to_walk_for_iter(prev_key, reverse);
+        if level_refs.is_empty() && entry.state == LargeTableEntryState::Unloaded {
             // No on-disk blobs and (by invariant) nothing in memory.
             caches.clear();
             return Ok(None);
@@ -1315,7 +1316,7 @@ impl LargeTable {
         // `get()`: a concurrent relocation must not delete the backing blob
         // out from under us.
         let mut readers: SmallVec<[WalRandomRead; INLINE_LEVELS]> = SmallVec::new();
-        for position in level_positions.iter() {
+        for position in level_refs.iter() {
             readers.push(loader.index_reader(*position)?);
         }
         // `clone_shared` migrates the `ArcCow` from `Owned` to `Shared` and
@@ -1326,7 +1327,7 @@ impl LargeTable {
         let is_sharded = entry.levels.is_sharded();
         Ok(Some(WalkPlan {
             data,
-            level_positions,
+            level_refs,
             readers,
             is_sharded,
         }))
@@ -1358,11 +1359,8 @@ impl LargeTable {
                 };
                 let mut candidates: SmallVec<[Option<(Bytes, WalPosition)>; 3]> = SmallVec::new();
                 candidates.push(in_memory_next);
-                for (level_idx, (position, reader)) in plan
-                    .level_positions
-                    .iter()
-                    .zip(plan.readers.iter())
-                    .enumerate()
+                for (level_idx, (index_ref, reader)) in
+                    plan.level_refs.iter().zip(plan.readers.iter()).enumerate()
                 {
                     let cache_slot = caches.slot_mut(level_idx);
                     let on_disk_next = format.next_entry_unloaded(
@@ -1371,7 +1369,7 @@ impl LargeTable {
                         prev_key.as_deref(),
                         direction,
                         metrics,
-                        *position,
+                        index_ref.position(),
                         cache_slot,
                     );
                     candidates.push(on_disk_next);
@@ -1773,17 +1771,17 @@ pub(crate) type LevelPositions = SmallVec<[WalPosition; INLINE_LEVELS]>;
 pub trait Loader {
     type Error: std::fmt::Debug;
 
-    fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> Result<IndexTable, Self::Error>;
+    fn load(&self, ks: &KeySpaceDesc, index_ref: IndexRef) -> Result<IndexTable, Self::Error>;
 
-    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error>;
+    fn index_reader(&self, index_ref: IndexRef) -> Result<WalRandomRead, Self::Error>;
 
-    /// Opens the index blob at `position` for a scan that reads it whole,
+    /// Opens the index blob `index_ref` points at for a scan that reads it whole,
     /// once. Unlike [`Self::index_reader`], which serves point lookups and
     /// may admit the blob into the index blob cache, a scan reader serves a
     /// resident blob from the cache but never admits one, and reads a cold
     /// blob as one whole frame.
-    fn index_scan_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
-        self.index_reader(position)
+    fn index_scan_reader(&self, index_ref: IndexRef) -> Result<WalRandomRead, Self::Error> {
+        self.index_reader(index_ref)
     }
 
     fn flush_supported(&self) -> bool;
@@ -1791,7 +1789,7 @@ pub trait Loader {
     /// Write an on-disk index blob. Any `Removed` entries in `data` are
     /// persisted as tombstones. Callers writing the deepest level should call
     /// `IndexTable::clean_self` first to strip them.
-    fn flush(&self, ks: KeySpace, data: &IndexTable) -> Result<WalPosition, Self::Error>;
+    fn flush(&self, ks: KeySpace, data: &IndexTable) -> Result<IndexRef, Self::Error>;
 
     /// Returns the last WAL position that has been fully processed and committed.
     /// This position represents the highest WAL offset where all operations up to and
@@ -2177,7 +2175,7 @@ impl LargeTableEntry {
     /// callers should use [`disk_levels_to_walk_for_key`] and iterator
     /// callers should use [`disk_levels_to_walk_for_iter`] so only the
     /// covering shard is opened.
-    pub(crate) fn disk_levels_to_walk(&self) -> SmallVec<[WalPosition; INLINE_LEVELS]> {
+    pub(crate) fn disk_levels_to_walk(&self) -> SmallVec<[IndexRef; INLINE_LEVELS]> {
         match self.state {
             LargeTableEntryState::Loaded | LargeTableEntryState::DirtyLoaded => {
                 self.levels.iter_below_l0().collect()
@@ -2195,11 +2193,11 @@ impl LargeTableEntry {
     pub(crate) fn disk_levels_to_walk_for_key(
         &self,
         key: &[u8],
-    ) -> SmallVec<[WalPosition; INLINE_LEVELS]> {
+    ) -> SmallVec<[IndexRef; INLINE_LEVELS]> {
         if !self.levels.is_sharded() {
             return self.disk_levels_to_walk();
         }
-        let mut out: SmallVec<[WalPosition; INLINE_LEVELS]> = SmallVec::new();
+        let mut out: SmallVec<[IndexRef; INLINE_LEVELS]> = SmallVec::new();
         let below_l0_only = matches!(
             self.state,
             LargeTableEntryState::Loaded | LargeTableEntryState::DirtyLoaded
@@ -2208,7 +2206,7 @@ impl LargeTableEntry {
             out.push(l0);
         }
         if let Some(shard) = self.levels.shard_for(key) {
-            out.push(shard.position);
+            out.push(shard.index_ref);
         }
         out
     }
@@ -2224,7 +2222,7 @@ impl LargeTableEntry {
         &self,
         prev_key: Option<&[u8]>,
         reverse: bool,
-    ) -> SmallVec<[WalPosition; INLINE_LEVELS]> {
+    ) -> SmallVec<[IndexRef; INLINE_LEVELS]> {
         if !self.levels.is_sharded() {
             return self.disk_levels_to_walk();
         }
@@ -2234,7 +2232,7 @@ impl LargeTableEntry {
             self.levels.shard_for_iter_forward(prev_key)
         };
 
-        let mut out: SmallVec<[WalPosition; INLINE_LEVELS]> = SmallVec::new();
+        let mut out: SmallVec<[IndexRef; INLINE_LEVELS]> = SmallVec::new();
         let below_l0_only = matches!(
             self.state,
             LargeTableEntryState::Loaded | LargeTableEntryState::DirtyLoaded
@@ -2243,7 +2241,7 @@ impl LargeTableEntry {
             out.push(l0);
         }
         if let Some(s) = shard {
-            out.push(s.position);
+            out.push(s.index_ref);
         }
         out
     }
@@ -2351,6 +2349,7 @@ impl LargeTableEntry {
         let relocate_positions: HashSet<WalPosition> = self
             .levels
             .iter()
+            .map(|index_ref| index_ref.position())
             .filter(|p| relocate_files.contains(p))
             .collect();
         if relocate_positions.is_empty() {
@@ -2731,7 +2730,10 @@ impl LargeTableEntry {
 
     /// Every blob position the levels reference, shards included.
     fn level_positions(&self) -> LevelPositions {
-        self.levels.iter().collect()
+        self.levels
+            .iter()
+            .map(|index_ref| index_ref.position())
+            .collect()
     }
 
     /// The positions in `before` that the current levels no longer
@@ -3102,12 +3104,12 @@ mod tests {
             fn load(
                 &self,
                 _ks: &KeySpaceDesc,
-                _position: WalPosition,
+                _index_ref: IndexRef,
             ) -> Result<IndexTable, Self::Error> {
                 Ok(self.disk_index.clone())
             }
 
-            fn index_reader(&self, _position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+            fn index_reader(&self, _index_ref: IndexRef) -> Result<WalRandomRead, Self::Error> {
                 Ok(WalRandomRead::Mapped(self.serialized_data.clone()))
             }
 
@@ -3115,8 +3117,8 @@ mod tests {
                 true
             }
 
-            fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> Result<WalPosition, Self::Error> {
-                Ok(WalPosition::test_value(100))
+            fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> Result<IndexRef, Self::Error> {
+                Ok(IndexRef::test_value(100))
             }
 
             fn last_processed_wal_position(&self) -> LastProcessed {
@@ -3184,7 +3186,7 @@ mod tests {
             // Create a row with a Loaded entry
             let mut entry = LargeTableEntry::new_empty(context.clone(), cell_id.clone(), 0);
             entry.data = ArcCow::new_owned(disk_index.clone());
-            entry.levels = IndexLevels::single(WalPosition::test_value(42));
+            entry.levels = IndexLevels::single(IndexRef::test_value(42));
             entry.state = LargeTableEntryState::Loaded;
 
             let mut row = Row {
@@ -3247,7 +3249,7 @@ mod tests {
             let entry = LargeTableEntry::new_unloaded(
                 context.clone(),
                 cell_id.clone(),
-                IndexLevels::single(WalPosition::test_value(42)),
+                IndexLevels::single(IndexRef::test_value(42)),
                 0,
                 None,
             );
@@ -3309,7 +3311,7 @@ mod tests {
                 WalPosition::test_value(18),
             ); // Deleted key
 
-            entry.levels = IndexLevels::single(WalPosition::test_value(42));
+            entry.levels = IndexLevels::single(IndexRef::test_value(42));
             entry.state = LargeTableEntryState::DirtyLoaded;
 
             let mut row = Row {
@@ -3356,7 +3358,7 @@ mod tests {
             let mut entry = LargeTableEntry::new_unloaded(
                 context.clone(),
                 cell_id.clone(),
-                IndexLevels::single(WalPosition::test_value(42)),
+                IndexLevels::single(IndexRef::test_value(42)),
                 0,
                 None,
             );
@@ -3428,18 +3430,18 @@ mod tests {
         let mut shards = BTreeMap::new();
         shards.insert(
             b"a".to_vec(),
-            IndexShard::new(WalPosition::test_value(11), b"l".to_vec()),
+            IndexShard::new(IndexRef::test_value(11), b"l".to_vec()),
         );
         shards.insert(
             b"m".to_vec(),
-            IndexShard::new(WalPosition::test_value(22), b"t".to_vec()),
+            IndexShard::new(IndexRef::test_value(22), b"t".to_vec()),
         );
         shards.insert(
             b"u".to_vec(),
-            IndexShard::new(WalPosition::test_value(33), b"z".to_vec()),
+            IndexShard::new(IndexRef::test_value(33), b"z".to_vec()),
         );
 
-        // Unloaded + sharded (no L0): just `shard_for(key).position`.
+        // Unloaded + sharded (no L0): just `shard_for(key).index_ref`.
         let entry = LargeTableEntry::new_unloaded(
             context.clone(),
             cell_id.clone(),
@@ -3450,15 +3452,15 @@ mod tests {
         // Keys inside each shard's content range:
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"a").as_slice(),
-            &[WalPosition::test_value(11)],
+            &[IndexRef::test_value(11)],
         );
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"p").as_slice(),
-            &[WalPosition::test_value(22)],
+            &[IndexRef::test_value(22)],
         );
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"u").as_slice(),
-            &[WalPosition::test_value(33)],
+            &[IndexRef::test_value(33)],
         );
         // Keys outside every shard's content range: no on-disk read needed.
         assert!(entry.disk_levels_to_walk_for_key(b"").is_empty()); // below A.min
@@ -3468,41 +3470,41 @@ mod tests {
         let entry = LargeTableEntry::new_unloaded(
             context.clone(),
             cell_id.clone(),
-            IndexLevels::sharded_with_l0(WalPosition::test_value(7), shards.clone()),
+            IndexLevels::sharded_with_l0(IndexRef::test_value(7), shards.clone()),
             0,
             None,
         );
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"a").as_slice(),
-            &[WalPosition::test_value(7), WalPosition::test_value(11)],
+            &[IndexRef::test_value(7), IndexRef::test_value(11)],
         );
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"z").as_slice(),
-            &[WalPosition::test_value(7), WalPosition::test_value(33)],
+            &[IndexRef::test_value(7), IndexRef::test_value(33)],
         );
         // Out-of-range key still consults L0 (the dirty overlay might hold it).
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"~").as_slice(),
-            &[WalPosition::test_value(7)],
+            &[IndexRef::test_value(7)],
         );
 
         // Loaded + sharded with L0: L0 is already folded into `self.data`, so
         // the disk walk drops it and only the covering shard remains.
         let mut entry = LargeTableEntry::new_empty(context.clone(), cell_id.clone(), 0);
-        entry.levels = IndexLevels::sharded_with_l0(WalPosition::test_value(7), shards.clone());
+        entry.levels = IndexLevels::sharded_with_l0(IndexRef::test_value(7), shards.clone());
         entry.state = LargeTableEntryState::Loaded;
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"a").as_slice(),
-            &[WalPosition::test_value(11)],
+            &[IndexRef::test_value(11)],
         );
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"q").as_slice(),
-            &[WalPosition::test_value(22)],
+            &[IndexRef::test_value(22)],
         );
 
         // Unsharded: identical to `disk_levels_to_walk` regardless of `key`.
         let mut entry = LargeTableEntry::new_empty(context.clone(), cell_id.clone(), 0);
-        entry.levels = IndexLevels::promoted(WalPosition::test_value(99));
+        entry.levels = IndexLevels::promoted(IndexRef::test_value(99));
         entry.state = LargeTableEntryState::Loaded;
         assert_eq!(
             entry.disk_levels_to_walk_for_key(b"anything"),
@@ -3526,8 +3528,12 @@ mod tests {
             }
         }
 
-        fn opens_for(&self, pos: WalPosition) -> usize {
-            *self.opens_by_pos.lock().get(&pos.offset()).unwrap_or(&0)
+        fn opens_for(&self, index_ref: IndexRef) -> usize {
+            *self
+                .opens_by_pos
+                .lock()
+                .get(&index_ref.offset())
+                .unwrap_or(&0)
         }
 
         fn total_opens(&self) -> usize {
@@ -3537,23 +3543,23 @@ mod tests {
 
     impl Loader for CountingByPosLoader {
         type Error = io::Error;
-        fn load(&self, _ks: &KeySpaceDesc, position: WalPosition) -> Result<IndexTable, io::Error> {
-            Ok(self.blobs.get(&position.offset()).unwrap().0.clone())
+        fn load(&self, _ks: &KeySpaceDesc, index_ref: IndexRef) -> Result<IndexTable, io::Error> {
+            Ok(self.blobs.get(&index_ref.offset()).unwrap().0.clone())
         }
-        fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, io::Error> {
+        fn index_reader(&self, index_ref: IndexRef) -> Result<WalRandomRead, io::Error> {
             *self
                 .opens_by_pos
                 .lock()
-                .entry(position.offset())
+                .entry(index_ref.offset())
                 .or_insert(0) += 1;
             Ok(WalRandomRead::Mapped(
-                self.blobs.get(&position.offset()).unwrap().1.clone(),
+                self.blobs.get(&index_ref.offset()).unwrap().1.clone(),
             ))
         }
         fn flush_supported(&self) -> bool {
             true
         }
-        fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> Result<WalPosition, io::Error> {
+        fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> Result<IndexRef, io::Error> {
             unreachable!("sharded iteration test never flushes")
         }
         fn last_processed_wal_position(&self) -> LastProcessed {
@@ -3574,7 +3580,7 @@ mod tests {
         context: KsContext,
         ks: &KeySpaceDesc,
         cell_id: CellId,
-    ) -> (CountingByPosLoader, Row, WalPosition, WalPosition) {
+    ) -> (CountingByPosLoader, Row, IndexRef, IndexRef) {
         let mut shard_a_table = IndexTable::default();
         shard_a_table.insert(
             Bytes::from(10_u64.to_be_bytes().to_vec()),
@@ -3602,8 +3608,8 @@ mod tests {
         let serialized_a = format.clean_serialize_index(&mut shard_a_table.clone(), ks);
         let serialized_b = format.clean_serialize_index(&mut shard_b_table.clone(), ks);
 
-        let pos_a = WalPosition::test_value(201);
-        let pos_b = WalPosition::test_value(202);
+        let pos_a = IndexRef::test_value(201);
+        let pos_b = IndexRef::test_value(202);
 
         let mut blobs = HashMap::new();
         blobs.insert(pos_a.offset(), (shard_a_table, serialized_a));
@@ -3936,7 +3942,7 @@ mod tests {
             .data
             .make_mut()
             .insert(Bytes::from(vec![0u8]), WalPosition::test_value(1));
-        entry.levels = IndexLevels::single(WalPosition::test_value(1));
+        entry.levels = IndexLevels::single(IndexRef::test_value(1));
         entry.state = LargeTableEntryState::DirtyLoaded;
         drop(row);
 
@@ -3959,9 +3965,9 @@ mod tests {
         // The relocation as-of view of an unloaded sharded cell must carry
         // the keys of every shard, with the L0 blob winning on overlap.
         let key = |k: u64| Bytes::from(k.to_be_bytes().to_vec());
-        let shard_a_pos = WalPosition::new(100, 64);
-        let shard_b_pos = WalPosition::new(200, 64);
-        let l0_pos = WalPosition::new(300, 64);
+        let shard_a_pos = IndexRef::new(WalPosition::new(100, 64));
+        let shard_b_pos = IndexRef::new(WalPosition::new(200, 64));
+        let l0_pos = IndexRef::new(WalPosition::new(300, 64));
         let mut shards = BTreeMap::new();
         shards.insert(
             1u64.to_be_bytes().to_vec(),

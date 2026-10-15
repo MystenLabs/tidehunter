@@ -4,6 +4,7 @@ use crate::cell::CellId;
 use crate::context::KsContext;
 use crate::db::Db;
 use crate::index::index_format::IndexFormat;
+use crate::index::index_ref::IndexRef;
 use crate::index::index_table::IndexTable;
 use crate::index::levels::{IndexLevels, IndexShard};
 use crate::key_shape::{KeySpace, KeySpaceDesc};
@@ -463,19 +464,19 @@ impl IndexFlusherThread {
             if !deeper_level_exists {
                 merged_l0.clean_self();
             }
-            let new_l0_pos = loader
+            let new_l0 = loader
                 .flush(command.ks, &merged_l0)
                 .expect("Failed to flush index");
             if !is_relocation {
                 ctx.metrics
                     .l0_bytes_written
                     .with_label_values(&[ctx.name()])
-                    .inc_by(new_l0_pos.frame_len() as u64);
+                    .inc_by(new_l0.frame_len() as u64);
             }
             if current_levels.is_sharded() {
-                IndexLevels::sharded_with_l0(new_l0_pos, current_levels.shards().clone())
+                IndexLevels::sharded_with_l0(new_l0, current_levels.shards().clone())
             } else {
-                let mut levels = IndexLevels::single(new_l0_pos);
+                let mut levels = IndexLevels::single(new_l0);
                 if let Some(l1) = existing_l1 {
                     levels.set(1, l1);
                 }
@@ -504,11 +505,11 @@ impl IndexFlusherThread {
     fn load_l1_or_default<L: Loader>(
         loader: &L,
         ctx: &KsContext,
-        l1: Option<WalPosition>,
+        l1: Option<IndexRef>,
     ) -> IndexTable {
         match l1 {
-            Some(pos) => loader
-                .load(&ctx.ks_config, pos)
+            Some(index_ref) => loader
+                .load(&ctx.ks_config, index_ref)
                 .expect("Failed to load L1 index in flusher thread"),
             None => IndexTable::default(),
         }
@@ -562,12 +563,12 @@ impl IndexFlusherThread {
         if serialized.len() > threshold {
             return Self::flush_split_l1(loader, ctx, ks, new_l1, threshold);
         }
-        let pos = loader.flush(ks, &new_l1).expect("Failed to flush index");
+        let l1 = loader.flush(ks, &new_l1).expect("Failed to flush index");
         ctx.metrics
             .l1_bytes_written
             .with_label_values(&[ctx.name()])
-            .inc_by(pos.frame_len() as u64);
-        IndexLevels::promoted(pos)
+            .inc_by(l1.frame_len() as u64);
+        IndexLevels::promoted(l1)
     }
 
     /// Median-by-index splits `new_l1` until every shard's serialized
@@ -618,9 +619,9 @@ impl IndexFlusherThread {
     ) -> u64 {
         let mut total_bytes = 0u64;
         for (min_key, max_key, table) in tables {
-            let pos = loader.flush(ks, table).expect("Failed to flush shard");
-            total_bytes += pos.frame_len() as u64;
-            target.insert(min_key.clone(), IndexShard::new(pos, max_key.clone()));
+            let index_ref = loader.flush(ks, table).expect("Failed to flush shard");
+            total_bytes += index_ref.frame_len() as u64;
+            target.insert(min_key.clone(), IndexShard::new(index_ref, max_key.clone()));
         }
         total_bytes
     }
@@ -723,7 +724,7 @@ impl IndexFlusherThread {
                 continue;
             };
             let mut shard_table = loader
-                .load(&ctx.ks_config, shard.position)
+                .load(&ctx.ks_config, shard.index_ref)
                 .expect("Failed to load shard for rewrite");
             if !rewrite(&mut shard_table, item) {
                 new_shards.insert(btree_key.clone(), shard.clone());
@@ -857,10 +858,10 @@ impl IndexFlusherThread {
         let mut shards_rewritten: u64 = 0;
 
         let new_l0 = match levels.l0() {
-            Some(pos) if relocate_positions.contains(&pos) => {
-                let new_pos = Self::reflush_blob_at(loader, ctx, ks, pos, "L0");
-                total_bytes += new_pos.frame_len() as u64;
-                Some(new_pos)
+            Some(l0) if relocate_positions.contains(&l0.position()) => {
+                let new_l0 = Self::reflush_blob_at(loader, ctx, ks, l0, "L0");
+                total_bytes += new_l0.frame_len() as u64;
+                Some(new_l0)
             }
             other => other,
         };
@@ -868,17 +869,17 @@ impl IndexFlusherThread {
         let new_levels = if levels.is_sharded() {
             let mut new_shards: BTreeMap<Vec<u8>, IndexShard> = BTreeMap::new();
             for (btree_key, shard) in levels.shards().iter() {
-                let new_pos = if relocate_positions.contains(&shard.position) {
-                    let p = Self::reflush_blob_at(loader, ctx, ks, shard.position, "shard");
-                    total_bytes += p.frame_len() as u64;
+                let new_ref = if relocate_positions.contains(&shard.index_ref.position()) {
+                    let r = Self::reflush_blob_at(loader, ctx, ks, shard.index_ref, "shard");
+                    total_bytes += r.frame_len() as u64;
                     shards_rewritten += 1;
-                    p
+                    r
                 } else {
-                    shard.position
+                    shard.index_ref
                 };
                 new_shards.insert(
                     btree_key.clone(),
-                    IndexShard::new(new_pos, shard.max_key.clone()),
+                    IndexShard::new(new_ref, shard.max_key.clone()),
                 );
             }
             match new_l0 {
@@ -887,10 +888,10 @@ impl IndexFlusherThread {
             }
         } else {
             let new_l1 = match levels.l1() {
-                Some(pos) if relocate_positions.contains(&pos) => {
-                    let new_pos = Self::reflush_blob_at(loader, ctx, ks, pos, "L1");
-                    total_bytes += new_pos.frame_len() as u64;
-                    Some(new_pos)
+                Some(l1) if relocate_positions.contains(&l1.position()) => {
+                    let new_l1 = Self::reflush_blob_at(loader, ctx, ks, l1, "L1");
+                    total_bytes += new_l1.frame_len() as u64;
+                    Some(new_l1)
                 }
                 other => other,
             };
@@ -926,17 +927,17 @@ impl IndexFlusherThread {
         new_levels
     }
 
-    /// Loads the blob at `pos` and reflushes it at a fresh WAL position.
-    /// `label` names the blob ("shard", "L0") for `expect` messages.
+    /// Loads the blob `index_ref` points at and reflushes it at a fresh WAL
+    /// position. `label` names the blob ("shard", "L0") for `expect` messages.
     fn reflush_blob_at<L: Loader>(
         loader: &L,
         ctx: &KsContext,
         ks: KeySpace,
-        pos: WalPosition,
+        index_ref: IndexRef,
         label: &str,
-    ) -> WalPosition {
+    ) -> IndexRef {
         let table = loader
-            .load(&ctx.ks_config, pos)
+            .load(&ctx.ks_config, index_ref)
             .unwrap_or_else(|_| panic!("Failed to load {label} for sharded force-relocate"));
         loader
             .flush(ks, &table)
@@ -1032,8 +1033,8 @@ mod tests {
 
         /// Pre-seeds the loader with a blob at the given position so
         /// re-sharding tests can simulate "this shard already exists on disk".
-        fn seed(&self, pos: WalPosition, table: IndexTable) {
-            self.blobs.lock().insert(pos.offset(), table);
+        fn seed(&self, index_ref: IndexRef, table: IndexTable) {
+            self.blobs.lock().insert(index_ref.offset(), table);
         }
     }
 
@@ -1043,17 +1044,17 @@ mod tests {
         fn load(
             &self,
             _ks: &crate::key_shape::KeySpaceDesc,
-            position: WalPosition,
+            index_ref: IndexRef,
         ) -> Result<IndexTable, Self::Error> {
             Ok(self
                 .blobs
                 .lock()
-                .get(&position.offset())
+                .get(&index_ref.offset())
                 .cloned()
                 .unwrap_or_default())
         }
 
-        fn index_reader(&self, _position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+        fn index_reader(&self, _index_ref: IndexRef) -> Result<WalRandomRead, Self::Error> {
             unreachable!("RecordingLoader does not serve index reads")
         }
 
@@ -1061,13 +1062,13 @@ mod tests {
             true
         }
 
-        fn flush(&self, _ks: KeySpace, data: &IndexTable) -> Result<WalPosition, Self::Error> {
+        fn flush(&self, _ks: KeySpace, data: &IndexTable) -> Result<IndexRef, Self::Error> {
             self.flushes.lock().push(data.len());
             let mut off = self.next_offset.lock();
             let pos = WalPosition::new(*off, 64);
             *off += 4096;
             self.blobs.lock().insert(pos.offset(), data.clone());
-            Ok(pos)
+            Ok(IndexRef::new(pos))
         }
 
         fn last_processed_wal_position(&self) -> LastProcessed {
@@ -1134,7 +1135,7 @@ mod tests {
         ks: KeySpace,
         dirty: IndexTable,
         current: IndexLevels,
-        relocate_positions: impl IntoIterator<Item = WalPosition>,
+        relocate_positions: impl IntoIterator<Item = IndexRef>,
     ) -> IndexFlushCommand {
         IndexFlushCommand::new(
             ks,
@@ -1143,7 +1144,10 @@ mod tests {
                 dirty: Arc::new(dirty),
                 current_levels: current,
                 loaded: true,
-                relocate_positions: relocate_positions.into_iter().collect(),
+                relocate_positions: relocate_positions
+                    .into_iter()
+                    .map(|index_ref| index_ref.position())
+                    .collect(),
             },
         )
     }
@@ -1259,9 +1263,9 @@ mod tests {
     fn seed_sharded_cell(
         loader: &RecordingLoader,
         ranges: &[(u64, u64)],
-    ) -> (IndexLevels, Vec<WalPosition>) {
+    ) -> (IndexLevels, Vec<IndexRef>) {
         let mut shards: BTreeMap<Vec<u8>, IndexShard> = BTreeMap::new();
-        let mut positions = Vec::new();
+        let mut refs = Vec::new();
         let mut next_seed_offset: u64 = 500;
         for (min, max) in ranges {
             let mut table = IndexTable::default();
@@ -1271,16 +1275,16 @@ mod tests {
                     WalPosition::test_value(k.max(1)),
                 );
             }
-            let pos = WalPosition::new(next_seed_offset, 64);
+            let index_ref = IndexRef::new(WalPosition::new(next_seed_offset, 64));
             next_seed_offset += 4096;
-            loader.seed(pos, table);
-            positions.push(pos);
+            loader.seed(index_ref, table);
+            refs.push(index_ref);
             shards.insert(
                 min.to_be_bytes().to_vec(),
-                IndexShard::new(pos, max.to_be_bytes().to_vec()),
+                IndexShard::new(index_ref, max.to_be_bytes().to_vec()),
             );
         }
-        (IndexLevels::sharded(shards), positions)
+        (IndexLevels::sharded(shards), refs)
     }
 
     /// Builds an `IndexTable` from an iterator of `(key, Option<pos>)`.
@@ -1308,8 +1312,13 @@ mod tests {
 
     /// Reads the new shard at `min_key` from the loader's blob store and
     /// returns its sorted entries as `(key_u64, pos_u64)` for assertion.
-    fn shard_entries(loader: &RecordingLoader, pos: WalPosition) -> Vec<u64> {
-        let blob = loader.blobs.lock().get(&pos.offset()).cloned().unwrap();
+    fn shard_entries(loader: &RecordingLoader, index_ref: IndexRef) -> Vec<u64> {
+        let blob = loader
+            .blobs
+            .lock()
+            .get(&index_ref.offset())
+            .cloned()
+            .unwrap();
         blob.iter()
             .map(|(k, _)| {
                 let bytes: [u8; 8] = k.as_ref().try_into().unwrap();
@@ -1318,8 +1327,13 @@ mod tests {
             .collect()
     }
 
-    fn index_entries(loader: &RecordingLoader, pos: WalPosition) -> Vec<(u64, u64)> {
-        let blob = loader.blobs.lock().get(&pos.offset()).cloned().unwrap();
+    fn index_entries(loader: &RecordingLoader, index_ref: IndexRef) -> Vec<(u64, u64)> {
+        let blob = loader
+            .blobs
+            .lock()
+            .get(&index_ref.offset())
+            .cloned()
+            .unwrap();
         blob.iter()
             .map(|(k, position)| {
                 let bytes: [u8; 8] = k.as_ref().try_into().unwrap();
@@ -1351,12 +1365,12 @@ mod tests {
         // Shard B (200..=300) is untouched: its btree key and position
         // should still match what we seeded.
         let new_b = new_levels.shards().get(&shard_key(200)).unwrap();
-        assert_eq!(new_b.position, positions[1]);
+        assert_eq!(new_b.index_ref, positions[1]);
         assert_eq!(new_b.max_key, shard_key(300));
 
         // Shard A was rewritten; min/max bounds unchanged.
         let new_a = new_levels.shards().get(&shard_key(1)).unwrap();
-        assert_ne!(new_a.position, positions[0]);
+        assert_ne!(new_a.index_ref, positions[0]);
         assert_eq!(new_a.max_key, shard_key(100));
 
         // Exactly one shard rewritten → one flush.
@@ -1385,12 +1399,12 @@ mod tests {
         assert_eq!(new_levels.shards().len(), 2);
 
         let new_a = new_levels.shards().get(&shard_key(1)).unwrap();
-        let a_keys = shard_entries(&loader, new_a.position);
+        let a_keys = shard_entries(&loader, new_a.index_ref);
         assert_eq!(a_keys, vec![1, 3, 5], "tombstones removed keys 2 and 4");
         assert_eq!(new_a.max_key, shard_key(5));
 
         let new_b = new_levels.shards().get(&shard_key(100)).unwrap();
-        let b_keys = shard_entries(&loader, new_b.position);
+        let b_keys = shard_entries(&loader, new_b.index_ref);
         assert_eq!(b_keys.first(), Some(&100));
         assert_eq!(b_keys.last(), Some(&200));
     }
@@ -1419,7 +1433,7 @@ mod tests {
             "gap key 100 extends shard A's max_key",
         );
         assert!(
-            shard_entries(&loader, new_a.position).contains(&100),
+            shard_entries(&loader, new_a.index_ref).contains(&100),
             "key 100 is present in shard A",
         );
         // Shard B is untouched.
@@ -1511,8 +1525,8 @@ mod tests {
         let s = new_levels.shards();
         assert_eq!(s.len(), 2);
         // Both shard btree entries are unchanged.
-        assert_eq!(s.get(&shard_key(1)).unwrap().position, positions[0]);
-        assert_eq!(s.get(&shard_key(200)).unwrap().position, positions[1]);
+        assert_eq!(s.get(&shard_key(1)).unwrap().index_ref, positions[0]);
+        assert_eq!(s.get(&shard_key(200)).unwrap().index_ref, positions[1]);
         // Exactly one flush (the new L0).
         assert_eq!(loader.flush_count(), 1);
     }
@@ -1522,14 +1536,17 @@ mod tests {
     fn force_relocate_command(
         ks: KeySpace,
         levels: IndexLevels,
-        relocate_positions: impl IntoIterator<Item = WalPosition>,
+        relocate_positions: impl IntoIterator<Item = IndexRef>,
     ) -> IndexFlushCommand {
         IndexFlushCommand::new(
             ks,
             CellId::Integer(0),
             FlushKind::ForceRelocate {
                 levels,
-                relocate_positions: relocate_positions.into_iter().collect(),
+                relocate_positions: relocate_positions
+                    .into_iter()
+                    .map(|index_ref| index_ref.position())
+                    .collect(),
             },
         )
     }
@@ -1554,15 +1571,18 @@ mod tests {
 
         let new_a = new_levels.shards().get(&shard_key(1)).unwrap();
         let new_b = new_levels.shards().get(&shard_key(100)).unwrap();
-        assert_ne!(new_a.position, pos_a, "shard A reflushed at fresh position");
+        assert_ne!(
+            new_a.index_ref, pos_a,
+            "shard A reflushed at fresh position"
+        );
         assert_eq!(new_a.max_key, shard_key(5), "shard A bounds unchanged");
-        assert_eq!(new_b.position, pos_b, "shard B untouched");
+        assert_eq!(new_b.index_ref, pos_b, "shard B untouched");
         assert_eq!(new_b.max_key, shard_key(200));
         // Exactly one flush: shard A's rewrite. B is untouched, no L0.
         assert_eq!(loader.flush_count(), 1);
 
         // Content of the rewritten shard A blob equals the original.
-        let a_keys = shard_entries(&loader, new_a.position);
+        let a_keys = shard_entries(&loader, new_a.index_ref);
         assert_eq!(a_keys, vec![1, 2, 3, 4, 5]);
     }
 
@@ -1581,8 +1601,8 @@ mod tests {
         assert_eq!(new_levels.shards().len(), 2);
         let new_a = new_levels.shards().get(&shard_key(1)).unwrap();
         let new_b = new_levels.shards().get(&shard_key(100)).unwrap();
-        assert_ne!(new_a.position, positions[0]);
-        assert_ne!(new_b.position, positions[1]);
+        assert_ne!(new_a.index_ref, positions[0]);
+        assert_ne!(new_b.index_ref, positions[1]);
         assert_eq!(loader.flush_count(), 2);
     }
 
@@ -1594,7 +1614,7 @@ mod tests {
         let loader = RecordingLoader::new();
         let (sharded_levels, positions) = seed_sharded_cell(&loader, &[(1, 5), (100, 110)]);
         // Seed an L0 blob.
-        let l0_pos = WalPosition::new(7_000, 64);
+        let l0_pos = IndexRef::new(WalPosition::new(7_000, 64));
         let mut l0_table = IndexTable::default();
         l0_table.insert(
             Bytes::from(50u64.to_be_bytes().to_vec()),
@@ -1614,8 +1634,8 @@ mod tests {
         // Shards untouched.
         let new_a = new_levels.shards().get(&shard_key(1)).unwrap();
         let new_b = new_levels.shards().get(&shard_key(100)).unwrap();
-        assert_eq!(new_a.position, positions[0]);
-        assert_eq!(new_b.position, positions[1]);
+        assert_eq!(new_a.index_ref, positions[0]);
+        assert_eq!(new_b.index_ref, positions[1]);
         // Exactly one flush: the L0 rewrite.
         assert_eq!(loader.flush_count(), 1);
     }
@@ -1646,10 +1666,10 @@ mod tests {
         let new_a = new_levels.shards().get(&shard_key(1)).unwrap();
         let new_b = new_levels.shards().get(&shard_key(100)).unwrap();
         assert_ne!(
-            new_a.position, pos_a,
+            new_a.index_ref, pos_a,
             "flagged shard A reflushed by post-pass"
         );
-        assert_eq!(new_b.position, pos_b, "unflagged shard B preserved");
+        assert_eq!(new_b.index_ref, pos_b, "unflagged shard B preserved");
     }
 
     #[test]
@@ -1674,8 +1694,8 @@ mod tests {
         let new_a = new_levels.shards().get(&shard_key(1)).unwrap();
         let new_b = new_levels.shards().get(&shard_key(200)).unwrap();
         // Both shards moved: A via re-sharding, B via the post-pass.
-        assert_ne!(new_a.position, positions[0]);
-        assert_ne!(new_b.position, pos_b);
+        assert_ne!(new_a.index_ref, positions[0]);
+        assert_ne!(new_b.index_ref, pos_b);
         assert_eq!(new_b.max_key, shard_key(300), "B bounds preserved");
     }
 
@@ -1686,7 +1706,7 @@ mod tests {
         // is flagged; post-pass must rewrite it.
         let ctx = make_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
-        let l1_pos = WalPosition::new(7_000, 64);
+        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64));
         let mut l1_table = IndexTable::default();
         l1_table.insert(
             Bytes::from(50u64.to_be_bytes().to_vec()),
@@ -1715,7 +1735,7 @@ mod tests {
         // floor; otherwise that index space is never reclaimed.
         let ctx = make_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
-        let l1_pos = WalPosition::new(7_000, 64);
+        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64));
         loader.seed(
             l1_pos,
             build_dirty(&[
@@ -1777,7 +1797,7 @@ mod tests {
             IndexFlusherThread::handle_command(&loader, &cmd, &ctx, RelocationFlush::None).unwrap();
 
         let shard_a = new_levels.shards().get(&shard_key(1)).unwrap();
-        let keys: Vec<u64> = index_entries(&loader, shard_a.position)
+        let keys: Vec<u64> = index_entries(&loader, shard_a.index_ref)
             .into_iter()
             .map(|(key, _)| key)
             .collect();
@@ -1794,7 +1814,7 @@ mod tests {
 
         let shard_b = new_levels.shards().get(&shard_key(200)).unwrap();
         assert_eq!(
-            shard_b.position, positions[1],
+            shard_b.index_ref, positions[1],
             "untouched shard keeps its blob"
         );
     }
@@ -1809,7 +1829,7 @@ mod tests {
         // necessarily when relocation returns.
         let ctx = make_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
-        let l1_pos = WalPosition::new(7_000, 64);
+        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64));
         loader.seed(l1_pos, build_dirty(&[(1, Some(100)), (2, Some(150))]));
         let cmd = flush_command(
             ctx.id(),
@@ -1850,7 +1870,7 @@ mod tests {
             .shards()
             .get(&shard_key(200))
             .unwrap()
-            .position;
+            .index_ref;
 
         // Promote 2: 65 overwrites in shard B's range. Shard A is now
         // "untouched" by this promote — its btree entry should carry the
@@ -1867,16 +1887,20 @@ mod tests {
         // Shard A's position carries through unchanged from promote 1.
         let a_after_2 = levels_after_2.shards().get(&shard_key(1)).unwrap();
         assert_eq!(
-            a_after_2.position,
-            levels_after_1.shards().get(&shard_key(1)).unwrap().position,
+            a_after_2.index_ref,
+            levels_after_1
+                .shards()
+                .get(&shard_key(1))
+                .unwrap()
+                .index_ref,
             "shard A untouched in promote 2 keeps promote-1 position",
         );
         // Shard B got rewritten, so its position changed.
         let b_after_2 = levels_after_2.shards().get(&shard_key(200)).unwrap();
-        assert_ne!(b_after_2.position, pos_b_after_1);
+        assert_ne!(b_after_2.index_ref, pos_b_after_1);
         // Content check: shard B's blob contains keys 200..=300 (all
         // original plus the overwrites — same set).
-        let b_keys = shard_entries(&loader, b_after_2.position);
+        let b_keys = shard_entries(&loader, b_after_2.index_ref);
         assert_eq!(b_keys.first(), Some(&200));
         assert_eq!(b_keys.last(), Some(&300));
         assert_eq!(b_keys.len(), 101);
@@ -1901,7 +1925,7 @@ mod tests {
         ctx: &KsContext,
         dirty: &[(u64, Option<u64>)],
         updates: RelocationUpdates,
-    ) -> (RecordingLoader, Vec<WalPosition>, IndexLevels) {
+    ) -> (RecordingLoader, Vec<IndexRef>, IndexLevels) {
         let loader = RecordingLoader::new();
         let (current_levels, positions) = seed_sharded_cell(&loader, &[(1, 100), (200, 300)]);
         let cmd = flush_command(ctx.id(), build_dirty(dirty), current_levels);
@@ -1938,9 +1962,9 @@ mod tests {
             vec![(50, 10_050), (400, 10_400)]
         );
         let a = new_levels.shards().get(&shard_key(1)).unwrap();
-        assert_ne!(a.position, positions[0], "shard A rewritten");
+        assert_ne!(a.index_ref, positions[0], "shard A rewritten");
         assert_eq!(a.max_key, shard_key(100), "shard A bounds unchanged");
-        let a_entries = index_entries(&loader, a.position);
+        let a_entries = index_entries(&loader, a.index_ref);
         assert_eq!(a_entries.len(), 100);
         assert!(a_entries.contains(&(10, 10_010)));
         assert!(
@@ -1948,8 +1972,8 @@ mod tests {
             "shadowed shard copy untouched"
         );
         let b = new_levels.shards().get(&shard_key(200)).unwrap();
-        assert_ne!(b.position, positions[1], "shard B rewritten");
-        let b_entries = index_entries(&loader, b.position);
+        assert_ne!(b.index_ref, positions[1], "shard B rewritten");
+        let b_entries = index_entries(&loader, b.index_ref);
         assert_eq!(b_entries.len(), 101);
         assert!(b_entries.contains(&(250, 10_250)));
         assert!(b_entries.contains(&(200, 200)));
@@ -1971,10 +1995,10 @@ mod tests {
 
         assert_eq!(new_levels.shards().len(), 2);
         let a = new_levels.shards().get(&shard_key(1)).unwrap();
-        assert_ne!(a.position, positions[0], "shard A rewritten");
-        assert!(index_entries(&loader, a.position).contains(&(10, 10_010)));
+        assert_ne!(a.index_ref, positions[0], "shard A rewritten");
+        assert!(index_entries(&loader, a.index_ref).contains(&(10, 10_010)));
         let b = new_levels.shards().get(&shard_key(200)).unwrap();
-        assert_eq!(b.position, positions[1], "shard B untouched");
+        assert_eq!(b.index_ref, positions[1], "shard B untouched");
         // Shard A and the new L0.
         assert_eq!(loader.flush_count(), 2);
         assert_eq!(
@@ -2000,11 +2024,11 @@ mod tests {
         );
 
         assert_eq!(
-            new_levels.shards().get(&shard_key(1)).unwrap().position,
+            new_levels.shards().get(&shard_key(1)).unwrap().index_ref,
             positions[0]
         );
         assert_eq!(
-            new_levels.shards().get(&shard_key(200)).unwrap().position,
+            new_levels.shards().get(&shard_key(200)).unwrap().index_ref,
             positions[1]
         );
         // Only the new L0.
@@ -2031,11 +2055,11 @@ mod tests {
         assert!(new_levels.is_sharded());
         assert_eq!(new_levels.l0(), None, "no blob for an empty L0");
         assert_eq!(
-            new_levels.shards().get(&shard_key(1)).unwrap().position,
+            new_levels.shards().get(&shard_key(1)).unwrap().index_ref,
             positions[0]
         );
         let b = new_levels.shards().get(&shard_key(200)).unwrap();
-        assert!(index_entries(&loader, b.position).contains(&(250, 10_250)));
+        assert!(index_entries(&loader, b.index_ref).contains(&(250, 10_250)));
         // Only the rewritten shard.
         assert_eq!(loader.flush_count(), 1);
         assert_eq!(
@@ -2058,11 +2082,11 @@ mod tests {
 
         assert_eq!(new_levels.l0(), None);
         assert_eq!(
-            new_levels.shards().get(&shard_key(1)).unwrap().position,
+            new_levels.shards().get(&shard_key(1)).unwrap().index_ref,
             positions[0]
         );
         assert_eq!(
-            new_levels.shards().get(&shard_key(200)).unwrap().position,
+            new_levels.shards().get(&shard_key(200)).unwrap().index_ref,
             positions[1]
         );
         assert_eq!(loader.flush_count(), 0);
@@ -2074,7 +2098,7 @@ mod tests {
         // cell keeps its `[INVALID, L1]` shape.
         let ctx = make_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
-        let l1_pos = WalPosition::new(500, 64);
+        let l1_pos = IndexRef::new(WalPosition::new(500, 64));
         loader.seed(l1_pos, build_dirty(&[(1, Some(1)), (2, Some(2))]));
         let cmd = flush_command(
             ctx.id(),
@@ -2107,15 +2131,15 @@ mod tests {
         assert!(new_levels.is_sharded());
         assert_eq!(new_levels.l0(), None, "promote leaves no L0");
         let a = new_levels.shards().get(&shard_key(1)).unwrap();
-        let a_entries = index_entries(&loader, a.position);
+        let a_entries = index_entries(&loader, a.index_ref);
         assert_eq!(a_entries.len(), 100);
         assert!(a_entries.contains(&(1, 20_001)), "dirty copy re-pointed");
         assert!(a_entries.contains(&(2, 1_002)), "dirty copy kept");
         assert!(a_entries.contains(&(70, 20_070)), "shard copy re-pointed");
         assert!(a_entries.contains(&(80, 80)), "untouched shard copy kept");
         let b = new_levels.shards().get(&shard_key(200)).unwrap();
-        assert_ne!(b.position, positions[1], "shard B rewritten");
-        let b_entries = index_entries(&loader, b.position);
+        assert_ne!(b.index_ref, positions[1], "shard B rewritten");
+        let b_entries = index_entries(&loader, b.index_ref);
         assert_eq!(b_entries.len(), 101);
         assert!(b_entries.contains(&(250, 20_250)));
     }

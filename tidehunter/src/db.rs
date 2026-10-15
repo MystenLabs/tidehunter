@@ -10,6 +10,7 @@ use crate::control::{ControlRegion, ControlRegionStore, RelocateFiles};
 use crate::crc::IntoBytesFixed;
 use crate::flusher::{IndexFlusher, RelocationFlush};
 use crate::index::index_format::{IndexFormat, IndexIterCaches};
+use crate::index::index_ref::IndexRef;
 use crate::index::index_table::IndexTable;
 use crate::index::levels::IndexLevels;
 use crate::index_blob_cache::IndexBlobCache;
@@ -1406,7 +1407,7 @@ impl Db {
         Ok(snapshot.replay_from)
     }
 
-    fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {
+    fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<IndexRef> {
         let context = self.ks_context(ks);
         self.metrics
             .flush_count
@@ -1426,7 +1427,7 @@ impl Db {
             .inc_by(index.len() as u64);
         let w = PreparedWalWrite::new(&WalEntry::Index(ks, index));
         context.inc_wal_written(WalEntryKind::Index, w.len() as u64);
-        Ok(*self.index_writer.write(&w)?.wal_position())
+        Ok(IndexRef::new(*self.index_writer.write(&w)?.wal_position()))
     }
 
     fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(ReadType, Option<WalEntry>)> {
@@ -1737,7 +1738,8 @@ impl Drop for Db {
 impl Loader for Wal {
     type Error = DbError;
 
-    fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> DbResult<IndexTable> {
+    fn load(&self, ks: &KeySpaceDesc, index_ref: IndexRef) -> DbResult<IndexTable> {
+        let position = index_ref.position();
         let (_, entry) = Db::read_entry(self, position)?;
         Db::read_index(
             ks,
@@ -1750,7 +1752,8 @@ impl Loader for Wal {
         )
     }
 
-    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+    fn index_reader(&self, index_ref: IndexRef) -> Result<WalRandomRead, Self::Error> {
+        let position = index_ref.position();
         Ok(self.random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
@@ -1758,7 +1761,7 @@ impl Loader for Wal {
         false
     }
 
-    fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> DbResult<WalPosition> {
+    fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> DbResult<IndexRef> {
         unimplemented!()
     }
 
@@ -1784,7 +1787,8 @@ impl Loader for Db {
     /// promote or relocation of a hot cell the re-read of its L1 from disk.
     /// `load` never admits a blob, only lookups fill the cache; and it
     /// probes non-blocking because `maybe_load` calls it under the row lock.
-    fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> DbResult<IndexTable> {
+    fn load(&self, ks: &KeySpaceDesc, index_ref: IndexRef) -> DbResult<IndexTable> {
+        let position = index_ref.position();
         if let Some(cache) = &self.index_blob_cache
             && let Some(blob) = cache.peek(position)
         {
@@ -1813,7 +1817,8 @@ impl Loader for Db {
     /// joins the fill in flight) on its first read, after the caller has
     /// released the lock. Mapped blobs, blobs below the floor and blobs
     /// above the budget are returned as they are.
-    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+    fn index_reader(&self, index_ref: IndexRef) -> Result<WalRandomRead, Self::Error> {
+        let position = index_ref.position();
         let Some(cache) = &self.index_blob_cache else {
             return Ok(self
                 .indexes
@@ -1836,7 +1841,8 @@ impl Loader for Db {
     /// Opens the index blob at `position` for a scan, sourcing it as `load`
     /// does: from the index blob cache when the blob is resident, with a
     /// whole-frame read otherwise, and without admitting it into the cache.
-    fn index_scan_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+    fn index_scan_reader(&self, index_ref: IndexRef) -> Result<WalRandomRead, Self::Error> {
+        let position = index_ref.position();
         if let Some(cache) = &self.index_blob_cache
             && let Some(blob) = cache.peek(position)
         {
@@ -1851,7 +1857,7 @@ impl Loader for Db {
         true
     }
 
-    fn flush(&self, ks: KeySpace, data: &IndexTable) -> DbResult<WalPosition> {
+    fn flush(&self, ks: KeySpace, data: &IndexTable) -> DbResult<IndexRef> {
         self.write_index(ks, data)
     }
 

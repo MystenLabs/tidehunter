@@ -123,11 +123,11 @@ pub(crate) fn register(engine: &mut Engine) {
                                 );
                                 m.insert(
                                     "offset".into(),
-                                    Dynamic::from(shard.position.offset() as i64),
+                                    Dynamic::from(shard.index_ref.offset() as i64),
                                 );
                                 m.insert(
                                     "len".into(),
-                                    Dynamic::from(shard.position.frame_len() as i64),
+                                    Dynamic::from(shard.index_ref.frame_len() as i64),
                                 );
                                 Dynamic::from(m)
                             })

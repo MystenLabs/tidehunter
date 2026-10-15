@@ -353,8 +353,8 @@ impl ControlRegionStore {
 /// Legacy on-disk representation — read-only, used for one-way migration of
 /// V2 control regions to V3.
 ///
-/// V2 stored each cell's `IndexLevels` as just the per-level positions
-/// `SmallVec`. V3 keeps the same `positions` plus a `BTreeMap` of
+/// V2 stored each cell's `IndexLevels` as just the per-level `WalPosition`
+/// `SmallVec`. V3 keeps those as the per-level refs plus a `BTreeMap` of
 /// auto-sharding shards (empty for cells that haven't split). The migration
 /// rebuilds each cell's `IndexLevels` with `shards = BTreeMap::new()`.
 mod legacy_v2 {
@@ -432,7 +432,7 @@ mod legacy_v2 {
 /// V1 control regions.
 ///
 /// V1 stored a single `WalPosition` per cell. Modern formats (V2/V3) store an
-/// `IndexLevels` (a `SmallVec` of per-level `WalPosition`s, inline capacity
+/// `IndexLevels` (a `SmallVec` of per-level `IndexRef`s, inline capacity
 /// `INLINE_LEVELS`). The migration maps every valid single position to a
 /// one-element level list; `WalPosition::INVALID` maps to an empty list.
 mod legacy_v1 {
@@ -500,6 +500,7 @@ mod legacy_v1 {
 mod tests {
     use super::*;
     use crate::cell::CellId;
+    use crate::index::index_ref::IndexRef;
     use crate::index::levels::{IndexLevels, IndexShard};
     use crate::key_shape::{KeyShape, KeyType, UniformKeyConfig};
     use crate::wal::position::{LastProcessed, WalPosition};
@@ -528,18 +529,18 @@ mod tests {
         cr.snapshot.data[0].insert(
             CellId::Integer(0),
             SnapshotEntryData::from_levels(
-                IndexLevels::single(WalPosition::test_value(7777)),
+                IndexLevels::single(IndexRef::test_value(7777)),
                 LastProcessed::new_test(42),
             ),
         );
         let mut shard_btree: BTreeMap<Vec<u8>, IndexShard> = BTreeMap::new();
         shard_btree.insert(
             b"aaaaaaaa".to_vec(),
-            IndexShard::new(WalPosition::test_value(1001), b"low_max".to_vec()),
+            IndexShard::new(IndexRef::test_value(1001), b"low_max".to_vec()),
         );
         shard_btree.insert(
             b"mid".to_vec(),
-            IndexShard::new(WalPosition::test_value(1002), b"zzzzzzzz".to_vec()),
+            IndexShard::new(IndexRef::test_value(1002), b"zzzzzzzz".to_vec()),
         );
         cr.snapshot.data[0].insert(
             CellId::Integer(1),
@@ -559,7 +560,7 @@ mod tests {
             .get(&CellId::Integer(0))
             .expect("cell 0 exists");
         assert_eq!(entry0.levels.len(), 1);
-        assert_eq!(entry0.levels.latest(), Some(WalPosition::test_value(7777)));
+        assert_eq!(entry0.levels.latest(), Some(IndexRef::test_value(7777)));
         assert!(!entry0.levels.is_sharded());
         assert_eq!(entry0.last_processed, LastProcessed::new_test(42));
 
@@ -632,7 +633,7 @@ mod tests {
             .get(&CellId::Integer(0))
             .expect("cell 0 present");
         assert_eq!(cell0.levels.len(), 2);
-        assert_eq!(cell0.levels.latest(), Some(WalPosition::test_value(9001)));
+        assert_eq!(cell0.levels.latest(), Some(IndexRef::test_value(9001)));
         assert!(
             !cell0.levels.is_sharded(),
             "V2 → V3 yields empty shard btree"
@@ -642,7 +643,7 @@ mod tests {
             .get(&CellId::Integer(1))
             .expect("cell 1 present");
         assert_eq!(cell1.levels.len(), 1);
-        assert_eq!(cell1.levels.latest(), Some(WalPosition::test_value(9002)));
+        assert_eq!(cell1.levels.latest(), Some(IndexRef::test_value(9002)));
         assert!(!cell1.levels.is_sharded());
     }
 
@@ -692,7 +693,7 @@ mod tests {
             .get(&CellId::Integer(0))
             .expect("cell 0 present");
         assert_eq!(cell0.levels.len(), 1);
-        assert_eq!(cell0.levels.latest(), Some(WalPosition::test_value(1234)));
+        assert_eq!(cell0.levels.latest(), Some(IndexRef::test_value(1234)));
 
         let cell1 = read_cr.snapshot.data[0]
             .get(&CellId::Integer(1))

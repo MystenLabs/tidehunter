@@ -8,17 +8,18 @@
 //! A slot can be "empty" even when a later slot is populated: immediately
 //! after a promote, L0 is empty and L1 holds the merged blob. To represent
 //! that unambiguously (without depending on size-based classification at
-//! read-time) we store `WalPosition::INVALID` as a sentinel for empty
+//! read-time) we store `IndexRef::INVALID` as a sentinel for empty
 //! interior slots. Trailing INVALIDs do not occur — all constructors
-//! produce canonical form and `set()` only accepts valid positions.
+//! produce canonical form and `set()` only accepts valid refs.
 //!
 //! When auto-sharding is enabled and a cell's L1 would exceed the WAL
 //! fragment size, the L1 slot is "vacated" (set to INVALID) and the
 //! `shards` btree owns L1 instead. Each entry maps a shard's
-//! **content minimum** key to the shard's `WalPosition` plus its
+//! **content minimum** key to the shard's `IndexRef` plus its
 //! **content maximum** key. The min/max pair lets the iterator pick the
 //! one shard that holds a key past `prev_key` (forward) or before it
 //! (reverse) without ever opening an empty shard.
+use crate::index::index_ref::IndexRef;
 use crate::wal::position::WalPosition;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -27,7 +28,7 @@ use std::ops::Bound;
 
 /// Per-shard descriptor stored as the value side of the shard btree.
 ///
-/// `position` is the WAL location of the shard's serialized index blob.
+/// `index_ref` identifies the shard's serialized index blob.
 /// `max_key` is the largest content key inside that blob — paired with
 /// the btree key (which is the shard's smallest content key) it gives
 /// the iterator a closed `[min_key, max_key]` range without reading the
@@ -35,13 +36,13 @@ use std::ops::Bound;
 /// past prev_key?" in O(log N_shards).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexShard {
-    pub position: WalPosition,
+    pub index_ref: IndexRef,
     pub max_key: Vec<u8>,
 }
 
 impl IndexShard {
-    pub fn new(position: WalPosition, max_key: Vec<u8>) -> Self {
-        Self { position, max_key }
+    pub fn new(index_ref: IndexRef, max_key: Vec<u8>) -> Self {
+        Self { index_ref, max_key }
     }
 }
 
@@ -52,18 +53,18 @@ impl IndexShard {
 /// SmallVec spills to the heap if a cell ever carries more levels.
 pub const INLINE_LEVELS: usize = 2;
 
-/// Ordered list of on-disk index-blob positions for one cell, freshest first.
+/// Ordered list of refs to one cell's on-disk index blobs, freshest first.
 ///
 /// Invariants:
-/// - `positions[0]` is the L0 slot, `positions[1]` is L1, etc.
-/// - An entry of `WalPosition::INVALID` means "this level slot exists in the
+/// - `refs[0]` is the L0 slot, `refs[1]` is L1, etc.
+/// - An entry of `IndexRef::INVALID` means "this level slot exists in the
 ///   schema but currently holds no blob" (e.g., L0 right after a promote).
 /// - No trailing INVALIDs: `[L0]` is the only form of "L0 only"; `[L0, INVALID]`
 ///   never occurs. Interior INVALIDs — typically `[INVALID, L1]` post-promote —
 ///   are valid and preserved.
 /// - The empty list represents a cell that has never been flushed.
-/// - Sharded form (`!shards.is_empty()`): `positions[1]` MUST be
-///   `WalPosition::INVALID` — the btree owns the L1 data. `positions[0]`
+/// - Sharded form (`!shards.is_empty()`): `refs[1]` MUST be
+///   `IndexRef::INVALID` — the btree owns the L1 data. `refs[0]`
 ///   (the L0 slot) still behaves normally.
 /// - Sharded btree keys are each shard's **smallest content key** in
 ///   strictly increasing byte order (no sentinel). Each value's
@@ -71,7 +72,7 @@ pub const INLINE_LEVELS: usize = 2;
 ///   `btree_key ≤ max_key < next_btree_key` (shards are disjoint).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexLevels {
-    positions: SmallVec<[WalPosition; INLINE_LEVELS]>,
+    refs: SmallVec<[IndexRef; INLINE_LEVELS]>,
     /// Per-range L1 sub-blobs when auto-sharding has split L1. Empty when
     /// the cell uses the legacy single-blob L1 (the common case). See the
     /// struct-level invariants for the contract this field carries.
@@ -83,37 +84,37 @@ impl IndexLevels {
     /// Returns an empty level set (no on-disk blobs).
     pub fn new() -> Self {
         Self {
-            positions: SmallVec::new(),
+            refs: SmallVec::new(),
             shards: BTreeMap::new(),
         }
     }
 
     /// Returns a level set with a single L0 blob.
-    pub fn single(position: WalPosition) -> Self {
+    pub fn single(index_ref: IndexRef) -> Self {
         debug_assert!(
-            position.is_valid(),
-            "IndexLevels::single requires a valid position",
+            index_ref.is_valid(),
+            "IndexLevels::single requires a valid ref",
         );
-        let mut positions = SmallVec::new();
-        positions.push(position);
+        let mut refs = SmallVec::new();
+        refs.push(index_ref);
         Self {
-            positions,
+            refs,
             shards: BTreeMap::new(),
         }
     }
 
     /// Returns a post-promote level set: L0 is empty (sentinel), L1 holds
     /// the promoted blob. Shape: `[INVALID, l1]`.
-    pub fn promoted(l1: WalPosition) -> Self {
+    pub fn promoted(l1: IndexRef) -> Self {
         debug_assert!(
             l1.is_valid(),
-            "IndexLevels::promoted requires a valid L1 position",
+            "IndexLevels::promoted requires a valid L1 ref",
         );
-        let mut positions = SmallVec::new();
-        positions.push(WalPosition::INVALID);
-        positions.push(l1);
+        let mut refs = SmallVec::new();
+        refs.push(IndexRef::INVALID);
+        refs.push(l1);
         Self {
-            positions,
+            refs,
             shards: BTreeMap::new(),
         }
     }
@@ -124,7 +125,7 @@ impl IndexLevels {
     /// `single()` for fresh code.
     pub fn from_legacy_position(position: WalPosition) -> Self {
         if position.is_valid() {
-            Self::single(position)
+            Self::single(IndexRef::new(position))
         } else {
             Self::new()
         }
@@ -137,7 +138,7 @@ impl IndexLevels {
         positions: SmallVec<[WalPosition; INLINE_LEVELS]>,
     ) -> Self {
         Self {
-            positions,
+            refs: positions.into_iter().map(IndexRef::new).collect(),
             shards: BTreeMap::new(),
         }
     }
@@ -149,24 +150,24 @@ impl IndexLevels {
     /// Panics (debug) on any invariant violation (see [`debug_assert_shards`]).
     pub fn sharded(shards: BTreeMap<Vec<u8>, IndexShard>) -> Self {
         Self::debug_assert_shards(&shards);
-        let mut positions = SmallVec::new();
-        positions.push(WalPosition::INVALID);
-        positions.push(WalPosition::INVALID);
-        Self { positions, shards }
+        let mut refs = SmallVec::new();
+        refs.push(IndexRef::INVALID);
+        refs.push(IndexRef::INVALID);
+        Self { refs, shards }
     }
 
     /// Returns a sharded level set carrying an L0 alongside the shard btree.
     /// Shape: `[l0, INVALID]` plus the btree owning L1.
-    pub fn sharded_with_l0(l0: WalPosition, shards: BTreeMap<Vec<u8>, IndexShard>) -> Self {
+    pub fn sharded_with_l0(l0: IndexRef, shards: BTreeMap<Vec<u8>, IndexShard>) -> Self {
         debug_assert!(
             l0.is_valid(),
-            "IndexLevels::sharded_with_l0 requires a valid L0 position",
+            "IndexLevels::sharded_with_l0 requires a valid L0 ref",
         );
         Self::debug_assert_shards(&shards);
-        let mut positions = SmallVec::new();
-        positions.push(l0);
-        positions.push(WalPosition::INVALID);
-        Self { positions, shards }
+        let mut refs = SmallVec::new();
+        refs.push(l0);
+        refs.push(IndexRef::INVALID);
+        Self { refs, shards }
     }
 
     fn debug_assert_shards(shards: &BTreeMap<Vec<u8>, IndexShard>) {
@@ -175,8 +176,8 @@ impl IndexLevels {
             "sharded IndexLevels requires at least one shard",
         );
         debug_assert!(
-            shards.values().all(|s| s.position.is_valid()),
-            "shard positions must all be valid",
+            shards.values().all(|s| s.index_ref.is_valid()),
+            "shard refs must all be valid",
         );
         // min_key (= btree key) ≤ max_key for every shard, and shards are
         // disjoint: max_key(X) < min_key(X+1).
@@ -199,18 +200,18 @@ impl IndexLevels {
     /// True when no level holds a blob. Equivalent to `l0().is_none() && l1().is_none() && ...`
     /// for the populated slots, and considers shard membership too.
     pub fn is_empty(&self) -> bool {
-        self.positions.iter().all(|p| !p.is_valid()) && self.shards.is_empty()
+        self.refs.iter().all(|r| !r.is_valid()) && self.shards.is_empty()
     }
 
     /// Number of schema slots currently tracked (including empty interior slots).
     /// Does not count shards — those live under the L1 slot when sharded.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.positions.len()
+        self.refs.len()
     }
 
     /// Returns the freshest populated level (lowest-index non-INVALID slot
-    /// in `positions`). Skips empty interior slots: for `[INVALID, L1]`, this
+    /// in `refs`). Skips empty interior slots: for `[INVALID, L1]`, this
     /// returns `Some(L1)`.
     ///
     /// For sharded cells, this returns the L0 slot if populated and `None`
@@ -218,33 +219,33 @@ impl IndexLevels {
     /// so we deliberately do not pick one. Callers that need a per-key
     /// answer should use [`shard_for`] instead.
     #[cfg(test)]
-    pub fn latest(&self) -> Option<WalPosition> {
-        self.positions.iter().copied().find(|p| p.is_valid())
+    pub fn latest(&self) -> Option<IndexRef> {
+        self.refs.iter().copied().find(|r| r.is_valid())
     }
 
     /// Iterates **populated** levels from freshest (L0) to oldest, skipping
     /// empty interior slots. This is the read-path order: first hit wins.
     /// When sharded, the shard blobs are appended in btree key order after
     /// the (always-INVALID) L1 slot is skipped.
-    pub fn iter(&self) -> impl Iterator<Item = WalPosition> + '_ {
-        self.positions
+    pub fn iter(&self) -> impl Iterator<Item = IndexRef> + '_ {
+        self.refs
             .iter()
             .copied()
-            .filter(|p| p.is_valid())
-            .chain(self.shards.values().map(|s| s.position))
+            .filter(|r| r.is_valid())
+            .chain(self.shards.values().map(|s| s.index_ref))
     }
 
-    /// Like [`iter`] but yields `(level_idx, position)` pairs. The level index
+    /// Like [`iter`] but yields `(level_idx, index_ref)` pairs. The level index
     /// is the schema slot (0 = L0, 1 = L1, …), preserved across empty interior
     /// slots — so a post-promote `[INVALID, L1]` yields `(1, L1)`. Shard blobs
     /// are yielded at the L1 slot (level index 1) in btree key order.
-    pub fn iter_with_level(&self) -> impl Iterator<Item = (usize, WalPosition)> + '_ {
-        self.positions
+    pub fn iter_with_level(&self) -> impl Iterator<Item = (usize, IndexRef)> + '_ {
+        self.refs
             .iter()
             .copied()
             .enumerate()
-            .filter(|(_, p)| p.is_valid())
-            .chain(self.shards.values().map(|s| (1usize, s.position)))
+            .filter(|(_, r)| r.is_valid())
+            .chain(self.shards.values().map(|s| (1usize, s.index_ref)))
     }
 
     /// Iterates **populated** levels below L0 (slot index ≥ 1), skipping
@@ -253,45 +254,45 @@ impl IndexLevels {
     /// caller needs to consult remaining on-disk levels. When sharded, yields
     /// every shard blob — point-lookup callers that only need one shard should
     /// use [`shard_for`] instead.
-    pub fn iter_below_l0(&self) -> impl Iterator<Item = WalPosition> + '_ {
-        self.positions
+    pub fn iter_below_l0(&self) -> impl Iterator<Item = IndexRef> + '_ {
+        self.refs
             .iter()
             .copied()
             .skip(1)
-            .filter(|p| p.is_valid())
-            .chain(self.shards.values().map(|s| s.position))
+            .filter(|r| r.is_valid())
+            .chain(self.shards.values().map(|s| s.index_ref))
     }
 
-    /// Returns the position at a specific level slot, if populated.
+    /// Returns the ref at a specific level slot, if populated.
     /// INVALID slot or out-of-bounds both return `None`.
-    pub fn get(&self, level: usize) -> Option<WalPosition> {
-        self.positions.get(level).copied().filter(|p| p.is_valid())
+    pub fn get(&self, level: usize) -> Option<IndexRef> {
+        self.refs.get(level).copied().filter(|r| r.is_valid())
     }
 
     /// Convenience for the L0 slot.
-    pub fn l0(&self) -> Option<WalPosition> {
+    pub fn l0(&self) -> Option<IndexRef> {
         self.get(0)
     }
 
     /// Convenience for the L1 slot.
-    pub fn l1(&self) -> Option<WalPosition> {
+    pub fn l1(&self) -> Option<IndexRef> {
         self.get(1)
     }
 
-    /// Replaces (or appends) the position at `level`. `position` must be valid.
+    /// Replaces (or appends) the ref at `level`. `index_ref` must be valid.
     ///
     /// Panics if `level` skips past the end — callers must fill levels contiguously.
-    pub fn set(&mut self, level: usize, position: WalPosition) {
-        debug_assert!(position.is_valid());
+    pub fn set(&mut self, level: usize, index_ref: IndexRef) {
+        debug_assert!(index_ref.is_valid());
         assert!(
-            level <= self.positions.len(),
+            level <= self.refs.len(),
             "level {level} skips past end of levels (len = {})",
-            self.positions.len(),
+            self.refs.len(),
         );
-        if level == self.positions.len() {
-            self.positions.push(position);
+        if level == self.refs.len() {
+            self.refs.push(index_ref);
         } else {
-            self.positions[level] = position;
+            self.refs[level] = index_ref;
         }
     }
 
@@ -397,8 +398,8 @@ mod tests {
     use super::*;
     use crate::wal::position::WalPosition;
 
-    fn pos(v: u64) -> WalPosition {
-        WalPosition::test_value(v)
+    fn pos(v: u64) -> IndexRef {
+        IndexRef::test_value(v)
     }
 
     #[test]
@@ -476,10 +477,10 @@ mod tests {
     fn two_shard_btree(
         min_a: &[u8],
         max_a: &[u8],
-        pos_a: WalPosition,
+        pos_a: IndexRef,
         min_b: &[u8],
         max_b: &[u8],
-        pos_b: WalPosition,
+        pos_b: IndexRef,
     ) -> BTreeMap<Vec<u8>, IndexShard> {
         let mut m = BTreeMap::new();
         m.insert(min_a.to_vec(), IndexShard::new(pos_a, max_a.to_vec()));
@@ -502,14 +503,14 @@ mod tests {
         let below: Vec<_> = lvls.iter_below_l0().collect();
         assert_eq!(below, vec![pos(10), pos(20)]);
         // shard_for: tight `[min, max]` check.
-        assert_eq!(lvls.shard_for(b"a").map(|s| s.position), Some(pos(10))); // min of A
-        assert_eq!(lvls.shard_for(b"f").map(|s| s.position), Some(pos(10))); // inside A
-        assert_eq!(lvls.shard_for(b"l").map(|s| s.position), Some(pos(10))); // max of A
-        assert_eq!(lvls.shard_for(b"m").map(|s| s.position), Some(pos(20))); // min of B
-        assert_eq!(lvls.shard_for(b"z").map(|s| s.position), Some(pos(20))); // max of B
+        assert_eq!(lvls.shard_for(b"a").map(|s| s.index_ref), Some(pos(10))); // min of A
+        assert_eq!(lvls.shard_for(b"f").map(|s| s.index_ref), Some(pos(10))); // inside A
+        assert_eq!(lvls.shard_for(b"l").map(|s| s.index_ref), Some(pos(10))); // max of A
+        assert_eq!(lvls.shard_for(b"m").map(|s| s.index_ref), Some(pos(20))); // min of B
+        assert_eq!(lvls.shard_for(b"z").map(|s| s.index_ref), Some(pos(20))); // max of B
         // Outside any shard's content range:
-        assert_eq!(lvls.shard_for(b"").map(|s| s.position), None); // below A.min
-        assert_eq!(lvls.shard_for(b"~").map(|s| s.position), None); // above B.max
+        assert_eq!(lvls.shard_for(b"").map(|s| s.index_ref), None); // below A.min
+        assert_eq!(lvls.shard_for(b"~").map(|s| s.index_ref), None); // above B.max
         assert!(!lvls.is_single_level());
         assert_eq!(lvls.shards(), &shards);
     }
@@ -546,32 +547,32 @@ mod tests {
 
         // prev=None → first shard.
         assert_eq!(
-            lvls.shard_for_iter_forward(None).map(|s| s.position),
+            lvls.shard_for_iter_forward(None).map(|s| s.index_ref),
             Some(pos(10))
         );
         // prev below all content → first shard (its min > prev).
         assert_eq!(
-            lvls.shard_for_iter_forward(Some(b"")).map(|s| s.position),
+            lvls.shard_for_iter_forward(Some(b"")).map(|s| s.index_ref),
             Some(pos(10))
         );
         // prev inside A, before A.max → A (predecessor with max > prev).
         assert_eq!(
-            lvls.shard_for_iter_forward(Some(b"e")).map(|s| s.position),
+            lvls.shard_for_iter_forward(Some(b"e")).map(|s| s.index_ref),
             Some(pos(10))
         );
         // prev == A.max → A has nothing past, skip to B.
         assert_eq!(
-            lvls.shard_for_iter_forward(Some(b"j")).map(|s| s.position),
+            lvls.shard_for_iter_forward(Some(b"j")).map(|s| s.index_ref),
             Some(pos(20))
         );
         // prev in the gap (above A.max, below B.min) → B.
         assert_eq!(
-            lvls.shard_for_iter_forward(Some(b"k")).map(|s| s.position),
+            lvls.shard_for_iter_forward(Some(b"k")).map(|s| s.index_ref),
             Some(pos(20))
         );
         // prev inside B → B.
         assert_eq!(
-            lvls.shard_for_iter_forward(Some(b"q")).map(|s| s.position),
+            lvls.shard_for_iter_forward(Some(b"q")).map(|s| s.index_ref),
             Some(pos(20))
         );
         // prev == B.max → cell exhausted.
@@ -587,27 +588,27 @@ mod tests {
 
         // prev=None → last shard.
         assert_eq!(
-            lvls.shard_for_iter_reverse(None).map(|s| s.position),
+            lvls.shard_for_iter_reverse(None).map(|s| s.index_ref),
             Some(pos(20))
         );
         // prev above B.max → B.
         assert_eq!(
-            lvls.shard_for_iter_reverse(Some(b"~")).map(|s| s.position),
+            lvls.shard_for_iter_reverse(Some(b"~")).map(|s| s.index_ref),
             Some(pos(20))
         );
         // prev inside B → B (its min < prev).
         assert_eq!(
-            lvls.shard_for_iter_reverse(Some(b"q")).map(|s| s.position),
+            lvls.shard_for_iter_reverse(Some(b"q")).map(|s| s.index_ref),
             Some(pos(20))
         );
         // prev == B.min → no shard has min < B.min except A; pick A.
         assert_eq!(
-            lvls.shard_for_iter_reverse(Some(b"m")).map(|s| s.position),
+            lvls.shard_for_iter_reverse(Some(b"m")).map(|s| s.index_ref),
             Some(pos(10))
         );
         // prev inside A → A.
         assert_eq!(
-            lvls.shard_for_iter_reverse(Some(b"e")).map(|s| s.position),
+            lvls.shard_for_iter_reverse(Some(b"e")).map(|s| s.index_ref),
             Some(pos(10))
         );
         // prev == A.min → no shard has min < A.min → cell exhausted.

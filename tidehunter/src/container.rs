@@ -57,6 +57,7 @@ impl LargeTableContainer<SnapshotEntryData> {
     /// keyspace-then-cell order. Level-generic: a multi-level cell yields
     /// one position per level.
     pub fn iter_valid_val_positions(&self) -> impl Iterator<Item = WalPosition> + '_ {
-        self.iter_cells().flat_map(|entry| entry.levels().iter())
+        self.iter_cells()
+            .flat_map(|entry| entry.levels().iter().map(|index_ref| index_ref.position()))
     }
 }
