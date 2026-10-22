@@ -125,22 +125,30 @@ impl IndexLevels {
     /// `single()` for fresh code.
     pub fn from_legacy_position(position: WalPosition) -> Self {
         if position.is_valid() {
-            Self::single(IndexRef::new(position))
+            Self::single(IndexRef::legacy(position))
         } else {
             Self::new()
         }
     }
 
-    /// Rebuilds an `IndexLevels` from a raw `positions` smallvec deserialized
-    /// from the V2 (pre-sharding) control-region format. The resulting cell
-    /// is unsharded — `shards` starts empty.
-    pub(crate) fn from_legacy_v2_positions(
+    /// Rebuilds an `IndexLevels` from the per-level positions and shards of
+    /// a control region that stored levels as bare `WalPosition`s (formats
+    /// V2 and V3). Every blob referenced that way has the legacy micro-cell
+    /// count; `IndexRef::legacy` records it.
+    pub(crate) fn from_legacy_parts(
         positions: SmallVec<[WalPosition; INLINE_LEVELS]>,
+        shards: BTreeMap<Vec<u8>, IndexShard>,
     ) -> Self {
         Self {
-            refs: positions.into_iter().map(IndexRef::new).collect(),
-            shards: BTreeMap::new(),
+            refs: positions.into_iter().map(IndexRef::legacy).collect(),
+            shards,
         }
+    }
+
+    /// The level slots as stored, sentinels included.
+    #[cfg(test)]
+    pub(crate) fn raw_refs(&self) -> &[IndexRef] {
+        &self.refs
     }
 
     /// Returns a sharded level set with no L0: L1 has been split into the

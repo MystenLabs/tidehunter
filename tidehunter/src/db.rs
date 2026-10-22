@@ -9,6 +9,7 @@ use crate::context::{DbOpKind, KsContext, KsContextVec, ReadType, WalEntryKind};
 use crate::control::{ControlRegion, ControlRegionStore, RelocateFiles};
 use crate::crc::IntoBytesFixed;
 use crate::flusher::{IndexFlusher, RelocationFlush};
+use crate::index::index_format::SerializedIndex;
 use crate::index::index_format::{IndexFormat, IndexIterCaches};
 use crate::index::index_ref::IndexRef;
 use crate::index::index_table::IndexTable;
@@ -86,6 +87,11 @@ impl Db {
         metrics: Arc<Metrics>,
     ) -> DbResult<Arc<Self>> {
         config.validate();
+        for ks in key_shape.iter_ks() {
+            if let Err(err) = ks.micro_cell_policy().validate() {
+                panic!("key space {}: {err}", ks.name());
+            }
+        }
         let path = path.canonicalize()?;
         let lock = DbLock::acquire(&path, config.open_lock_retry_timeout)?;
         let (key_shape, keyspaces, registry_dirty) = Self::reconcile_key_shape(&path, key_shape)?;
@@ -1417,17 +1423,20 @@ impl Db {
             .flushed_keys
             .with_label_values(&[context.name()])
             .inc_by(index.len() as u64);
-        let index = context
+        let SerializedIndex { bytes, micro_cells } = context
             .ks_config
             .index_format()
             .serialize_index(index, &context.ks_config);
         self.metrics
             .flushed_bytes
             .with_label_values(&[context.name()])
-            .inc_by(index.len() as u64);
-        let w = PreparedWalWrite::new(&WalEntry::Index(ks, index));
+            .inc_by(bytes.len() as u64);
+        let w = PreparedWalWrite::new(&WalEntry::Index(ks, bytes));
         context.inc_wal_written(WalEntryKind::Index, w.len() as u64);
-        Ok(IndexRef::new(*self.index_writer.write(&w)?.wal_position()))
+        Ok(IndexRef::new(
+            *self.index_writer.write(&w)?.wal_position(),
+            micro_cells,
+        ))
     }
 
     fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(ReadType, Option<WalEntry>)> {
@@ -1443,9 +1452,9 @@ impl Db {
         Ok(entry)
     }
 
-    fn read_index(ks: &KeySpaceDesc, entry: WalEntry) -> DbResult<IndexTable> {
+    fn read_index(ks: &KeySpaceDesc, entry: WalEntry, index_ref: IndexRef) -> DbResult<IndexTable> {
         if let WalEntry::Index(_, bytes) = entry {
-            let entry = ks.index_format().deserialize_index(ks, bytes);
+            let entry = ks.index_format().deserialize_index(ks, bytes, index_ref);
             Ok(entry)
         } else {
             panic!("Unexpected wal entry where expected index");
@@ -1749,6 +1758,7 @@ impl Loader for Wal {
                     position.offset()
                 )
             }),
+            index_ref,
         )
     }
 
@@ -1795,7 +1805,7 @@ impl Loader for Db {
             let context = self.ks_context(ks.id());
             context.inc_read(WalEntryKind::Index, ReadType::Cached);
             context.inc_read_bytes(WalEntryKind::Index, ReadType::Cached, blob.len() as u64);
-            return Ok(ks.index_format().deserialize_index(ks, blob));
+            return Ok(ks.index_format().deserialize_index(ks, blob, index_ref));
         }
         let entry = self.read_report_entry(&self.indexes, position)?;
         Self::read_index(
@@ -1806,6 +1816,7 @@ impl Loader for Db {
                     position.offset()
                 )
             }),
+            index_ref,
         )
     }
 

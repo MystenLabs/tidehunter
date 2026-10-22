@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use tidehunter::WalKind;
 use tidehunter::config::Config;
+use tidehunter::control::ControlRegion;
+use tidehunter::db::CONTROL_REGION_FILE;
 use tidehunter::key_shape::KeySpace;
 use tidehunter::test_utils::{
     IndexFormat, Metrics, Wal, WalEntry, WalError, list_wal_files_with_sizes,
@@ -422,7 +424,21 @@ pub(crate) fn register(engine: &mut Engine) {
             };
 
             let ks_desc = key_shape.ks(KeySpace::new(ks_id.as_u8()));
-            let index_table = ks_desc.index_format().deserialize_index(ks_desc, bytes);
+            // The blob's micro-cell count lives in its ref, which the control
+            // region holds for every live blob.
+            let control_region =
+                ControlRegion::read_or_create(&db_path.join(CONTROL_REGION_FILE), &key_shape);
+            let Some(index_ref) = control_region.index_ref_at(offset) else {
+                return Err(format!(
+                    "Index blob at offset {offset} is not referenced by the control region, \
+                     so its micro-cell count is unknown"
+                )
+                .into());
+            };
+            let index_table =
+                ks_desc
+                    .index_format()
+                    .deserialize_index(ks_desc, bytes, index_ref);
 
             let result: rhai::Array = index_table
                 .iter()

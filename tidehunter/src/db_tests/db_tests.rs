@@ -3445,7 +3445,10 @@ fn test_index_gc_low_occupancy_files_relocated() {
         db.insert(ks_rare, rare_key.clone(), vec![0x11; 16])
             .expect("insert rare");
 
-        let num_bulk: u32 = 64;
+        // Enough keys per bulk cell (16 cells, so 256 each) that one round's
+        // index blobs span several 8 KiB files: the blobs must leave the
+        // file holding `rare` behind for its occupancy to drop.
+        let num_bulk: u32 = 4096;
         let step = u32::MAX / num_bulk;
 
         // Several rounds of rewrite-then-snapshot. Bulk cells get re-flushed

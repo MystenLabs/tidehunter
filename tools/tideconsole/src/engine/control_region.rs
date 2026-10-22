@@ -5,6 +5,7 @@ use tidehunter::CellId;
 use tidehunter::WalKind;
 use tidehunter::control::ControlRegion;
 use tidehunter::db::CONTROL_REGION_FILE;
+use tidehunter::index::index_ref::IndexRef;
 use tidehunter::key_shape::KeySpace;
 use tidehunter::test_utils::{IndexFormat, Metrics, Wal, WalEntry, WalError};
 
@@ -231,13 +232,11 @@ pub(crate) fn register(engine: &mut Engine) {
                 .into());
             }
 
-            let mut valid_offsets: Vec<u64> = Vec::new();
+            let mut valid_refs: Vec<IndexRef> = Vec::new();
             for entry in snapshot.data[ks_idx].values() {
-                for pos in entry.levels.iter() {
-                    valid_offsets.push(pos.offset());
-                }
+                valid_refs.extend(entry.levels.iter());
             }
-            let total_index_entries = valid_offsets.len();
+            let total_index_entries = valid_refs.len();
 
             // Open index WAL and read each index entry
             let metrics = Metrics::new();
@@ -248,20 +247,24 @@ pub(crate) fn register(engine: &mut Engine) {
 
             let mut payload_sizes: Vec<usize> = Vec::new();
 
-            for offset in &valid_offsets {
-                let mut iter = index_wal.wal_iterator_for_scan(*offset).map_err(
-                    |e| -> Box<EvalAltResult> {
-                        format!("Failed to seek index WAL to {offset:#x}: {e:?}").into()
-                    },
-                )?;
+            for index_ref in &valid_refs {
+                let offset = index_ref.offset();
+                let mut iter =
+                    index_wal
+                        .wal_iterator_for_scan(offset)
+                        .map_err(|e| -> Box<EvalAltResult> {
+                            format!("Failed to seek index WAL to {offset:#x}: {e:?}").into()
+                        })?;
 
                 match iter.next() {
                     Ok((_pos, raw_bytes)) => {
                         let entry = WalEntry::from_bytes(raw_bytes);
                         if let WalEntry::Index(_, index_bytes) = entry {
-                            let index_table = ks_desc
-                                .index_format()
-                                .deserialize_index(ks_desc, index_bytes);
+                            let index_table = ks_desc.index_format().deserialize_index(
+                                ks_desc,
+                                index_bytes,
+                                *index_ref,
+                            );
                             for (_, wal_pos) in index_table.iter() {
                                 payload_sizes.push(wal_pos.payload_len());
                             }

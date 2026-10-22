@@ -1,5 +1,6 @@
 use crate::WalPosition;
 use crate::container::LargeTableContainer;
+use crate::index::index_ref::IndexRef;
 use crate::key_shape::KeyShape;
 use crate::large_table::SnapshotEntryData;
 use crate::metrics::Metrics;
@@ -19,20 +20,23 @@ use std::path::{Path, PathBuf};
 ///   starting at byte 0. No header. Distinguished by the fact that the first
 ///   8 bytes decode as a plausible `last_position: u64` — never the
 ///   versioned-header sentinel.
-/// - **V2** (legacy) / **V3**: 8-byte little-endian sentinel `u64::MAX`,
-///   followed by a 4-byte little-endian version number, followed by the
-///   `bincode`-serialized control-region payload. The version field selects
-///   the payload schema: V2 = pre-sharding `IndexLevels` (positions only);
-///   V3 = current layout with optional shard btrees per cell. Using
-///   `u64::MAX` as the discriminator works because the first field of the
-///   V1 layout is `last_position: u64`, which would only take the value
-///   `u64::MAX` in a pathological/corrupt file — never in a real database.
+/// - **V2** / **V3** (legacy) / **V4**: 8-byte little-endian sentinel
+///   `u64::MAX`, followed by a 4-byte little-endian version number, followed
+///   by the `bincode`-serialized control-region payload. The version field
+///   selects the payload schema: V2 = pre-sharding `IndexLevels` (positions
+///   only); V3 = positions plus optional shard btrees per cell; V4 = the
+///   current layout, where each level is an `IndexRef` (position plus
+///   micro-cell count). Using `u64::MAX` as the discriminator works because
+///   the first field of the V1 layout is `last_position: u64`, which would
+///   only take the value `u64::MAX` in a pathological/corrupt file — never
+///   in a real database.
 ///
-/// Writers always emit V3; readers detect the sentinel and fall back to V2
-/// or V1 parsing + one-way migration as needed.
+/// Writers always emit V4; readers detect the sentinel and fall back to V3,
+/// V2 or V1 parsing + one-way migration as needed.
 const CONTROL_REGION_V2_SENTINEL: u64 = u64::MAX;
 const CONTROL_REGION_V2_VERSION: u32 = 2;
 const CONTROL_REGION_V3_VERSION: u32 = 3;
+const CONTROL_REGION_V4_VERSION: u32 = 4;
 const CONTROL_REGION_V2_HEADER_LEN: usize = 12;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -180,14 +184,15 @@ impl ControlRegion {
     }
 
     /// Deserializes a control region from bytes, transparently handling
-    /// V1 (pre-levels), V2 (pre-sharding `IndexLevels`), and V3 (current)
-    /// formats.
+    /// V1 (pre-levels), V2 (pre-sharding `IndexLevels`), V3 (levels as bare
+    /// positions) and V4 (current) formats.
     ///
     /// V1 control regions are migrated on read: each single-position cell
     /// becomes a one-level `IndexLevels`. V2 control regions are migrated
     /// on read: each cell's `IndexLevels` is rebuilt with an empty shard
-    /// btree. The migration is one-way — the next successful `store`
-    /// rewrites the file in V3 format.
+    /// btree. V3 control regions are migrated on read: every level position
+    /// becomes a ref with the legacy micro-cell count. The migration is
+    /// one-way — the next successful `store` rewrites the file in V4 format.
     fn deserialize_any_version(bytes: &[u8]) -> Result<Self, bincode::Error> {
         if bytes.len() >= CONTROL_REGION_V2_HEADER_LEN {
             let sentinel = u64::from_le_bytes(bytes[..8].try_into().unwrap());
@@ -195,14 +200,19 @@ impl ControlRegion {
                 let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
                 let payload = &bytes[CONTROL_REGION_V2_HEADER_LEN..];
                 return match version {
-                    CONTROL_REGION_V3_VERSION => bincode::deserialize::<ControlRegion>(payload),
+                    CONTROL_REGION_V4_VERSION => bincode::deserialize::<ControlRegion>(payload),
+                    CONTROL_REGION_V3_VERSION => {
+                        let v3: legacy_v3::ControlRegionV3 = bincode::deserialize(payload)?;
+                        Ok(v3.migrate())
+                    }
                     CONTROL_REGION_V2_VERSION => {
                         let v2: legacy_v2::ControlRegionV2 = bincode::deserialize(payload)?;
                         Ok(v2.migrate())
                     }
                     _ => panic!(
                         "Unsupported control region version {version}; expected \
-                         {CONTROL_REGION_V3_VERSION} (or legacy {CONTROL_REGION_V2_VERSION}). \
+                         {CONTROL_REGION_V4_VERSION} (or legacy {CONTROL_REGION_V3_VERSION}, \
+                         {CONTROL_REGION_V2_VERSION}). \
                          This binary is older than the database it is trying to open."
                     ),
                 };
@@ -288,6 +298,16 @@ impl ControlRegion {
     pub fn last_index_wal_position(&self) -> Option<WalPosition> {
         self.snapshot.iter_valid_val_positions().max()
     }
+
+    /// The ref of the index blob at index-WAL `offset`, if any level of any
+    /// cell references it.
+    #[doc(hidden)] // Used by tools/tideconsole to decode a blob given its offset
+    pub fn index_ref_at(&self, offset: u64) -> Option<IndexRef> {
+        self.snapshot
+            .iter_cells()
+            .flat_map(|entry| entry.levels().iter())
+            .find(|index_ref| index_ref.offset() == offset)
+    }
 }
 
 impl ControlRegionStore {
@@ -311,11 +331,11 @@ impl ControlRegionStore {
             self.last_position,
         );
         let control_region = ControlRegion::new(snapshot, last_position, key_shape);
-        // V3 layout: sentinel + version + bincode payload. See the comment
+        // V4 layout: sentinel + version + bincode payload. See the comment
         // on `CONTROL_REGION_V2_SENTINEL` for the rationale.
         let mut serialized = Vec::with_capacity(CONTROL_REGION_V2_HEADER_LEN + 4 * 1024);
         serialized.extend_from_slice(&CONTROL_REGION_V2_SENTINEL.to_le_bytes());
-        serialized.extend_from_slice(&CONTROL_REGION_V3_VERSION.to_le_bytes());
+        serialized.extend_from_slice(&CONTROL_REGION_V4_VERSION.to_le_bytes());
         bincode::serialize_into(&mut serialized, &control_region)
             .expect("Failed to serialize control region");
         let temp_file = self.path.with_extension(".bak");
@@ -350,13 +370,169 @@ impl ControlRegionStore {
     }
 }
 
+#[cfg(test)]
+impl ControlRegion {
+    /// Rewrites the control region at `path` in the V3 layout, with every
+    /// level as a bare position: what a database written before micro-cell
+    /// counts looks like on disk. Only meaningful when every ref carries the
+    /// legacy count, which the V3 layout cannot say otherwise.
+    pub(crate) fn rewrite_as_v3_for_test(path: &Path, key_shape: &KeyShape) {
+        use crate::cell::CellId;
+        use crate::index::micro_cells::LEGACY_MICRO_CELLS;
+        use std::collections::BTreeMap;
+
+        let cr = Self::read(path, key_shape).expect("control region to rewrite");
+        let data: Vec<BTreeMap<CellId, legacy_v3::SnapshotEntryDataV3>> = cr
+            .snapshot
+            .data
+            .into_iter()
+            .map(|ks_map| {
+                ks_map
+                    .into_iter()
+                    .map(|(cell, entry)| {
+                        let levels = entry.levels();
+                        for index_ref in levels.iter() {
+                            assert_eq!(index_ref.micro_cells(), LEGACY_MICRO_CELLS);
+                        }
+                        let positions = levels.raw_refs().iter().map(|r| r.position()).collect();
+                        let shards = levels
+                            .shards()
+                            .iter()
+                            .map(|(min_key, shard)| {
+                                (
+                                    min_key.clone(),
+                                    legacy_v3::IndexShardV3 {
+                                        position: shard.index_ref.position(),
+                                        max_key: shard.max_key.clone(),
+                                    },
+                                )
+                            })
+                            .collect();
+                        (
+                            cell,
+                            legacy_v3::SnapshotEntryDataV3 {
+                                levels: legacy_v3::IndexLevelsV3 { positions, shards },
+                                last_processed: entry.last_processed,
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let v3 = legacy_v3::ControlRegionV3 {
+            last_position: cr.last_position,
+            snapshot: LargeTableContainer { data },
+            keyspace_names: cr.keyspace_names,
+        };
+        let payload = bincode::serialize(&v3).unwrap();
+        let mut bytes = Vec::with_capacity(CONTROL_REGION_V2_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(&CONTROL_REGION_V2_SENTINEL.to_le_bytes());
+        bytes.extend_from_slice(&CONTROL_REGION_V3_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        fs::write(path, &bytes).unwrap();
+    }
+}
+
 /// Legacy on-disk representation — read-only, used for one-way migration of
-/// V2 control regions to V3.
+/// V3 control regions to V4.
+///
+/// V3 stored each level as a bare `WalPosition`, in the level `SmallVec` and
+/// in the shard btree values. Every blob written then has the legacy
+/// micro-cell count, which `IndexRef::legacy` records.
+mod legacy_v3 {
+    use super::ControlRegion;
+    use crate::cell::CellId;
+    use crate::container::LargeTableContainer;
+    use crate::index::index_ref::IndexRef;
+    use crate::index::levels::{INLINE_LEVELS, IndexLevels, IndexShard};
+    use crate::large_table::SnapshotEntryData;
+    use crate::wal::position::{LastProcessed, WalPosition};
+    use serde::{Deserialize, Serialize};
+    use smallvec::SmallVec;
+    use std::collections::BTreeMap;
+
+    /// Exact on-disk layout of `IndexShard` prior to micro-cell counts.
+    #[derive(Serialize, Deserialize, Debug)]
+    pub(super) struct IndexShardV3 {
+        pub(super) position: WalPosition,
+        pub(super) max_key: Vec<u8>,
+    }
+
+    /// Exact on-disk layout of `IndexLevels` prior to micro-cell counts.
+    #[derive(Serialize, Deserialize, Debug)]
+    pub(super) struct IndexLevelsV3 {
+        pub(super) positions: SmallVec<[WalPosition; INLINE_LEVELS]>,
+        #[serde(default)]
+        pub(super) shards: BTreeMap<Vec<u8>, IndexShardV3>,
+    }
+
+    impl IndexLevelsV3 {
+        fn migrate(self) -> IndexLevels {
+            let shards = self
+                .shards
+                .into_iter()
+                .map(|(min_key, shard)| {
+                    (
+                        min_key,
+                        IndexShard::new(IndexRef::legacy(shard.position), shard.max_key),
+                    )
+                })
+                .collect();
+            IndexLevels::from_legacy_parts(self.positions, shards)
+        }
+    }
+
+    /// Exact on-disk layout of `SnapshotEntryData` prior to micro-cell counts.
+    #[derive(Serialize, Deserialize, Debug)]
+    pub(super) struct SnapshotEntryDataV3 {
+        pub(super) levels: IndexLevelsV3,
+        pub(super) last_processed: LastProcessed,
+    }
+
+    impl SnapshotEntryDataV3 {
+        fn migrate(self) -> SnapshotEntryData {
+            SnapshotEntryData::from_levels(self.levels.migrate(), self.last_processed)
+        }
+    }
+
+    /// Exact on-disk layout of `ControlRegion` prior to micro-cell counts.
+    #[derive(Serialize, Deserialize, Debug)]
+    pub(super) struct ControlRegionV3 {
+        pub(super) last_position: u64,
+        pub(super) snapshot: LargeTableContainer<SnapshotEntryDataV3>,
+        #[serde(default)]
+        pub(super) keyspace_names: Vec<String>,
+    }
+
+    impl ControlRegionV3 {
+        pub(super) fn migrate(self) -> ControlRegion {
+            let data: Vec<BTreeMap<CellId, SnapshotEntryData>> = self
+                .snapshot
+                .data
+                .into_iter()
+                .map(|ks_map| {
+                    ks_map
+                        .into_iter()
+                        .map(|(cell, entry)| (cell, entry.migrate()))
+                        .collect()
+                })
+                .collect();
+            ControlRegion {
+                last_position: self.last_position,
+                snapshot: LargeTableContainer { data },
+                keyspace_names: self.keyspace_names,
+            }
+        }
+    }
+}
+
+/// Legacy on-disk representation — read-only, used for one-way migration of
+/// V2 control regions.
 ///
 /// V2 stored each cell's `IndexLevels` as just the per-level `WalPosition`
-/// `SmallVec`. V3 keeps those as the per-level refs plus a `BTreeMap` of
-/// auto-sharding shards (empty for cells that haven't split). The migration
-/// rebuilds each cell's `IndexLevels` with `shards = BTreeMap::new()`.
+/// `SmallVec`. Later formats add a `BTreeMap` of auto-sharding shards (empty
+/// for cells that haven't split). The migration rebuilds each cell's
+/// `IndexLevels` with legacy refs and `shards = BTreeMap::new()`.
 mod legacy_v2 {
     use super::ControlRegion;
     use crate::cell::CellId;
@@ -377,7 +553,7 @@ mod legacy_v2 {
 
     impl IndexLevelsV2 {
         fn migrate(self) -> IndexLevels {
-            IndexLevels::from_legacy_v2_positions(self.positions)
+            IndexLevels::from_legacy_parts(self.positions, BTreeMap::new())
         }
     }
 
@@ -431,10 +607,11 @@ mod legacy_v2 {
 /// Legacy on-disk representation — read-only, used for one-way migration of
 /// V1 control regions.
 ///
-/// V1 stored a single `WalPosition` per cell. Modern formats (V2/V3) store an
+/// V1 stored a single `WalPosition` per cell. Later formats store an
 /// `IndexLevels` (a `SmallVec` of per-level `IndexRef`s, inline capacity
 /// `INLINE_LEVELS`). The migration maps every valid single position to a
-/// one-element level list; `WalPosition::INVALID` maps to an empty list.
+/// one-element level list with the legacy micro-cell count;
+/// `WalPosition::INVALID` maps to an empty list.
 mod legacy_v1 {
     use super::ControlRegion;
     use crate::cell::CellId;
@@ -517,8 +694,8 @@ mod tests {
     }
 
     #[test]
-    fn v3_roundtrip() {
-        let dir = tempdir::TempDir::new("cr_v3_roundtrip").unwrap();
+    fn v4_roundtrip() {
+        let dir = tempdir::TempDir::new("cr_v4_roundtrip").unwrap();
         let path = dir.path().join("cr");
         let shape = tiny_shape();
 
@@ -529,18 +706,24 @@ mod tests {
         cr.snapshot.data[0].insert(
             CellId::Integer(0),
             SnapshotEntryData::from_levels(
-                IndexLevels::single(IndexRef::test_value(7777)),
+                IndexLevels::single(IndexRef::new(WalPosition::test_value(7777), 16)),
                 LastProcessed::new_test(42),
             ),
         );
         let mut shard_btree: BTreeMap<Vec<u8>, IndexShard> = BTreeMap::new();
         shard_btree.insert(
             b"aaaaaaaa".to_vec(),
-            IndexShard::new(IndexRef::test_value(1001), b"low_max".to_vec()),
+            IndexShard::new(
+                IndexRef::new(WalPosition::test_value(1001), 128),
+                b"low_max".to_vec(),
+            ),
         );
         shard_btree.insert(
             b"mid".to_vec(),
-            IndexShard::new(IndexRef::test_value(1002), b"zzzzzzzz".to_vec()),
+            IndexShard::new(
+                IndexRef::new(WalPosition::test_value(1002), 4096),
+                b"zzzzzzzz".to_vec(),
+            ),
         );
         cr.snapshot.data[0].insert(
             CellId::Integer(1),
@@ -560,8 +743,24 @@ mod tests {
             .get(&CellId::Integer(0))
             .expect("cell 0 exists");
         assert_eq!(entry0.levels.len(), 1);
-        assert_eq!(entry0.levels.latest(), Some(IndexRef::test_value(7777)));
+        assert_eq!(
+            entry0.levels.latest(),
+            Some(IndexRef::new(WalPosition::test_value(7777), 16))
+        );
         assert!(!entry0.levels.is_sharded());
+        assert_eq!(
+            read_cr.index_ref_at(7777),
+            Some(IndexRef::new(WalPosition::test_value(7777), 16))
+        );
+        assert_eq!(
+            read_cr.index_ref_at(1002),
+            Some(IndexRef::new(WalPosition::test_value(1002), 4096))
+        );
+        assert_eq!(read_cr.index_ref_at(5), None);
+        assert_eq!(
+            u32::from_le_bytes(std::fs::read(&path).unwrap()[8..12].try_into().unwrap()),
+            CONTROL_REGION_V4_VERSION
+        );
         assert_eq!(entry0.last_processed, LastProcessed::new_test(42));
 
         let entry1 = read_cr.snapshot.data[0]
@@ -633,7 +832,12 @@ mod tests {
             .get(&CellId::Integer(0))
             .expect("cell 0 present");
         assert_eq!(cell0.levels.len(), 2);
-        assert_eq!(cell0.levels.latest(), Some(IndexRef::test_value(9001)));
+        assert_eq!(
+            cell0.levels.latest(),
+            Some(IndexRef::legacy(WalPosition::test_value(9001)))
+        );
+        assert_eq!(cell0.levels.latest().unwrap().micro_cells(), 128);
+        assert_eq!(cell0.levels.raw_refs()[0], IndexRef::INVALID);
         assert!(
             !cell0.levels.is_sharded(),
             "V2 → V3 yields empty shard btree"
@@ -643,7 +847,10 @@ mod tests {
             .get(&CellId::Integer(1))
             .expect("cell 1 present");
         assert_eq!(cell1.levels.len(), 1);
-        assert_eq!(cell1.levels.latest(), Some(IndexRef::test_value(9002)));
+        assert_eq!(
+            cell1.levels.latest(),
+            Some(IndexRef::legacy(WalPosition::test_value(9002)))
+        );
         assert!(!cell1.levels.is_sharded());
     }
 
@@ -693,12 +900,150 @@ mod tests {
             .get(&CellId::Integer(0))
             .expect("cell 0 present");
         assert_eq!(cell0.levels.len(), 1);
-        assert_eq!(cell0.levels.latest(), Some(IndexRef::test_value(1234)));
+        assert_eq!(
+            cell0.levels.latest(),
+            Some(IndexRef::legacy(WalPosition::test_value(1234)))
+        );
+        assert_eq!(cell0.levels.latest().unwrap().micro_cells(), 128);
 
         let cell1 = read_cr.snapshot.data[0]
             .get(&CellId::Integer(1))
             .expect("cell 1 present");
         assert!(cell1.levels.is_empty(), "INVALID ⇒ empty level list");
+    }
+
+    #[test]
+    fn v3_file_migrates_to_v4() {
+        // Hand-build a V3 byte stream (sentinel + version=3 + V3 payload):
+        // levels as bare positions, one plain cell and one sharded cell.
+        // Reading it must stamp every ref with the legacy micro-cell count.
+        use smallvec::SmallVec;
+
+        let dir = tempdir::TempDir::new("cr_v3_migrate").unwrap();
+        let path = dir.path().join("cr_v3");
+        let shape = tiny_shape();
+        let num_ks = shape.num_ks();
+
+        let mut promoted: SmallVec<[WalPosition; 2]> = SmallVec::new();
+        promoted.push(WalPosition::INVALID);
+        promoted.push(WalPosition::test_value(4242));
+        let mut vacated: SmallVec<[WalPosition; 2]> = SmallVec::new();
+        vacated.push(WalPosition::test_value(77));
+        vacated.push(WalPosition::INVALID);
+        let mut shards_v3: BTreeMap<Vec<u8>, legacy_v3::IndexShardV3> = BTreeMap::new();
+        shards_v3.insert(
+            b"a".to_vec(),
+            legacy_v3::IndexShardV3 {
+                position: WalPosition::test_value(501),
+                max_key: b"k".to_vec(),
+            },
+        );
+        shards_v3.insert(
+            b"m".to_vec(),
+            legacy_v3::IndexShardV3 {
+                position: WalPosition::test_value(502),
+                max_key: b"z".to_vec(),
+            },
+        );
+
+        let mut ks_map: BTreeMap<CellId, legacy_v3::SnapshotEntryDataV3> = BTreeMap::new();
+        ks_map.insert(
+            CellId::Integer(0),
+            legacy_v3::SnapshotEntryDataV3 {
+                levels: legacy_v3::IndexLevelsV3 {
+                    positions: promoted,
+                    shards: BTreeMap::new(),
+                },
+                last_processed: LastProcessed::new_test(12),
+            },
+        );
+        ks_map.insert(
+            CellId::Integer(1),
+            legacy_v3::SnapshotEntryDataV3 {
+                levels: legacy_v3::IndexLevelsV3 {
+                    positions: vacated,
+                    shards: shards_v3,
+                },
+                last_processed: LastProcessed::new_test(13),
+            },
+        );
+        let mut data = vec![ks_map];
+        for _ in 1..num_ks {
+            data.push(BTreeMap::new());
+        }
+        let keyspace_names: Vec<String> = shape.iter_ks().map(|ks| ks.name().to_string()).collect();
+        let v3 = legacy_v3::ControlRegionV3 {
+            last_position: 88,
+            snapshot: LargeTableContainer { data },
+            keyspace_names,
+        };
+        let payload = bincode::serialize(&v3).unwrap();
+        let mut bytes = Vec::with_capacity(CONTROL_REGION_V2_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(&CONTROL_REGION_V2_SENTINEL.to_le_bytes());
+        bytes.extend_from_slice(&CONTROL_REGION_V3_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let read_cr = ControlRegion::read(&path, &shape).unwrap();
+        assert_eq!(read_cr.last_position, 88);
+        let cell0 = read_cr.snapshot.data[0]
+            .get(&CellId::Integer(0))
+            .expect("cell 0 present");
+        assert_eq!(
+            cell0.levels.raw_refs(),
+            &[
+                IndexRef::INVALID,
+                IndexRef::legacy(WalPosition::test_value(4242))
+            ]
+        );
+        assert_eq!(cell0.levels.l1().unwrap().micro_cells(), 128);
+        assert_eq!(cell0.last_processed, LastProcessed::new_test(12));
+        let cell1 = read_cr.snapshot.data[0]
+            .get(&CellId::Integer(1))
+            .expect("cell 1 present");
+        assert!(cell1.levels.is_sharded());
+        assert_eq!(
+            cell1.levels.l0(),
+            Some(IndexRef::legacy(WalPosition::test_value(77)))
+        );
+        let mut expected_shards: BTreeMap<Vec<u8>, IndexShard> = BTreeMap::new();
+        expected_shards.insert(
+            b"a".to_vec(),
+            IndexShard::new(
+                IndexRef::legacy(WalPosition::test_value(501)),
+                b"k".to_vec(),
+            ),
+        );
+        expected_shards.insert(
+            b"m".to_vec(),
+            IndexShard::new(
+                IndexRef::legacy(WalPosition::test_value(502)),
+                b"z".to_vec(),
+            ),
+        );
+        assert_eq!(cell1.levels.shards(), &expected_shards);
+        assert_eq!(
+            read_cr.index_ref_at(502),
+            Some(IndexRef::legacy(WalPosition::test_value(502)))
+        );
+
+        // The next store rewrites it as V4 and it reads back unchanged.
+        let mut store = ControlRegionStore::new(path.clone(), &read_cr);
+        let snapshot = ControlRegion::read(&path, &shape).unwrap().snapshot;
+        store.store(snapshot, 88, &shape, &Metrics::new());
+        assert_eq!(
+            u32::from_le_bytes(std::fs::read(&path).unwrap()[8..12].try_into().unwrap()),
+            CONTROL_REGION_V4_VERSION
+        );
+        let rewritten = ControlRegion::read(&path, &shape).unwrap();
+        assert_eq!(
+            rewritten.snapshot.data[0]
+                .get(&CellId::Integer(1))
+                .unwrap()
+                .levels
+                .shards(),
+            &expected_shards
+        );
     }
 
     #[test]

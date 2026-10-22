@@ -1,6 +1,7 @@
 use crate::cell::CellId;
 use crate::db::MAX_KEY_LEN;
 use crate::index::index_format::IndexFormatType;
+use crate::index::micro_cells::MicroCellPolicy;
 use crate::math;
 use crate::math::{downscale_u32, starting_u32, starting_u64};
 use crate::relocation::RelocationFilter;
@@ -69,6 +70,12 @@ pub struct KeySpaceConfig {
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
     index_format: IndexFormatType,
+    /// How many micro-cells the lookup header of each index blob of this
+    /// key space gets (see `index::micro_cells`). Recorded in every blob's
+    /// `IndexRef`, so blobs written under earlier settings keep reading
+    /// correctly and a change applies to blobs written from then on.
+    #[serde(default)]
+    micro_cell_policy: MicroCellPolicy,
     #[serde(default = "KeySpaceConfig::default_unloaded_iterator")]
     unloaded_iterator: bool,
     #[serde(skip)]
@@ -85,6 +92,7 @@ impl Default for KeySpaceConfig {
             bloom_filter: None,
             value_cache_size: 0,
             index_format: IndexFormatType::default(),
+            micro_cell_policy: MicroCellPolicy::DEFAULT,
             unloaded_iterator: true,
             relocation_filter: None,
         }
@@ -424,14 +432,6 @@ impl KeySpaceDesc {
         element_size
     }
 
-    /// Returns imprecise element size that can be used for buffer capacity calculation.
-    /// This method uses known key size for key spaces with fixed key size.
-    /// For key spaces with variable length keys,
-    /// we use the best effort estimate of 64 bytes for index element size.
-    pub(crate) fn index_element_size_for_capacity(&self) -> usize {
-        self.index_element_size().unwrap_or(64)
-    }
-
     /// Returns u32 prefix
     pub(crate) fn index_prefix_u32(&self, k: &[u8]) -> u32 {
         starting_u32(self.index_prefix(k))
@@ -540,6 +540,11 @@ impl KeySpaceDesc {
     #[doc(hidden)] // Used by tools/tideconsole for analyzing keyspace indices
     pub fn index_format(&self) -> &IndexFormatType {
         &self.config.index_format
+    }
+
+    /// How the micro-cell count of this key space's index blobs is picked.
+    pub fn micro_cell_policy(&self) -> MicroCellPolicy {
+        self.config.micro_cell_policy
     }
 
     /// Returns the first and last keys in a cell.
@@ -678,6 +683,13 @@ impl KeySpaceConfig {
 
     pub fn with_index_format(mut self, index_format: IndexFormatType) -> Self {
         self.index_format = index_format;
+        self
+    }
+
+    /// Sets how the micro-cell count of this key space's index blobs is
+    /// picked; see `MicroCellPolicy`. Validated when the database opens.
+    pub fn with_micro_cell_policy(mut self, policy: MicroCellPolicy) -> Self {
+        self.micro_cell_policy = policy;
         self
     }
 

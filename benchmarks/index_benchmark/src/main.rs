@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tidehunter::WalPosition;
 use tidehunter::file_reader::{FileReader, set_direct_options};
 use tidehunter::index::index_format::IndexFormat;
+use tidehunter::index::index_ref::IndexRef;
 use tidehunter::index::index_table::IndexTable;
 use tidehunter::index::lookup_header::LookupHeaderIndex;
 use tidehunter::index::uniform_lookup::UniformLookupIndex;
@@ -31,7 +32,9 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
 ) -> std::io::Result<()> {
     println!("Generating index file with {n_indices} indices, {entries_per_index} entries each");
 
-    // Create the main output file and write the number of indices
+    // Create the main output file and write the number of indices. The
+    // micro-cell count shared by every index follows once the first one is
+    // serialized, then the indices themselves.
     let mut file = File::create(output_path)?;
     file.write_all(&n_indices.to_be_bytes())?;
 
@@ -53,16 +56,27 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     // Generate indices in parallel and send through a channel
     runtime.block_on(async {
         // Create a channel for sending indices
-        let (tx, rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(num_threads);
+        let (tx, rx) = tokio::sync::mpsc::channel::<(usize, u32, Vec<u8>)>(num_threads);
 
         // Spawn a task to consume indices and write to the file
         let consumer = tokio::spawn(async move {
             let mut rx = rx;
             let mut indices_written = 0;
+            let mut header_micro_cells: Option<u32> = None;
 
-            while let Some((i, buffer)) = rx.recv().await {
+            while let Some((i, micro_cells, buffer)) = rx.recv().await {
                 if i % 100 == 0 {
                     println!("  Merging index {i} into main file...");
+                }
+                match header_micro_cells {
+                    None => {
+                        file.write_all(&(micro_cells as u64).to_be_bytes())?;
+                        header_micro_cells = Some(micro_cells);
+                    }
+                    Some(expected) => assert_eq!(
+                        micro_cells, expected,
+                        "every index in the file must have the same micro-cell count"
+                    ),
                 }
 
                 // Write the serialized index to the main file
@@ -118,13 +132,19 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
                         index.insert(Bytes::from(key), position);
                     }
 
-                    // Serialize the index
-                    let bytes =
+                    // Serialize the index. Every index has the same number of
+                    // fixed-size entries, so the key space's policy gives them
+                    // all the same micro-cell count; the file header records it.
+                    let serialized =
                         index_format_clone.clean_serialize_index(&mut index, &ks_desc_clone);
 
                     // Send the serialized index through the channel
                     let result = tx_clone
-                        .send((index_idx, bytes.as_ref().to_vec()))
+                        .send((
+                            index_idx,
+                            serialized.micro_cells,
+                            serialized.bytes.as_ref().to_vec(),
+                        ))
                         .await
                         .map_err(|e| {
                             std::io::Error::other(format!(
@@ -166,34 +186,37 @@ pub(crate) fn generate_index_file<P: IndexFormat + Send + Sync + 'static + Clone
     Ok(())
 }
 
+/// Index file layout: `[index count: u64][micro-cell count: u64][indices]`,
+/// every index the same size and micro-cell count.
+const INDEX_FILE_HEADER_LEN: u64 = 16;
+
 struct IndexBenchmark {
     readers: Vec<FileRange>,
     key_shape: KeyShape,
+    micro_cells: u32,
 }
 
 impl IndexBenchmark {
     fn load_from_file(file: Arc<File>, file_length: u64, direct_io: bool) -> std::io::Result<Self> {
         let reader = FileReader::new(file.clone(), direct_io);
-        // get index count (first 8 bytes of file)
-        let index_count = match reader.read_exact_at(0, 8) {
-            Ok(buf) => u64::from_be_bytes(buf.as_ref().try_into().unwrap()),
-            Err(_) => {
-                panic!("Failed to read index count");
-            }
-        };
+        let header = reader
+            .read_exact_at(0, INDEX_FILE_HEADER_LEN as usize)
+            .expect("Failed to read index file header");
+        let index_count = u64::from_be_bytes(header[0..8].try_into().unwrap());
+        let micro_cells = u64::from_be_bytes(header[8..16].try_into().unwrap()) as u32;
 
         assert!(
-            (file_length - 8).is_multiple_of(index_count),
+            (file_length - INDEX_FILE_HEADER_LEN).is_multiple_of(index_count),
             "File size is not a multiple of index count"
         );
-        let index_size = (file_length - 8) / index_count;
+        let index_size = (file_length - INDEX_FILE_HEADER_LEN) / index_count;
 
         let mut readers = Vec::new();
 
         for i in 0..index_count {
             let range = Range {
-                start: 8 + i * index_size,
-                end: 8 + (i + 1) * index_size,
+                start: INDEX_FILE_HEADER_LEN + i * index_size,
+                end: INDEX_FILE_HEADER_LEN + (i + 1) * index_size,
             };
             readers.push(FileRange::new(
                 FileReader::new(file.clone(), direct_io),
@@ -203,7 +226,11 @@ impl IndexBenchmark {
 
         let key_shape = KeyShape::new_single(32, 1, KeyType::uniform(1));
 
-        Ok(Self { readers, key_shape })
+        Ok(Self {
+            readers,
+            key_shape,
+            micro_cells,
+        })
     }
 
     fn run_benchmark_multithreaded<P: IndexFormat + Clone + Send + 'static>(
@@ -220,6 +247,8 @@ impl IndexBenchmark {
 
         // Use thread::scope to manage threads and collect results
         let ks_desc = self.key_shape.iter_ks().next().unwrap();
+        // Readers only need the count; the position is not consulted.
+        let index_ref = IndexRef::new(WalPosition::test_value(0), self.micro_cells);
         let start = Instant::now();
 
         let thread_durations = thread::scope(|s| {
@@ -249,7 +278,8 @@ impl IndexBenchmark {
                                 rng.fill(&mut key[..]);
 
                                 // Look up the key
-                                index_format.lookup_unloaded(&ks_desc, reader, &key, metrics);
+                                index_format
+                                    .lookup_unloaded(&ks_desc, reader, index_ref, &key, metrics);
                             }
 
                             durations.push(start.elapsed());

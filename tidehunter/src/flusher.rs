@@ -1068,7 +1068,7 @@ mod tests {
             let pos = WalPosition::new(*off, 64);
             *off += 4096;
             self.blobs.lock().insert(pos.offset(), data.clone());
-            Ok(IndexRef::new(pos))
+            Ok(IndexRef::new(pos, 1))
         }
 
         fn last_processed_wal_position(&self) -> LastProcessed {
@@ -1152,7 +1152,7 @@ mod tests {
         )
     }
 
-    fn serialized_size(ks: &crate::key_shape::KeySpaceDesc, t: &IndexTable) -> usize {
+    fn serialized_size(ks: &KeySpaceDesc, t: &IndexTable) -> usize {
         ks.index_format().serialize_index(t, ks).len()
     }
 
@@ -1275,7 +1275,7 @@ mod tests {
                     WalPosition::test_value(k.max(1)),
                 );
             }
-            let index_ref = IndexRef::new(WalPosition::new(next_seed_offset, 64));
+            let index_ref = IndexRef::new(WalPosition::new(next_seed_offset, 64), 1);
             next_seed_offset += 4096;
             loader.seed(index_ref, table);
             refs.push(index_ref);
@@ -1614,7 +1614,7 @@ mod tests {
         let loader = RecordingLoader::new();
         let (sharded_levels, positions) = seed_sharded_cell(&loader, &[(1, 5), (100, 110)]);
         // Seed an L0 blob.
-        let l0_pos = IndexRef::new(WalPosition::new(7_000, 64));
+        let l0_pos = IndexRef::new(WalPosition::new(7_000, 64), 1);
         let mut l0_table = IndexTable::default();
         l0_table.insert(
             Bytes::from(50u64.to_be_bytes().to_vec()),
@@ -1706,7 +1706,7 @@ mod tests {
         // is flagged; post-pass must rewrite it.
         let ctx = make_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
-        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64));
+        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64), 1);
         let mut l1_table = IndexTable::default();
         l1_table.insert(
             Bytes::from(50u64.to_be_bytes().to_vec()),
@@ -1735,7 +1735,7 @@ mod tests {
         // floor; otherwise that index space is never reclaimed.
         let ctx = make_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
-        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64));
+        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64), 1);
         loader.seed(
             l1_pos,
             build_dirty(&[
@@ -1829,7 +1829,7 @@ mod tests {
         // necessarily when relocation returns.
         let ctx = make_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
-        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64));
+        let l1_pos = IndexRef::new(WalPosition::new(7_000, 64), 1);
         loader.seed(l1_pos, build_dirty(&[(1, Some(100)), (2, Some(150))]));
         let cmd = flush_command(
             ctx.id(),
@@ -2098,7 +2098,7 @@ mod tests {
         // cell keeps its `[INVALID, L1]` shape.
         let ctx = make_ctx(false, 1024 * 1024);
         let loader = RecordingLoader::new();
-        let l1_pos = IndexRef::new(WalPosition::new(500, 64));
+        let l1_pos = IndexRef::new(WalPosition::new(500, 64), 1);
         loader.seed(l1_pos, build_dirty(&[(1, Some(1)), (2, Some(2))]));
         let cmd = flush_command(
             ctx.id(),

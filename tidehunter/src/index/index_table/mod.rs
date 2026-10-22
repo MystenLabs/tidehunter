@@ -1073,13 +1073,10 @@ impl IndexTable {
     /// `WalPosition::INVALID` entries are written as tombstones (when the caller
     /// wants to preserve them); otherwise all entries are stored as clean.
     /// Writes directly into the caller's buffer, avoiding a separate allocation.
-    pub(super) fn append_flat_varlen_section(
-        entries: Vec<(Bytes, WalPosition)>,
-        out: &mut BytesMut,
-    ) {
+    pub(super) fn append_flat_varlen_section(entries: &[(Bytes, WalPosition)], out: &mut BytesMut) {
         let iwp_entries: Vec<(Bytes, IndexWalPosition)> = entries
-            .into_iter()
-            .map(|(k, pos)| (k, IndexWalPosition::from_disk(pos)))
+            .iter()
+            .map(|(k, pos)| (k.clone(), IndexWalPosition::from_disk(*pos)))
             .collect();
         append_flat_varlen(&iwp_entries, out);
     }

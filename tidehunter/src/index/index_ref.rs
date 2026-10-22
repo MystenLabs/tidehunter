@@ -1,30 +1,49 @@
 //! `IndexRef` — how a cell refers to one of its on-disk index blobs.
 //!
 //! An index blob lives at a `WalPosition` in the index WAL; the ref is the
-//! blob's identity. Everything that identifies, opens or deserializes an
-//! index blob goes through it: the per-cell level list (`IndexLevels`,
-//! persisted in the control region), the `Loader` trait, and the flusher.
-//! WAL-level concerns, such as garbage collection, relocation and the index
-//! blob cache, work on the position inside it.
-//!
-//! On the wire the ref is its fields in order, so a control region that
-//! stores a level as a bare position reads back as a ref with that position.
+//! blob's identity together with the one fact a reader needs that only the
+//! writer knew: how many micro-cells the blob's lookup header has (see
+//! `index::micro_cells`). Everything that identifies, opens or deserializes
+//! an index blob goes through the ref: the per-cell level list
+//! (`IndexLevels`, persisted in the control region), the `Loader` trait, and
+//! the flusher. WAL-level concerns, such as garbage collection, relocation
+//! and the index blob cache, work on the position inside it.
+use crate::index::micro_cells::LEGACY_MICRO_CELLS;
 use crate::wal::position::WalPosition;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct IndexRef {
     position: WalPosition,
+    /// Micro-cells in the blob's lookup header. 0 for blobs of index formats
+    /// without a header (`IndexFormatType::Uniform`) and for `INVALID`.
+    micro_cells: u32,
 }
 
 impl IndexRef {
     /// Sentinel for an empty level slot; see `IndexLevels`.
     pub const INVALID: Self = Self {
         position: WalPosition::INVALID,
+        micro_cells: 0,
     };
 
-    pub fn new(position: WalPosition) -> Self {
-        Self { position }
+    pub fn new(position: WalPosition, micro_cells: u32) -> Self {
+        Self {
+            position,
+            micro_cells,
+        }
+    }
+
+    /// A ref to a blob written before refs recorded the micro-cell count,
+    /// when every lookup header had `LEGACY_MICRO_CELLS` micro-cells. Used
+    /// when migrating control regions that store levels as bare positions.
+    /// An invalid position stays the `INVALID` sentinel.
+    pub fn legacy(position: WalPosition) -> Self {
+        if position.is_valid() {
+            Self::new(position, LEGACY_MICRO_CELLS)
+        } else {
+            Self::INVALID
+        }
     }
 
     /// Where the blob is in the index WAL.
@@ -43,6 +62,12 @@ impl IndexRef {
         self.position.frame_len()
     }
 
+    /// Micro-cells in the blob's lookup header; what the lookup-header
+    /// format needs to read the blob.
+    pub fn micro_cells(&self) -> u32 {
+        self.micro_cells
+    }
+
     pub fn is_valid(&self) -> bool {
         self.position.is_valid()
     }
@@ -51,9 +76,13 @@ impl IndexRef {
         if self.is_valid() { Some(self) } else { None }
     }
 
+    /// A ref with one micro-cell, for tests whose blob is never read through
+    /// the lookup-header format (mock loaders serving tables) or is small
+    /// enough to have one. Tests that read a real blob build the ref from
+    /// `SerializedIndex::micro_cells`.
     #[cfg(test)]
     pub fn test_value(v: u64) -> Self {
-        Self::new(WalPosition::test_value(v))
+        Self::new(WalPosition::test_value(v), 1)
     }
 }
 
@@ -61,34 +90,33 @@ impl IndexRef {
 mod tests {
     use super::*;
 
-    /// A ref serializes exactly like the position it wraps, which is what
-    /// keeps control regions written with bare positions readable.
     #[test]
-    fn serializes_like_a_position() {
-        for position in [
-            WalPosition::new(0, 0),
-            WalPosition::new(12345, 678),
-            WalPosition::new(u64::MAX - 1, u32::MAX - 1),
-            WalPosition::INVALID,
-        ] {
-            let index_ref = IndexRef::new(position);
-            assert_eq!(
-                bincode::serialize(&index_ref).unwrap(),
-                bincode::serialize(&position).unwrap()
-            );
-            let back: IndexRef =
-                bincode::deserialize(&bincode::serialize(&position).unwrap()).unwrap();
-            assert_eq!(back, index_ref);
-            assert_eq!(back.position(), position);
-            assert_eq!(back.offset(), position.offset());
-            assert_eq!(back.frame_len(), position.frame_len());
-            assert_eq!(back.is_valid(), position.is_valid());
-        }
+    fn accessors_and_serde_roundtrip() {
+        let position = WalPosition::new(12345, 678);
+        let index_ref = IndexRef::new(position, 512);
+        assert_eq!(index_ref.position(), position);
+        assert_eq!(index_ref.offset(), 12345);
+        assert_eq!(index_ref.frame_len(), 678);
+        assert_eq!(index_ref.micro_cells(), 512);
+        assert!(index_ref.is_valid());
+        assert_eq!(index_ref.valid(), Some(index_ref));
+        let back: IndexRef =
+            bincode::deserialize(&bincode::serialize(&index_ref).unwrap()).unwrap();
+        assert_eq!(back, index_ref);
+        assert_eq!(bincode::serialize(&index_ref).unwrap().len(), 12 + 4);
+
         assert!(!IndexRef::INVALID.is_valid());
         assert_eq!(IndexRef::INVALID.valid(), None);
-        assert_eq!(
-            IndexRef::test_value(7).valid(),
-            Some(IndexRef::test_value(7))
-        );
+        assert_eq!(IndexRef::INVALID.micro_cells(), 0);
+    }
+
+    #[test]
+    fn legacy_refs() {
+        let position = WalPosition::new(99, 1000);
+        let legacy = IndexRef::legacy(position);
+        assert_eq!(legacy.position(), position);
+        assert_eq!(legacy.micro_cells(), LEGACY_MICRO_CELLS);
+        assert_eq!(IndexRef::legacy(WalPosition::INVALID), IndexRef::INVALID);
+        assert_eq!(IndexRef::test_value(7).micro_cells(), 1);
     }
 }

@@ -214,9 +214,9 @@ pub(crate) enum PendingBatchOp {
 pub(crate) struct CellAsOfView {
     /// The overlay merged over L0; shadows every level below.
     top: IndexTable,
-    /// Readers over the levels below L0, in key order; the iteration drains
-    /// them.
-    below_l0: Vec<WalRandomRead>,
+    /// Readers over the levels below L0 with their refs, in key order; the
+    /// iteration drains them.
+    below_l0: Vec<(IndexRef, WalRandomRead)>,
 }
 
 impl CellAsOfView {
@@ -229,17 +229,20 @@ impl CellAsOfView {
         context: &'a KsContext,
     ) -> impl Iterator<Item = (Bytes, WalPosition)> + 'a {
         let top = &self.top;
-        let below_l0 = self.below_l0.drain(..).flat_map(move |reader| {
-            let ks = &context.ks_config;
-            let bytes = reader.read(0..reader.len());
-            let read_type = reader.read_type();
-            context.inc_read(WalEntryKind::Index, read_type);
-            context.inc_read_bytes(WalEntryKind::Index, read_type, bytes.len() as u64);
-            ks.index_format()
-                .deserialize_index(ks, bytes)
-                .into_entries()
-                .filter(move |(key, _)| !top.contains_key(key))
-        });
+        let below_l0 = self
+            .below_l0
+            .drain(..)
+            .flat_map(move |(index_ref, reader)| {
+                let ks = &context.ks_config;
+                let bytes = reader.read(0..reader.len());
+                let read_type = reader.read_type();
+                context.inc_read(WalEntryKind::Index, read_type);
+                context.inc_read_bytes(WalEntryKind::Index, read_type, bytes.len() as u64);
+                ks.index_format()
+                    .deserialize_index(ks, bytes, index_ref)
+                    .into_entries()
+                    .filter(move |(key, _)| !top.contains_key(key))
+            });
         top.iter().chain(below_l0)
     }
 }
@@ -629,7 +632,7 @@ impl LargeTable {
         // drop row to avoid holding mutex during IO
         drop(row);
 
-        Ok(self.lookup_disk_levels(context, index_readers, k))
+        Ok(self.lookup_disk_levels(context, level_refs, index_readers, k))
     }
 
     /// Walk the on-disk index levels (readers already opened under the row
@@ -643,6 +646,7 @@ impl LargeTable {
     fn lookup_disk_levels(
         &self,
         context: &KsContext,
+        level_refs: SmallVec<[IndexRef; INLINE_LEVELS]>,
         readers: SmallVec<[WalRandomRead; INLINE_LEVELS]>,
         k: &[u8],
     ) -> GetResult {
@@ -659,10 +663,10 @@ impl LargeTable {
             // reader only knows whether it led the fill once it has resolved.
             let mut last_read_type = ReadType::Cached;
             let mut last_level = 0usize;
-            for (level, reader) in readers.iter().enumerate() {
-                let found = ks
-                    .index_format()
-                    .lookup_unloaded(ks, reader, k, &self.metrics);
+            for (level, (index_ref, reader)) in level_refs.iter().zip(readers.iter()).enumerate() {
+                let found =
+                    ks.index_format()
+                        .lookup_unloaded(ks, reader, *index_ref, k, &self.metrics);
                 last_read_type = reader.read_type();
                 last_level = level;
                 match found {
@@ -760,7 +764,7 @@ impl LargeTable {
         // drop row to avoid holding mutex during IO
         drop(row);
 
-        Ok(self.lookup_disk_levels(context, index_readers, k))
+        Ok(self.lookup_disk_levels(context, level_refs, index_readers, k))
     }
 
     fn entry_mut<'a>(&self, row: &'a mut Row, cell: &CellId) -> &'a mut LargeTableEntry {
@@ -1037,11 +1041,11 @@ impl LargeTable {
         // and a later snapshot unlink their file, but an open reader keeps
         // its blob readable. Like every reader-based path, the reads skip
         // the frame CRC.
-        let below_l0: Vec<WalRandomRead> = entry
+        let below_l0: Vec<(IndexRef, WalRandomRead)> = entry
             .levels()
             .iter_below_l0()
-            .map(|pos| loader.index_scan_reader(pos))
-            .collect::<Result<_, _>>()?;
+            .map(|index_ref| Ok((index_ref, loader.index_scan_reader(index_ref)?)))
+            .collect::<Result<_, L::Error>>()?;
         // The view shadows each level only with `top`, which is right because
         // the levels below L0 are key-disjoint: one L1 blob, or the shards.
         assert!(
@@ -1366,10 +1370,10 @@ impl LargeTable {
                     let on_disk_next = format.next_entry_unloaded(
                         ks_config,
                         reader,
+                        *index_ref,
                         prev_key.as_deref(),
                         direction,
                         metrics,
-                        index_ref.position(),
                         cache_slot,
                     );
                     candidates.push(on_disk_next);
@@ -3146,7 +3150,9 @@ mod tests {
 
         // Serialize the disk index for our mock reader
         let format = ks.index_format();
-        let serialized_data = format.clean_serialize_index(&mut disk_index, ks);
+        let serialized = format.clean_serialize_index(&mut disk_index, ks);
+        let micro_cells = serialized.micro_cells;
+        let serialized_data = serialized.bytes;
 
         let loader = MockLoader {
             disk_index: disk_index.clone(),
@@ -3186,7 +3192,8 @@ mod tests {
             // Create a row with a Loaded entry
             let mut entry = LargeTableEntry::new_empty(context.clone(), cell_id.clone(), 0);
             entry.data = ArcCow::new_owned(disk_index.clone());
-            entry.levels = IndexLevels::single(IndexRef::test_value(42));
+            entry.levels =
+                IndexLevels::single(IndexRef::new(WalPosition::test_value(42), micro_cells));
             entry.state = LargeTableEntryState::Loaded;
 
             let mut row = Row {
@@ -3249,7 +3256,7 @@ mod tests {
             let entry = LargeTableEntry::new_unloaded(
                 context.clone(),
                 cell_id.clone(),
-                IndexLevels::single(IndexRef::test_value(42)),
+                IndexLevels::single(IndexRef::new(WalPosition::test_value(42), micro_cells)),
                 0,
                 None,
             );
@@ -3311,7 +3318,8 @@ mod tests {
                 WalPosition::test_value(18),
             ); // Deleted key
 
-            entry.levels = IndexLevels::single(IndexRef::test_value(42));
+            entry.levels =
+                IndexLevels::single(IndexRef::new(WalPosition::test_value(42), micro_cells));
             entry.state = LargeTableEntryState::DirtyLoaded;
 
             let mut row = Row {
@@ -3358,7 +3366,7 @@ mod tests {
             let mut entry = LargeTableEntry::new_unloaded(
                 context.clone(),
                 cell_id.clone(),
-                IndexLevels::single(IndexRef::test_value(42)),
+                IndexLevels::single(IndexRef::new(WalPosition::test_value(42), micro_cells)),
                 0,
                 None,
             );
@@ -3608,12 +3616,12 @@ mod tests {
         let serialized_a = format.clean_serialize_index(&mut shard_a_table.clone(), ks);
         let serialized_b = format.clean_serialize_index(&mut shard_b_table.clone(), ks);
 
-        let pos_a = IndexRef::test_value(201);
-        let pos_b = IndexRef::test_value(202);
+        let pos_a = IndexRef::new(WalPosition::test_value(201), serialized_a.micro_cells);
+        let pos_b = IndexRef::new(WalPosition::test_value(202), serialized_b.micro_cells);
 
         let mut blobs = HashMap::new();
-        blobs.insert(pos_a.offset(), (shard_a_table, serialized_a));
-        blobs.insert(pos_b.offset(), (shard_b_table, serialized_b));
+        blobs.insert(pos_a.offset(), (shard_a_table, serialized_a.bytes));
+        blobs.insert(pos_b.offset(), (shard_b_table, serialized_b.bytes));
         let loader = CountingByPosLoader::new(blobs);
 
         // Shard A: [10, 20] at pos_a. Shard B: [30, 50] at pos_b.
@@ -3965,9 +3973,11 @@ mod tests {
         // The relocation as-of view of an unloaded sharded cell must carry
         // the keys of every shard, with the L0 blob winning on overlap.
         let key = |k: u64| Bytes::from(k.to_be_bytes().to_vec());
-        let shard_a_pos = IndexRef::new(WalPosition::new(100, 64));
-        let shard_b_pos = IndexRef::new(WalPosition::new(200, 64));
-        let l0_pos = IndexRef::new(WalPosition::new(300, 64));
+        // Two or three entries fit one micro-cell under the default policy;
+        // `blob` below asserts it.
+        let shard_a_pos = IndexRef::new(WalPosition::new(100, 64), 1);
+        let shard_b_pos = IndexRef::new(WalPosition::new(200, 64), 1);
+        let l0_pos = IndexRef::new(WalPosition::new(300, 64), 1);
         let mut shards = BTreeMap::new();
         shards.insert(
             1u64.to_be_bytes().to_vec(),
@@ -4018,7 +4028,8 @@ mod tests {
                 .ks_config
                 .index_format()
                 .clean_serialize_index(&mut table, &context.ks_config);
-            (table, serialized)
+            assert_eq!(serialized.micro_cells, 1);
+            (table, serialized.bytes)
         };
         let mut blobs = HashMap::new();
         blobs.insert(shard_a_pos.offset(), blob(&[(1, 1), (2, 2), (3, 3)]));
