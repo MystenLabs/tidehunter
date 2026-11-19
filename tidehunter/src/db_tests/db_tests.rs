@@ -5507,3 +5507,94 @@ fn test_drop_during_snapshot_survives_restart() {
         "the dropped cell came back after the restart"
     );
 }
+
+/// The WAL ends below a frontier the control region stored for a flushed
+/// cell. The writer resumes at the end of the valid prefix, so the next write
+/// to that cell lands at an offset below the stored frontier. It is an
+/// acknowledged write and must survive a restart that happens before the
+/// next periodic control region store: with a side WAL configured, replay
+/// skips a record below the frontier of a cell that has levels.
+fn write_below_stale_frontier_survives_restart(wal_generations: u8) {
+    let dir = tempdir::TempDir::new("test-write-below-stale-frontier").unwrap();
+    let mut config = Config::small();
+    config.wal_generations = wal_generations;
+    let config = Arc::new(config);
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space("flushed", 8, 1, KeyType::uniform(1));
+    ksb.add_key_space("laggard", 8, 1, KeyType::uniform(1));
+    let key_shape = ksb.build();
+    let open = || {
+        Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap()
+    };
+    let k = |n: u64| n.to_be_bytes().to_vec();
+    let v = |b: u8| -> Bytes { vec![b].into() };
+
+    let (lost_frame, stored_frontier, file) = {
+        let db = open();
+        let (flushed, laggard) = (db.ks("flushed"), db.ks("laggard"));
+        // The flushed cell: clean, with a level.
+        db.insert(flushed, k(1), v(1)).unwrap();
+        db.force_rebuild_control_region().unwrap();
+        // The laggard cell stays dirty and keeps replay_from below the
+        // frames that follow.
+        db.insert(laggard, k(2), v(2)).unwrap();
+        let lost_frame = db.wal_writer.position();
+        db.insert(laggard, k(3), v(3)).unwrap();
+        db.insert(laggard, k(4), v(4)).unwrap();
+        db.wal_writer.wal_tracker_barrier();
+        let stored_frontier = db.wal_writer.last_processed().as_u64();
+        // Threshold 0 flushes nothing: the store records the flushed cell at
+        // the frontier and the laggard cell at its anchor.
+        let replay_from = db.rebuild_control_region_from(0).unwrap();
+        assert!(
+            replay_from < lost_frame && lost_frame < stored_frontier,
+            "replay_from {replay_from}, lost frame {lost_frame}, stored frontier {stored_frontier}"
+        );
+        let file = db.wal.file().try_clone().unwrap();
+        (lost_frame, stored_frontier, file)
+    };
+    // The WAL loses the frame at `lost_frame`, and with it everything above.
+    let mut data = [0u8; 1];
+    let position = lost_frame + CrcFrame::CRC_HEADER_LENGTH as u64;
+    file.read_exact_at(&mut data, position).unwrap();
+    data[0] = !data[0];
+    file.write_all_at(&data, position).unwrap();
+
+    {
+        let db = open();
+        let (flushed, laggard) = (db.ks("flushed"), db.ks("laggard"));
+        assert_eq!(Some(v(1)), db.get(flushed, &k(1)).unwrap());
+        assert_eq!(Some(v(2)), db.get(laggard, &k(2)).unwrap());
+        assert_eq!(None, db.get(laggard, &k(3)).unwrap());
+        let reused = db.wal_writer.position();
+        assert!(
+            reused < stored_frontier,
+            "the write must reuse an offset below the stored frontier: {reused} vs {stored_frontier}"
+        );
+        db.insert(flushed, k(1), v(11)).unwrap();
+        assert_eq!(Some(v(11)), db.get(flushed, &k(1)).unwrap());
+    }
+
+    let db = open();
+    assert_eq!(
+        Some(v(11)),
+        db.get(db.ks("flushed"), &k(1)).unwrap(),
+        "a write acknowledged below the stale frontier was lost by the restart"
+    );
+}
+
+#[test]
+fn test_write_below_stale_frontier_survives_restart() {
+    write_below_stale_frontier_survives_restart(1);
+}
+
+#[test]
+fn test_write_below_stale_frontier_survives_restart_multi_gen() {
+    write_below_stale_frontier_survives_restart(2);
+}

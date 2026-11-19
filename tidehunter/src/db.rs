@@ -165,6 +165,14 @@ impl Db {
             &metrics,
             last_processed,
         )?;
+        // The writer resumes at the end of the replayed prefix. A cell
+        // frontier above that position was stored when the WAL reached
+        // further than it does now (frames lost to a power failure after
+        // the store, a CRC failure inside the replay range, a control region
+        // restored next to an older WAL), and the offsets in between are
+        // about to be handed out again.
+        let writer_start = wal_writer.position();
+        let lowered_frontiers = large_table.lower_last_processed_to(writer_start);
         let last_index_position = control_region.last_index_wal_position();
         // Restore the mapped window over the fragments holding live index
         // blobs; see `WalIterator::premap_live_fragments` for why.
@@ -260,6 +268,20 @@ impl Db {
         let _flat_handle = Self::start_flat_promotion_job(Arc::downgrade(&this));
 
         // todo: store handles and wait for them on Db drop
+
+        if lowered_frontiers > 0 {
+            // The control region on disk still carries those frontiers, and
+            // a restart replays against it: a record written below one of
+            // them from here on would count as covered by levels that never
+            // held it (see `LargeTableEntry::apply_replay_buffer`). Store a
+            // control region with the lowered frontiers before `open`
+            // returns, so no write is acknowledged against the stale one.
+            eprintln!(
+                "tidehunter: the control region of {} is ahead of the WAL: {lowered_frontiers} cell frontier(s) were above the WAL end at {writer_start}; storing a control region before accepting writes",
+                this.path.display()
+            );
+            this.rebuild_control_region()?;
+        }
 
         Ok(this)
     }

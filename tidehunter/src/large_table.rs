@@ -1716,6 +1716,32 @@ impl LargeTable {
         self.snapshot(loader)
     }
 
+    /// Lowers every cell `last_processed` that is above `position` down to
+    /// it and returns how many cells were lowered.
+    ///
+    /// `Db::open` calls this with the position the WAL writer resumes at. A
+    /// control region is never stored ahead of the WAL tail, so a frontier
+    /// above the replayed prefix means the WAL no longer holds frames it
+    /// held at that store. The writer hands those offsets out again, and a
+    /// frontier left above them would claim the new records for levels that
+    /// never held them.
+    pub(crate) fn lower_last_processed_to(&self, position: u64) -> usize {
+        let limit = LastProcessed::new(position);
+        let mut lowered = 0;
+        for ks_table in &self.table {
+            for mutex in ks_table.rows.mutexes() {
+                let mut row = mutex.lock();
+                for entry in row.entries.iter_mut() {
+                    if entry.last_processed > limit {
+                        entry.last_processed = limit;
+                        lowered += 1;
+                    }
+                }
+            }
+        }
+        lowered
+    }
+
     #[cfg(test)]
     pub(crate) fn each_entry(&self, f: impl Fn(&mut LargeTableEntry)) {
         for ks_table in &self.table {
@@ -2058,6 +2084,9 @@ impl LargeTableEntry {
         //     anchor of writes no blob holds: a record below it (a control
         //     region written by a build that anchored a fresh cell on the
         //     first write to take the row lock can carry one) is live data.
+        // A frontier above the WAL's valid prefix is the remaining way for it
+        // to cover a record the levels do not hold; `Db::open` stores a fresh
+        // control region before the writer reuses those offsets.
         if self.context.config.wal_generations > 1 && !self.state.is_empty() {
             let covered = entries.partition_point(|(_, iwp)| self.last_processed.is_processed(iwp));
             if covered > 0 {
