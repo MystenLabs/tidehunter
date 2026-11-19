@@ -3043,6 +3043,9 @@ pub(crate) struct LargeTableFailPointsInner {
     /// Hit by `drop_cells_in_range` before it locks any cell, so a test can
     /// park a drop between its DropCells frame and the clear.
     pub fp_drop_cells_before_lock: crate::failpoints::FailPoint,
+    /// Hit by a WAL-based relocation run after each stripe has stored its
+    /// control region and reclaimed the WAL below its end.
+    pub fp_relocation_after_stripe: crate::failpoints::FailPoint,
 }
 
 #[cfg(not(test))]
@@ -3059,6 +3062,8 @@ impl LargeTableFailPoints {
     pub fn fp_snapshot_after_row(&self) {}
 
     pub fn fp_drop_cells_before_lock(&self) {}
+
+    pub fn fp_relocation_after_stripe(&self) {}
 }
 
 #[cfg(test)]
@@ -3088,6 +3093,10 @@ impl LargeTableFailPoints {
 
     pub fn fp_drop_cells_before_lock(&self) {
         self.0.read().fp_drop_cells_before_lock.fp();
+    }
+
+    pub fn fp_relocation_after_stripe(&self) {
+        self.0.read().fp_relocation_after_stripe.fp();
     }
 }
 

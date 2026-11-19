@@ -303,6 +303,10 @@ pub struct Metrics {
     pub l1_shard_rewritten_total: MetricIntCounterVec,
 
     pub relocation_target_position: MetricIntGauge,
+    /// Stripes a WAL-based relocation run completed: each stored a control
+    /// region and reclaimed the WAL below its end, or below the control
+    /// region's replay position when that is lower.
+    pub relocation_stripes: MetricIntCounter,
     pub relocation_terminal_position: MetricIntGauge,
     pub gc_position: MetricIntGaugeVec,
     pub relocation_kept: MetricIntCounterVec,
@@ -624,6 +628,7 @@ impl Metrics {
             ),
 
             relocation_target_position: gauge!("relocation_target_position", registry, enabled),
+            relocation_stripes: counter!("relocation_stripes", registry, enabled),
             relocation_terminal_position: gauge!("relocation_terminal_position", registry, enabled),
             gc_position: gauge_vec!("gc_position", &["kind"], registry, enabled),
             relocation_kept: counter_vec!("relocation_kept", &["ks"], registry, enabled),

@@ -11,6 +11,7 @@ pub use cell_reference::CellReference;
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak, mpsc};
 use std::thread::JoinHandle;
 
@@ -60,6 +61,29 @@ pub fn compute_target_position_from_ratio(db: &Arc<Db>, ratio: f64) -> Option<u6
 
     // Ensure we don't exceed last_processed
     Some(target.min(last_processed))
+}
+
+/// WAL range one relocation stripe covers: `stripe_bytes` rounded down to
+/// whole WAL files, and at least one file.
+fn stripe_range(stripe_bytes: u64, wal_file_size: u64) -> u64 {
+    (stripe_bytes / wal_file_size).max(1) * wal_file_size
+}
+
+/// Raises `Db::relocation_running` for the duration of a WAL-based run, which
+/// pauses the periodic snapshot thread's size-triggered snapshots.
+struct PeriodicSnapshotPause<'a>(&'a AtomicBool);
+
+impl<'a> PeriodicSnapshotPause<'a> {
+    fn new(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+
+impl Drop for PeriodicSnapshotPause<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 pub(crate) struct Relocator(pub(crate) mpsc::Sender<RelocationCommand>);
@@ -325,6 +349,9 @@ impl RelocationDriver {
             db.config.batch_codec.is_none(),
             "wal-based relocation does not support Config::batch_codec yet"
         );
+        // Raised before the scan below, so a periodic snapshot already under
+        // way when the run starts can finish while the scan reads the WAL.
+        let _paused = PeriodicSnapshotPause::new(&db.relocation_running);
         let last_processed = db.wal_writer.last_processed();
         let upper_limit = last_processed.as_u64();
         let min_wal_position = db.wal.min_wal_position();
@@ -377,19 +404,62 @@ impl RelocationDriver {
         if target_position < (db.wal.wal_file_size() + min_wal_position) {
             return Ok(());
         }
-        let mut current_cell = CellReference::first(&db, KeySpace::first());
+        let stripe_range = stripe_range(db.config.relocation_stripe_bytes, db.wal.wal_file_size());
+        let mut stripe_start = min_wal_position;
+        let mut cutoff = Some(terminal_position);
+        while stripe_start < target_position {
+            let stripe_end = stripe_start
+                .saturating_add(stripe_range)
+                .min(target_position);
+            self.relocate_stripe(&db, stripe_end, cutoff.take(), last_processed)?;
+            // Every entry below `stripe_end` is now re-pointed or dropped in
+            // the index; persist that before the WAL below it is reclaimed.
+            // The stripe's snapshot stands in for the periodic one, so it
+            // force-unloads behind the live tail as that would. Cells written
+            // since the run started are flushed too, and replay after a crash
+            // starts no earlier than the last stripe's snapshot.
+            let unload_threshold = db
+                .wal_writer
+                .position()
+                .saturating_sub(db.config.snapshot_unload_threshold());
+            db.rebuild_control_region_from(stripe_end.max(unload_threshold))?;
+            let replay_from = db.control_region_store.lock().last_position();
+            db.wal_writer.gc(stripe_end.min(replay_from))?;
+            self.metrics.relocation_stripes.inc();
+            db.large_table.fp.fp_relocation_after_stripe();
+            stripe_start = stripe_end;
+        }
+        Ok(())
+    }
+
+    /// One pass over every cell for the stripe ending at `stripe_end`. Key
+    /// spaces without a relocation filter get their live entries below
+    /// `stripe_end` copied to the WAL tail, and their index re-pointed at the
+    /// copies; entries below the previous stripe's end were moved by that
+    /// stripe. Key spaces with a filter only drop the entries below
+    /// `cutoff`, which the first stripe does for the whole run.
+    fn relocate_stripe(
+        &self,
+        db: &Arc<Db>,
+        stripe_end: u64,
+        cutoff: Option<u64>,
+        last_processed: LastProcessed,
+    ) -> DbResult<()> {
+        let mut current_cell = CellReference::first(db, KeySpace::first());
         while let Some(cell) = current_cell.take() {
-            current_cell = cell.next(&db);
+            current_cell = cell.next(db);
             let ks = db.key_shape.ks(cell.keyspace);
             // For keyspaces with relocation filter, flush and clear stale entries
             if ks.relocation_filter().is_some() {
-                let dropped = db.large_table.sync_flush_for_relocation(
-                    db.ks_context(cell.keyspace),
-                    &cell.cell_id,
-                    db.as_ref(),
-                    RelocationFlush::Cutoff(terminal_position),
-                )?;
-                db.retire_index_blobs(&dropped);
+                if let Some(cutoff) = cutoff {
+                    let dropped = db.large_table.sync_flush_for_relocation(
+                        db.ks_context(cell.keyspace),
+                        &cell.cell_id,
+                        db.as_ref(),
+                        RelocationFlush::Cutoff(cutoff),
+                    )?;
+                    db.retire_index_blobs(&dropped);
+                }
                 continue;
             }
             // For keyspaces without relocation filter, relocate entries.
@@ -410,10 +480,12 @@ impl RelocationDriver {
                 continue;
             };
             let batch_limit = db.config.relocation_batch_max_bytes();
+            // The copies re-point a key only while its latest position is
+            // still below `stripe_end`, i.e. the original this stripe read.
             let mut batch =
-                RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), target_position);
+                RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), stripe_end);
             for (reduced_key, position) in index.iter(context) {
-                if position.offset() < target_position
+                if position.offset() < stripe_end
                     && let Some((key, value)) =
                         db.read_record_for_indexed_key(context, position, reduced_key.as_ref())?
                 {
@@ -427,7 +499,7 @@ impl RelocationDriver {
                         batch = RelocatedWriteBatch::new(
                             cell.keyspace,
                             cell.cell_id.clone(),
-                            target_position,
+                            stripe_end,
                         );
                     }
                 }
@@ -436,11 +508,6 @@ impl RelocationDriver {
                 db.write_relocated_batch(batch)?;
             }
         }
-        db.rebuild_control_region_from(target_position)?;
-        db.wal_writer.gc(std::cmp::min(
-            target_position,
-            db.control_region_store.lock().last_position(),
-        ))?;
         Ok(())
     }
 
@@ -473,7 +540,8 @@ impl RelocationDriver {
         // offset >= `effective_limit`; a higher threshold (e.g. the live
         // frontier) would let the CAS re-point such a write to the relocated
         // copy of the older as-of value, losing the overwrite. (The WAL-based
-        // path passes its `target_position` for the same reason.)
+        // path passes each stripe's end, which lies at or below the frontier
+        // its view is built with.)
         let batch =
             RelocatedWriteBatch::new(cell_ref.keyspace, cell_ref.cell_id.clone(), effective_limit);
         let mut context = CellProcessingContext::new(batch);
