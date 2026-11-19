@@ -1413,8 +1413,16 @@ impl Db {
     /// `Wal` it lives in plus the in-generation position to read at. G0
     /// positions are returned unchanged; non-G0 positions are routed to the
     /// matching side WAL with the gen bits stripped from the offset.
+    ///
+    /// Panics on the tombstone sentinel offset, whatever length it is paired
+    /// with: no record lives there, and with its flag bit set it would decode
+    /// as a side-WAL position.
     fn value_wal_for(&self, position: WalPosition) -> (&Wal, WalPosition) {
-        assert!(position.is_valid(), "value_wal_for called on INVALID");
+        assert_ne!(
+            position.offset(),
+            WalPosition::INVALID.offset(),
+            "value_wal_for called on the tombstone sentinel offset ({position:?})"
+        );
         let generation_bits = self.config.generation_bits();
         let (generation, raw_offset) =
             WalPosition::decode_offset(position.offset(), generation_bits);
@@ -2470,6 +2478,33 @@ mod generation_wal_tests {
             .expect("record must still be readable after restart");
         assert_eq!(k.as_ref(), key.as_slice());
         assert_eq!(v.as_ref(), value.as_slice());
+    }
+
+    /// A position that carries the tombstone sentinel offset with a length
+    /// other than `INVALID`'s must not be routed: with a side WAL configured
+    /// the offset decodes as a G1 position, and the read of a file that is
+    /// not there would report the key as garbage-collected.
+    #[test]
+    #[should_panic(expected = "tombstone sentinel offset")]
+    fn test_value_wal_for_rejects_sentinel_offset() {
+        let dir = TempDir::new("test_value_wal_for_sentinel").unwrap();
+        let mut config = Config::small();
+        config.wal_generations = 2; // G0 + G1
+        let mut builder = KeyShapeBuilder::new();
+        builder.add_key_space("test", 4, 1, KeyType::uniform(1));
+        let db = Db::open(
+            dir.path(),
+            builder.build(),
+            Arc::new(config),
+            Metrics::new(),
+        )
+        .unwrap();
+        let sentinel_offset = WalPosition::new(WalPosition::INVALID.offset(), 0);
+        assert!(
+            sentinel_offset.is_valid(),
+            "not equal to INVALID as a whole"
+        );
+        let _: (&Wal, WalPosition) = db.value_wal_for(sentinel_offset);
     }
 }
 
