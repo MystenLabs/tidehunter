@@ -2034,8 +2034,9 @@ impl IndexWalPosition {
     /// Logical recency across WAL generations for two same-key positions.
     ///
     /// Data only flows *down* into deeper generations: relocation promotes an
-    /// as-of value into a side WAL and replaces its index entry, replay skips
-    /// records already covered by a cell's `last_processed`, and the overlay
+    /// as-of value into a side WAL and replaces its index entry, replay of a
+    /// database with side WALs skips records already covered by the
+    /// `last_processed` of a cell that has levels, and the overlay
     /// filters drop pre-frontier positions once flushed — so a stale G0 entry
     /// never coexists with its own promoted copy. Hence when a G0 position
     /// (generation flag bit clear) and a flagged position (promoted side-WAL

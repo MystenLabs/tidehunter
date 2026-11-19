@@ -2039,19 +2039,32 @@ impl LargeTableEntry {
         // the cell's persisted blobs when the control region was stored. The
         // global replay start is the *minimum* frontier across cells, so a
         // laggard cell can put another cell's already-covered records back
-        // into the replay range. Re-applying them was harmless duplication
-        // when levels held only G0 positions (the replayed copy is
+        // into the replay range. Re-applying them is harmless duplication
+        // while levels hold only G0 positions (the replayed copy is
         // value-equal); once levels can hold generation-flagged positions
         // (relocation-promoted copies), a covered G0 record or tombstone
         // replayed into the overlay would shadow the flagged entry — and
         // side WALs are not replayed, so nothing would re-establish it.
         // `IndexWalPosition::newer_than`'s soundness argument relies on
         // this filter.
-        let covered = entries.partition_point(|(_, iwp)| self.last_processed.is_processed(iwp));
-        if covered > 0 {
-            entries.drain(..covered);
-            if entries.is_empty() {
-                return;
+        //
+        // Dropping a record is only as safe as the stored frontier is exact,
+        // so the filter runs only where a flagged entry can exist:
+        //   - with a side WAL configured. Without one no level holds a
+        //     flagged position, and re-applying every record does not depend
+        //     on the frontier at all.
+        //   - on a cell that has levels. An `Empty` cell has nothing a record
+        //     could shadow, and the `last_processed` stored for it is the
+        //     anchor of writes no blob holds: a record below it (a control
+        //     region written by a build that anchored a fresh cell on the
+        //     first write to take the row lock can carry one) is live data.
+        if self.context.config.wal_generations > 1 && !self.state.is_empty() {
+            let covered = entries.partition_point(|(_, iwp)| self.last_processed.is_processed(iwp));
+            if covered > 0 {
+                entries.drain(..covered);
+                if entries.is_empty() {
+                    return;
+                }
             }
         }
         debug_assert!(
@@ -3163,27 +3176,19 @@ mod tests {
         assert_eq!(row.entry_mut(&cell).0.context.name(), "b");
     }
 
-    #[test]
-    fn test_apply_replay_buffer_skips_covered_records() {
-        // Records below a cell's CR-loaded `last_processed` are already
-        // covered by its persisted levels and must not be re-applied — the
-        // global replay start is the minimum frontier across cells, so a
-        // laggard cell can put another cell's covered records back into the
-        // replay range. A replayed tombstone or stale value would shadow a
-        // generation-flagged entry the levels hold (side WALs are not
-        // replayed, so nothing would re-establish it).
-        use crate::index::index_table::IndexWalPosition;
-        use crate::replay_buffer::CellReplayBuffer;
-
-        let config = Config::small();
+    /// A two-keyspace table for the replay filter tests. The WAL only backs
+    /// the loader argument of `from_unloaded`.
+    fn replay_filter_table(
+        wal_generations: u8,
+    ) -> (tempdir::TempDir, LargeTable, KeySpace, KeySpace) {
+        let mut config = Config::small();
+        config.wal_generations = wal_generations;
         let mut ks = KeyShapeBuilder::new();
         ks.add_key_space("a", 8, 1, KeyType::uniform(1));
         ks.add_key_space("b", 8, 1, KeyType::uniform(1));
         let ks = ks.build();
         let kss = crate::key_shape::KeySpaces::from_key_shape(&ks);
-        let a = kss.ks("a");
-        let b = kss.ks("b");
-        let tmp_dir = tempdir::TempDir::new("test_replay_skips_covered").unwrap();
+        let tmp_dir = tempdir::TempDir::new("test_replay_filter").unwrap();
         let wal = Wal::open(
             tmp_dir.path(),
             config.wal_layout(WalKind::Replay),
@@ -3199,25 +3204,51 @@ mod tests {
             SharedLastProcessed::default(),
             wal.as_ref(),
         );
+        (tmp_dir, l, kss.ks("a"), kss.ks("b"))
+    }
 
-        let key_below: Bytes = 1u64.to_be_bytes().to_vec().into();
-        let key_above: Bytes = 2u64.to_be_bytes().to_vec().into();
+    /// Puts `entry` in the state a control region loads a flushed cell in:
+    /// `Unloaded`, one level, `last_processed` at the store's frontier.
+    fn load_as_flushed(entry: &mut LargeTableEntry, last_processed: u64) {
+        entry.levels = IndexLevels::single(WalPosition::test_value(42));
+        entry.state = LargeTableEntryState::Unloaded;
+        entry.last_processed = LastProcessed::new(last_processed);
+    }
+
+    fn replay_filter_key(n: u64) -> Bytes {
+        n.to_be_bytes().to_vec().into()
+    }
+
+    /// One replayed write per `(key, offset)`, in WAL order.
+    fn replay_records(records: &[(u64, u64)]) -> crate::replay_buffer::CellReplayBuffer {
+        use crate::index::index_table::IndexWalPosition;
+        records
+            .iter()
+            .map(|(key, offset)| {
+                (
+                    replay_filter_key(*key),
+                    IndexWalPosition::new_modified(WalPosition::test_value(*offset)),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_apply_replay_buffer_skips_covered_records() {
+        // Records below a cell's CR-loaded `last_processed` are already
+        // covered by its persisted levels and must not be re-applied — the
+        // global replay start is the minimum frontier across cells, so a
+        // laggard cell can put another cell's covered records back into the
+        // replay range. A replayed tombstone or stale value would shadow a
+        // generation-flagged entry the levels hold (side WALs are not
+        // replayed, so nothing would re-establish it).
+        let (_dir, l, a, b) = replay_filter_table(2);
+        let (key_below, key_above) = (replay_filter_key(1), replay_filter_key(2));
+
         let (mut row, cell) = l.row(l.ks_context(a), &key_below);
         let entry = row.entry_mut(&cell).0;
-        // Simulate a CR-loaded cell whose levels cover everything below 500.
-        entry.last_processed = LastProcessed::new(500);
-
-        let buffer: CellReplayBuffer = vec![
-            (
-                key_below.clone(),
-                IndexWalPosition::new_modified(WalPosition::test_value(100)),
-            ),
-            (
-                key_above.clone(),
-                IndexWalPosition::new_modified(WalPosition::test_value(700)),
-            ),
-        ];
-        entry.apply_replay_buffer(buffer, u64::MAX);
+        load_as_flushed(entry, 500);
+        entry.apply_replay_buffer(replay_records(&[(1, 100), (2, 700)]), u64::MAX);
         assert_eq!(
             entry.data.get(&key_below),
             None,
@@ -3228,24 +3259,78 @@ mod tests {
             Some(WalPosition::test_value(700)),
             "record at or above last_processed must be applied"
         );
+        assert!(entry.state == LargeTableEntryState::DirtyUnloaded);
+        assert_eq!(
+            entry.last_processed,
+            LastProcessed::new(500),
+            "a cell with levels keeps the frontier its control region recorded"
+        );
 
         // A fully-covered buffer must be a no-op that leaves the entry clean.
         let (mut row, cell) = l.row(l.ks_context(b), &key_below);
         let entry = row.entry_mut(&cell).0;
-        entry.last_processed = LastProcessed::new(500);
-        let buffer: CellReplayBuffer = vec![(
-            key_below.clone(),
-            IndexWalPosition::new_modified(WalPosition::test_value(100)),
-        )];
-        entry.apply_replay_buffer(buffer, u64::MAX);
+        load_as_flushed(entry, 500);
+        entry.apply_replay_buffer(replay_records(&[(1, 100)]), u64::MAX);
         assert!(
             entry.data.is_empty(),
             "fully-covered buffer must be a no-op"
         );
         assert!(
-            !entry.state.is_dirty(),
+            entry.state == LargeTableEntryState::Unloaded,
             "a fully-covered replay must not dirty the entry"
         );
+    }
+
+    #[test]
+    fn test_apply_replay_buffer_keeps_records_of_cell_without_levels() {
+        // A cell stored without levels has no blob that could cover a
+        // record: the `last_processed` loaded for it is the anchor of its
+        // unflushed writes, and a record below that anchor is still the only
+        // copy of a write. The cell re-anchors on its first replayed record.
+        let (_dir, l, a, _b) = replay_filter_table(2);
+        let (key_below, key_above) = (replay_filter_key(1), replay_filter_key(2));
+
+        let (mut row, cell) = l.row(l.ks_context(a), &key_below);
+        let entry = row.entry_mut(&cell).0;
+        assert!(entry.state.is_empty());
+        entry.last_processed = LastProcessed::new(500);
+        entry.apply_replay_buffer(replay_records(&[(1, 100), (2, 700)]), u64::MAX);
+        assert_eq!(
+            entry.data.get(&key_below),
+            Some(WalPosition::test_value(100)),
+            "a cell without levels must apply a record below its stored anchor"
+        );
+        assert_eq!(
+            entry.data.get(&key_above),
+            Some(WalPosition::test_value(700))
+        );
+        assert!(entry.state == LargeTableEntryState::DirtyLoaded);
+        assert_eq!(entry.last_processed, LastProcessed::new(100));
+    }
+
+    #[test]
+    fn test_apply_replay_buffer_keeps_covered_records_without_side_wals() {
+        // With a single WAL generation no level holds a flagged position, so
+        // there is nothing a covered record could shadow: every replayed
+        // record is applied, whatever frontier the control region stored.
+        let (_dir, l, a, _b) = replay_filter_table(1);
+        let (key_below, key_above) = (replay_filter_key(1), replay_filter_key(2));
+
+        let (mut row, cell) = l.row(l.ks_context(a), &key_below);
+        let entry = row.entry_mut(&cell).0;
+        load_as_flushed(entry, 500);
+        entry.apply_replay_buffer(replay_records(&[(1, 100), (2, 700)]), u64::MAX);
+        assert_eq!(
+            entry.data.get(&key_below),
+            Some(WalPosition::test_value(100)),
+            "a single-generation database must re-apply a covered record"
+        );
+        assert_eq!(
+            entry.data.get(&key_above),
+            Some(WalPosition::test_value(700))
+        );
+        assert!(entry.state == LargeTableEntryState::DirtyUnloaded);
+        assert_eq!(entry.last_processed, LastProcessed::new(500));
     }
 
     #[test]
