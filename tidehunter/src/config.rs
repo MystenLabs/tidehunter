@@ -57,6 +57,18 @@ pub struct Config {
     /// `None` (default) resolves to `frag_size * 2`.
     #[serde(default)]
     pub relocation_batch_max_bytes: Option<usize>,
+    /// WAL range one stripe of a WAL-based relocation run covers, rounded down
+    /// to whole WAL files and at least one file.
+    ///
+    /// A run copies the live entries below one stripe's end, stores a control
+    /// region and reclaims the WAL below that end before it starts the next
+    /// stripe. Disk use above the steady state is therefore bounded by one
+    /// stripe of copies, however far the run reaches. Each stripe reads the
+    /// index of every cell of the key spaces it copies and rewrites the index
+    /// of every cell holding entries in it, so smaller stripes read and write
+    /// more index. `u64::MAX` covers the whole run in one stripe.
+    #[serde(default = "default_relocation_stripe_bytes")]
+    pub relocation_stripe_bytes: u64,
     /// Minimum live-byte occupancy (percent of `wal_file_size`) for an index WAL file to be
     /// kept as-is. Files below this threshold (excluding the most recently written file) get
     /// their cells force-relocated on the next snapshot, freeing the file for GC. 0 disables
@@ -165,6 +177,10 @@ fn default_relocation_max_reclaim_pct() -> u8 {
     5
 }
 
+fn default_relocation_stripe_bytes() -> u64 {
+    64 * 1024 * 1024 * 1024
+}
+
 fn default_index_min_occupancy_pct() -> u8 {
     15
 }
@@ -187,6 +203,7 @@ impl Default for Config {
             relocation_strategy: RelocationStrategy::default(),
             relocation_max_reclaim_pct: default_relocation_max_reclaim_pct(),
             relocation_batch_max_bytes: None,
+            relocation_stripe_bytes: default_relocation_stripe_bytes(),
             index_min_occupancy_pct: default_index_min_occupancy_pct(),
             metrics_enabled: true,
             commit_pool_size: 0,
@@ -220,6 +237,7 @@ impl Config {
             metrics_enabled: true,
             relocation_max_reclaim_pct: 100,
             relocation_batch_max_bytes: None,
+            relocation_stripe_bytes: default_relocation_stripe_bytes(),
             index_min_occupancy_pct: default_index_min_occupancy_pct(),
             commit_pool_size: 0,
             num_pending_promotion_threads: default_num_pending_promotion_threads(),

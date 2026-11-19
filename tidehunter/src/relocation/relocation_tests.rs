@@ -1,11 +1,13 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
 use crate::control::RelocateFiles;
 use crate::failpoints::FailPoint;
 use crate::key_shape::{KeySpace, KeySpaceConfig};
 use crate::large_table::Loader;
-use crate::latch::Latch;
+use crate::latch::{Latch, LatchGuard};
 use crate::relocation::CellReference;
 use crate::relocation::watermark::WatermarkData;
 use crate::wal::layout::WalKind;
@@ -19,6 +21,15 @@ use crate::{
 use crate::{metrics::Metrics, relocation::Decision};
 use minibytes::Bytes;
 
+/// `Config::small` with one WAL file per relocation stripe, so the WAL-based
+/// runs in these tests span several stripes.
+fn small_config() -> Config {
+    Config {
+        relocation_stripe_bytes: 0,
+        ..Config::small()
+    }
+}
+
 fn force_unload_config(config: &Config) -> Arc<Config> {
     let mut config2 = Config::clone(config);
     config2.snapshot_unload_threshold = 0;
@@ -26,17 +37,17 @@ fn force_unload_config(config: &Config) -> Arc<Config> {
 }
 
 fn index_based_config() -> Arc<Config> {
-    let mut config = Config::small();
+    let mut config = small_config();
     config.relocation_strategy = RelocationStrategy::IndexBased(None);
     force_unload_config(&config)
 }
 
-/// `Config::small` with WAL files of two fragments, cells unloading at every
+/// `small_config` with WAL files of two fragments, cells unloading at every
 /// control-region rebuild, and, when `sharded`, small dirty and L0 limits plus
 /// an auto-shard threshold of 2 KiB so a cell of a few hundred 8-byte keys
 /// splits its promoted L1.
 fn relocation_test_config(sharded: bool) -> Arc<Config> {
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     if sharded {
         config.max_dirty_keys = 8;
@@ -181,7 +192,7 @@ fn test_checkpoint_survives_relocation_with_unload() {
     // Forced unload during the held checkpoint (snapshot_unload_threshold = 0):
     // the cell unloads, so the checkpoint reads the as-of value from the
     // relocated on-disk blob rather than the post-checkpoint value.
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     checkpoint_survives_relocation(force_unload_config(&config), KeySpaceConfig::new());
 }
@@ -191,7 +202,7 @@ fn test_checkpoint_survives_relocation_without_unload() {
     // Unloading disabled: the cell stays loaded, so the as-of value must survive
     // relocation in the in-memory overlay (relocation rewrites its position to
     // >= L and reclaims the original frame).
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     checkpoint_survives_relocation(Arc::new(config), KeySpaceConfig::new().disable_unload());
 }
@@ -211,7 +222,7 @@ fn test_relocation_waits_for_racing_write_on_loaded_cell() {
     use std::time::Instant;
 
     let dir = tempdir::TempDir::new("test_reloc_racing_write").unwrap();
-    let config = Arc::new(Config::small());
+    let config = Arc::new(small_config());
     let mut ksb = KeyShapeBuilder::new();
     ksb.add_key_space_config(
         "k",
@@ -439,7 +450,7 @@ fn test_checkpoint_survives_relocation_overlay_asof_value_sharded() {
 #[test]
 fn test_wal_relocation_basic_flow() {
     let dir = tempdir::TempDir::new("test_relocation_filter").unwrap();
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     let config = Arc::new(config);
     let mut ksb = KeyShapeBuilder::new();
@@ -526,7 +537,7 @@ fn test_iterator_skips_reclaimed_positions() {
     // return every live key: stopping at the first unreadable entry hides the
     // whole live half, because the removed keys sort in front of it.
     let dir = tempdir::TempDir::new("test_iterator_skips_reclaimed_positions").unwrap();
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     let config = Arc::new(config);
     let mut ksb = KeyShapeBuilder::new();
@@ -685,7 +696,7 @@ fn test_index_based_relocation_point_deletes() {
 #[test]
 fn test_index_based_relocation_filter() {
     let dir = tempdir::TempDir::new("test_index_based_relocation_filter").unwrap();
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     config.relocation_strategy = RelocationStrategy::IndexBased(None);
     let config = force_unload_config(&config);
@@ -801,7 +812,7 @@ fn test_index_based_relocation_filter() {
 fn test_relocation_strategies_produce_identical_results() {
     let dir1 = tempdir::TempDir::new("test_wal_strategy").unwrap();
     let dir2 = tempdir::TempDir::new("test_index_strategy").unwrap();
-    let config = Arc::new(Config::small());
+    let config = Arc::new(small_config());
 
     // Create identical keyspace configurations
     let mut ksb = KeyShapeBuilder::new();
@@ -902,7 +913,7 @@ fn test_both_strategies_handle_concurrent_writes() {
         let config = if use_index_based {
             index_based_config()
         } else {
-            force_unload_config(&Config::small())
+            force_unload_config(&small_config())
         };
         let mut ksb = KeyShapeBuilder::new();
         let ksc = KeySpaceConfig::new();
@@ -1386,7 +1397,7 @@ fn test_index_based_relocation_preserves_overwrite_above_target() {
     let db = Db::open(
         dir.path(),
         key_shape,
-        Arc::new(Config::small()),
+        Arc::new(small_config()),
         metrics.clone(),
     )
     .unwrap();
@@ -1444,7 +1455,7 @@ fn test_force_relocate_concurrent_write_keeps_below_l0_keys() {
     let dir = tempdir::TempDir::new("force_relocate_dirty_loaded").unwrap();
     // Forced unload (threshold 0) so the flushed cell unloads; the later read
     // reloads it folding only L0 into the overlay, leaving L1 on disk.
-    let config = force_unload_config(&Config::small());
+    let config = force_unload_config(&small_config());
     let mut ksb = KeyShapeBuilder::new();
     // Unloaded iteration off so that stepping an iterator loads the cell
     // (point reads never load; this is the only read-path load trigger).
@@ -1604,7 +1615,7 @@ fn test_compute_target_position_from_ratio() {
     use crate::relocation::compute_target_position_from_ratio;
 
     let dir = tempdir::TempDir::new("test_compute_ratio").unwrap();
-    let config = Arc::new(Config::small());
+    let config = Arc::new(small_config());
     let mut ksb = KeyShapeBuilder::new();
     ksb.add_key_space("default", 8, 1, KeyType::uniform(1));
     let key_shape = ksb.build();
@@ -1841,7 +1852,7 @@ fn torn_frame_pad_value() -> Vec<u8> {
 }
 
 /// A relocated copy may be indexed, and so persisted by the control region
-/// rebuild that ends the run, only once every WAL frame below it is applied:
+/// rebuild that ends its stripe, only once every WAL frame below it is applied:
 /// a crash tears a frame still being written, replay stops at it, and a copy
 /// above the torn frame is unreachable (replay skips relocated frames) while
 /// its original is already reclaimed. The child process parks a writer
@@ -1987,6 +1998,302 @@ fn torn_frame_crash_child(path: &Path, exit_code: i32) -> ! {
         torn_offset % config.wal_file_size,
     )
     .unwrap();
+    // Crash: `process::exit` runs no destructors, so nothing is flushed or
+    // closed on the way out.
+    std::process::exit(exit_code)
+}
+
+/// Key in `pad` at which the relocation filter stops a run.
+const STOP_MARKER: u64 = u64::MAX;
+
+/// Relocation filter of `pad` and `tail`: drops every record but
+/// `STOP_MARKER`, which stops the run there.
+fn drop_until_stop_marker(key: &[u8], _value: &[u8]) -> Decision {
+    if key == STOP_MARKER.to_be_bytes() {
+        Decision::StopRelocation
+    } else {
+        Decision::Remove
+    }
+}
+
+/// Key spaces `k`, which relocation copies, and `pad` and `tail`, which it
+/// drops (see `drop_until_stop_marker`). `tail` holds a few records only, so
+/// they stay in its cell's dirty overlay until a flush.
+fn copy_and_drop_key_shape() -> KeyShape {
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), KeySpaceConfig::new());
+    for name in ["pad", "tail"] {
+        ksb.add_key_space_config(
+            name,
+            8,
+            1,
+            KeyType::uniform(1),
+            KeySpaceConfig::new().with_relocation_filter(drop_until_stop_marker),
+        );
+    }
+    ksb.build()
+}
+
+const STRIPED_KEYS: u64 = 600;
+
+/// Every sixth key of `k` is overwritten, so every stripe holds both live
+/// records, which it copies and so grows the WAL, and dead versions.
+fn striped_key_overwritten(i: u64) -> bool {
+    i % 6 == 0
+}
+
+/// Records written to `tail` just before `STOP_MARKER`. The run's filter
+/// cutoff drops them from the index; nothing else does while their WAL file
+/// is still on disk.
+const TAIL_KEYS: u64 = 4;
+
+/// Asserts that no `tail` record written before `STOP_MARKER` is readable.
+fn assert_tail_records_dropped(db: &Db, label: &str) {
+    let tail = db.ks("tail");
+    for i in 0..TAIL_KEYS {
+        assert_eq!(
+            db.get(tail, &i.to_be_bytes()).unwrap(),
+            None,
+            "{label}: the filter cutoff must drop tail record {i}"
+        );
+    }
+}
+
+fn striped_value(i: u64, tag: u8) -> Vec<u8> {
+    let mut v = vec![(i % 251) as u8; 12 * 1000];
+    v[0] = tag;
+    v
+}
+
+/// Writes `STRIPED_KEYS` keys of `k` interleaved with `pad` records, then
+/// overwrites the keys `striped_key_overwritten` picks, so the WAL spans
+/// several files that each hold live records, dead versions and records the
+/// filter drops. Ends with `TAIL_KEYS` records in `tail` and then `STOP_MARKER`,
+/// where relocation runs stop.
+fn write_striped_relocation_data(db: &Db) {
+    let ks = db.ks("k");
+    let pad = db.ks("pad");
+    let tail = db.ks("tail");
+    for i in 0..STRIPED_KEYS {
+        db.insert(ks, i.to_be_bytes().to_vec(), striped_value(i, 1))
+            .unwrap();
+        db.insert(pad, i.to_be_bytes().to_vec(), striped_value(i, 0))
+            .unwrap();
+    }
+    for i in (0..STRIPED_KEYS).filter(|i| striped_key_overwritten(*i)) {
+        db.insert(ks, i.to_be_bytes().to_vec(), striped_value(i, 2))
+            .unwrap();
+    }
+    for i in 0..TAIL_KEYS {
+        db.insert(tail, i.to_be_bytes().to_vec(), vec![1u8; 8])
+            .unwrap();
+    }
+    db.insert(pad, STOP_MARKER.to_be_bytes().to_vec(), vec![0u8; 8])
+        .unwrap();
+    // A run reaches only up to the tracker's frontier, which trails the
+    // writes; without this barrier a run started now could stop short of
+    // `STOP_MARKER` and leave the `tail` records above its cutoff.
+    db.wal_writer.wal_tracker_barrier();
+}
+
+fn verify_striped_relocation_data(db: &Db, label: &str) {
+    let ks = db.ks("k");
+    for i in 0..STRIPED_KEYS {
+        let tag = if striped_key_overwritten(i) { 2 } else { 1 };
+        assert_eq!(
+            db.get(ks, &i.to_be_bytes()).unwrap(),
+            Some(striped_value(i, tag).into()),
+            "{label}: key {i}"
+        );
+    }
+}
+
+/// Parks a WAL-based relocation run at the failpoint after its first stripe
+/// and returns once it is parked. Dropping the returned guard lets the run
+/// continue.
+fn park_relocation_after_first_stripe(db: &Arc<Db>) -> (thread::JoinHandle<()>, LatchGuard) {
+    let (latch, latch_guard) = Latch::new();
+    let arrivals = Arc::new(AtomicUsize::new(0));
+    db.large_table.fp.0.write().fp_relocation_after_stripe =
+        FailPoint::latch_counting(latch, arrivals.clone());
+    let relocation = {
+        let db = db.clone();
+        thread::spawn(move || db.start_blocking_relocation())
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while arrivals.load(Ordering::SeqCst) == 0 {
+        assert!(
+            !relocation.is_finished() && Instant::now() < deadline,
+            "relocation did not reach the end of its first stripe"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    (relocation, latch_guard)
+}
+
+/// A WAL-based run over several stripes stores a control region and reclaims
+/// the WAL below each stripe before it copies the next, so the copies of one
+/// stripe at most are held on top of their originals. The first stripe
+/// applies the filter cutoff for the whole run, and a later stripe's control
+/// region covers a cell written during the run that no stripe copies into.
+#[test]
+fn test_wal_relocation_reclaims_each_stripe_before_the_next() {
+    let dir = tempdir::TempDir::new("test_wal_relocation_stripes").unwrap();
+    // `small_config` makes each stripe one WAL file. Index files are not
+    // compacted, so only the stripe's unload threshold decides which dirty
+    // cells its control region flushes.
+    let mut config = Config::clone(&relocation_test_config(false));
+    config.index_min_occupancy_pct = 0;
+    let config = Arc::new(config);
+    let metrics = Metrics::new();
+    {
+        let db = Db::open(
+            dir.path(),
+            copy_and_drop_key_shape(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        write_striped_relocation_data(&db);
+        let wal_file_size = db.wal.wal_file_size();
+
+        let (relocation, latch_guard) = park_relocation_after_first_stripe(&db);
+        let target = metrics.relocation_target_position.get() as u64;
+        assert!(
+            target >= 3 * wal_file_size,
+            "test setup must give a run of several stripes, target {target}"
+        );
+        assert_eq!(metrics.relocation_stripes.get(), 1);
+        assert_eq!(
+            db.wal.min_wal_position(),
+            wal_file_size,
+            "the first stripe must be reclaimed before the second one starts"
+        );
+        verify_striped_relocation_data(&db, "between stripes");
+        assert_tail_records_dropped(&db, "between stripes");
+        // A write above the run's frontier, to a cell that has on-disk
+        // levels and that no later stripe copies into: the next stripe's
+        // control region must still flush it, or replay after a crash would
+        // start below it.
+        let late_write_start = db.wal_writer.position();
+        db.insert(
+            db.ks("pad"),
+            STRIPED_KEYS.to_be_bytes().to_vec(),
+            vec![2u8; 8],
+        )
+        .unwrap();
+
+        drop(latch_guard);
+        relocation.join().unwrap();
+        assert_eq!(metrics.relocation_stripes.get(), target / wal_file_size);
+        assert_eq!(db.wal.min_wal_position(), target);
+        assert_tail_records_dropped(&db, "after relocation");
+        let replay_from = db.control_region_store.lock().last_position();
+        assert!(
+            replay_from > late_write_start,
+            "replay must start above the write made between stripes, \
+             replay_from {replay_from}, write at {late_write_start}"
+        );
+        verify_striped_relocation_data(&db, "after relocation");
+        db.wait_for_background_threads_to_finish();
+    }
+    let db = Db::open(
+        dir.path(),
+        copy_and_drop_key_shape(),
+        config,
+        Metrics::new(),
+    )
+    .unwrap();
+    verify_striped_relocation_data(&db, "after reopen");
+    assert_tail_records_dropped(&db, "after reopen");
+    assert_eq!(
+        db.get(db.ks("pad"), &STRIPED_KEYS.to_be_bytes()).unwrap(),
+        Some(vec![2u8; 8].into()),
+        "after reopen: the write made between stripes"
+    );
+}
+
+/// A crash between two stripes keeps the first one: the reopened database
+/// reads every key, the WAL below the first stripe stays reclaimed, and the
+/// next run carries on from there. The child process parks a run after its
+/// first stripe, waits for the stripe's WAL file to be unlinked and exits
+/// without closing the database.
+#[test]
+fn test_wal_relocation_crash_between_stripes_keeps_progress() {
+    use std::process::Command;
+
+    const CHILD_DB_PATH: &str = "TIDEHUNTER_TEST_STRIPE_CRASH_DB_PATH";
+    const CHILD_EXIT_CODE: i32 = 38;
+    if let Some(path) = std::env::var_os(CHILD_DB_PATH) {
+        stripe_crash_child(Path::new(&path), CHILD_EXIT_CODE);
+    }
+
+    let dir = tempdir::TempDir::new("test_wal_relocation_stripe_crash").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "relocation::relocation_tests::test_wal_relocation_crash_between_stripes_keeps_progress",
+            "--exact",
+            "--nocapture",
+        ])
+        .env(CHILD_DB_PATH, dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(CHILD_EXIT_CODE),
+        "child did not reach its crash point\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        copy_and_drop_key_shape(),
+        relocation_test_config(false),
+        metrics.clone(),
+    )
+    .unwrap();
+    let wal_file_size = db.wal.wal_file_size();
+    assert_eq!(
+        db.wal.min_wal_position(),
+        wal_file_size,
+        "the stripe stored before the crash must stay reclaimed"
+    );
+    verify_striped_relocation_data(&db, "after crash");
+    assert_tail_records_dropped(&db, "after crash");
+
+    db.start_blocking_relocation();
+    assert!(metrics.relocation_stripes.get() >= 2);
+    assert!(db.wal.min_wal_position() > 2 * wal_file_size);
+    verify_striped_relocation_data(&db, "after the next run");
+}
+
+/// The child half of `test_wal_relocation_crash_between_stripes_keeps_progress`.
+/// Exits the process with `exit_code` instead of returning.
+fn stripe_crash_child(path: &Path, exit_code: i32) -> ! {
+    let db = Db::open(
+        path,
+        copy_and_drop_key_shape(),
+        relocation_test_config(false),
+        Metrics::new(),
+    )
+    .unwrap();
+    write_striped_relocation_data(&db);
+    let (_relocation, _latch_guard) = park_relocation_after_first_stripe(&db);
+    // GC hands the unlink to a background worker; wait for it so the parent
+    // sees the file gone rather than reclaiming it again on open.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while list_wal_files(path)
+        .iter()
+        .any(|name| name == "wal_0000000000000000")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the first stripe's WAL file was not unlinked"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
     // Crash: `process::exit` runs no destructors, so nothing is flushed or
     // closed on the way out.
     std::process::exit(exit_code)

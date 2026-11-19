@@ -36,6 +36,7 @@ use std::io;
 use std::io::Write;
 use std::iter;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -57,6 +58,12 @@ pub struct Db {
     /// resolved via [`Db::ks`] / [`Db::try_ks`] / [`Db::single_ks`].
     keyspaces: KeySpaces,
     relocator: Relocator,
+    /// Set while a WAL-based relocation run is in progress. The run stores a
+    /// control region after each stripe, and the periodic snapshot thread
+    /// skips its size-triggered snapshots meanwhile; hourly ones still run.
+    /// The thread reads the flag once per tick, so a snapshot it has already
+    /// started when a run begins runs to completion alongside the run.
+    pub(crate) relocation_running: AtomicBool,
     /// Present when `Config::compressed_batch_cache_bytes` is set; serves
     /// decompressed `CompressedBatch` bodies on the read paths.
     decompress_cache: Option<PositionCache>,
@@ -189,6 +196,7 @@ impl Db {
             key_shape,
             keyspaces,
             relocator,
+            relocation_running: AtomicBool::new(false),
             decompress_cache,
             index_blob_cache,
             commit_pool,
@@ -411,6 +419,12 @@ impl Db {
 
             let db = weak.upgrade()?;
             db.large_table.report_entries_state();
+            // A relocation run stores a control region after each stripe. Its
+            // copies would otherwise trigger a snapshot every
+            // `snapshot_written_bytes`, flushing every dirty cell many times
+            // over one run, so only the hourly snapshot runs meanwhile. It
+            // bounds replay after a crash between two stripe stores.
+            let relocating = db.relocation_running.load(Ordering::Acquire);
             // todo when we get to wal position wrapping around this will need to be fixed
             let current_wal_position = db.wal_writer.position();
             let written = current_wal_position.checked_sub(position).unwrap();
@@ -422,7 +436,7 @@ impl Db {
                 } else {
                     false
                 };
-            if timed_snapshot || written > db.config.snapshot_written_bytes() {
+            if timed_snapshot || (!relocating && written > db.config.snapshot_written_bytes()) {
                 // todo taint storage instance on failure?
                 let snapshot_position = db
                     .rebuild_control_region()
@@ -965,7 +979,8 @@ impl Db {
 
     /// Appends the relocated copies and returns their positions. The guards
     /// are dropped at once: a copy is not an acknowledged write of its own,
-    /// its original stays readable until the GC at the end of the run, and
+    /// its original stays readable until relocation reclaims the WAL under
+    /// it (at the end of the stripe, or of an index-based run), and
     /// [`Self::write_relocated_batch`] waits for the tracker's frontier to
     /// pass the copies before it indexes them.
     fn write_relocated_batch_into_wal(
