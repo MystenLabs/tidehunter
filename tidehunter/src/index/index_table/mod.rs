@@ -1107,9 +1107,10 @@ impl IndexTable {
     }
 
     /// Returns the key slice and WAL position for the entry at `idx`. O(1) via the offset table.
+    /// A tombstone is returned as `WalPosition::INVALID`.
     pub(super) fn flat_varlen_entry_at(buffer: &[u8], idx: usize) -> (&[u8], WalPosition) {
         let (key, iwp) = flat_entry_at(buffer, None, idx);
-        (key, iwp.into_update_position())
+        (key, iwp.into_wal_position())
     }
 
     /// Lower bound: smallest index `i` where `buffer[i].key >= key`.
@@ -1118,14 +1119,16 @@ impl IndexTable {
     }
 
     /// Binary-search a variable-length flat section for `key`.
-    /// Returns the WAL position if found, None otherwise.
+    /// Returns the WAL position if found, None otherwise. A tombstone is
+    /// found and returned as `WalPosition::INVALID`, so it shadows the key
+    /// in deeper levels.
     pub(super) fn flat_varlen_lookup(buffer: &[u8], key: &[u8]) -> Option<WalPosition> {
         let idx = flat_lower_bound(buffer, None, key);
         if idx >= flat_count(buffer, None) {
             return None;
         }
         let (found_key, iwp) = flat_entry_at(buffer, None, idx);
-        (found_key == key).then(|| iwp.into_update_position())
+        (found_key == key).then(|| iwp.into_wal_position())
     }
 
     /// Append `(key, WalPosition)` pairs as a variable-length flat section into `out`.

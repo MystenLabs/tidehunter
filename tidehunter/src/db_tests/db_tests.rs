@@ -4479,6 +4479,81 @@ fn test_compact_with_preserves_tombstones_shadowing_l1() {
     );
 }
 
+/// A variable-length section stores a tombstone with the entry kind in its
+/// length word, not as the `WalPosition::INVALID` bytes a fixed-length
+/// section holds. Reads served from an unloaded cell must still treat it as
+/// a tombstone: the cell is `[L0 with the tombstone, L1 with the value]`, so
+/// a tombstone taken for a live position is a hit on L0 with no record
+/// behind it, and one that is missed lets the deleted key through from L1.
+#[test]
+fn test_unloaded_varlen_tombstone_shadows_l1() {
+    let dir = tempdir::TempDir::new("test-unloaded-varlen-tombstone").unwrap();
+    let config = Arc::new(Config::small());
+    // One cell. l0_max_entries=2: a flush of four keys promotes into L1, a
+    // flush of a lone tombstone writes an L0 above it.
+    let ks_config = KeySpaceConfig::new().with_l0_max_entries(2);
+    let key_shape = KeyShape::new_single_config_indexing(
+        KeyIndexing::variable_length(),
+        1,
+        KeyType::uniform(1),
+        ks_config,
+    );
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    let ks = db.single_ks();
+
+    // "b", "cc", "ddd", "eeee": every key has its own length.
+    let key = |n: u8| vec![b'a' + n; n as usize];
+    let value = |n: u8| -> Bytes { vec![n].into() };
+    for n in 1..=4u8 {
+        db.insert(ks, key(n), value(n)).unwrap();
+    }
+    db.wal_writer.wal_tracker_barrier();
+    db.force_rebuild_control_region().unwrap();
+    db.remove(ks, key(2)).unwrap();
+    db.wal_writer.wal_tracker_barrier();
+    db.force_rebuild_control_region().unwrap();
+
+    let assert_unloaded_l0_over_l1 = || {
+        db.large_table.each_entry(|entry| {
+            assert!(
+                entry.levels().l0().is_some(),
+                "expected the tombstone L0 above L1"
+            );
+            assert!(entry.levels().l1().is_some(), "L1 must still be populated");
+            assert!(!entry.is_index_loaded(), "the cell must be unloaded");
+        });
+    };
+    assert_unloaded_l0_over_l1();
+
+    assert!(!db.exists(ks, &key(2)).unwrap());
+    assert_eq!(None, db.get(ks, &key(2)).unwrap());
+    for n in [1u8, 3, 4] {
+        assert!(db.exists(ks, &key(n)).unwrap());
+        assert_eq!(Some(value(n)), db.get(ks, &key(n)).unwrap());
+    }
+
+    let mut live: Vec<(Bytes, Bytes)> = [1u8, 3, 4]
+        .into_iter()
+        .map(|n| (key(n).into(), value(n)))
+        .collect();
+    assert_eq!(
+        live,
+        db.iterator(ks).collect::<DbResult<Vec<_>>>().unwrap(),
+        "forward iteration must skip the deleted key"
+    );
+    live.reverse();
+    let mut reversed = db.iterator(ks);
+    reversed.reverse();
+    assert_eq!(
+        live,
+        reversed.collect::<DbResult<Vec<_>>>().unwrap(),
+        "reverse iteration must skip the deleted key"
+    );
+
+    // Every read above was served from the unloaded levels.
+    assert_unloaded_l0_over_l1();
+}
+
 /// A key deleted and flushed into an L0 that sits above an L1 leaves a
 /// tombstone in that L0. When the cell is then loaded (here by the live
 /// iterator of a keyspace with the unloaded iterator disabled), the tombstone
