@@ -161,6 +161,14 @@ impl Db {
             last_processed.clone(),
             indexes.as_ref(),
         );
+        // The key spaces whose stored levels may hold generation-flagged
+        // positions, which replay must not shadow (see
+        // `LargeTableEntry::apply_replay_buffer`).
+        if let Some(side_wals) = control_region.side_wals() {
+            for ks in side_wals.promoted_keyspaces() {
+                large_table.ks_context(*ks).mark_promoted();
+            }
+        }
         let wal_iterator = wal.wal_iterator_for_writer(control_region.last_position())?;
         let wal_writer = crate::wal_replay::replay_wal(
             &large_table,
@@ -1196,6 +1204,12 @@ impl Db {
         } = batch;
         let context = self.ks_context(ks);
         let target_generation = self.relocation_target_generation(ks);
+        if target_generation != 0 {
+            // Before the first copy is written, let alone indexed: a control
+            // region that can point at a copy then records the key space as
+            // promoted (see `rebuild_control_region_from`).
+            context.mark_promoted();
+        }
 
         self.metrics
             .relocation_written_bytes
@@ -1924,10 +1938,20 @@ impl Db {
             gen_watermark::save(&self.generation_paths[idx], durable)?;
             watermarks.push(durable);
         }
+        // Read after the snapshot, like the watermarks: a key space is
+        // marked before its first copy is written, and the snapshot took
+        // each cell's lock after any blob pointing at a copy was installed.
+        let promoted_keyspaces = self
+            .key_shape
+            .iter_ks()
+            .map(|ks| ks.id())
+            .filter(|ks| self.ks_context(*ks).has_promoted())
+            .collect();
         // Once a side WAL holds bytes the snapshot may point into it: the
         // control region then records the side-WAL state and is stored in
         // the format version a binary without side WALs refuses to read.
-        let side_wals = SideWalState::for_store(self.config.wal_generations, watermarks);
+        let side_wals =
+            SideWalState::for_store(self.config.wal_generations, watermarks, promoted_keyspaces);
         // Persist the control region BEFORE unlinking files. A crash between
         // these steps must leave the on-disk CR consistent with the files
         // still present: extra (un-deleted) files are tolerated by the next

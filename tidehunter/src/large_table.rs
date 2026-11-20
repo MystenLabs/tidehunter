@@ -2076,9 +2076,11 @@ impl LargeTableEntry {
         //
         // Dropping a record is only as safe as the stored frontier is exact,
         // so the filter runs only where a flagged entry can exist:
-        //   - with a side WAL configured. Without one no level holds a
-        //     flagged position, and re-applying every record does not depend
-        //     on the frontier at all.
+        //   - in a key space that has had records promoted to a side WAL
+        //     (`KsContext::has_promoted`, restored from the control region
+        //     this replay runs against). The levels of any other key space
+        //     hold no flagged position, and re-applying every record there
+        //     does not depend on the frontier at all.
         //   - on a cell that has levels. An `Empty` cell has nothing a record
         //     could shadow, and the `last_processed` stored for it is the
         //     anchor of writes no blob holds: a record below it (a control
@@ -2087,7 +2089,7 @@ impl LargeTableEntry {
         // A frontier above the WAL's valid prefix is the remaining way for it
         // to cover a record the levels do not hold; `Db::open` stores a fresh
         // control region before the writer reuses those offsets.
-        if self.context.config.wal_generations > 1 && !self.state.is_empty() {
+        if self.context.has_promoted() && !self.state.is_empty() {
             let covered = entries.partition_point(|(_, iwp)| self.last_processed.is_processed(iwp));
             if covered > 0 {
                 entries.drain(..covered);
@@ -2830,6 +2832,13 @@ impl LargeTableEntry {
         &self.levels
     }
 
+    /// Test hook: overrides the cell's frontier, e.g. to model a control
+    /// region stored with a frontier above a write its levels do not hold.
+    #[cfg(test)]
+    pub(crate) fn set_last_processed_for_test(&mut self, last_processed: LastProcessed) {
+        self.last_processed = last_processed;
+    }
+
     /// Every blob position the levels reference, shards included.
     fn level_positions(&self) -> LevelPositions {
         self.levels.iter().collect()
@@ -3205,13 +3214,12 @@ mod tests {
         assert_eq!(row.entry_mut(&cell).0.context.name(), "b");
     }
 
-    /// A two-keyspace table for the replay filter tests. The WAL only backs
-    /// the loader argument of `from_unloaded`.
-    fn replay_filter_table(
-        wal_generations: u8,
-    ) -> (tempdir::TempDir, LargeTable, KeySpace, KeySpace) {
+    /// A two-keyspace table of a database with a side WAL, for the replay
+    /// filter tests. Neither key space has promoted records until a test
+    /// marks it. The WAL only backs the loader argument of `from_unloaded`.
+    fn replay_filter_table() -> (tempdir::TempDir, LargeTable, KeySpace, KeySpace) {
         let mut config = Config::small();
-        config.wal_generations = wal_generations;
+        config.wal_generations = 2;
         let mut ks = KeyShapeBuilder::new();
         ks.add_key_space("a", 8, 1, KeyType::uniform(1));
         ks.add_key_space("b", 8, 1, KeyType::uniform(1));
@@ -3271,7 +3279,9 @@ mod tests {
         // replay range. A replayed tombstone or stale value would shadow a
         // generation-flagged entry the levels hold (side WALs are not
         // replayed, so nothing would re-establish it).
-        let (_dir, l, a, b) = replay_filter_table(2);
+        let (_dir, l, a, b) = replay_filter_table();
+        l.ks_context(a).mark_promoted();
+        l.ks_context(b).mark_promoted();
         let (key_below, key_above) = (replay_filter_key(1), replay_filter_key(2));
 
         let (mut row, cell) = l.row(l.ks_context(a), &key_below);
@@ -3316,7 +3326,8 @@ mod tests {
         // record: the `last_processed` loaded for it is the anchor of its
         // unflushed writes, and a record below that anchor is still the only
         // copy of a write. The cell re-anchors on its first replayed record.
-        let (_dir, l, a, _b) = replay_filter_table(2);
+        let (_dir, l, a, _b) = replay_filter_table();
+        l.ks_context(a).mark_promoted();
         let (key_below, key_above) = (replay_filter_key(1), replay_filter_key(2));
 
         let (mut row, cell) = l.row(l.ks_context(a), &key_below);
@@ -3338,21 +3349,24 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_replay_buffer_keeps_covered_records_without_side_wals() {
-        // With a single WAL generation no level holds a flagged position, so
-        // there is nothing a covered record could shadow: every replayed
-        // record is applied, whatever frontier the control region stored.
-        let (_dir, l, a, _b) = replay_filter_table(1);
+    fn test_apply_replay_buffer_keeps_covered_records_of_key_space_without_promoted_records() {
+        // The levels of a key space that never had a record promoted hold no
+        // flagged position, so there is nothing a covered record could
+        // shadow: every replayed record is applied, whatever frontier the
+        // control region stored, also while another key space of the same
+        // database has promoted records.
+        let (_dir, l, a, b) = replay_filter_table();
+        l.ks_context(a).mark_promoted();
         let (key_below, key_above) = (replay_filter_key(1), replay_filter_key(2));
 
-        let (mut row, cell) = l.row(l.ks_context(a), &key_below);
+        let (mut row, cell) = l.row(l.ks_context(b), &key_below);
         let entry = row.entry_mut(&cell).0;
         load_as_flushed(entry, 500);
         entry.apply_replay_buffer(replay_records(&[(1, 100), (2, 700)]), u64::MAX);
         assert_eq!(
             entry.data.get(&key_below),
             Some(WalPosition::test_value(100)),
-            "a single-generation database must re-apply a covered record"
+            "a key space without promoted records must re-apply a covered record"
         );
         assert_eq!(
             entry.data.get(&key_above),

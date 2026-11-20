@@ -3180,7 +3180,12 @@ fn assert_promoted_keys_readable(db: &Db) {
 
 /// The side-WAL state of the control region stored at `path`.
 fn stored_side_wals(path: &Path) -> Option<SideWalState> {
-    ControlRegion::read(&path.join(CONTROL_REGION_FILE), &promoting_key_shape())
+    stored_side_wals_of(path, &promoting_key_shape())
+}
+
+/// `stored_side_wals` for a database opened with `key_shape`.
+fn stored_side_wals_of(path: &Path, key_shape: &KeyShape) -> Option<SideWalState> {
+    ControlRegion::read(&path.join(CONTROL_REGION_FILE), key_shape)
         .unwrap()
         .side_wals()
         .cloned()
@@ -3541,4 +3546,50 @@ fn test_open_with_side_wal_watermark_in_file_not_created_yet() {
         &config,
         "is missing below the durable watermark",
     );
+}
+
+// The control region records which key spaces have had records promoted.
+// Replay skips covered records in exactly those (their levels may hold
+// positions in a side WAL), so the record must survive restarts, control
+// region stores, and the key space dropping its `promote_during_relocation`
+// setting.
+#[test]
+fn test_promoted_key_space_is_remembered() {
+    let dir = tempdir::TempDir::new("test_promoted_key_space_remembered").unwrap();
+    let config = two_generation_config();
+    promote_keys(dir.path(), &config);
+
+    // `k` with or without the setting, next to a key space that never promotes.
+    let k_and_other = |promote: bool| {
+        let mut ksb = KeyShapeBuilder::new();
+        ksb.add_key_space_config(
+            "k",
+            8,
+            1,
+            KeyType::uniform(1),
+            KeySpaceConfig::new().with_promote_during_relocation(promote),
+        );
+        ksb.add_key_space("other", 8, 1, KeyType::uniform(1));
+        ksb.build()
+    };
+    for promote in [true, false, false] {
+        let key_shape = k_and_other(promote);
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        let (k, other) = (db.ks("k"), db.ks("other"));
+        assert!(db.ks_context(k).has_promoted(), "promote = {promote}");
+        assert!(!db.ks_context(other).has_promoted());
+        assert_promoted_keys_readable(&db);
+        db.insert(other, 1u64.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+        db.force_rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+        let side_wals = stored_side_wals_of(dir.path(), &key_shape).unwrap();
+        assert_eq!(side_wals.promoted_keyspaces(), [k], "promote = {promote}");
+    }
 }

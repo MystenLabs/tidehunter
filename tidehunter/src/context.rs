@@ -7,6 +7,7 @@ use crate::wal::tracker::SharedLastProcessed;
 use std::array;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use strum::{AsRefStr, EnumCount, EnumIter, FromRepr};
 
 #[derive(Clone)]
@@ -41,6 +42,9 @@ pub struct KsContextInner {
     read_metrics: [[MetricIntCounter; ReadType::COUNT]; WalEntryKind::COUNT],
     // Read bytes metrics indexed by [WalEntryKind][ReadType]
     read_bytes_metrics: [[MetricIntCounter; ReadType::COUNT]; WalEntryKind::COUNT],
+    /// Set once a record of this key space is written to a side WAL; never
+    /// cleared. See [`KsContext::has_promoted`].
+    promoted: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, EnumIter, EnumCount, AsRefStr, FromRepr)]
@@ -213,11 +217,28 @@ impl KsContext {
             lookup_mcs_metrics,
             read_metrics,
             read_bytes_metrics,
+            promoted: AtomicBool::new(false),
         };
 
         Self {
             inner: Arc::new(inner),
         }
+    }
+
+    /// Whether a record of this key space was ever promoted to a side WAL.
+    /// Only then can its index levels hold a generation-flagged position.
+    /// The flag is stored with every control region (`SideWalState`) and
+    /// restored from it at open, so it outlives the key space's
+    /// `promote_during_relocation` setting.
+    pub fn has_promoted(&self) -> bool {
+        self.inner.promoted.load(Ordering::SeqCst)
+    }
+
+    /// Records that a record of this key space is about to be written to a
+    /// side WAL. Called before the write, so that a control region able to
+    /// point at the copy already sees the flag.
+    pub fn mark_promoted(&self) {
+        self.inner.promoted.store(true, Ordering::SeqCst);
     }
 
     /// The externally observed WAL `last_processed` position: every write

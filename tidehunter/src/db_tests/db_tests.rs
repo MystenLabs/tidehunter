@@ -5598,3 +5598,72 @@ fn test_write_below_stale_frontier_survives_restart() {
 fn test_write_below_stale_frontier_survives_restart_multi_gen() {
     write_below_stale_frontier_survives_restart(2);
 }
+
+// In a database with a side WAL, a key space that never had a record promoted
+// replays every record, also one below the frontier its cell was stored with:
+// its levels hold no generation-flagged position a replayed record could
+// shadow, so a frontier stored above a write the levels do not hold (a
+// frontier bug, a control region from a build that had one) must not cost
+// the write.
+#[test]
+fn test_replay_keeps_covered_record_of_key_space_without_promoted_records() {
+    let dir = tempdir::TempDir::new("test-replay-keeps-covered-record").unwrap();
+    let mut config = Config::small();
+    config.wal_generations = 2;
+    let config = Arc::new(config);
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space("flushed", 8, 1, KeyType::uniform(1));
+    ksb.add_key_space("laggard", 8, 1, KeyType::uniform(1));
+    let key_shape = ksb.build();
+    let open = || {
+        Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap()
+    };
+    let k = |n: u64| n.to_be_bytes().to_vec();
+    let v = |b: u8| -> Bytes { vec![b].into() };
+
+    {
+        let db = open();
+        let (flushed, laggard) = (db.ks("flushed"), db.ks("laggard"));
+        // The flushed cell: clean, with a level.
+        db.insert(flushed, k(1), v(1)).unwrap();
+        db.force_rebuild_control_region().unwrap();
+        // The laggard cell stays dirty and keeps replay_from below the
+        // write that follows.
+        db.insert(laggard, k(2), v(2)).unwrap();
+        let covered = db.wal_writer.position();
+        db.insert(flushed, k(3), v(3)).unwrap();
+        db.wal_writer.wal_tracker_barrier();
+        // The flushed cell is stored with its frontier above that write,
+        // which its level does not hold.
+        let frontier = db.wal_writer.last_processed();
+        assert!(frontier.as_u64() > covered);
+        let context = db.ks_context(flushed);
+        let cell = context.ks_config.cell_id(&k(3));
+        db.large_table.with_entry_for_test(context, &cell, |entry| {
+            assert_eq!(entry.levels().len(), 1);
+            entry.set_last_processed_for_test(frontier);
+        });
+        // Threshold 0 flushes nothing.
+        let replay_from = db.rebuild_control_region_from(0).unwrap();
+        assert!(
+            replay_from <= covered,
+            "replay must reach the write: replay_from {replay_from}, write at {covered}"
+        );
+    }
+
+    let db = open();
+    let flushed = db.ks("flushed");
+    assert!(!db.ks_context(flushed).has_promoted());
+    assert_eq!(Some(v(1)), db.get(flushed, &k(1)).unwrap());
+    assert_eq!(
+        Some(v(3)),
+        db.get(flushed, &k(3)).unwrap(),
+        "replay dropped a record of a key space that holds no promoted record"
+    );
+}
