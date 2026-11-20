@@ -2409,7 +2409,7 @@ fn stripe_crash_child(path: &Path, exit_code: i32) -> ! {
 #[test]
 fn test_multi_gen_relocation_promotes_to_g1() {
     let dir = tempdir::TempDir::new("test_multi_gen_relocation").unwrap();
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     config.wal_generations = 2; // G0 + G1
     let config = force_unload_config(&config);
@@ -2528,7 +2528,7 @@ fn test_multi_gen_relocation_promotes_to_g1() {
 #[test]
 fn test_multi_gen_second_relocation_does_not_recopy_g1() {
     let dir = tempdir::TempDir::new("test_multi_gen_second_pass").unwrap();
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     config.wal_generations = 2;
     let config = force_unload_config(&config);
@@ -2624,7 +2624,7 @@ fn test_multi_gen_second_relocation_does_not_recopy_g1() {
 // relocation pass (re-promotes the new value) → read → restart → read.
 fn overwrite_after_promotion(ksc: KeySpaceConfig, label: &'static str) {
     let dir = tempdir::TempDir::new(label).unwrap();
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     config.wal_generations = 2;
     let config = force_unload_config(&config);
@@ -2757,7 +2757,7 @@ fn test_multi_gen_overwrite_after_promotion_no_unload() {
 #[test]
 fn test_multi_gen_update_promoted_key_in_loaded_cell() {
     let dir = tempdir::TempDir::new("test_multi_gen_update_promoted_loaded").unwrap();
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     config.wal_generations = 2;
     // Default snapshot threshold: the background snapshot loop must not
@@ -2882,7 +2882,7 @@ fn test_multi_gen_update_promoted_key_in_loaded_cell() {
 #[test]
 fn test_side_wal_tail_rediscovery_respects_durable_watermark() {
     let dir = tempdir::TempDir::new("test_side_wal_watermark").unwrap();
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     config.wal_generations = 2;
     let config = Arc::new(config);
@@ -3099,10 +3099,11 @@ fn test_promote_during_relocation_with_index_based_strategy_rejected() {
     let _: DbResult<Arc<Db>> = Db::open(dir.path(), key_shape, config, Metrics::new());
 }
 
-/// `Config::small` with two WAL generations, WAL files of two fragments and
-/// cells unloading at every control-region rebuild.
+/// `small_config` (one WAL file per relocation stripe) with two WAL
+/// generations, WAL files of two fragments and cells unloading at every
+/// control-region rebuild.
 fn two_generation_config() -> Config {
-    let mut config = Config::small();
+    let mut config = small_config();
     config.wal_file_size = 2 * config.frag_size;
     config.wal_generations = 2;
     config.snapshot_unload_threshold = 0;
@@ -3766,4 +3767,120 @@ fn test_destroyed_promoting_key_space_does_not_restrict_config() {
         );
         db.wait_for_background_threads_to_finish();
     }
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            let _: u64 = std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+// Promotion in a run of several stripes. Each stripe sends its copies to G1,
+// then stores a control region that records the side-WAL state, and only then
+// reclaims the main WAL under the originals. A crash between two stripes
+// therefore keeps the stripes already promoted: the database as it is on disk
+// at that point opens with every key readable, the promoted ones from G1.
+#[test]
+fn test_promotion_in_striped_run_survives_crash_between_stripes() {
+    let dir = tempdir::TempDir::new("test_promotion_striped").unwrap();
+    let config = two_generation_config();
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config.clone()),
+        metrics.clone(),
+    )
+    .unwrap();
+    let ks = db.ks("k");
+    for i in PROMOTED_KEYS {
+        db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+    }
+    // Writes above the frontier the run captures give its scan a terminal
+    // position; the checkpoint pins that frontier.
+    let checkpoint = db.checkpoint();
+    for i in 0..100u64 {
+        db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+    }
+    let main_wal_end = db.wal_writer.position();
+    let first_wal_file = dir
+        .path()
+        .join(list_wal_files(dir.path()).into_iter().min().unwrap());
+
+    let (relocation, latch_guard) = park_relocation_after_first_stripe(&db);
+    assert_eq!(metrics.relocation_stripes.get(), 1);
+    let g1_after_first_stripe = db.generation_writers[0].position();
+    assert!(g1_after_first_stripe > 0, "the first stripe must promote");
+    assert_eq!(
+        db.wal_writer.position(),
+        main_wal_end,
+        "promoted copies must not go to the main WAL"
+    );
+    let side_wals = stored_side_wals(dir.path()).expect("the stripe's control region");
+    assert_eq!(side_wals.watermark(1), g1_after_first_stripe);
+    assert_eq!(side_wals.promoted_keyspaces(), [ks]);
+    // The stripe reclaimed the main WAL under its originals.
+    assert!(db.wal.min_wal_position() >= config.wal_file_size);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while first_wal_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the first stripe's WAL file was not unlinked"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    // What a crash between the stripes leaves on disk: nothing writes while
+    // the run is parked.
+    let crashed = tempdir::TempDir::new("test_promotion_striped_crashed").unwrap();
+    copy_dir(dir.path(), crashed.path());
+    {
+        let db = Db::open(
+            crashed.path(),
+            promoting_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        assert!(db.ks_context(db.ks("k")).has_promoted());
+        assert_eq!(db.generation_writers[0].position(), g1_after_first_stripe);
+        assert_promoted_keys_readable(&db);
+        db.wait_for_background_threads_to_finish();
+    }
+
+    drop(latch_guard);
+    relocation.join().unwrap();
+    assert!(
+        metrics.relocation_stripes.get() > 1,
+        "the run must span several stripes"
+    );
+    let g1_end = db.generation_writers[0].position();
+    assert!(g1_end > g1_after_first_stripe);
+    assert_eq!(db.wal_writer.position(), main_wal_end);
+    assert_eq!(
+        stored_side_wals(dir.path()).unwrap().watermark(1),
+        g1_end,
+        "the last stripe's control region must cover every promoted copy"
+    );
+    assert_promoted_keys_readable(&db);
+    drop(checkpoint);
+    db.wait_for_background_threads_to_finish();
+
+    let db = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config),
+        Metrics::new(),
+    )
+    .unwrap();
+    assert_promoted_keys_readable(&db);
 }

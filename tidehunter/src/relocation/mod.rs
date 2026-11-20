@@ -434,10 +434,12 @@ impl RelocationDriver {
 
     /// One pass over every cell for the stripe ending at `stripe_end`. Key
     /// spaces without a relocation filter get their live entries below
-    /// `stripe_end` copied to the WAL tail, and their index re-pointed at the
-    /// copies; entries below the previous stripe's end were moved by that
-    /// stripe. Key spaces with a filter only drop the entries below
-    /// `cutoff`, which the first stripe does for the whole run.
+    /// `stripe_end` copied to the WAL tail, or to a side WAL when the key
+    /// space promotes (see `Db::relocation_target_generation`), and their
+    /// index re-pointed at the copies; entries below the previous stripe's
+    /// end were moved by that stripe, and either kind of copy sits above
+    /// every stripe end. Key spaces with a filter only drop the entries
+    /// below `cutoff`, which the first stripe does for the whole run.
     fn relocate_stripe(
         &self,
         db: &Arc<Db>,
