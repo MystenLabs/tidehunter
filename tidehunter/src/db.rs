@@ -595,7 +595,10 @@ impl Db {
     /// can't see (because `Config` is global, not per-keyspace).
     fn validate_key_shape_against_config(key_shape: &KeyShape, config: &Config) {
         for ks in key_shape.iter_ks() {
-            if !ks.promote_during_relocation() {
+            // A destroyed key space stays in the registry for good, with the
+            // config it had; it holds no data, is never relocated, and no
+            // declaration can change its settings any more.
+            if ks.destroyed() || !ks.promote_during_relocation() {
                 continue;
             }
             assert!(

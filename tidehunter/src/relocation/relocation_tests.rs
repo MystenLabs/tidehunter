@@ -3648,3 +3648,70 @@ fn test_relocation_filter_allowed_next_to_key_space_with_promoted_records() {
         db.wait_for_background_threads_to_finish();
     }
 }
+
+// A destroyed key space stays in the registry for good, with the config it
+// had, and no declaration can change it. Its `promote_during_relocation`
+// must not restrict how the database is opened afterwards.
+#[test]
+fn test_destroyed_promoting_key_space_does_not_restrict_config() {
+    let dir = tempdir::TempDir::new("test_destroyed_promoting_key_space").unwrap();
+    let mut config = two_generation_config();
+    let key = 1u64.to_be_bytes().to_vec();
+    {
+        let db = Db::open(
+            dir.path(),
+            k_and_other_key_shape(
+                KeySpaceConfig::new().with_promote_during_relocation(true),
+                KeySpaceConfig::new(),
+            ),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        db.insert(db.ks("k"), key.clone(), promoted_value())
+            .unwrap();
+        db.insert(db.ks("other"), key.clone(), promoted_value())
+            .unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space("other", 8, 1, KeyType::uniform(1));
+    let other_only = ksb.build();
+    // Only a key space the shape no longer declares can be destroyed.
+    {
+        let db = Db::open(
+            dir.path(),
+            other_only.clone(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        db.destroy_key_space("k").unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+    let stored = Db::load_key_shape(dir.path()).unwrap();
+    let k = stored.iter_ks().find(|ks| ks.name() == "k").unwrap();
+    assert!(k.destroyed() && k.promote_during_relocation());
+
+    for (wal_generations, strategy) in [
+        (1, RelocationStrategy::WalBased),
+        (2, RelocationStrategy::IndexBased(None)),
+        (1, RelocationStrategy::IndexBased(None)),
+    ] {
+        config.wal_generations = wal_generations;
+        config.relocation_strategy = strategy;
+        let db = Db::open(
+            dir.path(),
+            other_only.clone(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            db.get(db.ks("other"), &key).unwrap(),
+            Some(promoted_value().into()),
+            "wal_generations = {wal_generations}, {strategy:?}"
+        );
+        db.wait_for_background_threads_to_finish();
+    }
+}
