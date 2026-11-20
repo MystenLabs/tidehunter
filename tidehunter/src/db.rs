@@ -124,6 +124,7 @@ impl Db {
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(path.join(CONTROL_REGION_FILE), &key_shape)?;
         Self::validate_wal_generations(control_region.side_wals(), &config);
+        Self::validate_promoted_key_spaces(control_region.side_wals(), &key_shape);
         Self::maybe_create_config_file(&path, &config)?;
         let wal = Wal::open(&path, config.wal_layout(WalKind::Replay), metrics.clone())?;
         let indexes = Wal::open(&path, config.wal_layout(WalKind::Index), metrics.clone())?;
@@ -555,6 +556,36 @@ impl Db {
                  stored with wal_generations = {}: {reason}",
                 config.wal_generations,
                 side_wals.wal_generations(),
+            );
+        }
+    }
+
+    /// Checks the declared key spaces against the ones the stored control
+    /// region records as holding promoted records.
+    ///
+    /// Every relocation filter path prunes by main-WAL position: the
+    /// WAL-based pass cuts a filtered key space's index below its terminal
+    /// position, and the index-based pass only visits entries below its
+    /// limit. A promoted record sits at a generation-flagged position,
+    /// above any such bound, so the filter would never be asked about it and
+    /// the record would stay readable for good.
+    /// `validate_key_shape_against_config` rejects a key space that sets
+    /// `promote_during_relocation` together with a filter; this rejects a
+    /// filter added once records are promoted.
+    fn validate_promoted_key_spaces(side_wals: Option<&SideWalState>, key_shape: &KeyShape) {
+        let Some(side_wals) = side_wals else {
+            return;
+        };
+        for ks in side_wals.promoted_keyspaces() {
+            let ks = key_shape.ks(*ks);
+            if ks.destroyed() {
+                continue;
+            }
+            assert!(
+                ks.relocation_filter().is_none(),
+                "keyspace {:?} holds records promoted to a side WAL and declares a relocation \
+                 filter; a relocation filter cannot prune promoted records",
+                ks.name(),
             );
         }
     }

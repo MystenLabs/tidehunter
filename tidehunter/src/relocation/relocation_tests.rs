@@ -3593,3 +3593,58 @@ fn test_promoted_key_space_is_remembered() {
         assert_eq!(side_wals.promoted_keyspaces(), [k], "promote = {promote}");
     }
 }
+
+/// `k` and a second key space, `other`, each with the given config.
+fn k_and_other_key_shape(k: KeySpaceConfig, other: KeySpaceConfig) -> KeyShape {
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config("k", 8, 1, KeyType::uniform(1), k);
+    ksb.add_key_space_config("other", 8, 1, KeyType::uniform(1), other);
+    ksb.build()
+}
+
+fn keep_all_filter() -> KeySpaceConfig {
+    KeySpaceConfig::new().with_relocation_filter(|_key: &[u8], _value: &[u8]| Decision::Keep)
+}
+
+// A relocation filter prunes by main-WAL position and never reaches a record
+// promoted to a side WAL: on a key space that holds promoted records it would
+// silently leave them readable for good, so the open rejects it, also when
+// the key space no longer sets `promote_during_relocation`.
+#[test]
+#[should_panic(expected = "a relocation filter cannot prune promoted records")]
+fn test_relocation_filter_rejected_on_key_space_with_promoted_records() {
+    let dir = tempdir::TempDir::new("test_filter_after_promotion").unwrap();
+    let config = two_generation_config();
+    promote_keys(dir.path(), &config);
+    let _: DbResult<Arc<Db>> = Db::open(
+        dir.path(),
+        k_and_other_key_shape(keep_all_filter(), KeySpaceConfig::new()),
+        Arc::new(config),
+        Metrics::new(),
+    );
+}
+
+// The restriction is per key space: another key space of the same database
+// can use a filter.
+#[test]
+fn test_relocation_filter_allowed_next_to_key_space_with_promoted_records() {
+    let dir = tempdir::TempDir::new("test_filter_next_to_promotion").unwrap();
+    let config = two_generation_config();
+    promote_keys(dir.path(), &config);
+    for k in [
+        KeySpaceConfig::new().with_promote_during_relocation(true),
+        KeySpaceConfig::new(),
+    ] {
+        let db = Db::open(
+            dir.path(),
+            k_and_other_key_shape(k, keep_all_filter()),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        assert!(db.ks_context(db.ks("k")).has_promoted());
+        assert!(!db.ks_context(db.ks("other")).has_promoted());
+        assert_promoted_keys_readable(&db);
+        db.wait_for_background_threads_to_finish();
+    }
+}
