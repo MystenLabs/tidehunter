@@ -704,8 +704,9 @@ impl KeySpaceConfig {
     }
 
     /// Opt this keyspace in to multi-generation WAL: records that survive
-    /// relocation are written to the next generation's side WAL instead of
-    /// back to G0. Requires `Config::wal_generations >= 2`.
+    /// a WAL-based relocation pass are written to the next generation's side
+    /// WAL instead of back to G0. Requires `Config::wal_generations >= 2`
+    /// and the WAL-based `Config::relocation_strategy`.
     pub fn with_promote_during_relocation(mut self, enabled: bool) -> Self {
         self.promote_during_relocation = enabled;
         self

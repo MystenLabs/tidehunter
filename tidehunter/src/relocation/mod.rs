@@ -308,7 +308,7 @@ impl RelocationDriver {
             // Relocate entries if any were marked for keeping
             let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
             if !context.batch.is_empty() {
-                let successful = self.relocate_entries(context.batch, &db)?;
+                let successful = self.relocate_entries(context.batch, &db, target_position)?;
                 // Track successful relocations with existing metrics (same as WAL-based)
                 self.metrics
                     .relocation_kept
@@ -495,7 +495,7 @@ impl RelocationDriver {
                         .with_label_values(&[ks.name()])
                         .inc();
                     if batch.size_bytes() >= batch_limit {
-                        db.write_relocated_batch(batch)?;
+                        db.write_relocated_batch(batch, RelocationStrategy::WalBased)?;
                         batch = RelocatedWriteBatch::new(
                             cell.keyspace,
                             cell.cell_id.clone(),
@@ -505,7 +505,7 @@ impl RelocationDriver {
                 }
             }
             if !batch.is_empty() {
-                db.write_relocated_batch(batch)?;
+                db.write_relocated_batch(batch, RelocationStrategy::WalBased)?;
             }
         }
         Ok(())
@@ -632,11 +632,17 @@ impl RelocationDriver {
         Ok(context)
     }
 
-    /// Relocate entries following the same pattern as WAL-based relocation
-    fn relocate_entries(&self, batch: RelocatedWriteBatch, db: &Arc<Db>) -> DbResult<u64> {
+    /// Writes the copies of one cell of an index-based pass, following the
+    /// same pattern as WAL-based relocation.
+    fn relocate_entries(
+        &self,
+        batch: RelocatedWriteBatch,
+        db: &Arc<Db>,
+        target_position: Option<u64>,
+    ) -> DbResult<u64> {
         let successful_inserts = batch.len() as u64;
 
-        db.write_relocated_batch(batch)?;
+        db.write_relocated_batch(batch, RelocationStrategy::IndexBased(target_position))?;
 
         Ok(successful_inserts)
     }

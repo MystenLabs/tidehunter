@@ -3649,6 +3649,58 @@ fn test_relocation_filter_allowed_next_to_key_space_with_promoted_records() {
     }
 }
 
+// An index-based pass reclaims main-WAL files without storing a control
+// region first, so it must not promote: a crash after it would leave a
+// control region pointing at the reclaimed originals of records whose only
+// copy sits in a side WAL nothing replays. Its copies stay in the main WAL,
+// also when the pass is started ad hoc on a database configured for the
+// WAL-based strategy with a promoting key space.
+#[test]
+fn test_index_based_pass_does_not_promote() {
+    let dir = tempdir::TempDir::new("test_index_based_no_promotion").unwrap();
+    let config = two_generation_config();
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            promoting_key_shape(),
+            Arc::new(config.clone()),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        for i in PROMOTED_KEYS {
+            db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+                .unwrap();
+        }
+        db.rebuild_control_region().unwrap();
+        db.start_blocking_relocation_with_strategy(RelocationStrategy::IndexBased(None));
+        assert!(
+            metrics.relocation_kept.with_label_values(&["k"]).get() > 0,
+            "the pass must copy records"
+        );
+        assert_eq!(
+            db.generation_writers[0].position(),
+            0,
+            "the copies of an index-based pass must stay in the main WAL"
+        );
+        assert!(!db.ks_context(ks).has_promoted());
+        assert_promoted_keys_readable(&db);
+        // The index-based pass stores no control region after its GC.
+        db.rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+    assert_eq!(stored_side_wals(dir.path()), None);
+    let db = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config),
+        Metrics::new(),
+    )
+    .unwrap();
+    assert_promoted_keys_readable(&db);
+}
+
 // A destroyed key space stays in the registry for good, with the config it
 // had, and no declaration can change it. Its `promote_during_relocation`
 // must not restrict how the database is opened afterwards.

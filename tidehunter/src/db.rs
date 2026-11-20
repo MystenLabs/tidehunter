@@ -618,13 +618,12 @@ impl Db {
                  filter; promotion is not supported for filtered keyspaces",
                 ks.name(),
             );
-            // Index-based relocation GCs G0 files without rebuilding the
-            // control region first, so a promoted entry's G0 original can be
-            // reclaimed while the persisted control region still references
-            // it — and side WALs are not replayed. Reject until that path
-            // rebuilds the control region before GC. (This guards the
-            // configured strategy; an ad-hoc strategy passed to
-            // `start_blocking_relocation_with_strategy` bypasses it.)
+            // Only the WAL-based pass promotes (see
+            // `relocation_target_generation`), so with the index-based
+            // strategy configured the flag would be as inert as with a
+            // filter. An index-based pass started through
+            // `start_relocation_with_strategy` on a database configured for
+            // the WAL-based strategy is fine: its copies go to the main WAL.
             assert!(
                 !matches!(
                     config.relocation_strategy,
@@ -1223,7 +1222,13 @@ impl Db {
         Ok(())
     }
 
-    pub(crate) fn write_relocated_batch(&self, batch: RelocatedWriteBatch) -> DbResult<()> {
+    /// Writes the copies a relocation pass running `strategy` made of a
+    /// cell's surviving records and re-points the cell's index at them.
+    pub(crate) fn write_relocated_batch(
+        &self,
+        batch: RelocatedWriteBatch,
+        strategy: RelocationStrategy,
+    ) -> DbResult<()> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -1237,7 +1242,7 @@ impl Db {
             size_bytes,
         } = batch;
         let context = self.ks_context(ks);
-        let target_generation = self.relocation_target_generation(ks);
+        let target_generation = self.relocation_target_generation(ks, strategy);
         if target_generation != 0 {
             // Before the first copy is written, let alone indexed: a control
             // region that can point at a copy then records the key space as
@@ -1281,16 +1286,26 @@ impl Db {
         Ok(())
     }
 
-    /// The WAL generation surviving records should be written to during a
-    /// relocation pass. Returns G0 unless this keyspace opted in via
-    /// `KeySpaceConfig::with_promote_during_relocation` AND the database is
-    /// configured for at least two generations. First-cut policy: single-hop
-    /// G0 → G1 promotion; multi-hop tiering comes later.
-    fn relocation_target_generation(&self, ks: KeySpace) -> u8 {
-        if self.key_shape.ks(ks).promote_during_relocation() && self.config.wal_generations >= 2 {
-            1
-        } else {
-            0
+    /// The WAL generation a relocation pass running `strategy` writes the
+    /// surviving records of `ks` to: G1 on a WAL-based pass, for a keyspace
+    /// that opted in via `KeySpaceConfig::with_promote_during_relocation`
+    /// in a database configured for at least two generations; G0 otherwise.
+    /// First-cut policy: single-hop G0 → G1 promotion; multi-hop tiering
+    /// comes later.
+    ///
+    /// Only the WAL-based pass promotes. It stores a control region, which
+    /// fsyncs the side WAL and saves its watermark, before it reclaims the
+    /// files holding the originals. The index-based pass reclaims them
+    /// without one: a crash after that would leave a control region that
+    /// points at the reclaimed originals, and nothing replays a side WAL to
+    /// re-derive the copies. Deciding here, by the strategy of the running
+    /// pass, covers every way a pass is started.
+    fn relocation_target_generation(&self, ks: KeySpace, strategy: RelocationStrategy) -> u8 {
+        let promotes =
+            self.key_shape.ks(ks).promote_during_relocation() && self.config.wal_generations >= 2;
+        match strategy {
+            RelocationStrategy::WalBased if promotes => 1,
+            RelocationStrategy::WalBased | RelocationStrategy::IndexBased(_) => 0,
         }
     }
 
@@ -2167,6 +2182,10 @@ impl Db {
         self.start_relocation_with_strategy(self.config.relocation_strategy)
     }
 
+    /// Starts a relocation pass with `strategy`, whatever strategy the
+    /// database is configured with. Only a WAL-based pass promotes records
+    /// of a `promote_during_relocation` key space; an index-based pass
+    /// relocates them inside the main WAL.
     pub fn start_relocation_with_strategy(
         &self,
         strategy: RelocationStrategy,
@@ -2179,6 +2198,8 @@ impl Db {
         self.start_blocking_relocation_with_strategy(self.config.relocation_strategy)
     }
 
+    /// [`Self::start_relocation_with_strategy`], returning once the pass is
+    /// done.
     pub fn start_blocking_relocation_with_strategy(&self, strategy: RelocationStrategy) {
         let (sender, receiver) = mpsc::channel();
         self.relocator
