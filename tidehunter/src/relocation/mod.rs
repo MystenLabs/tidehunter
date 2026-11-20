@@ -514,21 +514,24 @@ impl RelocationDriver {
         // (see the WAL-based path for why). `get_index_for_cell` already returns
         // the as-of view; the loop below skips any on-disk entry still at >= the
         // cutoff.
-        for (key, position) in index.iter(ks_context) {
+        for (reduced_key, position) in index.iter(ks_context) {
             if position.offset() >= effective_limit {
                 continue;
             }
 
-            // Read the actual value from WAL
-            let value = match db.read_record_for_indexed_key(ks_context, position, key.as_ref())? {
-                Some((_, val)) => val,
-                None => {
-                    // Entry might have been deleted or corrupted, skip it
-                    context.mark_entry_removed(position);
-                    removed_count += 1;
-                    continue;
-                }
-            };
+            // Read the record from WAL. The index holds the reduced key (a hash
+            // or a key range for such keyspaces); the filter and the relocated
+            // copy take the full key the record carries, as on the WAL-based path.
+            let (key, value) =
+                match db.read_record_for_indexed_key(ks_context, position, reduced_key.as_ref())? {
+                    Some(record) => record,
+                    None => {
+                        // Entry might have been deleted or corrupted, skip it
+                        context.mark_entry_removed(position);
+                        removed_count += 1;
+                        continue;
+                    }
+                };
 
             // Simplified decision logic for index-based relocation. Since we're iterating through
             // current index entries, we only need to check the relocation filter
@@ -538,7 +541,7 @@ impl RelocationDriver {
 
             match decision {
                 Decision::Keep => {
-                    context.add_entry_to_relocate(key.clone(), value, position);
+                    context.add_entry_to_relocate(key, value, position);
                 }
                 Decision::Remove => {
                     context.mark_entry_removed(position);

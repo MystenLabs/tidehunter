@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc, thread, time::Duration};
 
 use crate::control::RelocateFiles;
 use crate::failpoints::FailPoint;
-use crate::key_shape::{KeySpace, KeySpaceConfig};
+use crate::key_shape::{KeyIndexing, KeySpace, KeySpaceConfig};
 use crate::large_table::Loader;
 use crate::latch::Latch;
 use crate::relocation::CellReference;
@@ -1990,4 +1990,106 @@ fn torn_frame_crash_child(path: &Path, exit_code: i32) -> ! {
     // Crash: `process::exit` runs no destructors, so nothing is flushed or
     // closed on the way out.
     std::process::exit(exit_code)
+}
+
+/// Index-based relocation of a keyspace of 16-byte keys indexed by `indexing`.
+/// Every key must read its value once the pass has reclaimed the WAL files
+/// holding the originals, and again after a reopen. The relocation filter must
+/// be called once per key with the full key, not the index key.
+fn index_based_relocation_with_key_indexing(indexing: KeyIndexing) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const KEY_LEN: usize = 16;
+    let dir = tempdir::TempDir::new("index_based_relocation_with_key_indexing").unwrap();
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    config.relocation_strategy = RelocationStrategy::IndexBased(None);
+    let config = force_unload_config(&config);
+    let filter_calls = Arc::new(AtomicU64::new(0));
+    let filter_short_keys = Arc::new(AtomicU64::new(0));
+    let ksc = KeySpaceConfig::new().with_relocation_filter({
+        let filter_calls = filter_calls.clone();
+        let filter_short_keys = filter_short_keys.clone();
+        move |key, _| {
+            filter_calls.fetch_add(1, Ordering::Relaxed);
+            if key.len() != KEY_LEN {
+                filter_short_keys.fetch_add(1, Ordering::Relaxed);
+            }
+            Decision::Keep
+        }
+    });
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config_indexing("k", indexing, 1, KeyType::uniform(1), ksc);
+    let key_shape = ksb.build();
+    // Both halves are unique per key, so either half works as a reduced key.
+    let key = |i: u64| -> Vec<u8> { [i.to_be_bytes(), (!i).to_be_bytes()].concat() };
+    let value = |i: u64| -> Vec<u8> { vec![(i % 251) as u8; 12 * 1024] };
+    let n = 600u64;
+    let check_all = |db: &Db, stage: &str| {
+        let ks = db.ks("k");
+        for i in 0..n {
+            assert_eq!(
+                db.get(ks, &key(i)).unwrap(),
+                Some(value(i).into()),
+                "key {i} {stage}"
+            );
+        }
+    };
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        let mut first_half_end = 0;
+        for i in 0..n {
+            db.insert(ks, key(i), value(i)).unwrap();
+            if i == n / 2 {
+                first_half_end = db.wal_writer.position();
+            }
+        }
+        db.rebuild_control_region().unwrap();
+        start_index_based_relocation(&db);
+        // The reads below must come from the copies.
+        assert!(
+            db.wal.min_wal_position() >= first_half_end,
+            "the pass must reclaim the originals of the first half of the keys \
+             (min WAL position {}, first half ends at {first_half_end})",
+            db.wal.min_wal_position()
+        );
+        assert_eq!(metrics.relocation_kept.with_label_values(&["k"]).get(), n);
+        assert_eq!(filter_calls.load(Ordering::Relaxed), n);
+        assert_eq!(filter_short_keys.load(Ordering::Relaxed), 0);
+        check_all(&db, "after the relocation pass");
+        // The index-based pass stores no control region after its GC; store
+        // one so the reopen reads the relocated copies through their blobs.
+        db.rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    check_all(&db, "after reopen");
+}
+
+#[test]
+fn test_index_based_relocation_fixed_key_indexing() {
+    index_based_relocation_with_key_indexing(KeyIndexing::fixed(16));
+}
+
+#[test]
+fn test_index_based_relocation_hash_key_indexing() {
+    index_based_relocation_with_key_indexing(KeyIndexing::hash());
+}
+
+#[test]
+fn test_index_based_relocation_key_reduction_prefix() {
+    index_based_relocation_with_key_indexing(KeyIndexing::key_reduction(16, 0..8));
+}
+
+#[test]
+fn test_index_based_relocation_key_reduction_suffix() {
+    index_based_relocation_with_key_indexing(KeyIndexing::key_reduction(16, 8..16));
 }
