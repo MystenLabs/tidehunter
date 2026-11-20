@@ -19,7 +19,9 @@ env:
 jobs:
   test:
     name: Run Tests
-    runs-on: ubuntu-latest
+    # librocksdb-sys 0.11 (RocksDB 8.1.1, pulled in by benchmarks/benchmark)
+    # does not compile with the ubuntu-26.04 C++ toolchain.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
         with:
