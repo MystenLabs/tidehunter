@@ -25,7 +25,7 @@ use crate::position_cache::{CacheOutcome, PositionCache};
 use crate::relocation::updates::RelocationUpdates;
 use crate::relocation::{RelocationCommand, RelocationDriver, RelocationStrategy, Relocator};
 use crate::state_snapshot;
-use crate::wal::layout::WalKind;
+use crate::wal::layout::{WalKind, WalLayout};
 use crate::wal::position::{LastProcessed, WalFileId, WalPosition};
 use crate::wal::tracker::{SharedLastProcessed, WalGuard};
 use crate::wal::{PreparedWalWrite, Wal, WalError, WalRandomRead, WalWriter};
@@ -131,7 +131,7 @@ impl Db {
             wals: generation_wals,
             writers: generation_writers,
             paths: generation_paths,
-        } = Self::open_generation_wals(&path, &config, &metrics)?;
+        } = Self::open_generation_wals(&path, &config, &metrics, control_region.side_wals())?;
         if registry_dirty {
             // Persisted only after the control region verified the canonical
             // shape, so a bad declaration never overwrites the registry.
@@ -614,10 +614,16 @@ impl Db {
     /// and there is no per-generation tracking in the relocation watermark
     /// file (`rel`). The relocator will need a per-gen watermark story
     /// before it can actually GC side-WAL files.
+    ///
+    /// `side_wals` is the side-WAL state of the stored control region. A
+    /// generation directory that cannot be the one that control region
+    /// points into fails the open before anything in it is created or
+    /// written (see `side_wal_watermark`).
     fn open_generation_wals(
         path: &Path,
         config: &Config,
         metrics: &Arc<Metrics>,
+        side_wals: Option<&SideWalState>,
     ) -> DbResult<GenerationWals> {
         let n = config.wal_generations as usize;
         assert!(n >= 1, "wal_generations must be >= 1");
@@ -629,9 +635,6 @@ impl Db {
         let mut paths = Vec::with_capacity(n - 1);
         for g in 1..n {
             let gen_path = path.join(format!("gen{g:04}"));
-            if !gen_path.exists() {
-                std::fs::create_dir(&gen_path)?;
-            }
             let mut layout = config.wal_layout(WalKind::Replay);
             // Side WALs share the main WAL's on-disk format (`kind` stays
             // `Replay` for file naming) but publish their own metric series
@@ -639,11 +642,15 @@ impl Db {
             // the main WAL's gauges, flapping them between unrelated
             // address spaces.
             layout.label = format!("gen{g:04}");
+            let stored_watermark = side_wals.map_or(0, |side_wals| side_wals.watermark(g as u8));
+            let durable = Self::side_wal_watermark(&gen_path, &layout, stored_watermark)?;
+            if !gen_path.exists() {
+                std::fs::create_dir(&gen_path)?;
+            }
             let wal = Wal::open(&gen_path, layout, metrics.clone())?;
             // Walk from the durable watermark to find the writer tail. A new
             // (empty) side WAL has watermark 0 and stops immediately at
             // EndOfWal, converting into a writer at offset 0.
-            let durable = gen_watermark::read(&gen_path)?;
             let mut iter = wal.wal_iterator_for_writer(durable)?;
             loop {
                 match iter.next() {
@@ -662,6 +669,63 @@ impl Db {
             writers,
             paths,
         })
+    }
+
+    /// Reads the durable watermark of the side WAL in `gen_path` and checks
+    /// that the directory can be the one a control region stored at side-WAL
+    /// watermark `stored_watermark` points into (0 when it points into no
+    /// side WAL).
+    ///
+    /// A side WAL is neither replayed nor garbage-collected: every record
+    /// below its watermark is reachable only through the control region and
+    /// stays in its file for good. A directory that was left out of a copy,
+    /// restored from an older one or lost some of its files would otherwise
+    /// open as a shorter or empty side WAL: its promoted keys would read as
+    /// garbage-collected and the writer would hand out offsets the control
+    /// region still points to.
+    fn side_wal_watermark(
+        gen_path: &Path,
+        layout: &WalLayout,
+        stored_watermark: u64,
+    ) -> DbResult<u64> {
+        let missing = |what: String| {
+            DbError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "side WAL {}: {what}; the directory was not copied or restored together \
+                     with the control region",
+                    gen_path.display()
+                ),
+            ))
+        };
+        if !gen_path.exists() {
+            if stored_watermark > 0 {
+                return Err(missing(format!(
+                    "the directory does not exist, but the control region points into it \
+                     (stored at watermark {stored_watermark})"
+                )));
+            }
+            return Ok(0);
+        }
+        let durable = gen_watermark::read(gen_path)?;
+        if durable < stored_watermark {
+            return Err(missing(format!(
+                "its durable watermark is {durable}, below the watermark \
+                 {stored_watermark} the control region was stored at"
+            )));
+        }
+        // The file holding the watermark itself may not exist yet; every
+        // file below it was written.
+        for file_id in layout.files_below(durable) {
+            let file = layout.wal_file_name(gen_path, file_id);
+            if !file.exists() {
+                return Err(missing(format!(
+                    "file {} is missing below the durable watermark {durable}",
+                    file.display()
+                )));
+            }
+        }
+        Ok(durable)
     }
 
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
@@ -1499,6 +1563,29 @@ impl Db {
         )
     }
 
+    /// Reads the WAL entry at a (possibly generation-encoded) position from
+    /// the WAL of its generation.
+    ///
+    /// `None` means the main-WAL file that held the entry was
+    /// garbage-collected. A side WAL is never garbage-collected, so a
+    /// position in a side-WAL file that is not there is an error: the record
+    /// must not read as deleted.
+    fn read_value_entry(&self, position: WalPosition) -> DbResult<Option<WalEntry>> {
+        let (wal, target_position) = self.value_wal_for(position);
+        let entry = self.read_report_entry(wal, target_position)?;
+        if entry.is_none() && WalPosition::offset_is_flagged(position.offset()) {
+            return Err(DbError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "side WAL {} has no file for offset {} (position {position:?})",
+                    wal.layout().label,
+                    target_position.offset()
+                ),
+            )));
+        }
+        Ok(entry)
+    }
+
     /// Read the record matching `indexed_key` at `position`. `indexed_key` is
     /// what the large-table index stores — for keyspaces without reduction it
     /// equals the full key; for reducing keyspaces it is the result of
@@ -1542,8 +1629,7 @@ impl Db {
         if let Some(body) = self.cached_batch_body(context, position) {
             return Ok(Some(RecordFrame::Batch(body)));
         }
-        let (wal, target_position) = self.value_wal_for(position);
-        let Some(entry) = self.read_report_entry(wal, target_position)? else {
+        let Some(entry) = self.read_value_entry(position)? else {
             return Ok(None);
         };
         match entry {
@@ -1602,16 +1688,13 @@ impl Db {
         loop {
             let batch_entry = match entry.take() {
                 Some(batch_entry) => batch_entry,
-                None => {
-                    let (wal, target_position) = self.value_wal_for(position);
-                    match self.read_report_entry(wal, target_position)? {
-                        Some(batch_entry @ WalEntry::CompressedBatch(..)) => batch_entry,
-                        Some(other) => {
-                            panic!("Unexpected wal entry where expected record/batch: {other:?}")
-                        }
-                        None => return Ok(None),
+                None => match self.read_value_entry(position)? {
+                    Some(batch_entry @ WalEntry::CompressedBatch(..)) => batch_entry,
+                    Some(other) => {
+                        panic!("Unexpected wal entry where expected record/batch: {other:?}")
                     }
-                }
+                    None => return Ok(None),
+                },
             };
             let decompress = || {
                 let _timer = context.read_decompress_mcs.clone().mcs_timer();
@@ -1645,8 +1728,7 @@ impl Db {
     /// relocator will call this once it actually reads from side WALs.
     #[allow(dead_code)]
     pub(crate) fn read_record(&self, position: WalPosition) -> DbResult<Option<(Bytes, Bytes)>> {
-        let (wal, target_position) = self.value_wal_for(position);
-        let Some(entry) = self.read_report_entry(wal, target_position)? else {
+        let Some(entry) = self.read_value_entry(position)? else {
             return Ok(None);
         };
         if let WalEntry::Record(KeySpace(_), k, v, _relocated) = entry {

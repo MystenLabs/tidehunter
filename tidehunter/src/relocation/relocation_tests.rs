@@ -14,7 +14,7 @@ use crate::wal::layout::WalKind;
 use crate::{
     RelocationStrategy,
     config::Config,
-    db::{CONTROL_REGION_FILE, Db, DbResult},
+    db::{CONTROL_REGION_FILE, Db, DbError, DbResult},
     key_shape::{KeyShape, KeyShapeBuilder, KeyType},
     relocation::RelocationWatermarks,
 };
@@ -3336,4 +3336,95 @@ fn test_load_config_reports_wal_generations_of_promoted_records() {
     )
     .unwrap();
     assert_promoted_keys_readable(&db);
+}
+
+/// Opening the promoted database at `path` must fail with a "not found" error
+/// whose message contains `what`.
+fn assert_open_reports_missing(path: &Path, config: &Config, what: &str) {
+    let result = Db::open(
+        path,
+        promoting_key_shape(),
+        Arc::new(config.clone()),
+        Metrics::new(),
+    );
+    match result {
+        Err(DbError::Io(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+            assert!(err.to_string().contains(what), "{err}");
+        }
+        Err(err) => panic!("unexpected error {err:?}"),
+        Ok(_) => panic!("the open must fail"),
+    }
+}
+
+// A database copied or restored without its side-WAL directory must not open
+// as one whose promoted keys were deleted.
+#[test]
+fn test_open_fails_without_side_wal_directory() {
+    let dir = tempdir::TempDir::new("test_side_wal_dir_missing").unwrap();
+    let config = two_generation_config();
+    promote_keys(dir.path(), &config);
+    let gen_path = dir.path().join("gen0001");
+    std::fs::remove_dir_all(&gen_path).unwrap();
+
+    assert_open_reports_missing(dir.path(), &config, "the directory does not exist");
+    assert!(!gen_path.exists(), "a failed open must not recreate it");
+}
+
+// A side-WAL directory older than the control region (here: one that lost its
+// watermark file) ends below positions the control region points to.
+#[test]
+fn test_open_fails_with_side_wal_older_than_control_region() {
+    let dir = tempdir::TempDir::new("test_side_wal_older").unwrap();
+    let config = two_generation_config();
+    let g1_end = promote_keys(dir.path(), &config);
+    std::fs::remove_file(dir.path().join("gen0001").join("durable")).unwrap();
+
+    assert_open_reports_missing(
+        dir.path(),
+        &config,
+        &format!("below the watermark {g1_end} the control region was stored at"),
+    );
+}
+
+// Every side-WAL file below the watermark holds promoted records.
+#[test]
+fn test_open_fails_with_missing_side_wal_file() {
+    let dir = tempdir::TempDir::new("test_side_wal_file_missing").unwrap();
+    let config = two_generation_config();
+    promote_keys(dir.path(), &config);
+    let gen_path = dir.path().join("gen0001");
+    let first_file = list_wal_files(&gen_path).into_iter().min().unwrap();
+    std::fs::remove_file(gen_path.join(&first_file)).unwrap();
+
+    assert_open_reports_missing(dir.path(), &config, &first_file);
+}
+
+// A side WAL is never garbage-collected, so a position in a side-WAL file
+// that does not exist is an error, not the `None` of a reclaimed main-WAL
+// record.
+#[test]
+fn test_read_from_missing_side_wal_file_is_an_error() {
+    let dir = tempdir::TempDir::new("test_side_wal_read_missing").unwrap();
+    let config = two_generation_config();
+    let db = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config.clone()),
+        Metrics::new(),
+    )
+    .unwrap();
+    let in_missing_file = crate::WalPosition::for_generation(
+        1,
+        1000 * config.wal_file_size,
+        100,
+        config.generation_bits(),
+    );
+    match db.read_record(in_missing_file) {
+        Err(DbError::Io(err)) => assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}"),
+        other => panic!("expected a not-found error, got {other:?}"),
+    }
+    // The same position without the flag is a main-WAL position.
+    let reclaimed = crate::WalPosition::new(1000 * config.wal_file_size, 100);
+    assert!(matches!(db.read_record(reclaimed), Ok(None)));
 }

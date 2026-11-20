@@ -112,6 +112,11 @@ impl WalLayout {
         WalFileId(offset / self.wal_file_size)
     }
 
+    /// Ids of the files that lie entirely below `offset`, lowest first.
+    pub(crate) fn files_below(&self, offset: u64) -> impl Iterator<Item = WalFileId> {
+        (0..self.locate_file(offset).0).map(WalFileId)
+    }
+
     pub fn file_for_map(&self, map_id: MapId) -> WalFileId {
         self.locate_file(self.map_range(map_id).start)
     }
