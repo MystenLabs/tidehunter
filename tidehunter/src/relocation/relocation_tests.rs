@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
-use crate::control::RelocateFiles;
+use crate::control::{ControlRegion, RelocateFiles, SideWalState};
 use crate::failpoints::FailPoint;
 use crate::key_shape::{KeyIndexing, KeySpace, KeySpaceConfig};
 use crate::large_table::Loader;
@@ -14,7 +14,7 @@ use crate::wal::layout::WalKind;
 use crate::{
     RelocationStrategy,
     config::Config,
-    db::{Db, DbResult},
+    db::{CONTROL_REGION_FILE, Db, DbResult},
     key_shape::{KeyShape, KeyShapeBuilder, KeyType},
     relocation::RelocationWatermarks,
 };
@@ -3097,4 +3097,133 @@ fn test_promote_during_relocation_with_index_based_strategy_rejected() {
     let key_shape = ksb.build();
 
     let _: DbResult<Arc<Db>> = Db::open(dir.path(), key_shape, config, Metrics::new());
+}
+
+/// `Config::small` with two WAL generations, WAL files of two fragments and
+/// cells unloading at every control-region rebuild.
+fn two_generation_config() -> Config {
+    let mut config = Config::small();
+    config.wal_file_size = 2 * config.frag_size;
+    config.wal_generations = 2;
+    config.snapshot_unload_threshold = 0;
+    config
+}
+
+/// One key space, `k`, whose records relocation promotes to G1.
+fn promoting_key_shape() -> KeyShape {
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space_config(
+        "k",
+        8,
+        1,
+        KeyType::uniform(1),
+        KeySpaceConfig::new().with_promote_during_relocation(true),
+    );
+    ksb.build()
+}
+
+const PROMOTED_KEYS: std::ops::Range<u64> = 1000..1600;
+
+fn promoted_value() -> Vec<u8> {
+    vec![7; 12 * 1000]
+}
+
+/// Opens (or creates) the database at `path`, writes `PROMOTED_KEYS`, has a
+/// relocation pass promote them to G1 and closes the database. Returns the G1
+/// writer position the pass's control region was stored at.
+fn promote_keys(path: &Path, config: &Config) -> u64 {
+    let metrics = Metrics::new();
+    let db = Db::open(
+        path,
+        promoting_key_shape(),
+        Arc::new(config.clone()),
+        metrics.clone(),
+    )
+    .unwrap();
+    let ks = db.ks("k");
+    for i in PROMOTED_KEYS {
+        db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+    }
+    // Writes above the frontier the pass captures give its scan a terminal
+    // position; the checkpoint pins that frontier.
+    let checkpoint = db.checkpoint();
+    for i in 0..100u64 {
+        db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+    }
+    db.start_blocking_relocation();
+    assert!(
+        metrics.relocation_kept.with_label_values(&["k"]).get() > 0,
+        "the pass must promote records"
+    );
+    let g1_end = db.generation_writers[0].position();
+    assert!(
+        g1_end > config.wal_file_size,
+        "the promoted records must span side-WAL files (G1 ends at {g1_end})"
+    );
+    drop(checkpoint);
+    db.wait_for_background_threads_to_finish();
+    g1_end
+}
+
+fn assert_promoted_keys_readable(db: &Db) {
+    let ks = db.ks("k");
+    for i in PROMOTED_KEYS {
+        assert_eq!(
+            db.get(ks, &i.to_be_bytes()).unwrap(),
+            Some(promoted_value().into()),
+            "promoted key {i}"
+        );
+    }
+}
+
+/// The side-WAL state of the control region stored at `path`.
+fn stored_side_wals(path: &Path) -> Option<SideWalState> {
+    ControlRegion::read(&path.join(CONTROL_REGION_FILE), &promoting_key_shape())
+        .unwrap()
+        .side_wals()
+        .cloned()
+}
+
+// A control region that may point into a side WAL carries the side-WAL state,
+// which puts it in the format version a binary without side WALs refuses to
+// read. Until a record is promoted the control region stays in the version
+// such a binary reads.
+#[test]
+fn test_control_region_records_side_wal_state_once_promoted() {
+    let dir = tempdir::TempDir::new("test_cr_side_wal_state").unwrap();
+    let config = two_generation_config();
+    {
+        let db = Db::open(
+            dir.path(),
+            promoting_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        db.insert(db.ks("k"), 1u64.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+        db.force_rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+    assert_eq!(
+        stored_side_wals(dir.path()),
+        None,
+        "nothing promoted: the control region must stay readable without side WALs"
+    );
+
+    let g1_end = promote_keys(dir.path(), &config);
+    let side_wals = stored_side_wals(dir.path()).expect("side-WAL state after a promotion");
+    assert_eq!(side_wals.wal_generations(), 2);
+    assert_eq!(side_wals.watermark(1), g1_end);
+
+    let db = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config),
+        Metrics::new(),
+    )
+    .unwrap();
+    assert_promoted_keys_readable(&db);
 }

@@ -6,7 +6,7 @@ use crate::compressed_batch::{
 };
 use crate::config::Config;
 use crate::context::{DbOpKind, KsContext, ReadType, WalEntryKind};
-use crate::control::{ControlRegion, ControlRegionStore, RelocateFiles};
+use crate::control::{ControlRegion, ControlRegionStore, RelocateFiles, SideWalState};
 use crate::crc::IntoBytesFixed;
 use crate::flusher::{IndexFlusher, RelocationFlush};
 use crate::gen_watermark;
@@ -1787,11 +1787,17 @@ impl Db {
         // can never truncate them (see `crate::gen_watermark`). Saved before
         // `crs.store` so no control region ever references positions above
         // the persisted watermark.
+        let mut watermarks = Vec::with_capacity(self.generation_wals.len());
         for (idx, gen_wal) in self.generation_wals.iter().enumerate() {
             let durable = self.generation_writers[idx].position();
             gen_wal.fsync_all()?;
             gen_watermark::save(&self.generation_paths[idx], durable)?;
+            watermarks.push(durable);
         }
+        // Once a side WAL holds bytes the snapshot may point into it: the
+        // control region then records the side-WAL state and is stored in
+        // the format version a binary without side WALs refuses to read.
+        let side_wals = SideWalState::for_store(self.config.wal_generations, watermarks);
         // Persist the control region BEFORE unlinking files. A crash between
         // these steps must leave the on-disk CR consistent with the files
         // still present: extra (un-deleted) files are tolerated by the next
@@ -1800,6 +1806,7 @@ impl Db {
             snapshot.data,
             snapshot.replay_from,
             &self.key_shape,
+            side_wals,
             &self.metrics,
         );
         self.index_writer.delete_files(to_delete)?;

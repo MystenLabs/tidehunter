@@ -19,21 +19,71 @@ use std::path::{Path, PathBuf};
 ///   starting at byte 0. No header. Distinguished by the fact that the first
 ///   8 bytes decode as a plausible `last_position: u64` — never the
 ///   versioned-header sentinel.
-/// - **V2** (legacy) / **V3**: 8-byte little-endian sentinel `u64::MAX`,
-///   followed by a 4-byte little-endian version number, followed by the
-///   `bincode`-serialized control-region payload. The version field selects
-///   the payload schema: V2 = pre-sharding `IndexLevels` (positions only);
-///   V3 = current layout with optional shard btrees per cell. Using
+/// - **V2** (legacy) / **V3** / **V4**: 8-byte little-endian sentinel
+///   `u64::MAX`, followed by a 4-byte little-endian version number, followed
+///   by the `bincode`-serialized control-region payload. The version field
+///   selects the payload schema: V2 = pre-sharding `IndexLevels` (positions
+///   only); V3 = current layout with optional shard btrees per cell; V4 = a
+///   `bincode`-serialized [`SideWalState`] followed by the V3 payload. Using
 ///   `u64::MAX` as the discriminator works because the first field of the
 ///   V1 layout is `last_position: u64`, which would only take the value
 ///   `u64::MAX` in a pathological/corrupt file — never in a real database.
 ///
-/// Writers always emit V3; readers detect the sentinel and fall back to V2
-/// or V1 parsing + one-way migration as needed.
+/// Writers emit V4 when the snapshot may hold generation-flagged positions
+/// (see [`SideWalState`]) and V3 otherwise; readers detect the sentinel and
+/// fall back to V2 or V1 parsing + one-way migration as needed. A binary
+/// that does not know side WALs stops at the V4 version number instead of
+/// resolving flagged positions against the main WAL, where they read as
+/// garbage-collected records.
 const CONTROL_REGION_V2_SENTINEL: u64 = u64::MAX;
 const CONTROL_REGION_V2_VERSION: u32 = 2;
 const CONTROL_REGION_V3_VERSION: u32 = 3;
+const CONTROL_REGION_V4_VERSION: u32 = 4;
 const CONTROL_REGION_V2_HEADER_LEN: usize = 12;
+
+/// What a control region records about the side WALs its snapshot points
+/// into. Present exactly when a side WAL held bytes at the store, which is
+/// when the snapshot may hold generation-flagged positions.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)] // Reachable through `ControlRegion`, which tools/tideconsole reads
+pub struct SideWalState {
+    /// `Config::wal_generations` the flagged positions are encoded with.
+    wal_generations: u8,
+    /// Durable watermark of each side WAL at the store, indexed by
+    /// `generation - 1`. Every flagged position in the snapshot lies below
+    /// the watermark of its generation.
+    watermarks: Vec<u64>,
+}
+
+impl SideWalState {
+    /// The state to store next to a snapshot taken with the side WALs at
+    /// `watermarks`. `None` while every side WAL is empty: no position can
+    /// point into one, and the control region stays readable by a binary
+    /// that does not know side WALs.
+    pub(crate) fn for_store(wal_generations: u8, watermarks: Vec<u64>) -> Option<Self> {
+        assert_eq!(
+            watermarks.len() + 1,
+            wal_generations as usize,
+            "one watermark per side WAL"
+        );
+        if watermarks.iter().all(|watermark| *watermark == 0) {
+            return None;
+        }
+        Some(Self {
+            wal_generations,
+            watermarks,
+        })
+    }
+
+    pub fn wal_generations(&self) -> u8 {
+        self.wal_generations
+    }
+
+    /// Durable watermark of side WAL `generation` (1-based) at the store.
+    pub fn watermark(&self, generation: u8) -> u64 {
+        self.watermarks[generation as usize - 1]
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[doc(hidden)] // Used by tools/tideconsole for control region inspection
@@ -47,6 +97,9 @@ pub struct ControlRegion {
     /// predate the shape file.
     #[serde(default)]
     keyspace_names: Vec<String>,
+    /// Not part of the V3 payload: a V4 file carries it ahead of the payload.
+    #[serde(skip)]
+    side_wals: Option<SideWalState>,
 }
 
 pub(crate) struct ControlRegionStore {
@@ -139,6 +192,7 @@ impl ControlRegion {
             last_position: 0,
             snapshot,
             keyspace_names,
+            side_wals: None,
         }
     }
 
@@ -146,6 +200,7 @@ impl ControlRegion {
         snapshot: LargeTableContainer<SnapshotEntryData>,
         last_position: u64,
         key_shape: &KeyShape,
+        side_wals: Option<SideWalState>,
     ) -> Self {
         let keyspace_names = key_shape
             .iter_ks()
@@ -155,6 +210,7 @@ impl ControlRegion {
             snapshot,
             last_position,
             keyspace_names,
+            side_wals,
         }
     }
 
@@ -180,8 +236,8 @@ impl ControlRegion {
     }
 
     /// Deserializes a control region from bytes, transparently handling
-    /// V1 (pre-levels), V2 (pre-sharding `IndexLevels`), and V3 (current)
-    /// formats.
+    /// V1 (pre-levels), V2 (pre-sharding `IndexLevels`), V3 and V4 (V3 with
+    /// the side-WAL state ahead of it) formats.
     ///
     /// V1 control regions are migrated on read: each single-position cell
     /// becomes a one-level `IndexLevels`. V2 control regions are migrated
@@ -196,13 +252,21 @@ impl ControlRegion {
                 let payload = &bytes[CONTROL_REGION_V2_HEADER_LEN..];
                 return match version {
                     CONTROL_REGION_V3_VERSION => bincode::deserialize::<ControlRegion>(payload),
+                    CONTROL_REGION_V4_VERSION => {
+                        let mut payload = payload;
+                        let side_wals: SideWalState = bincode::deserialize_from(&mut payload)?;
+                        let mut control_region: ControlRegion = bincode::deserialize(payload)?;
+                        control_region.side_wals = Some(side_wals);
+                        Ok(control_region)
+                    }
                     CONTROL_REGION_V2_VERSION => {
                         let v2: legacy_v2::ControlRegionV2 = bincode::deserialize(payload)?;
                         Ok(v2.migrate())
                     }
                     _ => panic!(
                         "Unsupported control region version {version}; expected \
-                         {CONTROL_REGION_V3_VERSION} (or legacy {CONTROL_REGION_V2_VERSION}). \
+                         {CONTROL_REGION_V3_VERSION} or {CONTROL_REGION_V4_VERSION} (or legacy \
+                         {CONTROL_REGION_V2_VERSION}). \
                          This binary is older than the database it is trying to open."
                     ),
                 };
@@ -288,6 +352,12 @@ impl ControlRegion {
     pub fn last_index_wal_position(&self) -> Option<WalPosition> {
         self.snapshot.iter_valid_val_positions().max()
     }
+
+    /// The side-WAL state stored with this control region, `None` when its
+    /// snapshot cannot hold a generation-flagged position.
+    pub fn side_wals(&self) -> Option<&SideWalState> {
+        self.side_wals.as_ref()
+    }
 }
 
 impl ControlRegionStore {
@@ -298,11 +368,14 @@ impl ControlRegionStore {
         }
     }
 
+    /// Stores a control region. `side_wals` is the state of the side WALs
+    /// the snapshot was taken against (see [`SideWalState::for_store`]).
     pub fn store(
         &mut self,
         snapshot: LargeTableContainer<SnapshotEntryData>,
         last_position: u64,
         key_shape: &KeyShape,
+        side_wals: Option<SideWalState>,
         metrics: &Metrics,
     ) {
         assert!(
@@ -310,12 +383,20 @@ impl ControlRegionStore {
             "control region last_position regressed: new={last_position} < old={}",
             self.last_position,
         );
-        let control_region = ControlRegion::new(snapshot, last_position, key_shape);
-        // V3 layout: sentinel + version + bincode payload. See the comment
-        // on `CONTROL_REGION_V2_SENTINEL` for the rationale.
+        let control_region = ControlRegion::new(snapshot, last_position, key_shape, side_wals);
+        // Sentinel + version + payload; with side-WAL state the payload is
+        // V4, the state followed by the V3 payload. See the comment on
+        // `CONTROL_REGION_V2_SENTINEL` for the rationale.
         let mut serialized = Vec::with_capacity(CONTROL_REGION_V2_HEADER_LEN + 4 * 1024);
         serialized.extend_from_slice(&CONTROL_REGION_V2_SENTINEL.to_le_bytes());
-        serialized.extend_from_slice(&CONTROL_REGION_V3_VERSION.to_le_bytes());
+        match &control_region.side_wals {
+            Some(side_wals) => {
+                serialized.extend_from_slice(&CONTROL_REGION_V4_VERSION.to_le_bytes());
+                bincode::serialize_into(&mut serialized, side_wals)
+                    .expect("Failed to serialize side WAL state");
+            }
+            None => serialized.extend_from_slice(&CONTROL_REGION_V3_VERSION.to_le_bytes()),
+        }
         bincode::serialize_into(&mut serialized, &control_region)
             .expect("Failed to serialize control region");
         let temp_file = self.path.with_extension(".bak");
@@ -423,6 +504,7 @@ mod legacy_v2 {
                 last_position: self.last_position,
                 snapshot: LargeTableContainer { data },
                 keyspace_names: self.keyspace_names,
+                side_wals: None,
             }
         }
     }
@@ -491,6 +573,7 @@ mod legacy_v1 {
                 last_position: self.last_position,
                 snapshot: LargeTableContainer { data },
                 keyspace_names: self.keyspace_names,
+                side_wals: None,
             }
         }
     }
@@ -551,9 +634,11 @@ mod tests {
         cr.last_position = 100;
 
         let mut store = ControlRegionStore::new(path.clone(), &cr);
-        store.store(cr.snapshot, cr.last_position, &shape, &Metrics::new());
+        store.store(cr.snapshot, cr.last_position, &shape, None, &Metrics::new());
 
+        assert_eq!(stored_version(&path), CONTROL_REGION_V3_VERSION);
         let read_cr = ControlRegion::read(&path, &shape).unwrap();
+        assert_eq!(read_cr.side_wals(), None);
         assert_eq!(read_cr.last_position, 100);
         let entry0 = read_cr.snapshot.data[0]
             .get(&CellId::Integer(0))
@@ -569,6 +654,58 @@ mod tests {
         assert!(entry1.levels.is_sharded());
         assert_eq!(entry1.levels.shards(), &shard_btree);
         assert_eq!(entry1.last_processed, LastProcessed::new_test(43));
+    }
+
+    /// The version number of the control region file at `path`.
+    fn stored_version(path: &Path) -> u32 {
+        let bytes = fs::read(path).unwrap();
+        assert_eq!(
+            u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            CONTROL_REGION_V2_SENTINEL
+        );
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap())
+    }
+
+    #[test]
+    fn side_wal_state_is_stored_as_v4() {
+        let dir = tempdir::TempDir::new("cr_v4_roundtrip").unwrap();
+        let path = dir.path().join("cr");
+        let shape = tiny_shape();
+
+        let mut cr = ControlRegion::new_empty(&shape);
+        cr.snapshot.data[0].insert(
+            CellId::Integer(0),
+            SnapshotEntryData::from_levels(
+                IndexLevels::single(WalPosition::test_value(7777)),
+                LastProcessed::new_test(42),
+            ),
+        );
+        let side_wals = SideWalState::for_store(3, vec![4096, 0]);
+        assert!(side_wals.is_some());
+
+        let mut store = ControlRegionStore::new(path.clone(), &cr);
+        store.store(cr.snapshot, 100, &shape, side_wals.clone(), &Metrics::new());
+
+        // The version number is what stops a binary that predates side WALs.
+        assert_eq!(stored_version(&path), CONTROL_REGION_V4_VERSION);
+        let read_cr = ControlRegion::read(&path, &shape).unwrap();
+        assert_eq!(read_cr.side_wals(), side_wals.as_ref());
+        let side_wals = read_cr.side_wals().unwrap();
+        assert_eq!(side_wals.wal_generations(), 3);
+        assert_eq!(side_wals.watermark(1), 4096);
+        assert_eq!(side_wals.watermark(2), 0);
+        assert_eq!(read_cr.last_position, 100);
+        let entry = read_cr.snapshot.data[0]
+            .get(&CellId::Integer(0))
+            .expect("cell 0 exists");
+        assert_eq!(entry.levels.latest(), Some(WalPosition::test_value(7777)));
+        assert_eq!(entry.last_processed, LastProcessed::new_test(42));
+    }
+
+    #[test]
+    fn empty_side_wals_have_no_state() {
+        assert_eq!(SideWalState::for_store(1, vec![]), None);
+        assert_eq!(SideWalState::for_store(3, vec![0, 0]), None);
     }
 
     #[test]
