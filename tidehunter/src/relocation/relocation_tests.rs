@@ -3227,3 +3227,113 @@ fn test_control_region_records_side_wal_state_once_promoted() {
     .unwrap();
     assert_promoted_keys_readable(&db);
 }
+
+/// The key space of `promoting_key_shape` declared without promotion.
+fn plain_key_shape() -> KeyShape {
+    let mut ksb = KeyShapeBuilder::new();
+    ksb.add_key_space("k", 8, 1, KeyType::uniform(1));
+    ksb.build()
+}
+
+// Promoted records are stored at positions encoded for the `wal_generations`
+// in effect; a single generation has no side WAL to read them from.
+#[test]
+#[should_panic(expected = "records promoted with wal_generations = 2")]
+fn test_lower_wal_generations_rejected_after_promotion() {
+    let dir = tempdir::TempDir::new("test_lower_wal_generations").unwrap();
+    let mut config = two_generation_config();
+    promote_keys(dir.path(), &config);
+    config.wal_generations = 1;
+    let _: DbResult<Arc<Db>> = Db::open(
+        dir.path(),
+        plain_key_shape(),
+        Arc::new(config),
+        Metrics::new(),
+    );
+}
+
+// More generations widen the generation id inside a flagged offset.
+#[test]
+#[should_panic(expected = "records promoted with wal_generations = 2")]
+fn test_higher_wal_generations_rejected_after_promotion() {
+    let dir = tempdir::TempDir::new("test_higher_wal_generations").unwrap();
+    let mut config = two_generation_config();
+    promote_keys(dir.path(), &config);
+    config.wal_generations = 3;
+    let _: DbResult<Arc<Db>> = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config),
+        Metrics::new(),
+    );
+}
+
+// Until a record is promoted nothing stored depends on `wal_generations`.
+#[test]
+fn test_wal_generations_can_change_before_promotion() {
+    let dir = tempdir::TempDir::new("test_wal_generations_change").unwrap();
+    let mut config = two_generation_config();
+    let key = 1u64.to_be_bytes().to_vec();
+    for wal_generations in [2, 1, 3, 2] {
+        config.wal_generations = wal_generations;
+        let db = Db::open(
+            dir.path(),
+            plain_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        if wal_generations == 2 {
+            db.insert(ks, key.clone(), promoted_value()).unwrap();
+        }
+        assert_eq!(
+            db.get(ks, &key).unwrap(),
+            Some(promoted_value().into()),
+            "wal_generations = {wal_generations}"
+        );
+        db.force_rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+}
+
+// `config.yaml` keeps the `wal_generations` the database was created with. A
+// tool that opens the database from its directory alone (tideconsole) must get
+// the value the promoted records need.
+#[test]
+fn test_load_config_reports_wal_generations_of_promoted_records() {
+    let dir = tempdir::TempDir::new("test_load_config_wal_generations").unwrap();
+    let mut config = two_generation_config();
+    config.wal_generations = 1;
+    {
+        let db = Db::open(
+            dir.path(),
+            plain_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+    assert_eq!(Db::load_config(dir.path()).unwrap().wal_generations, 1);
+
+    config.wal_generations = 2;
+    promote_keys(dir.path(), &config);
+    let yaml = std::fs::read_to_string(Db::config_file_path(dir.path())).unwrap();
+    let created_with: Config = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(
+        created_with.wal_generations, 1,
+        "config.yaml is not rewritten"
+    );
+    let loaded = Db::load_config(dir.path()).unwrap();
+    assert_eq!(loaded.wal_generations, 2);
+
+    let db = Db::open(
+        dir.path(),
+        Db::load_key_shape(dir.path()).unwrap(),
+        Arc::new(loaded),
+        Metrics::new(),
+    )
+    .unwrap();
+    assert_promoted_keys_readable(&db);
+}

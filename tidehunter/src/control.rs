@@ -8,7 +8,7 @@ use crate::wal::position::WalFileId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 /// On-disk control-region format version.
@@ -233,6 +233,31 @@ impl ControlRegion {
         control_region.verify_shape(key_shape);
         control_region.extend_snapshot_if_needed(key_shape);
         Ok(control_region)
+    }
+
+    /// `Config::wal_generations` recorded in the control region file at
+    /// `path`: `Some` when the file carries side-WAL state, `None` when it
+    /// does not or does not exist. Reads only the head of the file.
+    pub(crate) fn stored_wal_generations(path: &Path) -> io::Result<Option<u8>> {
+        let mut file = match fs::File::open(path) {
+            Ok(file) => BufReader::new(file),
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let mut header = [0u8; CONTROL_REGION_V2_HEADER_LEN];
+        match file.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+            Err(err) => return Err(err),
+        }
+        let sentinel = u64::from_le_bytes(header[..8].try_into().unwrap());
+        let version = u32::from_le_bytes(header[8..].try_into().unwrap());
+        if sentinel != CONTROL_REGION_V2_SENTINEL || version != CONTROL_REGION_V4_VERSION {
+            return Ok(None);
+        }
+        let side_wals: SideWalState = bincode::deserialize_from(&mut file)
+            .map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+        Ok(Some(side_wals.wal_generations))
     }
 
     /// Deserializes a control region from bytes, transparently handling
@@ -637,6 +662,7 @@ mod tests {
         store.store(cr.snapshot, cr.last_position, &shape, None, &Metrics::new());
 
         assert_eq!(stored_version(&path), CONTROL_REGION_V3_VERSION);
+        assert_eq!(ControlRegion::stored_wal_generations(&path).unwrap(), None);
         let read_cr = ControlRegion::read(&path, &shape).unwrap();
         assert_eq!(read_cr.side_wals(), None);
         assert_eq!(read_cr.last_position, 100);
@@ -688,6 +714,14 @@ mod tests {
 
         // The version number is what stops a binary that predates side WALs.
         assert_eq!(stored_version(&path), CONTROL_REGION_V4_VERSION);
+        assert_eq!(
+            ControlRegion::stored_wal_generations(&path).unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            ControlRegion::stored_wal_generations(&dir.path().join("missing")).unwrap(),
+            None
+        );
         let read_cr = ControlRegion::read(&path, &shape).unwrap();
         assert_eq!(read_cr.side_wals(), side_wals.as_ref());
         let side_wals = read_cr.side_wals().unwrap();
