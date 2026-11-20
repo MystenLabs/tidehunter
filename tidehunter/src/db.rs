@@ -647,6 +647,17 @@ impl Db {
             if !gen_path.exists() {
                 std::fs::create_dir(&gen_path)?;
             }
+            // The watermark is the allocator's frontier, and the allocator
+            // enters a new file before the mapper has created it. A control
+            // region stored at that moment, followed by a crash, leaves the
+            // watermark in a file that does not exist. Nothing was written
+            // there and every file below is present, so the missing file is
+            // the empty one the writer was waiting for: create it for the
+            // tail scan to start in.
+            let watermark_file = layout.wal_file_name(&gen_path, layout.locate_file(durable));
+            if !watermark_file.exists() {
+                let _: std::fs::File = Wal::open_file(&watermark_file, &layout)?;
+            }
             let wal = Wal::open(&gen_path, layout, metrics.clone())?;
             // Walk from the durable watermark to find the writer tail. A new
             // (empty) side WAL has watermark 0 and stops immediately at

@@ -3428,3 +3428,61 @@ fn test_read_from_missing_side_wal_file_is_an_error() {
     let reclaimed = crate::WalPosition::new(1000 * config.wal_file_size, 100);
     assert!(matches!(db.read_record(reclaimed), Ok(None)));
 }
+
+// The side-WAL watermark is the allocator's frontier, which enters a new file
+// before the mapper creates it. A control region stored at that moment and a
+// crash before the file appears leave the watermark in a file that does not
+// exist; the database must open and go on promoting from there.
+#[test]
+fn test_open_with_side_wal_watermark_in_file_not_created_yet() {
+    let dir = tempdir::TempDir::new("test_side_wal_watermark_ahead").unwrap();
+    let config = two_generation_config();
+    promote_keys(dir.path(), &config);
+    let gen_path = dir.path().join("gen0001");
+    let layout = config.wal_layout(WalKind::Replay);
+    let newest_file = list_wal_files(&gen_path).into_iter().max().unwrap();
+    let newest_id = u64::from_str_radix(newest_file.strip_prefix("wal_").unwrap(), 16).unwrap();
+    // One allocation into the file after the newest one.
+    let watermark = (newest_id + 1) * config.wal_file_size + layout.align(12 * 1000);
+    let watermark_file = layout.wal_file_name(&gen_path, layout.locate_file(watermark));
+    assert!(!watermark_file.exists());
+    crate::gen_watermark::save(&gen_path, watermark).unwrap();
+
+    {
+        let db = Db::open(
+            dir.path(),
+            promoting_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        assert_eq!(db.generation_writers[0].position(), watermark);
+        assert_promoted_keys_readable(&db);
+        db.wait_for_background_threads_to_finish();
+    }
+    assert!(watermark_file.exists());
+    // The next pass promotes above the watermark.
+    let g1_end = promote_keys(dir.path(), &config);
+    assert!(g1_end > watermark, "G1 ends at {g1_end}");
+    {
+        let db = Db::open(
+            dir.path(),
+            promoting_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        assert_promoted_keys_readable(&db);
+        db.wait_for_background_threads_to_finish();
+    }
+
+    // A watermark further ahead than the next file means files are missing.
+    let newest_file = list_wal_files(&gen_path).into_iter().max().unwrap();
+    let newest_id = u64::from_str_radix(newest_file.strip_prefix("wal_").unwrap(), 16).unwrap();
+    crate::gen_watermark::save(&gen_path, (newest_id + 2) * config.wal_file_size).unwrap();
+    assert_open_reports_missing(
+        dir.path(),
+        &config,
+        "is missing below the durable watermark",
+    );
+}
