@@ -268,7 +268,13 @@ impl Config {
     /// needed). The top offset bit is always the gen-flag and is not counted
     /// here.
     pub fn generation_bits(&self) -> u8 {
-        let n = self.wal_generations as u32;
+        Self::generation_bits_for(self.wal_generations)
+    }
+
+    /// [`Self::generation_bits`] of a configuration with `wal_generations`
+    /// generations.
+    pub fn generation_bits_for(wal_generations: u8) -> u8 {
+        let n = wal_generations as u32;
         assert!(n >= 1, "wal_generations must be >= 1");
         let non_g0 = n.saturating_sub(1);
         if non_g0 <= 1 {

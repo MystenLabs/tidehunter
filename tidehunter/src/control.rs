@@ -1,4 +1,5 @@
 use crate::WalPosition;
+use crate::config::Config;
 use crate::container::LargeTableContainer;
 use crate::key_shape::KeyShape;
 use crate::large_table::SnapshotEntryData;
@@ -79,9 +80,54 @@ impl SideWalState {
         self.wal_generations
     }
 
-    /// Durable watermark of side WAL `generation` (1-based) at the store.
+    /// Durable watermark of side WAL `generation` (1-based) at the store; 0
+    /// for a generation the storing database did not have.
     pub fn watermark(&self, generation: u8) -> u64 {
-        self.watermarks[generation as usize - 1]
+        self.watermarks
+            .get(generation as usize - 1)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether a database with this state can be opened with
+    /// `wal_generations`; the error says why not.
+    ///
+    /// Every side WAL that holds records must still be configured, and the
+    /// positions stored for it must decode to the same generation and
+    /// offset. The generation id occupies the `Config::generation_bits`
+    /// bits below the flag bit, so under another id width only the
+    /// positions of generation 1 (id 0) keep their meaning. A side WAL that
+    /// holds nothing has no position pointing into it and does not restrict
+    /// the value.
+    pub(crate) fn check_wal_generations(&self, wal_generations: u8) -> Result<(), String> {
+        if wal_generations == self.wal_generations {
+            return Ok(());
+        }
+        let stored_bits = Config::generation_bits_for(self.wal_generations);
+        let bits = Config::generation_bits_for(wal_generations);
+        for (idx, watermark) in self.watermarks.iter().enumerate() {
+            if *watermark == 0 {
+                continue;
+            }
+            let generation = idx as u8 + 1;
+            if generation >= wal_generations {
+                return Err(format!(
+                    "generation {generation} holds records and would not be configured"
+                ));
+            }
+            // The highest offset a position of this generation can have. If
+            // it decodes unchanged every lower one does: the id bits are the
+            // same for all of them and a lower offset has no higher bit set.
+            let highest = *watermark - 1;
+            let stored = WalPosition::encode_offset(generation, highest, stored_bits);
+            if WalPosition::decode_offset(stored, bits) != (generation, highest) {
+                return Err(format!(
+                    "positions of generation {generation} are stored with a {stored_bits}-bit \
+                     generation id and would be read with a {bits}-bit one"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -734,6 +780,46 @@ mod tests {
             .expect("cell 0 exists");
         assert_eq!(entry.levels.latest(), Some(WalPosition::test_value(7777)));
         assert_eq!(entry.last_processed, LastProcessed::new_test(42));
+    }
+
+    #[test]
+    fn side_wal_state_restricts_wal_generations() {
+        let state = |wal_generations: u8, watermarks: &[u64]| {
+            SideWalState::for_store(wal_generations, watermarks.to_vec()).unwrap()
+        };
+        let allowed = |state: &SideWalState, wal_generations: u8| {
+            state.check_wal_generations(wal_generations).is_ok()
+        };
+
+        // Records in generation 1 only: its id is 0 under every width, so
+        // any value that keeps generation 1 opens.
+        let g1_only = state(2, &[4096]);
+        assert!(!allowed(&g1_only, 1), "generation 1 must stay configured");
+        for wal_generations in [2, 3, 4, 5, 9, 255] {
+            assert!(allowed(&g1_only, wal_generations), "{wal_generations}");
+        }
+        let g1_of_five = state(5, &[4096, 0, 0, 0]);
+        for wal_generations in [2, 3, 4, 5, 6] {
+            assert!(allowed(&g1_of_five, wal_generations), "{wal_generations}");
+        }
+
+        // Records in generation 2, stored with a 1-bit id (3 generations).
+        let g2 = state(3, &[4096, 8192]);
+        assert!(allowed(&g2, 3));
+        assert!(!allowed(&g2, 2), "generation 2 must stay configured");
+        assert!(!allowed(&g2, 4), "a 2-bit id reads generation 2 as 3");
+
+        // Records in generation 3, stored with a 2-bit id (4 generations):
+        // 5 generations use the same width, 3 and 6 do not.
+        let g3 = state(4, &[0, 0, 8192]);
+        assert!(allowed(&g3, 5));
+        assert!(!allowed(&g3, 3));
+        assert!(!allowed(&g3, 6));
+
+        // An offset that needs the bit a wider id takes.
+        let high_offset = state(2, &[(1 << 62) + 1]);
+        assert!(allowed(&high_offset, 2));
+        assert!(!allowed(&high_offset, 3));
     }
 
     #[test]

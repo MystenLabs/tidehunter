@@ -435,8 +435,9 @@ impl Db {
     ///
     /// `config.yaml` is written once, when the database is created, while
     /// `wal_generations` can be raised later. Once records are promoted the
-    /// database opens only with the value its control region records (see
-    /// `validate_wal_generations`), so that value replaces the file's.
+    /// value the control region was stored with is one the database is known
+    /// to open with (see `validate_wal_generations`), which the file's may
+    /// not be, so that value replaces the file's.
     #[doc(hidden)] // Used by tools/tideconsole for loading database config
     pub fn load_config(path: &Path) -> DbResult<Config> {
         let config_file_path = Self::config_file_path(path);
@@ -530,21 +531,24 @@ impl Db {
     /// A control region with that state holds generation-flagged positions,
     /// encoded for the `wal_generations` it was stored with: the flag bit
     /// routes a position to a side WAL and `Config::generation_bits` more
-    /// bits select which one. Another value would read them from the wrong
-    /// WAL or at the wrong offset, and a single generation has no side WAL
-    /// to read them from at all. A control region without the state points
-    /// into no side WAL and opens with any value.
+    /// bits select which one. The configured value may differ from the
+    /// stored one only while every side WAL that holds records stays
+    /// configured and its positions decode unchanged (see
+    /// `SideWalState::check_wal_generations`); the next control region is
+    /// stored with the configured value. A control region without the state
+    /// points into no side WAL and opens with any value.
     fn validate_wal_generations(side_wals: Option<&SideWalState>, config: &Config) {
         let Some(side_wals) = side_wals else {
             return;
         };
-        assert!(
-            config.wal_generations == side_wals.wal_generations(),
-            "Config::wal_generations is {} but the database holds records promoted with \
-             wal_generations = {}; the value cannot change once records are promoted",
-            config.wal_generations,
-            side_wals.wal_generations(),
-        );
+        if let Err(reason) = side_wals.check_wal_generations(config.wal_generations) {
+            panic!(
+                "Config::wal_generations is {} but the database holds promoted records \
+                 stored with wal_generations = {}: {reason}",
+                config.wal_generations,
+                side_wals.wal_generations(),
+            );
+        }
     }
 
     /// Cross-validate per-keyspace settings against global `Config`. Called
@@ -606,9 +610,9 @@ impl Db {
     /// open-time scan to the tail written since the last control-region
     /// store.
     ///
-    /// `config.wal_generations` matches the value any stored
-    /// generation-flagged position was encoded with: the caller has checked
-    /// it against the control region (see `validate_wal_generations`).
+    /// Every stored generation-flagged position decodes under
+    /// `config.wal_generations` as it was encoded: the caller has checked
+    /// the value against the control region (see `validate_wal_generations`).
     ///
     /// todo multi-gen: each side WAL has its own `WalWriter::gc()` watermark
     /// and there is no per-generation tracking in the relocation watermark

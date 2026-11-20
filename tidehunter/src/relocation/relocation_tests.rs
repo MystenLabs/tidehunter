@@ -3235,11 +3235,11 @@ fn plain_key_shape() -> KeyShape {
     ksb.build()
 }
 
-// Promoted records are stored at positions encoded for the `wal_generations`
-// in effect; a single generation has no side WAL to read them from.
+// Promoted records live in a side WAL; a single generation has none to read
+// them from.
 #[test]
-#[should_panic(expected = "records promoted with wal_generations = 2")]
-fn test_lower_wal_generations_rejected_after_promotion() {
+#[should_panic(expected = "generation 1 holds records and would not be configured")]
+fn test_wal_generations_below_promoted_records_rejected() {
     let dir = tempdir::TempDir::new("test_lower_wal_generations").unwrap();
     let mut config = two_generation_config();
     promote_keys(dir.path(), &config);
@@ -3252,17 +3252,73 @@ fn test_lower_wal_generations_rejected_after_promotion() {
     );
 }
 
-// More generations widen the generation id inside a flagged offset.
+// Adding generations to a database that already promoted records: positions
+// in G1 read the same under every `wal_generations`, promotion goes on in the
+// same G1, and a control region stored under the new value records it. The
+// value can also go back down as long as the generations that hold records
+// stay.
 #[test]
-#[should_panic(expected = "records promoted with wal_generations = 2")]
-fn test_higher_wal_generations_rejected_after_promotion() {
-    let dir = tempdir::TempDir::new("test_higher_wal_generations").unwrap();
+fn test_wal_generations_can_be_raised_after_promotion() {
+    let dir = tempdir::TempDir::new("test_raise_wal_generations").unwrap();
     let mut config = two_generation_config();
-    promote_keys(dir.path(), &config);
+    let first_g1_end = promote_keys(dir.path(), &config);
+    assert_eq!(stored_side_wals(dir.path()).unwrap().wal_generations(), 2);
+
     config.wal_generations = 3;
+    let g1_end = promote_keys(dir.path(), &config);
+    assert!(g1_end > first_g1_end, "the pass must append to G1");
+    let side_wals = stored_side_wals(dir.path()).unwrap();
+    assert_eq!(side_wals.wal_generations(), 3);
+    assert_eq!(side_wals.watermark(1), g1_end);
+    assert_eq!(side_wals.watermark(2), 0);
+
+    for wal_generations in [5, 2, 3] {
+        config.wal_generations = wal_generations;
+        let db = Db::open(
+            dir.path(),
+            promoting_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        assert_promoted_keys_readable(&db);
+        db.force_rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+        let side_wals = stored_side_wals(dir.path()).unwrap();
+        assert_eq!(side_wals.wal_generations(), wal_generations);
+        assert_eq!(side_wals.watermark(1), g1_end);
+    }
+}
+
+// The generation id of a flagged offset is as wide as `wal_generations`
+// needs. Four generations use a wider id than three, under which a position
+// stored for G2 reads as one of G3.
+#[test]
+#[should_panic(expected = "positions of generation 2 are stored with a 1-bit generation id")]
+fn test_wal_generations_id_width_change_rejected_with_records_above_g1() {
+    let dir = tempdir::TempDir::new("test_wal_generations_id_width").unwrap();
+    let mut config = two_generation_config();
+    config.wal_generations = 3;
+    {
+        let db = Db::open(
+            dir.path(),
+            plain_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        let _: crate::WalPosition = db
+            .write_to_generation(2, ks, 1u64.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+        db.force_rebuild_control_region().unwrap();
+        db.wait_for_background_threads_to_finish();
+    }
+    assert_eq!(stored_side_wals(dir.path()).unwrap().wal_generations(), 3);
+    config.wal_generations = 4;
     let _: DbResult<Arc<Db>> = Db::open(
         dir.path(),
-        promoting_key_shape(),
+        plain_key_shape(),
         Arc::new(config),
         Metrics::new(),
     );
