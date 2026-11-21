@@ -186,7 +186,9 @@ pub enum RelocationFlush {
     /// a clean cell too.
     None,
     /// Re-point the positions relocation copied: each update is a
-    /// compare-and-set on the key's latest position below the frontier.
+    /// compare-and-set on the key's latest position, which must be below
+    /// the frontier or, for the copy of a side-WAL record, exactly the
+    /// position the copy was made from.
     Updates(RelocationUpdates),
     /// Drop the L0 and overlay entries below this position: relocation-filter
     /// key spaces reclaim their values instead of copying them, and deeper
@@ -805,14 +807,14 @@ impl IndexFlusherThread {
         let frontier = updates.last_processed();
         let mut local = RelocationUpdates::new(frontier);
         let mut by_shard: BTreeMap<&[u8], RelocationUpdates> = BTreeMap::new();
-        for (key, position) in updates.into_entries() {
-            if merged_l0.contains_key(&key) {
-                local.add(key, position);
-            } else if let Some((min_key, _)) = levels.shard_entry_for(&key) {
+        for update in updates.into_updates() {
+            if merged_l0.contains_key(update.reduced_key()) {
+                local.push(update);
+            } else if let Some((min_key, _)) = levels.shard_entry_for(update.reduced_key()) {
                 by_shard
                     .entry(min_key.as_slice())
                     .or_insert_with(|| RelocationUpdates::new(frontier))
-                    .add(key, position);
+                    .push(update);
             }
         }
         local.apply(merged_l0);

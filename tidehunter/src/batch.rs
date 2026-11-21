@@ -3,6 +3,7 @@ use crate::db::{Db, DbResult, WalEntry};
 use crate::index::pending_table::Transaction;
 use crate::key_shape::KeySpace;
 use crate::wal::PreparedWalWrite;
+use crate::wal::position::WalPosition;
 use minibytes::Bytes;
 use std::sync::Arc;
 
@@ -66,6 +67,12 @@ pub(crate) struct RelocatedWriteBatch {
     /// otherwise the side WAL records are promoted to. Chosen by the pass
     /// through `Db::relocation_target_generation`.
     pub(crate) target_generation: u8,
+    /// `Some` for a batch of copies of side-WAL records (side-WAL
+    /// reclamation): the position each copy was made from, parallel to
+    /// `keys`. Such a copy replaces an index entry only while the entry
+    /// still holds that exact position. `None` for copies of main-WAL
+    /// records, which are identified by `last_processed`.
+    pub(crate) sources: Option<Vec<WalPosition>>,
 }
 
 const MAX_BATCH_LEN: usize = 1_000_000;
@@ -153,10 +160,39 @@ impl RelocatedWriteBatch {
             ks,
             cell_id,
             target_generation,
+            sources: None,
         }
     }
 
+    /// A batch of copies of records that sit in the side WAL of
+    /// `generation`, to be written back to the tail of the same side WAL.
+    pub fn of_side_wal_records(ks: KeySpace, cell_id: CellId, generation: u8) -> Self {
+        assert_ne!(generation, 0, "the main WAL is not a side WAL");
+        Self {
+            sources: Some(Vec::new()),
+            ..Self::new(ks, cell_id, 0, generation)
+        }
+    }
+
+    /// Adds the copy of a main-WAL record.
     pub fn write(&mut self, key: Bytes, value: Bytes) {
+        assert!(
+            self.sources.is_none(),
+            "a batch of side-WAL records takes the position of each record"
+        );
+        self.push(key, value);
+    }
+
+    /// Adds the copy of the side-WAL record at `source`.
+    pub fn write_from(&mut self, key: Bytes, value: Bytes, source: WalPosition) {
+        self.sources
+            .as_mut()
+            .expect("not a batch of side-WAL records")
+            .push(source);
+        self.push(key, value);
+    }
+
+    fn push(&mut self, key: Bytes, value: Bytes) {
         let write =
             PreparedWalWrite::new(&WalEntry::Record(self.ks, key.clone(), value.clone(), true));
         self.size_bytes += write.len();

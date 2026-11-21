@@ -69,6 +69,16 @@ pub struct Config {
     /// more index. `u64::MAX` covers the whole run in one stripe.
     #[serde(default = "default_relocation_stripe_bytes")]
     pub relocation_stripe_bytes: u64,
+    /// Minimum share of live bytes (percent of `wal_file_size`) for a
+    /// side-WAL file to be kept as it is. At the end of a WAL-based
+    /// relocation run, the live records of files below this threshold are
+    /// copied to the tail of their side WAL and the files are deleted, the
+    /// emptiest first, up to one `relocation_stripe_bytes` of copies per
+    /// run. A higher value keeps less dead data on disk and copies more;
+    /// with 50, a file is rewritten once half of it is dead, and the side
+    /// WAL holds at most twice its live data. 0 disables reclamation.
+    #[serde(default = "default_side_wal_min_occupancy_pct")]
+    pub side_wal_min_occupancy_pct: u8,
     /// Minimum live-byte occupancy (percent of `wal_file_size`) for an index WAL file to be
     /// kept as-is. Files below this threshold (excluding the most recently written file) get
     /// their cells force-relocated on the next snapshot, freeing the file for GC. 0 disables
@@ -188,6 +198,10 @@ fn default_relocation_stripe_bytes() -> u64 {
     64 * 1024 * 1024 * 1024
 }
 
+fn default_side_wal_min_occupancy_pct() -> u8 {
+    50
+}
+
 fn default_index_min_occupancy_pct() -> u8 {
     15
 }
@@ -215,6 +229,7 @@ impl Default for Config {
             relocation_max_reclaim_pct: default_relocation_max_reclaim_pct(),
             relocation_batch_max_bytes: None,
             relocation_stripe_bytes: default_relocation_stripe_bytes(),
+            side_wal_min_occupancy_pct: default_side_wal_min_occupancy_pct(),
             index_min_occupancy_pct: default_index_min_occupancy_pct(),
             metrics_enabled: true,
             commit_pool_size: 0,
@@ -250,6 +265,7 @@ impl Config {
             relocation_max_reclaim_pct: 100,
             relocation_batch_max_bytes: None,
             relocation_stripe_bytes: default_relocation_stripe_bytes(),
+            side_wal_min_occupancy_pct: default_side_wal_min_occupancy_pct(),
             index_min_occupancy_pct: default_index_min_occupancy_pct(),
             commit_pool_size: 0,
             num_pending_promotion_threads: default_num_pending_promotion_threads(),
@@ -323,6 +339,11 @@ impl Config {
     /// invariant. Called by the builders (early feedback) and by
     /// `Db::open` (catches struct-literal / deserialize bypasses).
     pub(crate) fn validate(&self) {
+        assert!(
+            self.side_wal_min_occupancy_pct <= 100,
+            "side_wal_min_occupancy_pct is a percentage, given {}",
+            self.side_wal_min_occupancy_pct
+        );
         if let Some(cache_bytes) = self.compressed_batch_cache_bytes {
             assert!(
                 cache_bytes > 0,

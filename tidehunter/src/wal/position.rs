@@ -14,6 +14,13 @@ pub struct WalPosition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalFileId(pub(super) u64);
 
+impl WalFileId {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct MapId(pub(super) u64);
 

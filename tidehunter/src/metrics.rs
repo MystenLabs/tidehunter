@@ -308,6 +308,16 @@ pub struct Metrics {
     /// region's replay position when that is lower.
     pub relocation_stripes: MetricIntCounter,
     pub relocation_terminal_position: MetricIntGauge,
+    /// Bytes of live records in each side WAL (`wal` label) below its tail
+    /// file, as counted by the last relocation run.
+    pub side_wal_live_bytes: MetricIntGaugeVec,
+    /// Bytes the files of each side WAL below its tail file take on disk,
+    /// at the same moment as `side_wal_live_bytes`.
+    pub side_wal_file_bytes: MetricIntGaugeVec,
+    /// Bytes of live records copied out of side-WAL files being reclaimed.
+    pub side_wal_compacted_bytes: MetricIntCounter,
+    /// Side-WAL files deleted after reclamation.
+    pub side_wal_reclaimed_files: MetricIntCounter,
     pub gc_position: MetricIntGaugeVec,
     pub relocation_kept: MetricIntCounterVec,
     /// Records a WAL-based relocation pass copied that were themselves the
@@ -637,6 +647,10 @@ impl Metrics {
             relocation_target_position: gauge!("relocation_target_position", registry, enabled),
             relocation_stripes: counter!("relocation_stripes", registry, enabled),
             relocation_terminal_position: gauge!("relocation_terminal_position", registry, enabled),
+            side_wal_live_bytes: gauge_vec!("side_wal_live_bytes", &["wal"], registry, enabled),
+            side_wal_file_bytes: gauge_vec!("side_wal_file_bytes", &["wal"], registry, enabled),
+            side_wal_compacted_bytes: counter!("side_wal_compacted_bytes", registry, enabled),
+            side_wal_reclaimed_files: counter!("side_wal_reclaimed_files", registry, enabled),
             gc_position: gauge_vec!("gc_position", &["kind"], registry, enabled),
             relocation_kept: counter_vec!("relocation_kept", &["ks"], registry, enabled),
             relocation_recopied: counter_vec!("relocation_recopied", &["ks"], registry, enabled),

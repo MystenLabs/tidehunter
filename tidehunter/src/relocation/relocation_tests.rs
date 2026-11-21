@@ -3769,6 +3769,10 @@ fn test_destroyed_promoting_key_space_does_not_restrict_config() {
     }
 }
 
+/// Copies a database directory as a crash at this moment would leave it. A
+/// file that disappears during the copy is one whose unlink was already under
+/// way, in the background after a GC; a crash leaves such a file either
+/// present or gone, and nothing stored points into it.
 fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
@@ -3776,8 +3780,12 @@ fn copy_dir(from: &Path, to: &Path) {
         let target = to.join(entry.file_name());
         if entry.file_type().unwrap().is_dir() {
             copy_dir(&entry.path(), &target);
-        } else {
-            let _: u64 = std::fs::copy(entry.path(), &target).unwrap();
+            continue;
+        }
+        match std::fs::copy(entry.path(), &target) {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("failed to copy {:?}: {err}", entry.path()),
         }
     }
 }
@@ -4007,4 +4015,290 @@ fn test_promote_after_two_passes() {
 #[should_panic(expected = "promote_after_passes must be 1 or 2")]
 fn test_promote_after_passes_rejects_unsupported_count() {
     let _: KeySpaceConfig = KeySpaceConfig::new().with_promote_after_passes(3);
+}
+
+fn rewritten_value() -> Vec<u8> {
+    vec![9; 12 * 1000]
+}
+
+/// The keys of `PROMOTED_KEYS` that `rewrite_most_promoted_keys` leaves alone.
+fn survives_rewrite(key: u64) -> bool {
+    key.is_multiple_of(6)
+}
+
+/// Rewrites five keys in six of `PROMOTED_KEYS`: the records they had are
+/// dead once the writes are processed.
+fn rewrite_most_promoted_keys(db: &Db) {
+    let ks = db.ks("k");
+    for i in PROMOTED_KEYS.filter(|i| !survives_rewrite(*i)) {
+        db.insert(ks, i.to_be_bytes().to_vec(), rewritten_value())
+            .unwrap();
+    }
+}
+
+fn assert_keys_after_rewrite(db: &Db) {
+    let ks = db.ks("k");
+    for i in PROMOTED_KEYS {
+        let expected = if survives_rewrite(i) {
+            promoted_value()
+        } else {
+            rewritten_value()
+        };
+        assert_eq!(
+            db.get(ks, &i.to_be_bytes()).unwrap(),
+            Some(expected.into()),
+            "key {i}"
+        );
+    }
+}
+
+/// Paths of the G1 files the control region stored at `path` lists as
+/// reclaimed.
+fn reclaimed_g1_files(path: &Path, config: &Config) -> Vec<std::path::PathBuf> {
+    let layout = config.wal_layout(WalKind::Replay);
+    let gen_path = path.join("gen0001");
+    stored_side_wals(path)
+        .map(|side_wals| {
+            side_wals
+                .reclaimed_files(1)
+                .iter()
+                .map(|file| layout.wal_file_name(&gen_path, *file))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn wait_until_unlinked(files: &[std::path::PathBuf]) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while files.iter().any(|file| file.exists()) {
+        assert!(
+            Instant::now() < deadline,
+            "reclaimed side-WAL files were not unlinked: {files:?}"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+// A promoted record that is rewritten stays in its side-WAL file as dead
+// bytes. Once most of a file is dead, the run that notices copies the records
+// still live to the side WAL's tail, lists the file as reclaimed in the
+// control region and deletes it. Every key keeps reading its value, also
+// after a reopen, which must accept that the files are gone.
+fn side_wal_reclamation(config: Config, expect_sharded: bool) {
+    let dir = tempdir::TempDir::new("test_side_wal_reclamation").unwrap();
+    let reclaimed = {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            promoting_key_shape(),
+            Arc::new(config.clone()),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        for i in PROMOTED_KEYS {
+            db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+                .unwrap();
+        }
+        relocate_written_so_far(&db, 0);
+        assert!(db.generation_writers[0].position() > config.wal_file_size);
+        assert_eq!(any_cell_sharded(&db, ks), expect_sharded);
+        assert_eq!(
+            metrics.side_wal_reclaimed_files.get(),
+            0,
+            "files full of live records must be kept"
+        );
+        assert_eq!(
+            reclaimed_g1_files(dir.path(), &config),
+            Vec::<std::path::PathBuf>::new()
+        );
+
+        rewrite_most_promoted_keys(&db);
+        relocate_written_so_far(&db, 1);
+        let reclaimed = reclaimed_g1_files(dir.path(), &config);
+        assert!(!reclaimed.is_empty(), "mostly dead files must be reclaimed");
+        assert_eq!(
+            metrics.side_wal_reclaimed_files.get(),
+            reclaimed.len() as u64
+        );
+        assert!(
+            metrics.side_wal_compacted_bytes.get() > 0,
+            "the records still live in the reclaimed files must be copied"
+        );
+        wait_until_unlinked(&reclaimed);
+        assert_keys_after_rewrite(&db);
+
+        // A position in a reclaimed file reads as a reclaimed record.
+        let layout = config.wal_layout(WalKind::Replay);
+        let first_reclaimed = stored_side_wals(dir.path()).unwrap().reclaimed_files(1)[0];
+        let stale = crate::WalPosition::for_generation(
+            1,
+            layout.wal_file_range(first_reclaimed).start,
+            100,
+            config.generation_bits(),
+        );
+        assert!(matches!(db.read_record(stale), Ok(None)));
+        db.wait_for_background_threads_to_finish();
+        reclaimed
+    };
+
+    // A reclaimed file that reappears (the process stopped between storing
+    // the control region and deleting it) is removed by the open.
+    std::fs::write(&reclaimed[0], b"left over").unwrap();
+    let db = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config.clone()),
+        Metrics::new(),
+    )
+    .unwrap();
+    assert!(!reclaimed[0].exists());
+    assert_keys_after_rewrite(&db);
+    assert_eq!(reclaimed_g1_files(dir.path(), &config), reclaimed);
+}
+
+#[test]
+fn test_side_wal_reclaims_mostly_dead_files() {
+    side_wal_reclamation(two_generation_config(), false);
+}
+
+#[test]
+fn test_side_wal_reclaims_mostly_dead_files_on_sharded_cell() {
+    let mut config = two_generation_config();
+    config.max_dirty_keys = 8;
+    config.l0_max_entries = Some(16);
+    config.with_index_auto_shard_threshold(2048);
+    side_wal_reclamation(config, true);
+}
+
+// A held checkpoint reads the versions that were current when it was taken.
+// While it is held those versions count as live, so their files are kept;
+// once it is released they are dead and the next run reclaims the files.
+#[test]
+fn test_side_wal_reclamation_keeps_records_a_checkpoint_reads() {
+    let dir = tempdir::TempDir::new("test_side_wal_reclamation_checkpoint").unwrap();
+    let config = two_generation_config();
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config.clone()),
+        metrics.clone(),
+    )
+    .unwrap();
+    let ks = db.ks("k");
+    for i in PROMOTED_KEYS {
+        db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+    }
+    relocate_written_so_far(&db, 0);
+    // Enough fresh records below the checkpoint for the next run to have a
+    // stripe to relocate.
+    for i in 0..400u64 {
+        db.insert(ks, (5_000_000 + i).to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+    }
+    db.wal_writer.wal_tracker_barrier();
+    let checkpoint = db.checkpoint();
+    // Above the checkpoint's frontier: the run finds its terminal position here.
+    rewrite_most_promoted_keys(&db);
+
+    let stripes_before = metrics.relocation_stripes.get();
+    db.start_blocking_relocation();
+    assert!(
+        metrics.relocation_stripes.get() > stripes_before,
+        "the run must relocate a stripe for the reclamation to be considered"
+    );
+    assert_eq!(
+        metrics.side_wal_reclaimed_files.get(),
+        0,
+        "records a held checkpoint reads are live"
+    );
+    for i in PROMOTED_KEYS {
+        assert_eq!(
+            checkpoint.get(ks, &i.to_be_bytes()).unwrap(),
+            Some(promoted_value().into()),
+            "key {i} as of the checkpoint"
+        );
+    }
+    assert_keys_after_rewrite(&db);
+
+    drop(checkpoint);
+    relocate_written_so_far(&db, 1);
+    let reclaimed = reclaimed_g1_files(dir.path(), &config);
+    assert!(!reclaimed.is_empty());
+    wait_until_unlinked(&reclaimed);
+    assert_keys_after_rewrite(&db);
+}
+
+// The files are marked reclaimed, and deleted, only after a control region
+// that points at nothing in them is stored. If the process stops once the
+// live records are copied but before that store, the database on disk still
+// has the previous control region and every file it points into.
+#[test]
+fn test_side_wal_reclamation_crash_before_control_region_store() {
+    let dir = tempdir::TempDir::new("test_side_wal_reclamation_crash").unwrap();
+    let config = two_generation_config();
+    let metrics = Metrics::new();
+    let db = Db::open(
+        dir.path(),
+        promoting_key_shape(),
+        Arc::new(config.clone()),
+        metrics.clone(),
+    )
+    .unwrap();
+    let ks = db.ks("k");
+    for i in PROMOTED_KEYS {
+        db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+    }
+    relocate_written_so_far(&db, 0);
+    rewrite_most_promoted_keys(&db);
+
+    let (latch, latch_guard) = Latch::new();
+    let arrivals = Arc::new(AtomicUsize::new(0));
+    db.large_table.fp.0.write().fp_side_wal_reclaim_before_store =
+        FailPoint::latch_counting(latch, arrivals.clone());
+    let relocation = {
+        let db = db.clone();
+        thread::spawn(move || relocate_written_so_far(&db, 1))
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while arrivals.load(Ordering::SeqCst) == 0 {
+        assert!(
+            !relocation.is_finished() && Instant::now() < deadline,
+            "the run did not reach the reclamation's control region store"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        metrics.side_wal_compacted_bytes.get() > 0,
+        "the live records must be copied by now"
+    );
+    assert_eq!(
+        reclaimed_g1_files(dir.path(), &config),
+        Vec::<std::path::PathBuf>::new()
+    );
+
+    // What a crash at this point leaves on disk.
+    let crashed = tempdir::TempDir::new("test_side_wal_reclamation_crashed").unwrap();
+    copy_dir(dir.path(), crashed.path());
+    {
+        let db = Db::open(
+            crashed.path(),
+            promoting_key_shape(),
+            Arc::new(config.clone()),
+            Metrics::new(),
+        )
+        .unwrap();
+        assert_keys_after_rewrite(&db);
+        db.wait_for_background_threads_to_finish();
+    }
+
+    drop(latch_guard);
+    relocation.join().unwrap();
+    let reclaimed = reclaimed_g1_files(dir.path(), &config);
+    assert!(!reclaimed.is_empty());
+    wait_until_unlinked(&reclaimed);
+    assert_keys_after_rewrite(&db);
 }

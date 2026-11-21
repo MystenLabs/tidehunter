@@ -6,10 +6,11 @@ use crate::key_shape::KeySpace;
 use crate::metrics::Metrics;
 use crate::relocation::watermark::RelocationWatermarks;
 use crate::wal::WalError;
-use crate::wal::position::LastProcessed;
+use crate::wal::position::{LastProcessed, WalFileId};
 pub use cell_reference::CellReference;
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak, mpsc};
@@ -83,6 +84,41 @@ impl<'a> PeriodicSnapshotPause<'a> {
 impl Drop for PeriodicSnapshotPause<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Bytes of live records per side-WAL file, counted over the as-of index of
+/// every cell that holds promoted records. Indexed by `generation - 1`.
+struct SideWalLiveBytes {
+    /// The file each side WAL was writing to when the count began. Only the
+    /// files below it are counted in full: a record promoted while the
+    /// count runs lands at or above it.
+    tail_files: Vec<WalFileId>,
+    live: Vec<HashMap<WalFileId, u64>>,
+}
+
+impl SideWalLiveBytes {
+    /// `None` when there is nothing to reclaim from: no side WAL, or
+    /// reclamation is switched off.
+    fn begin(db: &Db) -> Option<Self> {
+        if db.config.side_wal_min_occupancy_pct == 0 || db.generation_wals.is_empty() {
+            return None;
+        }
+        let tail_files = db
+            .generation_wals
+            .iter()
+            .zip(&db.generation_writers)
+            .map(|(wal, writer)| wal.layout().locate_file(writer.position()))
+            .collect::<Vec<_>>();
+        let live = vec![HashMap::new(); tail_files.len()];
+        Some(Self { tail_files, live })
+    }
+
+    /// Counts the record an index entry points at, if it is in a side WAL.
+    fn record(&mut self, db: &Db, position: WalPosition) {
+        if let Some((idx, file, bytes)) = db.side_wal_location(position) {
+            *self.live[idx].entry(file).or_default() += bytes;
+        }
     }
 }
 
@@ -412,11 +448,24 @@ impl RelocationDriver {
         let stripe_range = stripe_range(db.config.relocation_stripe_bytes, db.wal.wal_file_size());
         let mut stripe_start = min_wal_position;
         let mut cutoff = Some(terminal_position);
+        // The last stripe reads the index of every cell like the others, and
+        // while it does it counts the live bytes of each side-WAL file for
+        // the reclamation that ends the run.
+        let mut side_wal_live = None;
         while stripe_start < target_position {
             let stripe_end = stripe_start
                 .saturating_add(stripe_range)
                 .min(target_position);
-            self.relocate_stripe(&db, stripe_end, cutoff.take(), last_processed)?;
+            if stripe_end == target_position {
+                side_wal_live = SideWalLiveBytes::begin(&db);
+            }
+            self.relocate_stripe(
+                &db,
+                stripe_end,
+                cutoff.take(),
+                last_processed,
+                side_wal_live.as_mut(),
+            )?;
             // Every entry below `stripe_end` is now re-pointed or dropped in
             // the index; persist that before the WAL below it is reclaimed.
             // The stripe's snapshot stands in for the periodic one, so it
@@ -434,6 +483,143 @@ impl RelocationDriver {
             db.large_table.fp.fp_relocation_after_stripe();
             stripe_start = stripe_end;
         }
+        if let Some(side_wal_live) = side_wal_live {
+            self.reclaim_side_wal_files(&db, side_wal_live)?;
+        }
+        Ok(())
+    }
+
+    /// Reclaims the side-WAL files that hold mostly dead records.
+    ///
+    /// A side WAL only grows by promotion, and a promoted record that is
+    /// overwritten or removed afterwards stays in its file as dead bytes.
+    /// Given the live bytes of every file (`live`, counted by the run's last
+    /// stripe), this takes the files below the tail file whose live share is
+    /// under `Config::side_wal_min_occupancy_pct`, the emptiest first, up to
+    /// one `relocation_stripe_bytes` of live records; copies those records
+    /// to the tail of the same side WAL and re-points the index at the
+    /// copies; and only then marks the files reclaimed, stores a control
+    /// region that lists them, and deletes them.
+    ///
+    /// A record counts as live when the as-of view of its cell holds it,
+    /// the view a held checkpoint reads, so a version a checkpoint still
+    /// needs keeps its file or is copied with it. An entry that the copies
+    /// did not re-point is one the index no longer serves: a newer write
+    /// shadows it, and reading it finds a reclaimed file, which reads as a
+    /// reclaimed record does in the main WAL.
+    ///
+    /// A crash before the control region is stored leaves the old one with
+    /// every file it points into; the copies are dead bytes at the tail,
+    /// counted as such by a later run. A crash after it leaves files the
+    /// control region lists as reclaimed, which the next open deletes.
+    fn reclaim_side_wal_files(&self, db: &Arc<Db>, live: SideWalLiveBytes) -> DbResult<()> {
+        let wal_file_size = db.wal.wal_file_size();
+        let threshold = wal_file_size / 100 * db.config.side_wal_min_occupancy_pct as u64;
+        let budget = db.config.relocation_stripe_bytes;
+        let mut reclaim: Vec<HashSet<WalFileId>> = vec![HashSet::new(); live.live.len()];
+        let mut bytes_to_copy = 0u64;
+        for (idx, wal) in db.generation_wals.iter().enumerate() {
+            let mut files: Vec<(u64, WalFileId)> = wal
+                .file_ids()
+                .into_iter()
+                .filter(|file| {
+                    *file < live.tail_files[idx] && !db.side_wal_file_reclaimed(idx, *file)
+                })
+                .map(|file| (live.live[idx].get(&file).copied().unwrap_or(0), file))
+                .collect();
+            let label = &[wal.layout().label.as_str()];
+            let live_bytes: u64 = files.iter().map(|(bytes, _)| bytes).sum();
+            self.metrics
+                .side_wal_live_bytes
+                .with_label_values(label)
+                .set(live_bytes as i64);
+            self.metrics
+                .side_wal_file_bytes
+                .with_label_values(label)
+                .set((files.len() as u64 * wal_file_size) as i64);
+            files.retain(|(bytes, _)| *bytes < threshold);
+            files.sort();
+            for (bytes, file) in files {
+                // A file with no live record costs nothing to reclaim.
+                if bytes > 0 && bytes_to_copy > 0 && bytes_to_copy + bytes > budget {
+                    break;
+                }
+                bytes_to_copy += bytes;
+                reclaim[idx].insert(file);
+            }
+        }
+        if reclaim.iter().all(HashSet::is_empty) {
+            // Files an earlier run reclaimed but could not delete yet.
+            let _: u64 = db.delete_reclaimed_side_wal_files()?;
+            return Ok(());
+        }
+
+        if bytes_to_copy > 0 {
+            // Views as of the current frontier: a key written during the run
+            // is seen at its new position and its old record is not copied.
+            // A held checkpoint pins this frontier, so the versions it reads
+            // are in the views.
+            let last_processed = db.wal_writer.last_processed();
+            let batch_limit = db.config.relocation_batch_max_bytes();
+            let mut current_cell = CellReference::first(db, KeySpace::first());
+            while let Some(cell) = current_cell.take() {
+                current_cell = cell.next(db);
+                let context = db.ks_context(cell.keyspace);
+                if !context.has_promoted() {
+                    continue;
+                }
+                let Some(mut index) = db.large_table.get_index_for_cell(
+                    context,
+                    &cell.cell_id,
+                    db.as_ref(),
+                    last_processed,
+                )?
+                else {
+                    continue;
+                };
+                let mut batches: Vec<Option<RelocatedWriteBatch>> =
+                    reclaim.iter().map(|_| None).collect();
+                for (reduced_key, position) in index.iter(context) {
+                    let Some((idx, file, _)) = db.side_wal_location(position) else {
+                        continue;
+                    };
+                    if !reclaim[idx].contains(&file) {
+                        continue;
+                    }
+                    let Some((key, value)) =
+                        db.read_record_for_indexed_key(context, position, reduced_key.as_ref())?
+                    else {
+                        continue;
+                    };
+                    let batch = batches[idx].get_or_insert_with(|| {
+                        RelocatedWriteBatch::of_side_wal_records(
+                            cell.keyspace,
+                            cell.cell_id.clone(),
+                            idx as u8 + 1,
+                        )
+                    });
+                    batch.write_from(key, value, position);
+                    if batch.size_bytes() >= batch_limit
+                        && let Some(full) = batches[idx].take()
+                    {
+                        db.write_relocated_batch(full)?;
+                    }
+                }
+                for batch in batches.into_iter().flatten() {
+                    db.write_relocated_batch(batch)?;
+                }
+            }
+        }
+
+        db.large_table.fp.fp_side_wal_reclaim_before_store();
+        // No cell points into the files any more. Marked only now: a control
+        // region stored while the copies were under way must not list them.
+        for (idx, files) in reclaim.iter().enumerate() {
+            let files: Vec<WalFileId> = files.iter().copied().collect();
+            db.mark_side_wal_files_reclaimed(idx, &files);
+        }
+        let _: u64 = db.rebuild_control_region()?;
+        let _: u64 = db.delete_reclaimed_side_wal_files()?;
         Ok(())
     }
 
@@ -445,12 +631,15 @@ impl RelocationDriver {
     /// end were moved by that stripe, and either kind of copy sits above
     /// every stripe end. Key spaces with a filter only drop the entries
     /// below `cutoff`, which the first stripe does for the whole run.
+    /// With `side_wal_live`, the pass also counts the side-WAL record every
+    /// entry it reads points at.
     fn relocate_stripe(
         &self,
         db: &Arc<Db>,
         stripe_end: u64,
         cutoff: Option<u64>,
         last_processed: LastProcessed,
+        mut side_wal_live: Option<&mut SideWalLiveBytes>,
     ) -> DbResult<()> {
         let mut current_cell = CellReference::first(db, KeySpace::first());
         while let Some(cell) = current_cell.take() {
@@ -507,6 +696,9 @@ impl RelocationDriver {
             let mut main_batch = new_batch(0);
             let mut promoted_batch = new_batch(promote_to);
             for (reduced_key, position) in index.iter(context) {
+                if let Some(side_wal_live) = &mut side_wal_live {
+                    side_wal_live.record(db, position);
+                }
                 if position.offset() < stripe_end
                     && let Some((key, value, recopied)) =
                         db.read_record_for_relocation(context, position, reduced_key.as_ref())?

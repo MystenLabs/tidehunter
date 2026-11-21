@@ -57,6 +57,11 @@ pub struct SideWalState {
     /// The key spaces that have had records promoted to a side WAL: the
     /// only ones whose levels can hold a flagged position.
     promoted_keyspaces: Vec<KeySpace>,
+    /// The files of each side WAL that were reclaimed, indexed by
+    /// `generation - 1`: no position in the snapshot points into one, and a
+    /// database opened from this control region neither needs them nor
+    /// keeps them.
+    reclaimed_files: Vec<Vec<WalFileId>>,
 }
 
 impl SideWalState {
@@ -69,6 +74,7 @@ impl SideWalState {
         wal_generations: u8,
         watermarks: Vec<u64>,
         promoted_keyspaces: Vec<KeySpace>,
+        reclaimed_files: Vec<Vec<WalFileId>>,
     ) -> Option<Self> {
         assert_eq!(
             watermarks.len() + 1,
@@ -82,7 +88,15 @@ impl SideWalState {
             wal_generations,
             watermarks,
             promoted_keyspaces,
+            reclaimed_files,
         })
+    }
+
+    /// The reclaimed files of side WAL `generation` (1-based).
+    pub fn reclaimed_files(&self, generation: u8) -> &[WalFileId] {
+        self.reclaimed_files
+            .get(generation as usize - 1)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The key spaces that had records promoted to a side WAL when the
@@ -767,7 +781,9 @@ mod tests {
                 LastProcessed::new_test(42),
             ),
         );
-        let side_wals = SideWalState::for_store(3, vec![4096, 0], vec![KeySpace(0)]);
+        let reclaimed = vec![vec![WalFileId::new_for_test(0), WalFileId::new_for_test(2)]];
+        let side_wals =
+            SideWalState::for_store(3, vec![4096, 0], vec![KeySpace(0)], reclaimed.clone());
         assert!(side_wals.is_some());
 
         let mut store = ControlRegionStore::new(path.clone(), &cr);
@@ -790,6 +806,8 @@ mod tests {
         assert_eq!(side_wals.watermark(1), 4096);
         assert_eq!(side_wals.watermark(2), 0);
         assert_eq!(side_wals.promoted_keyspaces(), [KeySpace(0)]);
+        assert_eq!(side_wals.reclaimed_files(1), reclaimed[0]);
+        assert_eq!(side_wals.reclaimed_files(2), []);
         assert_eq!(read_cr.last_position, 100);
         let entry = read_cr.snapshot.data[0]
             .get(&CellId::Integer(0))
@@ -801,7 +819,7 @@ mod tests {
     #[test]
     fn side_wal_state_restricts_wal_generations() {
         let state = |wal_generations: u8, watermarks: &[u64]| {
-            SideWalState::for_store(wal_generations, watermarks.to_vec(), vec![]).unwrap()
+            SideWalState::for_store(wal_generations, watermarks.to_vec(), vec![], vec![]).unwrap()
         };
         let allowed = |state: &SideWalState, wal_generations: u8| {
             state.check_wal_generations(wal_generations).is_ok()
@@ -840,10 +858,13 @@ mod tests {
 
     #[test]
     fn empty_side_wals_have_no_state() {
-        assert_eq!(SideWalState::for_store(1, vec![], vec![]), None);
-        assert_eq!(SideWalState::for_store(3, vec![0, 0], vec![]), None);
+        assert_eq!(SideWalState::for_store(1, vec![], vec![], vec![]), None);
+        assert_eq!(SideWalState::for_store(3, vec![0, 0], vec![], vec![]), None);
         // A key space marked before its first copy reached the side WAL.
-        assert_eq!(SideWalState::for_store(2, vec![0], vec![KeySpace(0)]), None);
+        assert_eq!(
+            SideWalState::for_store(2, vec![0], vec![KeySpace(0)], vec![]),
+            None
+        );
     }
 
     #[test]

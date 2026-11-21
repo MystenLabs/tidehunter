@@ -32,7 +32,7 @@ use crate::wal::{PreparedWalWrite, Wal, WalError, WalRandomRead, WalWriter};
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::io::Write;
 use std::iter;
@@ -60,6 +60,8 @@ pub struct Db {
     /// Directory of each side WAL (indexed by `generation - 1`); holds the
     /// generation's `durable` watermark file next to its WAL files.
     generation_paths: Vec<PathBuf>,
+    /// The reclaimed files of each side WAL (indexed by `generation - 1`).
+    generation_reclaimed: Vec<Mutex<ReclaimedFiles>>,
     pub(crate) control_region_store: Mutex<ControlRegionStore>,
     pub(crate) config: Arc<Config>,
     metrics: Arc<Metrics>,
@@ -97,6 +99,22 @@ struct GenerationWals {
     wals: Vec<Arc<Wal>>,
     writers: Vec<WalWriter>,
     paths: Vec<PathBuf>,
+    reclaimed: Vec<Mutex<ReclaimedFiles>>,
+}
+
+/// The files of one side WAL that reclamation has emptied: every record
+/// still live in them was copied to the side WAL's tail and re-pointed
+/// (see `RelocationDriver::reclaim_side_wal_files`).
+#[derive(Default)]
+struct ReclaimedFiles {
+    /// Every file marked as reclaimed. A control region store records the
+    /// set as it is when the store begins; a file is marked only once no
+    /// cell points into it, so a snapshot taken afterwards cannot either.
+    marked: BTreeSet<WalFileId>,
+    /// The marked files a stored control region lists. Nothing on disk
+    /// points into them any more: they may be deleted, and a position in
+    /// one of them reads as a reclaimed record.
+    stored: BTreeSet<WalFileId>,
 }
 
 pub const MAX_KEY_LEN: usize = u16::MAX as usize;
@@ -132,6 +150,7 @@ impl Db {
             wals: generation_wals,
             writers: generation_writers,
             paths: generation_paths,
+            reclaimed: generation_reclaimed,
         } = Self::open_generation_wals(&path, &config, &metrics, control_region.side_wals())?;
         if registry_dirty {
             // Persisted only after the control region verified the canonical
@@ -242,6 +261,7 @@ impl Db {
             generation_wals,
             generation_writers,
             generation_paths,
+            generation_reclaimed,
             control_region_store,
             config,
             metrics: metrics.clone(),
@@ -655,10 +675,10 @@ impl Db {
     /// `config.wal_generations` as it was encoded: the caller has checked
     /// the value against the control region (see `validate_wal_generations`).
     ///
-    /// todo multi-gen: each side WAL has its own `WalWriter::gc()` watermark
-    /// and there is no per-generation tracking in the relocation watermark
-    /// file (`rel`). The relocator will need a per-gen watermark story
-    /// before it can actually GC side-WAL files.
+    /// A side WAL's files are freed one by one, once reclamation has copied
+    /// their live records to the tail (`RelocationDriver::
+    /// reclaim_side_wal_files`); the control region lists the files freed
+    /// so far, which is what this open is checked against.
     ///
     /// `side_wals` is the side-WAL state of the stored control region. A
     /// generation directory that cannot be the one that control region
@@ -678,6 +698,7 @@ impl Db {
         let mut wals = Vec::with_capacity(n - 1);
         let mut writers = Vec::with_capacity(n - 1);
         let mut paths = Vec::with_capacity(n - 1);
+        let mut reclaimed = Vec::with_capacity(n - 1);
         for g in 1..n {
             let gen_path = path.join(format!("gen{g:04}"));
             let mut layout = config.wal_layout(WalKind::Replay);
@@ -688,9 +709,22 @@ impl Db {
             // address spaces.
             layout.label = format!("gen{g:04}");
             let stored_watermark = side_wals.map_or(0, |side_wals| side_wals.watermark(g as u8));
-            let durable = Self::side_wal_watermark(&gen_path, &layout, stored_watermark)?;
+            let stored_reclaimed: BTreeSet<WalFileId> = side_wals
+                .map(|side_wals| side_wals.reclaimed_files(g as u8).iter().copied().collect())
+                .unwrap_or_default();
+            let durable =
+                Self::side_wal_watermark(&gen_path, &layout, stored_watermark, &stored_reclaimed)?;
             if !gen_path.exists() {
                 std::fs::create_dir(&gen_path)?;
+            }
+            // A reclaimed file that is still on disk was about to be deleted
+            // when the process stopped. The control region points at nothing
+            // in it.
+            for file_id in &stored_reclaimed {
+                let file = layout.wal_file_name(&gen_path, *file_id);
+                if file.exists() {
+                    std::fs::remove_file(&file)?;
+                }
             }
             // The watermark is the allocator's frontier, and the allocator
             // enters a new file before the mapper has created it. A control
@@ -719,11 +753,16 @@ impl Db {
             wals.push(wal);
             writers.push(writer);
             paths.push(gen_path);
+            reclaimed.push(Mutex::new(ReclaimedFiles {
+                marked: stored_reclaimed.clone(),
+                stored: stored_reclaimed,
+            }));
         }
         Ok(GenerationWals {
             wals,
             writers,
             paths,
+            reclaimed,
         })
     }
 
@@ -732,17 +771,19 @@ impl Db {
     /// watermark `stored_watermark` points into (0 when it points into no
     /// side WAL).
     ///
-    /// A side WAL is neither replayed nor garbage-collected: every record
-    /// below its watermark is reachable only through the control region and
-    /// stays in its file for good. A directory that was left out of a copy,
-    /// restored from an older one or lost some of its files would otherwise
-    /// open as a shorter or empty side WAL: its promoted keys would read as
-    /// garbage-collected and the writer would hand out offsets the control
-    /// region still points to.
+    /// A side WAL is not replayed: every record below its watermark is
+    /// reachable only through the control region, and stays in its file
+    /// until reclamation empties that file, which the control region then
+    /// lists in `reclaimed`. A directory that was left out of a copy,
+    /// restored from an older one or lost some of its other files would
+    /// otherwise open as a shorter or empty side WAL: its promoted keys
+    /// would read as reclaimed and the writer would hand out offsets the
+    /// control region still points to.
     fn side_wal_watermark(
         gen_path: &Path,
         layout: &WalLayout,
         stored_watermark: u64,
+        reclaimed: &BTreeSet<WalFileId>,
     ) -> DbResult<u64> {
         let missing = |what: String| {
             DbError::Io(io::Error::new(
@@ -771,8 +812,11 @@ impl Db {
             )));
         }
         // The file holding the watermark itself may not exist yet; every
-        // file below it was written.
+        // file below it was written and, unless reclaimed, is still needed.
         for file_id in layout.files_below(durable) {
+            if reclaimed.contains(&file_id) {
+                continue;
+            }
             let file = layout.wal_file_name(gen_path, file_id);
             if !file.exists() {
                 return Err(missing(format!(
@@ -1238,6 +1282,7 @@ impl Db {
             last_processed,
             size_bytes,
             target_generation,
+            sources,
         } = batch;
         let context = self.ks_context(ks);
         if target_generation != 0 {
@@ -1247,9 +1292,11 @@ impl Db {
             context.mark_promoted();
         }
 
-        self.metrics
-            .relocation_written_bytes
-            .inc_by(size_bytes as u64);
+        let written_bytes = match sources {
+            None => &self.metrics.relocation_written_bytes,
+            Some(_) => &self.metrics.side_wal_compacted_bytes,
+        };
+        written_bytes.inc_by(size_bytes as u64);
         let positions = self.write_relocated_batch_into_wal(&prepared_writes, target_generation)?;
         if target_generation == 0 {
             // Index the copies only once every frame below them is applied.
@@ -1269,9 +1316,16 @@ impl Db {
             self.wal_writer.wait_processed();
         }
         let mut updates = RelocationUpdates::new(last_processed);
+        let mut sources = sources.map(Vec::into_iter);
         for (pos, key) in positions.into_iter().zip(keys.into_iter()) {
             let reduced_key = context.ks_config.reduced_key_bytes(key);
-            updates.add(reduced_key, pos);
+            match &mut sources {
+                None => updates.add(reduced_key, pos),
+                Some(sources) => {
+                    let source = sources.next().expect("one source position per copy");
+                    updates.add_exact(reduced_key, source, pos)
+                }
+            }
         }
         let dropped = self.large_table.sync_flush_for_relocation(
             context,
@@ -1649,14 +1703,21 @@ impl Db {
     /// Reads the WAL entry at a (possibly generation-encoded) position from
     /// the WAL of its generation.
     ///
-    /// `None` means the main-WAL file that held the entry was
-    /// garbage-collected. A side WAL is never garbage-collected, so a
-    /// position in a side-WAL file that is not there is an error: the record
-    /// must not read as deleted.
+    /// `None` means the file that held the entry was reclaimed: a main-WAL
+    /// file by garbage collection, a side-WAL file once reclamation had
+    /// copied its live records elsewhere. A position in a side-WAL file that
+    /// is missing without having been reclaimed is an error: the record must
+    /// not read as deleted.
     fn read_value_entry(&self, position: WalPosition) -> DbResult<Option<WalEntry>> {
         let (wal, target_position) = self.value_wal_for(position);
         let entry = self.read_report_entry(wal, target_position)?;
-        if entry.is_none() && WalPosition::offset_is_flagged(position.offset()) {
+        if entry.is_none()
+            && let Some((idx, file_id, _)) = self.side_wal_location(position)
+            && !self.generation_reclaimed[idx]
+                .lock()
+                .stored
+                .contains(&file_id)
+        {
             return Err(DbError::Io(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
@@ -1948,6 +2009,15 @@ impl Db {
             .clone()
             .mcs_timer();
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
+        // Read before the snapshot walk, unlike the watermarks below: a
+        // side-WAL file is marked reclaimed only after every cell stopped
+        // pointing into it, so a walk that starts after the mark was seen
+        // finds no such cell, while a walk already under way may have.
+        let reclaimed_files: Vec<Vec<WalFileId>> = self
+            .generation_reclaimed
+            .iter()
+            .map(|reclaimed| reclaimed.lock().marked.iter().copied().collect())
+            .collect();
         let snapshot = self
             .large_table
             .relocate_and_snapshot(self, &relocate_files);
@@ -2022,8 +2092,12 @@ impl Db {
         // Once a side WAL holds bytes the snapshot may point into it: the
         // control region then records the side-WAL state and is stored in
         // the format version a binary without side WALs refuses to read.
-        let side_wals =
-            SideWalState::for_store(self.config.wal_generations, watermarks, promoted_keyspaces);
+        let side_wals = SideWalState::for_store(
+            self.config.wal_generations,
+            watermarks,
+            promoted_keyspaces,
+            reclaimed_files.clone(),
+        );
         // Persist the control region BEFORE unlinking files. A crash between
         // these steps must leave the on-disk CR consistent with the files
         // still present: extra (un-deleted) files are tolerated by the next
@@ -2035,8 +2109,73 @@ impl Db {
             side_wals,
             &self.metrics,
         );
+        // The stored control region lists these files as reclaimed and
+        // points at nothing in them.
+        for (reclaimed, stored) in self.generation_reclaimed.iter().zip(reclaimed_files) {
+            reclaimed.lock().stored.extend(stored);
+        }
         self.index_writer.delete_files(to_delete)?;
         Ok(snapshot.replay_from)
+    }
+
+    /// Where in a side WAL a generation-flagged position lies: the index of
+    /// its generation (`generation - 1`), the file, and the bytes its frame
+    /// occupies there. `None` for a main-WAL position and for the tombstone
+    /// sentinel.
+    pub(crate) fn side_wal_location(
+        &self,
+        position: WalPosition,
+    ) -> Option<(usize, WalFileId, u64)> {
+        if position == WalPosition::INVALID || !WalPosition::offset_is_flagged(position.offset()) {
+            return None;
+        }
+        let (generation, raw_offset) =
+            WalPosition::decode_offset(position.offset(), self.config.generation_bits());
+        let idx = generation as usize - 1;
+        let layout = self.generation_wals.get(idx)?.layout();
+        Some((
+            idx,
+            layout.locate_file(raw_offset),
+            layout.align(position.frame_len() as u64),
+        ))
+    }
+
+    /// Marks `files` of the side WAL at `idx` (`generation - 1`) as
+    /// reclaimed. The caller has re-pointed every index entry that pointed
+    /// into them; the files are deleted by
+    /// [`Self::delete_reclaimed_side_wal_files`] once a control region that
+    /// lists them is stored.
+    pub(crate) fn mark_side_wal_files_reclaimed(&self, idx: usize, files: &[WalFileId]) {
+        self.generation_reclaimed[idx].lock().marked.extend(files);
+    }
+
+    /// Whether `file` of the side WAL at `idx` was marked as reclaimed.
+    pub(crate) fn side_wal_file_reclaimed(&self, idx: usize, file: WalFileId) -> bool {
+        self.generation_reclaimed[idx].lock().marked.contains(&file)
+    }
+
+    /// Deletes the side-WAL files a stored control region lists as
+    /// reclaimed, and returns how many it deleted. A file that still has a
+    /// writeable map is skipped and deleted by a later call.
+    pub(crate) fn delete_reclaimed_side_wal_files(&self) -> DbResult<u64> {
+        let mut deleted = 0;
+        for (idx, wal) in self.generation_wals.iter().enumerate() {
+            let present: BTreeSet<WalFileId> = wal.file_ids().into_iter().collect();
+            let files: Vec<WalFileId> = self.generation_reclaimed[idx]
+                .lock()
+                .stored
+                .intersection(&present)
+                .copied()
+                .collect();
+            if files.is_empty() {
+                continue;
+            }
+            self.generation_writers[idx].delete_files(files)?;
+            let present_now = wal.file_ids().len();
+            deleted += (present.len() - present_now) as u64;
+        }
+        self.metrics.side_wal_reclaimed_files.inc_by(deleted);
+        Ok(deleted)
     }
 
     fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {

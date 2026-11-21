@@ -3117,6 +3117,10 @@ pub(crate) struct LargeTableFailPointsInner {
     /// Hit by a WAL-based relocation run after each stripe has stored its
     /// control region and reclaimed the WAL below its end.
     pub fp_relocation_after_stripe: crate::failpoints::FailPoint,
+    /// Hit by side-WAL reclamation after it copied the live records out of
+    /// the files it reclaims, before it stores the control region that
+    /// lists them as reclaimed.
+    pub fp_side_wal_reclaim_before_store: crate::failpoints::FailPoint,
 }
 
 #[cfg(not(test))]
@@ -3135,6 +3139,8 @@ impl LargeTableFailPoints {
     pub fn fp_drop_cells_before_lock(&self) {}
 
     pub fn fp_relocation_after_stripe(&self) {}
+
+    pub fn fp_side_wal_reclaim_before_store(&self) {}
 }
 
 #[cfg(test)]
@@ -3168,6 +3174,10 @@ impl LargeTableFailPoints {
 
     pub fn fp_relocation_after_stripe(&self) {
         self.0.read().fp_relocation_after_stripe.fp();
+    }
+
+    pub fn fp_side_wal_reclaim_before_store(&self) {
+        self.0.read().fp_side_wal_reclaim_before_store.fp();
     }
 }
 
