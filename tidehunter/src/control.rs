@@ -9,7 +9,7 @@ use crate::wal::position::WalFileId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, BufReader, ErrorKind, Read};
+use std::io::{self, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// On-disk control-region format version.
@@ -470,6 +470,12 @@ impl ControlRegionStore {
 
     /// Stores a control region. `side_wals` is the state of the side WALs
     /// the snapshot was taken against (see [`SideWalState::for_store`]).
+    ///
+    /// The control region is durable when this returns: the file is synced
+    /// before it is renamed into place, and the rename is synced through
+    /// the directory. Callers delete what only the previous control region
+    /// pointed at right afterwards (main-WAL files, index files, reclaimed
+    /// side-WAL files), so a power loss must not bring that one back.
     pub fn store(
         &mut self,
         snapshot: LargeTableContainer<SnapshotEntryData>,
@@ -500,7 +506,7 @@ impl ControlRegionStore {
         bincode::serialize_into(&mut serialized, &control_region)
             .expect("Failed to serialize control region");
         let temp_file = self.path.with_extension(".bak");
-        fs::write(&temp_file, &serialized).unwrap_or_else(|e| {
+        Self::write_synced(&temp_file, &serialized).unwrap_or_else(|e| {
             panic!(
                 "Failed to write control region file {}: {}",
                 temp_file.display(),
@@ -518,7 +524,31 @@ impl ControlRegionStore {
                 e
             )
         });
+        Self::sync_directory_of(&self.path).unwrap_or_else(|e| {
+            panic!(
+                "Failed to sync the directory of control region file {}: {}",
+                self.path.display(),
+                e
+            )
+        });
         self.last_position = last_position;
+    }
+
+    /// Writes `bytes` to a new file at `path` and syncs it.
+    fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let mut file = fs::File::create(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+
+    /// Syncs the directory holding `path`, which makes a rename of `path`
+    /// durable.
+    fn sync_directory_of(path: &Path) -> io::Result<()> {
+        let directory = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        fs::File::open(directory)?.sync_all()
     }
 
     /// The path to the control region file
