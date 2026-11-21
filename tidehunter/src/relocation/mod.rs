@@ -298,7 +298,12 @@ impl RelocationDriver {
             }
 
             // Process each cell
-            let context = self.process_single_cell(&cell_ref, &db, effective_limit)?;
+            let context = self.process_single_cell(
+                &cell_ref,
+                &db,
+                effective_limit,
+                RelocationStrategy::IndexBased(target_position),
+            )?;
 
             // Track the highest WAL position seen
             if context.highest_wal_position.offset() > highest_wal_position {
@@ -308,7 +313,7 @@ impl RelocationDriver {
             // Relocate entries if any were marked for keeping
             let keyspace_desc = &db.ks_context(cell_ref.keyspace).ks_config;
             if !context.batch.is_empty() {
-                let successful = self.relocate_entries(context.batch, &db, target_position)?;
+                let successful = self.relocate_entries(context.batch, &db)?;
                 // Track successful relocations with existing metrics (same as WAL-based)
                 self.metrics
                     .relocation_kept
@@ -482,33 +487,62 @@ impl RelocationDriver {
                 continue;
             };
             let batch_limit = db.config.relocation_batch_max_bytes();
+            // Where the key space's records are promoted to (0: nowhere), and
+            // how many passes a record must have survived by then. A record
+            // read here has survived this pass; one that is itself a
+            // relocation copy survived an earlier pass as well.
+            let promote_to =
+                db.relocation_target_generation(cell.keyspace, RelocationStrategy::WalBased);
+            let promote_after = ks.promote_after_passes();
             // The copies re-point a key only while its latest position is
             // still below `stripe_end`, i.e. the original this stripe read.
-            let mut batch =
-                RelocatedWriteBatch::new(cell.keyspace, cell.cell_id.clone(), stripe_end);
+            let new_batch = |target_generation| {
+                RelocatedWriteBatch::new(
+                    cell.keyspace,
+                    cell.cell_id.clone(),
+                    stripe_end,
+                    target_generation,
+                )
+            };
+            let mut main_batch = new_batch(0);
+            let mut promoted_batch = new_batch(promote_to);
             for (reduced_key, position) in index.iter(context) {
                 if position.offset() < stripe_end
-                    && let Some((key, value)) =
-                        db.read_record_for_indexed_key(context, position, reduced_key.as_ref())?
+                    && let Some((key, value, recopied)) =
+                        db.read_record_for_relocation(context, position, reduced_key.as_ref())?
                 {
+                    let promote = promote_to != 0 && (promote_after <= 1 || recopied);
+                    let batch = if promote {
+                        &mut promoted_batch
+                    } else {
+                        &mut main_batch
+                    };
                     batch.write(key, value);
+                    let ks_name = &[ks.name()];
                     self.metrics
                         .relocation_kept
-                        .with_label_values(&[ks.name()])
+                        .with_label_values(ks_name)
                         .inc();
+                    if recopied {
+                        self.metrics
+                            .relocation_recopied
+                            .with_label_values(ks_name)
+                            .inc();
+                    }
+                    if promote {
+                        self.metrics
+                            .relocation_promoted
+                            .with_label_values(ks_name)
+                            .inc();
+                    }
                     if batch.size_bytes() >= batch_limit {
-                        db.write_relocated_batch(batch, RelocationStrategy::WalBased)?;
-                        batch = RelocatedWriteBatch::new(
-                            cell.keyspace,
-                            cell.cell_id.clone(),
-                            stripe_end,
-                        );
+                        let full = std::mem::replace(batch, new_batch(batch.target_generation));
+                        db.write_relocated_batch(full)?;
                     }
                 }
             }
-            if !batch.is_empty() {
-                db.write_relocated_batch(batch, RelocationStrategy::WalBased)?;
-            }
+            db.write_relocated_batch(main_batch)?;
+            db.write_relocated_batch(promoted_batch)?;
         }
         Ok(())
     }
@@ -536,6 +570,7 @@ impl RelocationDriver {
         cell_ref: &CellReference,
         db: &Arc<Db>,
         effective_limit: u64,
+        strategy: RelocationStrategy,
     ) -> DbResult<CellProcessingContext> {
         // The CAS threshold must be the same frontier the as-of index view
         // below is built with. Any write newer than that view sits at an
@@ -544,8 +579,12 @@ impl RelocationDriver {
         // copy of the older as-of value, losing the overwrite. (The WAL-based
         // path passes each stripe's end, which lies at or below the frontier
         // its view is built with.)
-        let batch =
-            RelocatedWriteBatch::new(cell_ref.keyspace, cell_ref.cell_id.clone(), effective_limit);
+        let batch = RelocatedWriteBatch::new(
+            cell_ref.keyspace,
+            cell_ref.cell_id.clone(),
+            effective_limit,
+            db.relocation_target_generation(cell_ref.keyspace, strategy),
+        );
         let mut context = CellProcessingContext::new(batch);
         let mut removed_count = 0;
 
@@ -636,15 +675,10 @@ impl RelocationDriver {
 
     /// Writes the copies of one cell of an index-based pass, following the
     /// same pattern as WAL-based relocation.
-    fn relocate_entries(
-        &self,
-        batch: RelocatedWriteBatch,
-        db: &Arc<Db>,
-        target_position: Option<u64>,
-    ) -> DbResult<u64> {
+    fn relocate_entries(&self, batch: RelocatedWriteBatch, db: &Arc<Db>) -> DbResult<u64> {
         let successful_inserts = batch.len() as u64;
 
-        db.write_relocated_batch(batch, RelocationStrategy::IndexBased(target_position))?;
+        db.write_relocated_batch(batch)?;
 
         Ok(successful_inserts)
     }

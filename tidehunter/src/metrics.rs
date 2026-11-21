@@ -310,6 +310,13 @@ pub struct Metrics {
     pub relocation_terminal_position: MetricIntGauge,
     pub gc_position: MetricIntGaugeVec,
     pub relocation_kept: MetricIntCounterVec,
+    /// Records a WAL-based relocation pass copied that were themselves the
+    /// copy an earlier pass made: they survived a whole relocation cycle.
+    /// `relocation_kept` counts them too.
+    pub relocation_recopied: MetricIntCounterVec,
+    /// Records a relocation pass promoted to a side WAL. `relocation_kept`
+    /// counts them too.
+    pub relocation_promoted: MetricIntCounterVec,
     pub relocation_removed: MetricIntCounterVec,
 
     // Index-based relocation metrics
@@ -632,6 +639,8 @@ impl Metrics {
             relocation_terminal_position: gauge!("relocation_terminal_position", registry, enabled),
             gc_position: gauge_vec!("gc_position", &["kind"], registry, enabled),
             relocation_kept: counter_vec!("relocation_kept", &["ks"], registry, enabled),
+            relocation_recopied: counter_vec!("relocation_recopied", &["ks"], registry, enabled),
+            relocation_promoted: counter_vec!("relocation_promoted", &["ks"], registry, enabled),
             relocation_removed: counter_vec!("relocation_removed", &["ks"], registry, enabled),
 
             // Index-based relocation metrics

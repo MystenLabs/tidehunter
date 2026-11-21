@@ -3884,3 +3884,127 @@ fn test_promotion_in_striped_run_survives_crash_between_stripes() {
     .unwrap();
     assert_promoted_keys_readable(&db);
 }
+
+/// Runs one WAL-based relocation pass over what was written so far. A pass
+/// finds its terminal position at a record at or above the frontier it
+/// captures, so a checkpoint pins the frontier and a few fresh records of `k`
+/// (keys unique to `round`) follow it.
+fn relocate_written_so_far(db: &Arc<Db>, round: u64) {
+    db.wal_writer.wal_tracker_barrier();
+    let checkpoint = db.checkpoint();
+    let ks = db.ks("k");
+    for i in 0..100u64 {
+        let key = 1_000_000 * (round + 1) + i;
+        db.insert(ks, key.to_be_bytes().to_vec(), promoted_value())
+            .unwrap();
+    }
+    db.start_blocking_relocation();
+    drop(checkpoint);
+}
+
+fn relocation_counter(counter: &crate::metrics::MetricIntCounterVec) -> u64 {
+    counter.with_label_values(&["k"]).get()
+}
+
+// With `with_promote_after_passes(2)` a record's first survival copies it
+// within the main WAL, like a key space that does not promote. It is promoted
+// when a later pass finds that copy still live; a record that died in between
+// never reaches the side WAL, and neither does the fresh record that
+// replaced it.
+#[test]
+fn test_promote_after_two_passes() {
+    let dir = tempdir::TempDir::new("test_promote_after_two_passes").unwrap();
+    let config = Arc::new(two_generation_config());
+    let key_shape = {
+        let mut ksb = KeyShapeBuilder::new();
+        ksb.add_key_space_config(
+            "k",
+            8,
+            1,
+            KeyType::uniform(1),
+            KeySpaceConfig::new()
+                .with_promote_during_relocation(true)
+                .with_promote_after_passes(2),
+        );
+        ksb.build()
+    };
+    let rewritten_value = || -> Vec<u8> { vec![9; 12 * 1000] };
+    let assert_readable = |db: &Db| {
+        let ks = db.ks("k");
+        for i in PROMOTED_KEYS {
+            let expected = if i % 2 == 0 {
+                rewritten_value()
+            } else {
+                promoted_value()
+            };
+            assert_eq!(
+                db.get(ks, &i.to_be_bytes()).unwrap(),
+                Some(expected.into()),
+                "key {i}"
+            );
+        }
+    };
+    {
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        let ks = db.ks("k");
+        for i in PROMOTED_KEYS {
+            db.insert(ks, i.to_be_bytes().to_vec(), promoted_value())
+                .unwrap();
+        }
+
+        relocate_written_so_far(&db, 0);
+        let kept_by_first_pass = relocation_counter(&metrics.relocation_kept);
+        assert!(kept_by_first_pass > 0, "the first pass must copy records");
+        assert_eq!(relocation_counter(&metrics.relocation_recopied), 0);
+        assert_eq!(
+            relocation_counter(&metrics.relocation_promoted),
+            0,
+            "a record's first survival must not promote it"
+        );
+        assert_eq!(db.generation_writers[0].position(), 0);
+        assert!(!db.ks_context(ks).has_promoted());
+
+        // Every other key dies before the next pass.
+        for i in PROMOTED_KEYS.filter(|i| i % 2 == 0) {
+            db.insert(ks, i.to_be_bytes().to_vec(), rewritten_value())
+                .unwrap();
+        }
+        relocate_written_so_far(&db, 1);
+        let promoted = relocation_counter(&metrics.relocation_promoted);
+        assert!(promoted > 0, "the second pass must promote");
+        assert_eq!(
+            promoted,
+            relocation_counter(&metrics.relocation_recopied),
+            "exactly the copies that survived a second pass are promoted"
+        );
+        assert!(
+            promoted < kept_by_first_pass,
+            "the copies of the rewritten keys must not be promoted \
+             ({promoted} promoted, {kept_by_first_pass} copied by the first pass)"
+        );
+        let kept_by_second_pass = relocation_counter(&metrics.relocation_kept) - kept_by_first_pass;
+        assert!(
+            kept_by_second_pass > promoted,
+            "the fresh records must be copied within the main WAL"
+        );
+        assert!(db.generation_writers[0].position() > 0);
+        assert!(db.ks_context(ks).has_promoted());
+        assert_readable(&db);
+        db.wait_for_background_threads_to_finish();
+    }
+    let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+    assert_readable(&db);
+}
+
+#[test]
+#[should_panic(expected = "promote_after_passes must be 1 or 2")]
+fn test_promote_after_passes_rejects_unsupported_count() {
+    let _: KeySpaceConfig = KeySpaceConfig::new().with_promote_after_passes(3);
+}

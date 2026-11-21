@@ -62,6 +62,10 @@ pub(crate) struct RelocatedWriteBatch {
     pub(crate) last_processed: u64,
     pub(crate) ks: KeySpace,
     pub(crate) cell_id: CellId,
+    /// The WAL generation the copies are written to: 0 for the main WAL,
+    /// otherwise the side WAL records are promoted to. Chosen by the pass
+    /// through `Db::relocation_target_generation`.
+    pub(crate) target_generation: u8,
 }
 
 const MAX_BATCH_LEN: usize = 1_000_000;
@@ -140,7 +144,7 @@ impl WriteBatch {
 }
 
 impl RelocatedWriteBatch {
-    pub fn new(ks: KeySpace, cell_id: CellId, last_processed: u64) -> Self {
+    pub fn new(ks: KeySpace, cell_id: CellId, last_processed: u64, target_generation: u8) -> Self {
         Self {
             last_processed,
             keys: Default::default(),
@@ -148,6 +152,7 @@ impl RelocatedWriteBatch {
             size_bytes: 0,
             ks,
             cell_id,
+            target_generation,
         }
     }
 

@@ -79,6 +79,10 @@ pub struct KeySpaceConfig {
     /// single-WAL relocation behavior.
     #[serde(default)]
     promote_during_relocation: bool,
+    /// How many relocation passes a record must survive before it is
+    /// promoted; see `KeySpaceConfig::with_promote_after_passes`.
+    #[serde(default = "KeySpaceConfig::default_promote_after_passes")]
+    promote_after_passes: u8,
 }
 
 impl Default for KeySpaceConfig {
@@ -94,6 +98,7 @@ impl Default for KeySpaceConfig {
             unloaded_iterator: true,
             relocation_filter: None,
             promote_during_relocation: false,
+            promote_after_passes: Self::default_promote_after_passes(),
         }
     }
 }
@@ -542,6 +547,11 @@ impl KeySpaceDesc {
         self.config.promote_during_relocation
     }
 
+    /// `KeySpaceConfig::with_promote_after_passes`.
+    pub(crate) fn promote_after_passes(&self) -> u8 {
+        self.config.promote_after_passes
+    }
+
     #[doc(hidden)] // Used by tools/tideconsole to display keyspace names
     pub fn name(&self) -> &str {
         &self.name
@@ -706,10 +716,37 @@ impl KeySpaceConfig {
     /// Opt this keyspace in to multi-generation WAL: records that survive
     /// a WAL-based relocation pass are written to the next generation's side
     /// WAL instead of back to G0. Requires `Config::wal_generations >= 2`
-    /// and the WAL-based `Config::relocation_strategy`.
+    /// and the WAL-based `Config::relocation_strategy`. How many passes a
+    /// record must survive first is set by `with_promote_after_passes`.
     pub fn with_promote_during_relocation(mut self, enabled: bool) -> Self {
         self.promote_during_relocation = enabled;
         self
+    }
+
+    /// With `with_promote_during_relocation`, how many WAL-based relocation
+    /// passes a record must survive before it is promoted.
+    ///
+    /// - 1 (the default): a record is promoted the first time a pass finds
+    ///   it live.
+    /// - 2: the first pass copies it within the main WAL as usual, and it is
+    ///   promoted when a later pass finds that copy still live.
+    ///
+    /// A record that dies after its promotion leaves dead bytes in the side
+    /// WAL until its file is reclaimed, so a key space whose records often
+    /// outlive one pass but not two is better served by 2. The price is one
+    /// more copy of every long-lived record. The WAL marks a record as a
+    /// relocation copy but does not count passes, so no higher value exists.
+    pub fn with_promote_after_passes(mut self, passes: u8) -> Self {
+        assert!(
+            (1..=2).contains(&passes),
+            "promote_after_passes must be 1 or 2, given {passes}"
+        );
+        self.promote_after_passes = passes;
+        self
+    }
+
+    fn default_promote_after_passes() -> u8 {
+        1
     }
 
     fn default_unloaded_iterator() -> bool {

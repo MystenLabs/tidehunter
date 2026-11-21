@@ -1222,13 +1222,10 @@ impl Db {
         Ok(())
     }
 
-    /// Writes the copies a relocation pass running `strategy` made of a
-    /// cell's surviving records and re-points the cell's index at them.
-    pub(crate) fn write_relocated_batch(
-        &self,
-        batch: RelocatedWriteBatch,
-        strategy: RelocationStrategy,
-    ) -> DbResult<()> {
+    /// Writes the copies a relocation pass made of a cell's surviving
+    /// records, to the WAL generation the batch was created for, and
+    /// re-points the cell's index at them.
+    pub(crate) fn write_relocated_batch(&self, batch: RelocatedWriteBatch) -> DbResult<()> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -1240,9 +1237,9 @@ impl Db {
             cell_id,
             last_processed,
             size_bytes,
+            target_generation,
         } = batch;
         let context = self.ks_context(ks);
-        let target_generation = self.relocation_target_generation(ks, strategy);
         if target_generation != 0 {
             // Before the first copy is written, let alone indexed: a control
             // region that can point at a copy then records the key space as
@@ -1300,7 +1297,15 @@ impl Db {
     /// points at the reclaimed originals, and nothing replays a side WAL to
     /// re-derive the copies. Deciding here, by the strategy of the running
     /// pass, covers every way a pass is started.
-    fn relocation_target_generation(&self, ks: KeySpace, strategy: RelocationStrategy) -> u8 {
+    ///
+    /// Which of the key space's records go there is the pass's decision
+    /// (see `KeySpaceConfig::with_promote_after_passes`); the rest are
+    /// copied to G0.
+    pub(crate) fn relocation_target_generation(
+        &self,
+        ks: KeySpace,
+        strategy: RelocationStrategy,
+    ) -> u8 {
         let promotes =
             self.key_shape.ks(ks).promote_during_relocation() && self.config.wal_generations >= 2;
         match strategy {
@@ -1595,7 +1600,7 @@ impl Db {
         }
         match self.resolve_record_frame(context, position)? {
             None => Ok(None),
-            Some(RecordFrame::Record(wal_key, v)) => {
+            Some(RecordFrame::Record(wal_key, v, _relocated)) => {
                 if wal_key.as_ref() != k {
                     Ok(None)
                 } else {
@@ -1678,13 +1683,29 @@ impl Db {
         position: WalPosition,
         indexed_key: &[u8],
     ) -> DbResult<Option<(Bytes, Bytes)>> {
+        Ok(self
+            .read_record_for_relocation(context, position, indexed_key)?
+            .map(|(key, value, _relocated)| (key, value)))
+    }
+
+    /// [`Self::read_record_for_indexed_key`] that also says whether the
+    /// record is the copy a relocation pass made of an earlier record, i.e.
+    /// whether its value already survived a pass. A record inside a
+    /// compressed batch is always an original write.
+    pub(crate) fn read_record_for_relocation(
+        &self,
+        context: &KsContext,
+        position: WalPosition,
+        indexed_key: &[u8],
+    ) -> DbResult<Option<(Bytes, Bytes, bool)>> {
         match self.resolve_record_frame(context, position)? {
             None => Ok(None),
-            Some(RecordFrame::Record(k, v)) => Ok(Some((k, v))),
+            Some(RecordFrame::Record(k, v, relocated)) => Ok(Some((k, v, relocated))),
             Some(RecordFrame::Batch(body)) => {
                 Ok(find_record_by(&body, context.ks_config.id(), |full_key| {
                     context.ks_config.reduce_key(full_key).as_ref() == indexed_key
-                }))
+                })
+                .map(|(key, value)| (key, value, false)))
             }
         }
     }
@@ -1711,7 +1732,9 @@ impl Db {
             return Ok(None);
         };
         match entry {
-            WalEntry::Record(_, key, value, _) => Ok(Some(RecordFrame::Record(key, value))),
+            WalEntry::Record(_, key, value, relocated) => {
+                Ok(Some(RecordFrame::Record(key, value, relocated)))
+            }
             entry @ WalEntry::CompressedBatch(..) => Ok(self
                 .decompressed_batch_body(context, position, entry)?
                 .map(RecordFrame::Batch)),
@@ -2485,10 +2508,11 @@ impl Loader for Db {
 }
 
 /// A WAL frame resolved on the record read path: either a plain record's
-/// key and value, or the decompressed body of a `CompressedBatch` for the
-/// caller to scan. See `Db::resolve_record_frame`.
+/// key, value and whether it is a relocation copy, or the decompressed body
+/// of a `CompressedBatch` for the caller to scan. See
+/// `Db::resolve_record_frame`.
 enum RecordFrame {
-    Record(Bytes, Bytes),
+    Record(Bytes, Bytes, bool),
     Batch(Bytes),
 }
 
